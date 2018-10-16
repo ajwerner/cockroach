@@ -33,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
@@ -61,7 +62,20 @@ type runnerResult struct {
 	err    error
 }
 
-func (req runnerRequest) run() {
+func (req runnerRequest) run(direct bool) {
+	if log.V(1) {
+		logMsg := fmt.Sprintf("flow %v", req.flowReq.Flow.FlowID)
+		ctx := context.TODO()
+		if direct {
+			log.Infof(ctx, "running %s directly", logMsg)
+		} else {
+			log.Infof(ctx, "running %s through a worker", logMsg, req.flowReq.Flow.FlowID)
+		}
+		start := timeutil.Now()
+		defer func() {
+			log.Infof(ctx, "ran %s setup flow request in %v", logMsg, timeutil.Since(start))
+		}()
+	}
 	defer distsqlplan.ReleaseSetupFlowRequest(req.flowReq)
 
 	res := runnerResult{nodeID: req.nodeID}
@@ -72,6 +86,7 @@ func (req runnerRequest) run() {
 	} else {
 		client := distsqlpb.NewDistSQLClient(conn)
 		// TODO(radu): do we want a timeout here?
+		log.Infof(context.TODO(), "sending setup flow request for flow %v to node %v", req.flowReq.Flow.FlowID, req.nodeID)
 		resp, err := client.SetupFlow(req.ctx, req.flowReq)
 		if err != nil {
 			res.err = err
@@ -87,13 +102,16 @@ func (dsp *DistSQLPlanner) initRunners() {
 	// requests if a worker is actually there to receive them.
 	dsp.runnerChan = make(chan runnerRequest)
 	for i := 0; i < numRunners; i++ {
-		dsp.stopper.RunWorker(context.TODO(), func(context.Context) {
+		dsp.stopper.RunWorker(context.TODO(), func(ctx context.Context) {
 			runnerChan := dsp.runnerChan
 			stopChan := dsp.stopper.ShouldStop()
 			for {
 				select {
 				case req := <-runnerChan:
-					req.run()
+					if log.V(1) {
+						log.Infof(ctx, "worker running flow req %v", req.flowReq.Flow.FlowID)
+					}
+					req.run(false)
 
 				case <-stopChan:
 					return
@@ -192,12 +210,20 @@ func (dsp *DistSQLPlanner) Run(
 	// this node).
 	var resultChan chan runnerResult
 	if len(flows) > 1 {
+		if flows[0] != nil {
+		}
 		resultChan = make(chan runnerResult, len(flows)-1)
 	}
+	start := timeutil.Now()
+	var debugFs *distsqlrun.FlowSpec
 	for nodeID, flowSpec := range flows {
 		if nodeID == thisNodeID {
 			// Skip this node.
 			continue
+		}
+		if debugFs == nil {
+			debugFs = flowSpec
+			log.Infof(ctx, "about to run multi node flow %v", debugFs.FlowID)
 		}
 		req := setupReq
 		req.Flow = *flowSpec
@@ -213,7 +239,10 @@ func (dsp *DistSQLPlanner) Run(
 		select {
 		case dsp.runnerChan <- runReq:
 		default:
-			runReq.run()
+			if log.V(1) {
+				log.Infof(ctx, "running flow req %v directly, number of flows including this one: %d", flowSpec.FlowID, len(flows))
+			}
+			runReq.run(true)
 		}
 	}
 
@@ -237,6 +266,9 @@ func (dsp *DistSQLPlanner) Run(
 	localReq := setupReq
 	localReq.Flow = *flows[thisNodeID]
 	defer distsqlplan.ReleaseSetupFlowRequest(&localReq)
+	if len(flows) > 1 {
+		log.Infof(ctx, "setting up local portion of multinode flow %v, time since before setup %v", debugFs.FlowID, timeutil.Since(start))
+	}
 	ctx, flow, err := dsp.distSQLSrv.SetupLocalSyncFlow(ctx, evalCtx.Mon, &localReq, recv, localState)
 	if err != nil {
 		recv.SetError(err)

@@ -44,7 +44,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/opentracing/opentracing-go"
+	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 )
 
@@ -546,6 +546,7 @@ func (ds *ServerImpl) RunSyncFlow(stream distsqlpb.DistSQL_RunSyncFlowServer) er
 func (ds *ServerImpl) SetupFlow(
 	ctx context.Context, req *distsqlpb.SetupFlowRequest,
 ) (*distsqlpb.SimpleResponse, error) {
+	log.Infof(ctx, "received setup flow request for flow %v", req.Flow.FlowID)
 	parentSpan := opentracing.SpanFromContext(ctx)
 
 	// Note: the passed context will be canceled when this RPC completes, so we
