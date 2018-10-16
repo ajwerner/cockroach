@@ -265,7 +265,12 @@ func (d tpccBenchDistribution) zones() []string {
 	case multiZone:
 		return []string{"us-central1-a", "us-central1-b", "us-central1-c"}
 	case multiRegion:
-		return []string{"us-east1-b", "us-west1-b", "europe-west2-b"}
+		//return []string{"us-east1-b", "us-west1-b", "europe-west2-b"}
+		return []string{
+			"europe-west2-a", "europe-west3-a", "asia-northeast1-a", "us-west1-a",
+			"europe-west2-b", "europe-west3-b", "asia-northeast1-b", "us-west1-b",
+			"europe-west2-c", "europe-west3-c", "asia-northeast1-c", "us-west1-c",
+		}
 	default:
 		panic("unexpected")
 	}
@@ -293,7 +298,8 @@ func (l tpccBenchLoadConfig) numLoadNodes(d tpccBenchDistribution) int {
 	case singlePartitionedLoadgen:
 		return 1
 	case multiLoadgen:
-		return len(d.zones())
+		return 4
+		//return len(d.zones())
 	default:
 		panic("unexpected")
 	}
@@ -330,7 +336,8 @@ func (s tpccBenchSpec) partitions() int {
 	case singlePartitionedLoadgen:
 		return s.Nodes / 3
 	case multiLoadgen:
-		return len(s.Distribution.zones())
+		//return len(s.Distribution.zones())
+		return 4
 	default:
 		panic("unexpected")
 	}
@@ -624,7 +631,7 @@ func runTPCCBench(ctx context.Context, t *test, c *cluster, b tpccBenchSpec) {
 
 					t.Status(fmt.Sprintf("running benchmark, warehouses=%d", warehouses))
 					cmd := fmt.Sprintf("./workload run tpcc --warehouses=%d --active-warehouses=%d "+
-						"--tolerate-errors --ramp=%s --duration=%s%s {pgurl%s} "+
+						"--ramp=%s --duration=%s%s {pgurl%s} "+
 						"--histograms=logs/warehouses=%d/stats.json",
 						b.LoadWarehouses, activeWarehouses, rampDur,
 						loadDur, extraFlags, sqlGateways, activeWarehouses)
@@ -770,7 +777,8 @@ func registerTPCCBench(r *registry) {
 		},
 		// objective 3, key result 2.
 		{
-			Nodes:        9,
+			//Nodes:        9,
+			Nodes:        12,
 			CPUs:         16,
 			Distribution: multiRegion,
 			LoadConfig:   multiLoadgen,
