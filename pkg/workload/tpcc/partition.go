@@ -162,7 +162,7 @@ func (p *partitioner) randActive(rng *rand.Rand) int {
 func configureZone(db *pgx.ConnPool, table, partition string, constraint int, zones []string) {
 	var constraints string
 	if len(zones) > 0 {
-		constraints = fmt.Sprintf("[+zone=%s]", zones[constraint])
+		constraints = fmt.Sprintf("[+region=%s]", zones[constraint])
 	} else {
 		constraints = fmt.Sprintf("[+rack=%d]", constraint)
 	}
