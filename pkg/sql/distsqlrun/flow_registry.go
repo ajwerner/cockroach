@@ -206,6 +206,7 @@ func (fr *flowRegistry) RegisterFlow(
 	}
 
 	if len(inboundStreams) > 0 {
+		log.Infof(context.TODO(), "registering %d inbound streams for flow %s", len(inboundStreams), id)
 		// Set up a function to time out inbound streams after a while.
 		entry.streamTimer = time.AfterFunc(timeout, func() {
 			fr.Lock()
@@ -456,6 +457,8 @@ func (fr *flowRegistry) ConnectInboundStream(
 	if s.canceled {
 		return nil, nil, nil, errors.Errorf("flow %s: inbound stream %d came too late", flowID, streamID)
 	}
+
+	log.Infof(ctx, "found %s in flow registry, connected stream", flowID)
 
 	// We now mark the stream as connected but, if an error happens later because
 	// the handshake fails, we reset the state; we want the stream to be

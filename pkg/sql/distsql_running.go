@@ -63,19 +63,17 @@ type runnerResult struct {
 }
 
 func (req runnerRequest) run(direct bool) {
-	if log.V(1) {
-		logMsg := fmt.Sprintf("flow %v", req.flowReq.Flow.FlowID)
-		ctx := context.TODO()
-		if direct {
-			log.Infof(ctx, "running %s directly", logMsg)
-		} else {
-			log.Infof(ctx, "running %s through a worker", logMsg, req.flowReq.Flow.FlowID)
-		}
-		start := timeutil.Now()
-		defer func() {
-			log.Infof(ctx, "ran %s setup flow request in %v", logMsg, timeutil.Since(start))
-		}()
+	logMsg := fmt.Sprintf("flow %v", req.flowReq.Flow.FlowID)
+	ctx := context.TODO()
+	if direct {
+		log.Infof(ctx, "running %s directly", logMsg)
+	} else {
+		log.Infof(ctx, "running %s through a worker", logMsg, req.flowReq.Flow.FlowID)
 	}
+	start := timeutil.Now()
+	defer func() {
+		log.Infof(ctx, "ran %s setup flow request in %v", logMsg, timeutil.Since(start))
+	}()
 	defer distsqlplan.ReleaseSetupFlowRequest(req.flowReq)
 
 	res := runnerResult{nodeID: req.nodeID}
@@ -223,7 +221,7 @@ func (dsp *DistSQLPlanner) Run(
 		}
 		if debugFs == nil {
 			debugFs = flowSpec
-			log.Infof(ctx, "about to run multi node flow %v", debugFs.FlowID)
+			log.Infof(ctx, "about to run multi node flow %v, total num flows: %d", debugFs.FlowID, len(flows))
 		}
 		req := setupReq
 		req.Flow = *flowSpec
@@ -239,9 +237,7 @@ func (dsp *DistSQLPlanner) Run(
 		select {
 		case dsp.runnerChan <- runReq:
 		default:
-			if log.V(1) {
-				log.Infof(ctx, "running flow req %v directly, number of flows including this one: %d", flowSpec.FlowID, len(flows))
-			}
+			log.Infof(ctx, "running flow req %v directly, number of flows including this one: %d", flowSpec.FlowID, len(flows))
 			runReq.run(true)
 		}
 	}

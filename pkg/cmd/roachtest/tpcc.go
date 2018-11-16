@@ -267,10 +267,9 @@ func (d tpccBenchDistribution) zones() []string {
 	case multiRegion:
 		//return []string{"us-east1-b", "us-west1-b", "europe-west2-b"}
 		return []string{
-			"europe-west2-a", "europe-west2-b", "europe-west2-c",
-			"europe-west3-a", "europe-west3-b", "europe-west3-c",
-			"asia-northeast1-a", "asia-northeast1-b", "asia-northeast1-c",
-			"us-west1-a", "us-west1-b", "us-west1-c",
+			"europe-west2-a", "europe-west3-a", "asia-northeast1-a", "us-west1-a",
+			"europe-west2-b", "europe-west3-b", "asia-northeast1-b", "us-west1-b",
+			"europe-west2-c", "europe-west3-c", "asia-northeast1-c", "us-west1-c",
 		}
 	default:
 		panic("unexpected")

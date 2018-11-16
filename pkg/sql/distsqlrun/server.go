@@ -448,6 +448,7 @@ func (ds *ServerImpl) setupFlow(
 		local:          localState.IsLocal,
 	}
 	f := newFlow(flowCtx, ds.flowRegistry, syncFlowConsumer, localState.LocalProcs)
+	log.Infof(ctx, "setting up flow %s", f.id)
 	if err := f.setup(ctx, &req.Flow); err != nil {
 		log.Errorf(ctx, "error setting up flow: %s", err)
 		tracing.FinishSpan(sp)
@@ -556,6 +557,7 @@ func (ds *ServerImpl) SetupFlow(
 	if err == nil {
 		err = ds.flowScheduler.ScheduleFlow(ctx, f)
 	}
+	log.Infof(ctx, "returning from setup flow request for flow %v", req.Flow.FlowID)
 	if err != nil {
 		// We return flow deployment errors in the response so that they are
 		// packaged correctly over the wire. If we return them directly to this
@@ -581,9 +583,7 @@ func (ds *ServerImpl) flowStreamInt(
 	}
 	flowID := msg.Header.FlowID
 	streamID := msg.Header.StreamID
-	if log.V(1) {
-		log.Infof(ctx, "connecting inbound stream %s/%d", flowID.Short(), streamID)
-	}
+	log.Infof(ctx, "connecting inbound stream %s/%d", flowID.Short(), streamID)
 	f, receiver, cleanup, err := ds.flowRegistry.ConnectInboundStream(
 		ctx, flowID, streamID, stream, settingFlowStreamTimeout.Get(&ds.Settings.SV),
 	)
@@ -591,7 +591,7 @@ func (ds *ServerImpl) flowStreamInt(
 		return err
 	}
 	defer cleanup()
-	log.VEventf(ctx, 1, "connected inbound stream %s/%d", flowID.Short(), streamID)
+	log.Infof(ctx, "connected inbound stream %s/%d", flowID.Short(), streamID)
 	return ProcessInboundStream(f.AnnotateCtx(ctx), stream, msg, receiver, f)
 }
 

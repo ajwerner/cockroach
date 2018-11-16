@@ -91,8 +91,8 @@ func (fs *flowScheduler) canRunFlow(_ *Flow) bool {
 
 // runFlowNow starts the given flow; does not wait for the flow to complete.
 func (fs *flowScheduler) runFlowNow(ctx context.Context, f *Flow) error {
-	log.VEventf(
-		ctx, 1, "flow scheduler running flow %s, currently running %d", f.id, fs.mu.numRunning,
+	log.Infof(
+		ctx, "flow scheduler running flow %s, currently running %d", f.id, fs.mu.numRunning,
 	)
 	fs.mu.numRunning++
 	fs.metrics.FlowStart()

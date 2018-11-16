@@ -225,6 +225,7 @@ func (f *Flow) setupInboundStream(
 		return errors.Errorf("inbound stream of type SYNC_RESPONSE")
 
 	case distsqlpb.StreamEndpointSpec_REMOTE:
+		log.Infof(ctx, "setting up remote inbound stream for flow %d with spec %v", f.FlowCtx.id, spec)
 		if _, found := f.inboundStreams[sid]; found {
 			return errors.Errorf("inbound stream %d has multiple consumers", sid)
 		}
@@ -284,6 +285,8 @@ func (f *Flow) setupOutboundStream(spec distsqlpb.StreamEndpointSpec) (RowReceiv
 		}, nil
 
 	case distsqlpb.StreamEndpointSpec_REMOTE:
+		log.Infof(context.TODO(), "creating outbound stream for flow %v for spec %v (note this only sends something when flow is STARTED", f.FlowCtx.id, spec)
+
 		outbox := newOutbox(&f.FlowCtx, spec.TargetNodeID, spec.DeprecatedTargetAddr, f.id, sid)
 		f.startables = append(f.startables, outbox)
 		return outbox, nil

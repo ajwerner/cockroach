@@ -28,7 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/opentracing/opentracing-go"
+	opentracing "github.com/opentracing/opentracing-go"
 	"google.golang.org/grpc"
 )
 
@@ -215,16 +215,21 @@ func (m *outbox) mainLoop(ctx context.Context) error {
 		}
 	}()
 
+	flowID := m.flowCtx.id
 	if m.stream == nil {
 		var conn *grpc.ClientConn
 		var err error
 		if m.nodeID != 0 {
+			log.Infof(ctx, "dialing node %s for flow %s", m.nodeID, flowID)
 			conn, err = m.flowCtx.nodeDialer.Dial(ctx, m.nodeID)
+			log.Infof(ctx, "DONE dialed node %s for flow %s", m.nodeID, flowID)
 			if err != nil {
 				return err
 			}
 		} else {
+			log.Infof(ctx, "nodeID was 0 GRPCDial for flow %s", flowID)
 			conn, err = m.flowCtx.rpcCtx.GRPCDial(m.addr).Connect(ctx)
+			log.Infof(ctx, "DONE GRPCDial for flow %s, %v", flowID, err)
 			if err != nil {
 				return err
 			}
@@ -233,16 +238,13 @@ func (m *outbox) mainLoop(ctx context.Context) error {
 		if log.V(2) {
 			log.Infof(ctx, "outbox: calling FlowStream")
 		}
+		log.Infof(ctx, "outbox: calling FlowStream %s", flowID)
 		m.stream, err = client.FlowStream(context.TODO())
 		if err != nil {
-			if log.V(1) {
-				log.Infof(ctx, "FlowStream error: %s", err)
-			}
+			log.Infof(ctx, "FlowStream error: %s, %s", err, flowID)
 			return err
 		}
-		if log.V(2) {
-			log.Infof(ctx, "outbox: FlowStream returned")
-		}
+		log.Infof(ctx, "outbox: FlowStream returned %s", flowID)
 	}
 
 	var flushTimer timeutil.Timer
@@ -420,6 +422,7 @@ func (m *outbox) listenForDrainSignalFromConsumer(ctx context.Context) (<-chan d
 }
 
 func (m *outbox) run(ctx context.Context, wg *sync.WaitGroup) {
+	log.Infof(ctx, "starting outbox for flow %s", m.flowCtx.id)
 	err := m.mainLoop(ctx)
 	if stream, ok := m.stream.(distsqlpb.DistSQL_FlowStreamClient); ok {
 		closeErr := stream.CloseSend()
