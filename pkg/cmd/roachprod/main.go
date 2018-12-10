@@ -856,6 +856,11 @@ The "status" command outputs the binary and PID for the specified nodes:
 	}),
 }
 
+var logsCmd = &cobra.Command{
+	Use:   "logs",
+	Short: "retrieve and stream logs in a cluster",
+}
+
 var monitorCmd = &cobra.Command{
 	Use:   "monitor",
 	Short: "monitor the status of nodes in a cluster",
@@ -1313,6 +1318,7 @@ func main() {
 		ipCmd,
 		pgurlCmd,
 		adminurlCmd,
+		logsCmd,
 
 		webCmd,
 		dumpCmd,

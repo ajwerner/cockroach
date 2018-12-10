@@ -19,11 +19,6 @@ import (
 )
 
 func main() {
-	// get the
-	// flag for the cluster
-
-	// get the cluster names and IPs
-	//
 	cluster := flag.String("cluster", "", "cluster name of interest")
 	remoteLogsPath := flag.String("remote-logs", "logs", "path on remote hosts of logs")
 	localLogsPath := flag.String("local-logs", "", "defaults to <cluster>.logs")
@@ -42,16 +37,19 @@ func main() {
 		*localLogsPath = "./" + c.Name + ".logs"
 	}
 	if err := os.MkdirAll(*localLogsPath, 0755); err != nil {
-
+		panic(err)
 	}
 	const timeFormat = "060102 15:04:05.999999"
-	var prev time.Time
+	prev := time.Now().UTC().Add(-2 * time.Second)
 	for {
 		t := time.Now().UTC().Add(-1 * time.Second).Truncate(time.Microsecond)
 		if err := rsyncLogs(ctx, *remoteLogsPath, *localLogsPath, *remoteUser, c); err != nil {
 			panic(err)
 		}
-		cmd := exec.CommandContext(ctx, "cockroach", "debug", "merge-logs", *localLogsPath+"/*/*", "--from", prev.Format(timeFormat), "--to", t.Format(timeFormat))
+		cmd := exec.CommandContext(ctx, "cockroach", "debug", "merge-logs",
+			*localLogsPath+"/*/*",
+			"--from", prev.Format(timeFormat),
+			"--to", t.Format(timeFormat))
 		cmd.Stdout = os.Stdout
 		if err := cmd.Run(); err != nil {
 			panic(err)
