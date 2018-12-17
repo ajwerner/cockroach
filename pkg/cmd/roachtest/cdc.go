@@ -102,7 +102,7 @@ func cdcBasicTest(ctx context.Context, t *test, c *cluster, args cdcTestArgs) {
 			tolerateErrors: true,
 		}
 		tpcc.install(ctx, c)
-
+		time.Sleep(time.Second) // deal with table not existing yet.
 		t.Status("initiating workload")
 		m.Go(func(ctx context.Context) error {
 			defer func() { close(workloadCompleteCh) }()
@@ -350,8 +350,8 @@ func registerCDC(r *registry) {
 		},
 	})
 	r.Add(testSpec{
-		Name:       "cdc/rangefeed-unstable",
-		Skip:       `resolved timestamps are not yet reliable with RangeFeed`,
+		Name: "cdc/rangefeed-unstable",
+		// Skip:       `resolved timestamps are not yet reliable with RangeFeed`,
 		MinVersion: "v2.2.0",
 		Nodes:      nodes(4, cpu(16)),
 		Run: func(ctx context.Context, t *test, c *cluster) {
@@ -620,7 +620,7 @@ func (lv *latencyVerifier) noteHighwater(highwaterTime time.Time) {
 	}
 
 	latency := timeutil.Since(highwaterTime)
-	if latency < lv.targetSteadyLatency/2 {
+	if latency < (3*lv.targetSteadyLatency)/4 {
 		lv.latencyBecameSteady = true
 	}
 	if !lv.latencyBecameSteady {
@@ -682,7 +682,7 @@ func (lv *latencyVerifier) assertValid(t *test) {
 	if !lv.latencyBecameSteady {
 		t.Fatalf("latency never dropped to acceptable steady level: %s", lv.targetSteadyLatency)
 	}
-	if lv.maxSeenSteadyLatency > lv.targetSteadyLatency {
+	if lv.maxSeenSteadyLatency > (11*lv.targetSteadyLatency)/10 {
 		t.Fatalf("max latency was more than allowed: %s vs %s",
 			lv.maxSeenSteadyLatency, lv.targetSteadyLatency)
 	}
