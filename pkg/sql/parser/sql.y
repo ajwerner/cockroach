@@ -528,7 +528,7 @@ func newNameFromStr(s string) *tree.Name {
 %token <str> REGCLASS REGPROC REGPROCEDURE REGNAMESPACE REGTYPE
 %token <str> REMOVE_PATH RENAME REPEATABLE REPLACE
 %token <str> RELEASE RESET RESTORE RESTRICT RESUME RETURNING REVOKE RIGHT
-%token <str> ROLE ROLES ROLLBACK ROLLUP ROW ROWS RSHIFT RULE
+%token <str> ROLE ROLES ROLLBACK ROLLUP ROW ROWS RSHIFT RULE RECENT
 
 %token <str> SAVEPOINT SCATTER SCHEMA SCHEMAS SCRUB SEARCH SECOND SELECT SEQUENCE SEQUENCES
 %token <str> SERIAL SERIAL2 SERIAL4 SERIAL8
@@ -6290,6 +6290,10 @@ as_of_clause:
   {
     $$.val = tree.AsOfClause{Expr: $5.expr()}
   }
+| AS_LA OF RECENT SYSTEM TIME
+  {
+    $$.val = tree.AsOfClause{Recent: true}
+  }
 
 opt_as_of_clause:
   as_of_clause
@@ -8942,6 +8946,7 @@ unreserved_keyword:
 | RANGES
 | READ
 | RECURSIVE
+| RECENT
 | REF
 | REGCLASS
 | REGPROC

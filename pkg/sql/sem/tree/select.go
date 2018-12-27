@@ -194,7 +194,8 @@ func (a *AliasClause) Format(ctx *FmtCtx) {
 
 // AsOfClause represents an as of time.
 type AsOfClause struct {
-	Expr Expr
+	Expr   Expr
+	Recent bool
 }
 
 // Format implements the NodeFormatter interface.

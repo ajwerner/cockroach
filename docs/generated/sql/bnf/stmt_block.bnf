@@ -402,6 +402,7 @@ reset_csetting_stmt ::=
 
 as_of_clause ::=
 	'AS' 'OF' 'SYSTEM' 'TIME' a_expr
+	| 'AS' 'OF' 'RECENT' 'SYSTEM' 'TIME'
 
 scrub_table_stmt ::=
 	'EXPERIMENTAL' 'SCRUB' 'TABLE' table_name opt_as_of_clause opt_scrub_options_clause
@@ -684,6 +685,7 @@ unreserved_keyword ::=
 	| 'RANGES'
 	| 'READ'
 	| 'RECURSIVE'
+	| 'RECENT'
 	| 'REF'
 	| 'REGCLASS'
 	| 'REGPROC'

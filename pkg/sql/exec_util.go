@@ -674,12 +674,26 @@ func checkResultType(typ types.T) error {
 	return nil
 }
 
+// RecentDuration is a function used for AS OF RECENT SYSTEM TIME queries to
+// determine the appropriate offset from now to use.
+// It is injected by followerreadsccl.
+var RecentDuration func(*cluster.Settings) time.Duration
+
 // EvalAsOfTimestamp evaluates and returns the timestamp from an AS OF SYSTEM
 // TIME clause.
 func (p *planner) EvalAsOfTimestamp(
 	asOf tree.AsOfClause, max hlc.Timestamp,
 ) (hlc.Timestamp, error) {
-	return tree.EvalAsOfTimestamp(asOf, max, &p.semaCtx, p.EvalContext())
+	if !asOf.Recent {
+		return tree.EvalAsOfTimestamp(asOf, max, &p.semaCtx, p.EvalContext())
+	}
+	if RecentDuration == nil {
+		return hlc.Timestamp{},
+			errors.Errorf("AS OF RECENT SYSTEM TIME is only available in ccl version")
+	}
+	return hlc.Timestamp{
+		WallTime: max.GoTime().Add(RecentDuration(p.extendedEvalCtx.Settings)).UnixNano(),
+	}, nil
 }
 
 // ParseHLC parses a string representation of an `hlc.Timestamp`.
@@ -714,7 +728,8 @@ func (p *planner) isAsOf(stmt tree.Statement, max hlc.Timestamp) (*hlc.Timestamp
 		if !ok {
 			return nil, nil
 		}
-		if sc.From == nil || sc.From.AsOf.Expr == nil {
+		if sc.From == nil ||
+			(!sc.From.AsOf.Recent && sc.From.AsOf.Expr == nil) {
 			return nil, nil
 		}
 
@@ -734,7 +749,6 @@ func (p *planner) isAsOf(stmt tree.Statement, max hlc.Timestamp) (*hlc.Timestamp
 	default:
 		return nil, nil
 	}
-
 	ts, err := p.EvalAsOfTimestamp(asOf, max)
 	return &ts, err
 }
