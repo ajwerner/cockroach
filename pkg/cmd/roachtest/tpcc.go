@@ -785,7 +785,7 @@ func registerTPCCBench(r *registry) {
 		{
 			//Nodes:        9,
 			Nodes:        12,
-			CPUs:         16,
+			CPUs:         4,
 			Distribution: multiRegion,
 			LoadConfig:   multiLoadgen,
 
