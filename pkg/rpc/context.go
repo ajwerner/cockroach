@@ -754,7 +754,7 @@ func (ctx *Context) runHeartbeat(
 		if cancel != nil {
 			cancel()
 		}
-
+		log.Info(ctx.masterCtx, "heartbeat failed: %v %v", target, err)
 		if err == nil {
 			err = errors.Wrap(
 				checkVersion(ctx.version, response.ServerVersion),

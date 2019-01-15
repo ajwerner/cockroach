@@ -26,7 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/opentracing/opentracing-go"
+	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 )
 
@@ -417,6 +417,10 @@ func (fr *flowRegistry) ConnectInboundStream(
 ) (_ *Flow, _ RowReceiver, _ func(), retErr error) {
 	fr.Lock()
 	defer fr.Unlock()
+	start := timeutil.Now()
+	defer func() {
+		log.Infof(ctx, "ConnectInboundStream %v %v %v %v %v", flowID, streamID, timeout, time.Since(start), retErr)
+	}()
 
 	entry := fr.getEntryLocked(flowID)
 	if entry.flow == nil {
