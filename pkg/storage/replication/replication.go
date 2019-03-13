@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
@@ -28,6 +29,8 @@ import (
 	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
 )
+
+// Question: does it matter that we've been aggressively focusing on having
 
 // GroupID is the basic unit of replication.
 // Each peer corresponds to a single ID.
@@ -42,32 +45,82 @@ type ProposalMessage struct {
 	Command *storagepb.RaftCommand
 }
 
-type RaftMessage struct {
-	GroupID GroupID
-	Msg     raftpb.Message
-}
-
-type TransportFactory interface {
-	NewClient() connect.Conn
+type RaftMessage interface {
+	connect.Message
+	SetGroup(GroupID)
+	SetRaftMessage(raftpb.Message)
 }
 
 // PeerFactory creates Peers and schedules their interactions between io and
 // network resources.
 type PeerFactory struct {
+	config
 	stopper   *stop.Stopper
-	transport TransportFactory
+	transport connect.Conn
 	storage   engine.Engine
 
-	// requestQueues stores the current requests
-	// we're going to have a goroutine waiting to receive messages and add them
-	// to the queues. Maybe these queues should live on the peer objects
-	// TODO(ajwerner): revisit whether this is the right place for the queues
-	requestQueues requestQueues
+	scheduler scheduler
+
+	liveness           func(GroupID) bool
+	raftMessageFactory func() RaftMessage
+
+	tickInterval time.Duration
 
 	mu struct {
 		syncutil.RWMutex
-		peers map[GroupID]*Peer
+		peers      map[GroupID]*Peer
+		unquiesced map[GroupID]struct{}
 	}
+}
+
+func (f *PeerFactory) recvLoop() {
+	for {
+		msg := f.transport.Recv()
+		switch msg := msg.(type) {
+		case RaftMessage:
+			// Enqueue the message for the peer if it exists
+
+			// TODO(ajwerner): how do we deal with the case where the peer does not yet exist?
+			// I think what we'll do is have the contract be that messages sent to peers which don't exist will just be dropped
+			p := f.getPeer(msg.GroupID)
+			if p == nil {
+				// TODO(ajwerner): record a metric or something?
+				continue
+			}
+			p.enqueueMessage(msg.Msg)
+			f.scheduler.EnqueueRaftReady(msg.ID)
+		case nil:
+			return
+		default:
+			panic(fmt.Errorf("unexpected message type %T", msg))
+		}
+	}
+}
+
+func (f *PeerFactory) tickLoop() {
+	ticker := time.NewTicker(s.cfg.RaftTickInterval)
+	defer ticker.Stop()
+	var groupsToTick []GroupID
+	for {
+		select {
+		case <-ticker.C:
+			// TODO(ajwerner): need a call to update the liveness map here because
+			// it gets referenced when ticking the peers.
+			groupsToTick = f.getUnquiescedGroups(groupsToTick[:0])
+			f.scheduler.EnqueueRaftTick(groupsToTick...)
+		case <-ticker.ShouldQuiesce():
+			return
+		}
+	}
+}
+
+func (f *PeerFactory) getUnquiescedGroups(buf []GroupID) []GroupID {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	for g := range f.mu.unquiesced {
+		buf = append(buf, g)
+	}
+	return buf
 }
 
 // Random thoughts:
@@ -89,6 +142,8 @@ type Peer struct {
 	// Seems like yes for sure.
 	// TODO: sprinkle some state for that
 	quiescent bool
+
+	toProcess requestQueue
 
 	// StateLoader?
 	// RaftTransport?
@@ -117,6 +172,7 @@ var _ peerIface = (*Peer)(nil)
 // to be used in any way.
 type peerIface interface {
 	NewClient(sync.Locker) *PeerClient
+	MarkUnreachable(PeerID)
 	Progress() Progress
 	Snapshot()      // ???
 	ApplySnapshot() // ???
@@ -147,10 +203,8 @@ type PeerClient struct {
 		Applied func()
 	}
 
-	mu struct {
-		syncutil.RWMutex
-		p *peer
-	}
+	syn sync.Locker
+	p   *peer
 }
 
 // Send accepts ProposalMessages.
@@ -159,7 +213,9 @@ func (pc *PeerClient) Send(ctx context.Context, msg connect.Message) {
 	if !ok {
 		panic(fmt.Errorf("got %T, expected %T", msg, (*ProposalMessage)(nil)))
 	}
-	pc.p.addProposal(&proposal{
+	pc.syn.Unlock()
+	defer pc.syn.Lock()
+	pc.p.addProposal(ctx, pc, sync, pc, &proposal{
 		ctx: ctx,
 		m:   m,
 		pc:  pc,
@@ -168,6 +224,7 @@ func (pc *PeerClient) Send(ctx context.Context, msg connect.Message) {
 
 type proposal struct {
 	ctx             context.Context
+	syn             sync.Locker
 	pc              *PeerClient
 	msg             *ProposalMessage
 	proposedAtTicks int

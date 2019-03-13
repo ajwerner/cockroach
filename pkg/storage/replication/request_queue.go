@@ -14,7 +14,10 @@
 
 package replication
 
-import "github.com/cockroachdb/cockroach/pkg/util/syncutil"
+import (
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"go.etcd.io/etcd/raft/raftpb"
+)
 
 type requestInfo struct {
 	req        *RaftMessageRequest
@@ -23,7 +26,7 @@ type requestInfo struct {
 
 type requestQueue struct {
 	syncutil.Mutex
-	infos []raftRequestInfo
+	infos []raftpb.Message
 }
 
 type requestQueues struct {

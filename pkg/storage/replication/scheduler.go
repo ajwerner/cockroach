@@ -113,16 +113,16 @@ type raftProcessor interface {
 	processTick(context.Context, GroupID) bool
 }
 
-type raftScheduleState int
+type scheduleState int
 
 const (
-	stateQueued raftScheduleState = 1 << iota
+	stateQueued scheduleState = 1 << iota
 	stateRaftReady
 	stateRaftRequest
 	stateRaftTick
 )
 
-type raftScheduler struct {
+type scheduler struct {
 	processor  raftProcessor
 	numWorkers int
 
@@ -130,26 +130,24 @@ type raftScheduler struct {
 		syncutil.Mutex
 		cond    *sync.Cond
 		queue   groupIDQueue
-		state   map[GroupID]raftScheduleState
+		state   map[GroupID]scheduleState
 		stopped bool
 	}
 
 	done sync.WaitGroup
 }
 
-func newRaftScheduler(
-	metrics *StoreMetrics, processor raftProcessor, numWorkers int,
-) *raftScheduler {
-	s := &raftScheduler{
+func newRaftScheduler(metrics *StoreMetrics, processor raftProcessor, numWorkers int) *scheduler {
+	s := &scheduler{
 		processor:  processor,
 		numWorkers: numWorkers,
 	}
 	s.mu.cond = sync.NewCond(&s.mu.Mutex)
-	s.mu.state = make(map[GroupID]raftScheduleState)
+	s.mu.state = make(map[GroupID]scheduleState)
 	return s
 }
 
-func (s *raftScheduler) Start(ctx context.Context, stopper *stop.Stopper) {
+func (s *scheduler) Start(ctx context.Context, stopper *stop.Stopper) {
 	stopper.RunWorker(ctx, func(ctx context.Context) {
 		<-stopper.ShouldStop()
 		s.mu.Lock()
@@ -166,17 +164,17 @@ func (s *raftScheduler) Start(ctx context.Context, stopper *stop.Stopper) {
 	}
 }
 
-func (s *raftScheduler) Wait(context.Context) {
+func (s *scheduler) Wait(context.Context) {
 	s.done.Wait()
 }
 
-func (s *raftScheduler) worker(ctx context.Context) {
+func (s *scheduler) worker(ctx context.Context) {
 	defer s.done.Done()
 
 	// We use a sync.Cond for worker notification instead of a buffered
 	// channel. Buffered channels have internal overhead for maintaining the
 	// buffer even when the elements are empty. And the buffer isn't necessary as
-	// the raftScheduler work is already buffered on the internal queue. Lastly,
+	// the scheduler work is already buffered on the internal queue. Lastly,
 	// signaling a sync.Cond is significantly faster than selecting and sending
 	// on a buffered channel.
 
@@ -239,7 +237,7 @@ func (s *raftScheduler) worker(ctx context.Context) {
 	}
 }
 
-func (s *raftScheduler) enqueue1Locked(addState raftScheduleState, id GroupID) int {
+func (s *scheduler) enqueue1Locked(addState scheduleState, id GroupID) int {
 	prevState := s.mu.state[id]
 	if prevState&addState == addState {
 		return 0
@@ -255,15 +253,15 @@ func (s *raftScheduler) enqueue1Locked(addState raftScheduleState, id GroupID) i
 	return queued
 }
 
-func (s *raftScheduler) enqueue1(addState raftScheduleState, id GroupID) int {
+func (s *scheduler) enqueue1(addState scheduleState, id GroupID) int {
 	s.mu.Lock()
 	count := s.enqueue1Locked(addState, id)
 	s.mu.Unlock()
 	return count
 }
 
-func (s *raftScheduler) enqueueN(addState raftScheduleState, ids ...GroupID) int {
-	// Enqueue the ids in chunks to avoid hold raftScheduler.mu for too long.
+func (s *scheduler) enqueueN(addState scheduleState, ids ...GroupID) int {
+	// Enqueue the ids in chunks to avoid hold scheduler.mu for too long.
 	const enqueueChunkSize = 128
 
 	var count int
@@ -279,7 +277,7 @@ func (s *raftScheduler) enqueueN(addState raftScheduleState, ids ...GroupID) int
 	return count
 }
 
-func (s *raftScheduler) signal(count int) {
+func (s *scheduler) signal(count int) {
 	if count >= s.numWorkers {
 		s.mu.cond.Broadcast()
 	} else {
@@ -289,14 +287,14 @@ func (s *raftScheduler) signal(count int) {
 	}
 }
 
-func (s *raftScheduler) EnqueueRaftReady(id GroupID) {
+func (s *scheduler) EnqueueRaftReady(id GroupID) {
 	s.signal(s.enqueue1(stateRaftReady, id))
 }
 
-func (s *raftScheduler) EnqueueRaftRequest(id GroupID) {
+func (s *scheduler) EnqueueRaftRequest(id GroupID) {
 	s.signal(s.enqueue1(stateRaftRequest, id))
 }
 
-func (s *raftScheduler) EnqueueRaftTick(ids ...GroupID) {
+func (s *scheduler) EnqueueRaftTick(ids ...GroupID) {
 	s.signal(s.enqueueN(stateRaftTick, ids...))
 }
