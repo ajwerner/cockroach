@@ -36,12 +36,33 @@ type GroupID int64
 // PeerID is a replica id :/
 type PeerID int64
 
+// ProposalMessage is used to propose commands to the system.
+type ProposalMessage struct {
+	ID      storagebase.CmdIDKey
+	Command *storagepb.RaftCommand
+}
+
+type RaftMessage struct {
+	GroupID GroupID
+	Msg     raftpb.Message
+}
+
+type TransportFactory interface {
+	NewClient() connect.Conn
+}
+
 // PeerFactory creates Peers and schedules their interactions between io and
 // network resources.
 type PeerFactory struct {
 	stopper   *stop.Stopper
 	transport TransportFactory
 	storage   engine.Engine
+
+	// requestQueues stores the current requests
+	// we're going to have a goroutine waiting to receive messages and add them
+	// to the queues. Maybe these queues should live on the peer objects
+	// TODO(ajwerner): revisit whether this is the right place for the queues
+	requestQueues requestQueues
 
 	mu struct {
 		syncutil.RWMutex
@@ -60,6 +81,7 @@ type PeerFactory struct {
 
 // Peer represents local replication state for a replica group.
 type Peer struct {
+
 	// does this need to be protected by the mutex for lazy initialization?
 	*raft.RawNode
 
@@ -91,6 +113,8 @@ func (f *PeerFactory) LoadPeer(id GroupID) (*Peer, error) {
 
 var _ peerIface = (*Peer)(nil)
 
+// peerIface exists merely to clarify the peer's interface and is not expected
+// to be used in any way.
 type peerIface interface {
 	NewClient(sync.Locker) *PeerClient
 	Progress() Progress
@@ -129,39 +153,24 @@ type PeerClient struct {
 	}
 }
 
+// Send accepts ProposalMessages.
 func (pc *PeerClient) Send(ctx context.Context, msg connect.Message) {
 	m, ok := msg.(*ProposalMessage)
 	if !ok {
 		panic(fmt.Errorf("got %T, expected %T", msg, (*ProposalMessage)(nil)))
 	}
-	pc.p.addProposal(&proposalMessage{
+	pc.p.addProposal(&proposal{
 		ctx: ctx,
 		m:   m,
+		pc:  pc,
 	})
 }
 
 type proposal struct {
-	conn            *PeerClient
 	ctx             context.Context
+	pc              *PeerClient
 	msg             *ProposalMessage
 	proposedAtTicks int
-}
-
-type Proposal struct {
-	ID      storagebase.CmdIDKey
-	Command *storagepb.RaftCommand
-}
-
-type TransportMessage struct {
-	GroupID GroupID
-	Msg     raftpb.Message
-}
-
-// TODO(ajwerner): what is this?
-// Do we want this to be orchestrator level?
-type Transport interface {
-	Send(Message) (ok bool)
-	Recv() (Message, bool)
 }
 
 // Progress represents the local view of state of replication for the replica
@@ -170,7 +179,4 @@ type Progress interface {
 	AppliedIndex() uint64
 	LeaseSequence() int64
 	LeaseAppliedIndex() int64
-}
-
-type PeerClient struct {
 }
