@@ -55,17 +55,18 @@ type Chunkable interface {
 // been acquired, of course). This results in the premature shutdown of the
 // connection.
 type Conn interface {
-	// Write sends a new request message across the connection. The given
+
+	// Send sends a new request message across the connection. The given
 	// context can contain tracing information or other context that's tied to
 	// the request. The context covers the entire request/reply lifecycle of the
 	// message. Once the connection has been closed, Write is a no-op.
-	Write(ctx context.Context, request Message)
+	Send(ctx context.Context, request Message)
 
-	// Read receives a reply to a previous request sent via the Write method.
+	// Recv receives a reply to a previous request sent via the Write method.
 	// Note that no context parameter is required, since it was provided to the
 	// Write method instead. Once the connection has been closed, Read returns
 	// nil.
-	Read() Message
+	Recv() Message
 
 	// Close shuts down the connection. This can be called even if other
 	// goroutines are writing or reading. In that case, Close results in the
