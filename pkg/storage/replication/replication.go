@@ -20,13 +20,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/connect"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachlabs/acidlib/v1/connect"
-	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
 )
 
@@ -45,24 +46,54 @@ type ProposalMessage struct {
 	Command *storagepb.RaftCommand
 }
 
+// RaftMessage is a message used to send raft messages on the wire.
 type RaftMessage interface {
 	connect.Message
-	SetGroup(GroupID)
+	GetGroupID() GroupID
+	SetGroupID(GroupID)
+	GetRaftMessage() raftpb.Message
 	SetRaftMessage(raftpb.Message)
+}
+
+func NewPeerFactory(
+	ctx context.Context,
+	cfg base.RaftConfig,
+	stopper *stop.Stopper,
+	raftTransport connect.Conn,
+	storage engine.Engine,
+	raftMessageFactory func(GroupID) RaftMessage,
+	options ...Option,
+) (*PeerFactory, error) {
+	pf := PeerFactory{
+		cfg:           cfg,
+		stopper:       stopper,
+		raftTransport: raftTransport,
+		storage:       storage,
+	}
+	if err := pf.init(options...); err != nil {
+		return nil, err
+	}
+	initScheduler(&pf.scheduler, &pf, pf.numWorkers)
+	pf.scheduler.Start(ctx, pf.stopper)
+	pf.stopper.RunAsyncTask(ctx, "replication.PeerFactory.tickLoop", pf.tickLoop)
+	pf.stopper.RunAsyncTask(ctx, "replication.PeerFactory.recvLoop", pf.recvLoop)
+	return &pf, nil
 }
 
 // PeerFactory creates Peers and schedules their interactions between io and
 // network resources.
 type PeerFactory struct {
 	config
-	stopper   *stop.Stopper
-	transport connect.Conn
-	storage   engine.Engine
+	cfg           base.RaftConfig
+	stopper       *stop.Stopper
+	raftTransport connect.Conn
+	storage       engine.Engine
 
 	scheduler scheduler
 
 	liveness           func(GroupID) bool
 	raftMessageFactory func() RaftMessage
+	onUnquiesce        func(g GroupID)
 
 	tickInterval time.Duration
 
@@ -73,22 +104,56 @@ type PeerFactory struct {
 	}
 }
 
-func (f *PeerFactory) recvLoop() {
+func (pf *PeerFactory) processReady(ctx context.Context, id GroupID) {
+	if log.V(2) {
+		log.Infof(ctx, "processing ready for %d", id)
+	}
+	pf.mu.RLock()
+	p, ok := pf.mu.peers[id]
+	pf.mu.RUnlock()
+	if !ok {
+		return
+	}
+	ctx = p.logCtx.AnnotateCtx(ctx)
+	p.handleRaftReady(ctx)
+}
+
+func (p *PeerFactory) processRequestQueue(context.Context, GroupID) {
+}
+
+// Process a raft tick for the specified range. Return true if the range
+// should be queued for ready processing.
+func (p *PeerFactory) processTick(context.Context, GroupID) bool {
+	panic("not implemented")
+}
+
+func (f *PeerFactory) getPeer(id GroupID) *Peer {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.mu.peers[id]
+}
+
+func (f *PeerFactory) recvLoop(ctx context.Context) {
 	for {
-		msg := f.transport.Recv()
+		msg := f.raftTransport.Recv()
 		switch msg := msg.(type) {
 		case RaftMessage:
 			// Enqueue the message for the peer if it exists
 
 			// TODO(ajwerner): how do we deal with the case where the peer does not yet exist?
 			// I think what we'll do is have the contract be that messages sent to peers which don't exist will just be dropped
-			p := f.getPeer(msg.GroupID)
+			groupID := msg.GetGroupID()
+			if groupID == 0 {
+				panic("There shouldn't ever be a zero group ID")
+			}
+			p := f.getPeer(groupID)
 			if p == nil {
 				// TODO(ajwerner): record a metric or something?
 				continue
 			}
-			p.enqueueMessage(msg.Msg)
-			f.scheduler.EnqueueRaftReady(msg.ID)
+			raftMsg := msg.GetRaftMessage()
+			p.enqueueRaftMessage(raftMsg)
+			f.scheduler.EnqueueRaftReady(groupID)
 		case nil:
 			return
 		default:
@@ -97,8 +162,9 @@ func (f *PeerFactory) recvLoop() {
 	}
 }
 
-func (f *PeerFactory) tickLoop() {
-	ticker := time.NewTicker(s.cfg.RaftTickInterval)
+func (f *PeerFactory) tickLoop(ctx context.Context) {
+	ticker := time.NewTicker(f.cfg.RaftTickInterval)
+	defer f.raftTransport.Close(ctx, true)
 	defer ticker.Stop()
 	var groupsToTick []GroupID
 	for {
@@ -108,7 +174,7 @@ func (f *PeerFactory) tickLoop() {
 			// it gets referenced when ticking the peers.
 			groupsToTick = f.getUnquiescedGroups(groupsToTick[:0])
 			f.scheduler.EnqueueRaftTick(groupsToTick...)
-		case <-ticker.ShouldQuiesce():
+		case <-f.stopper.ShouldQuiesce():
 			return
 		}
 	}
@@ -132,37 +198,28 @@ func (f *PeerFactory) getUnquiescedGroups(buf []GroupID) []GroupID {
 // In merges a peer gets destroyed.
 // All good.
 
-// Peer represents local replication state for a replica group.
-type Peer struct {
-
-	// does this need to be protected by the mutex for lazy initialization?
-	*raft.RawNode
-
-	// Do we need to think about quiescence?
-	// Seems like yes for sure.
-	// TODO: sprinkle some state for that
-	quiescent bool
-
-	toProcess requestQueue
-
-	// StateLoader?
-	// RaftTransport?
-	mu struct {
-		syncutil.RWMutex
-
-		proposals map[storagebase.CmdIDKey]*proposal
-	}
-}
-
 func (f *PeerFactory) Destroy(p *Peer) {
 	panic("not implemented")
 }
 
-func (f *PeerFactory) NewPeer(id GroupID) (*Peer, error) {
-	panic("not implemented")
+func (f *PeerFactory) NewPeer(logCtx log.AmbientContext, id GroupID) (*Peer, error) {
+	// TODO: actually implement
+	// We start out without a peer ID.
+	// We'll get one when we start receiving raft messages hopefully.
+	return &Peer{
+		config:  &f.cfg,
+		groupID: id,
+		logCtx:  logCtx,
+		raftMessageFactory: func() RaftMessage {
+			m := f.raftMessageFactory()
+			m.SetGroupID(id)
+			return m
+		},
+		onUnquiesce: func() { f.onUnquiesce(id) },
+	}, nil
 }
 
-func (f *PeerFactory) LoadPeer(id GroupID) (*Peer, error) {
+func (f *PeerFactory) LoadPeer(logCtx log.AmbientContext, id GroupID) (*Peer, error) {
 	panic("not implemented")
 }
 
@@ -172,10 +229,10 @@ var _ peerIface = (*Peer)(nil)
 // to be used in any way.
 type peerIface interface {
 	NewClient(sync.Locker) *PeerClient
-	MarkUnreachable(PeerID)
+	// MarkUnreachable(PeerID)
 	Progress() Progress
-	Snapshot()      // ???
-	ApplySnapshot() // ???
+	// Snapshot()      // ???
+	// ApplySnapshot() // ???
 }
 
 // PeerClient is a connect.Conn that implements proposals.
@@ -188,6 +245,7 @@ type PeerClient struct {
 	// sends one message? Do we need to decorate the signatures?
 
 	Callbacks struct {
+
 		// DoCommit is a callback which occurs to allow the command to validate that
 		// a commit can proceed given the current state. If an error is returned it
 		// propagate back to the client through a message send. An error prevents
@@ -195,7 +253,7 @@ type PeerClient struct {
 		Commit func() error
 
 		// DoApply is a callback which the client can set to do the work of applying a
-		// command. An error from DoApply
+		// command. An error from DoApply is fatal.
 		Apply func(engine.Writer) error
 
 		// OnApplied is called when the application of the command has been written
@@ -203,8 +261,10 @@ type PeerClient struct {
 		Applied func()
 	}
 
-	syn sync.Locker
-	p   *peer
+	commitErr error
+	cond      sync.Cond
+	syn       sync.Locker
+	peer      *Peer
 }
 
 // Send accepts ProposalMessages.
@@ -213,14 +273,35 @@ func (pc *PeerClient) Send(ctx context.Context, msg connect.Message) {
 	if !ok {
 		panic(fmt.Errorf("got %T, expected %T", msg, (*ProposalMessage)(nil)))
 	}
-	pc.syn.Unlock()
-	defer pc.syn.Lock()
-	pc.p.addProposal(ctx, pc, sync, pc, &proposal{
+	pc.peer.addProposal(&proposal{
 		ctx: ctx,
-		m:   m,
+		syn: pc.syn,
+		msg: m,
 		pc:  pc,
 	})
 }
+
+// TODO(ajwerner): consider cancelling the proposal if possible.
+func (pc *PeerClient) Close(ctx context.Context, drain bool) {
+
+}
+
+type CommittedMessage struct {
+}
+
+type ErrorMessage struct {
+	Err error
+}
+
+func (pc *PeerClient) Recv() connect.Message {
+	pc.cond.Wait()
+	if pc.commitErr != nil {
+		return &ErrorMessage{Err: pc.commitErr}
+	}
+	return CommittedMessage{}
+}
+
+var _ connect.Conn = (*PeerClient)(nil)
 
 type proposal struct {
 	ctx             context.Context

@@ -105,7 +105,7 @@ func (q *groupIDQueue) back() *groupIDChunk {
 	return q.chunks.Back().Value.(*groupIDChunk)
 }
 
-type raftProcessor interface {
+type eventProcessor interface {
 	processReady(context.Context, GroupID)
 	processRequestQueue(context.Context, GroupID)
 	// Process a raft tick for the specified range. Return true if the range
@@ -123,7 +123,7 @@ const (
 )
 
 type scheduler struct {
-	processor  raftProcessor
+	processor  eventProcessor
 	numWorkers int
 
 	mu struct {
@@ -137,14 +137,13 @@ type scheduler struct {
 	done sync.WaitGroup
 }
 
-func newRaftScheduler(metrics *StoreMetrics, processor raftProcessor, numWorkers int) *scheduler {
-	s := &scheduler{
+func initScheduler(s *scheduler, processor eventProcessor, numWorkers int) {
+	*s = scheduler{
 		processor:  processor,
 		numWorkers: numWorkers,
 	}
 	s.mu.cond = sync.NewCond(&s.mu.Mutex)
 	s.mu.state = make(map[GroupID]scheduleState)
-	return s
 }
 
 func (s *scheduler) Start(ctx context.Context, stopper *stop.Stopper) {
