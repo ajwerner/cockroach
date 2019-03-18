@@ -499,7 +499,7 @@ func (r *Replica) sendWithRangeID(
 ) (*roachpb.BatchResponse, *roachpb.Error) {
 	var br *roachpb.BatchResponse
 	if r.leaseholderStats != nil && ba.Header.GatewayNodeID != 0 {
-		r.leaseholderStats.record(ba.HeaderGatewayNodeID)
+		r.leaseholderStats.record(ba.Header.GatewayNodeID)
 	}
 
 	// Add the range log tag.
