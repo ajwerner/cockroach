@@ -37,8 +37,8 @@ import (
 // Peer represents local replication state for a replica group.
 type Peer struct {
 	logCtx  log.AmbientContext
-	config  *base.RaftConfig
 	groupID GroupID
+	pf      *PeerFactory
 
 	// groupID GroupID // Does it need this?
 	// raftTransport is exclusively for outbound traffic.
@@ -46,12 +46,16 @@ type Peer struct {
 	raftTransport      connect.Conn
 	raftMessageFactory func() RaftMessage
 	shouldCampaign     func(ctx context.Context, status *raft.Status) bool
-
-	onUnquiesce func()
+	onUnquiesce        func()
 
 	// mu < msgQueueMu < unreachablesMu
 	mu struct {
 		syncutil.RWMutex
+
+		truncatedState RaftTruncatedState
+
+		appliedIndex uint64 // same as Replica.mu.state.RaftAppliedIndex?
+
 		// PeerID is the current peer's ID.
 		// It is zero when the Peer was created from a snapshot.
 		peerID              PeerID
@@ -60,6 +64,8 @@ type Peer struct {
 		lastIndex, lastTerm uint64
 		quiescent           bool
 		destroyed           bool
+		stateLoader         StateLoader
+		peers               []PeerID // ugh this is sort of from the replica descriptor?
 		rawNode             *raft.RawNode
 
 		proposals map[storagebase.CmdIDKey]*proposal
@@ -101,6 +107,15 @@ type Peer struct {
 		// to the quota pool. We only do so when all replicas have persisted
 		// the corresponding entry into their logs.
 		quotaReleaseQueue []int
+	}
+	// TODO(ajwerner): justify and understand this
+	raftMu struct {
+		syncutil.Mutex
+		// Note that there are two StateLoaders, in raftMu and mu,
+		// depending on which lock is being held.
+		stateLoader StateLoader
+		// on-disk storage for sideloaded SSTables. nil when there's no ReplicaID.
+		sideloaded SideloadStorage
 	}
 	msgQueueMu struct {
 		syncutil.RWMutex
@@ -176,7 +191,22 @@ func (p *Peer) withRaftGroupLocked(
 	}
 	// Should we create the raft raw node lazily? I feel like probably not.
 	if p.mu.rawNode == nil {
-		panic("TODO: fix this")
+		ctx := p.logCtx.AnnotateCtx(context.TODO())
+		raftGroup, err := raft.NewRawNode(newRaftConfig(
+			raft.Storage((*peerStorage)(p)),
+			uint64(p.mu.peerID),
+			p.mu.appliedIndex, // TODO(ajwerner): think about this
+			p.pf.cfg,
+			&raftLogger{ctx: ctx},
+		), nil)
+		if err != nil {
+			return err
+		}
+		p.mu.rawNode = raftGroup
+
+		if mayCampaignOnWake {
+			p.maybeCampaignOnWakeLocked(ctx)
+		}
 	}
 
 	// This wrapper function is a hack to add range IDs to stack traces
@@ -188,6 +218,10 @@ func (p *Peer) withRaftGroupLocked(
 		p.unquiesceAndWakeLeaderLocked()
 	}
 	return err
+}
+
+func (p *Peer) maybeCampaignOnWakeLocked(ctx context.Context) {
+	panic("TODO(ajwerner): not implemented")
 }
 
 // TODO: consider pooling
@@ -251,7 +285,7 @@ func (p *Peer) updateProposalQuota(ctx context.Context, lastLeaderID PeerID) {
 			// through the code paths where we acquire quota from the pool. To
 			// offset this we reset the quota pool whenever leadership changes
 			// hands.
-			p.mu.proposalQuota = newQuotaPool(p.config.RaftProposalQuota)
+			p.mu.proposalQuota = newQuotaPool(p.pf.cfg.RaftProposalQuota)
 			// TODO(ajwerner): figure out last update
 			p.mu.commandSizes = make(map[storagebase.CmdIDKey]int)
 		} else if p.mu.proposalQuota != nil {
@@ -387,6 +421,61 @@ func (p *Peer) raftStatusRLocked() *raft.Status {
 		return rg.Status()
 	}
 	return nil
+}
+
+func (p *Peer) tick(
+	ctx context.Context, isAlive func(peerID PeerID) bool,
+) (exists bool, err error) {
+	ctx = p.logCtx.AnnotateCtx(ctx)
+
+	p.unreachablesMu.Lock()
+	remotes := p.unreachablesMu.remotes
+	p.unreachablesMu.remotes = nil
+	p.unreachablesMu.Unlock()
+
+	p.raftMu.Lock()
+	defer p.raftMu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// If the raft group is uninitialized, do not initialize on tick.
+	if p.mu.rawNode == nil {
+		return false, nil
+	}
+
+	for remoteReplica := range remotes {
+		p.mu.rawNode.ReportUnreachable(uint64(remoteReplica))
+	}
+
+	if p.mu.quiescent {
+		return false, nil
+	}
+	if p.maybeQuiesceLocked(ctx, isAlive) {
+		return false, nil
+	}
+
+	p.maybeTransferRaftLeadershipLocked(ctx)
+
+	p.mu.ticks++
+	p.mu.internalRaftGroup.Tick()
+
+	refreshAtDelta := p.store.cfg.RaftElectionTimeoutTicks
+	if knob := p.store.TestingKnobs().RefreshReasonTicksPeriod; knob > 0 {
+		refreshAtDelta = knob
+	}
+	if !p.store.TestingKnobs().DisableRefreshReasonTicks && p.mu.ticks%refreshAtDelta == 0 {
+		// RaftElectionTimeoutTicks is a reasonable approximation of how long we
+		// should wait before deciding that our previous proposal didn't go
+		// through. Note that the combination of the above condition and passing
+		// RaftElectionTimeoutTicks to refreshProposalsLocked means that commands
+		// will be refreshed when they have been pending for 1 to 2 election
+		// cycles.
+		p.refreshProposalsLocked(refreshAtDelta, reasonTicks)
+	}
+	return true, nil
+}
+
+func (p *Peer) maybeQuiesceLocked(ctx context.Context, isAlive func(peerID PeerID) bool) bool {
 }
 
 func (p *Peer) maybeAcquireProposalQuota(prop *proposal) error {
@@ -553,4 +642,23 @@ func DecodeRaftCommand(data []byte) (storagebase.CmdIDKey, []byte) {
 		panic(fmt.Sprintf("unknown command encoding version %v", data[0]))
 	}
 	return storagebase.CmdIDKey(data[1 : 1+raftCommandIDLen]), data[1+raftCommandIDLen:]
+}
+
+func newRaftConfig(
+	strg raft.Storage, id uint64, appliedIndex uint64, storeCfg base.RaftConfig, logger raft.Logger,
+) *raft.Config {
+	return &raft.Config{
+		ID:                        id,
+		Applied:                   appliedIndex,
+		ElectionTick:              storeCfg.RaftElectionTimeoutTicks,
+		HeartbeatTick:             storeCfg.RaftHeartbeatIntervalTicks,
+		MaxUncommittedEntriesSize: storeCfg.RaftMaxUncommittedEntriesSize,
+		MaxCommittedSizePerReady:  storeCfg.RaftMaxCommittedSizePerReady,
+		MaxSizePerMsg:             storeCfg.RaftMaxSizePerMsg,
+		MaxInflightMsgs:           storeCfg.RaftMaxInflightMsgs,
+		Storage:                   strg,
+		Logger:                    logger,
+
+		PreVote: true,
+	}
 }

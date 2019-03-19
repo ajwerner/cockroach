@@ -23,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/connect"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/storage/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -62,6 +63,7 @@ func NewPeerFactory(
 	raftTransport connect.Conn,
 	storage engine.Engine,
 	raftMessageFactory func(GroupID) RaftMessage,
+	c *raftentry.Cache,
 	options ...Option,
 ) (*PeerFactory, error) {
 	pf := PeerFactory{
@@ -69,7 +71,10 @@ func NewPeerFactory(
 		stopper:       stopper,
 		raftTransport: raftTransport,
 		storage:       storage,
+		entryCache:    c,
 	}
+	pf.mu.peers = make(map[GroupID]*Peer)
+	pf.mu.unquiesced = make(map[GroupID]struct{})
 	if err := pf.init(options...); err != nil {
 		return nil, err
 	}
@@ -88,12 +93,14 @@ type PeerFactory struct {
 	stopper       *stop.Stopper
 	raftTransport connect.Conn
 	storage       engine.Engine
+	entryCache    *raftentry.Cache
 
 	scheduler scheduler
 
-	liveness           func(GroupID) bool
+	liveness           func(GroupID, PeerID) bool
 	raftMessageFactory func() RaftMessage
 	onUnquiesce        func(g GroupID)
+	entries            func()
 
 	tickInterval time.Duration
 
@@ -118,7 +125,20 @@ func (pf *PeerFactory) processReady(ctx context.Context, id GroupID) {
 	p.handleRaftReady(ctx)
 }
 
-func (p *PeerFactory) processRequestQueue(context.Context, GroupID) {
+func (pf *PeerFactory) processRequestQueue(ctx context.Context, id GroupID) bool {
+	pf.mu.RLock()
+	p, ok := pf.mu.peers[id]
+	pf.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	exists, err := p.tick(ctx, func(peerID PeerID) bool {
+		return pf.liveness(id, peerID)
+	})
+	if err != nil {
+		log.Error(ctx, err)
+	}
+	return exists
 }
 
 // Process a raft tick for the specified range. Return true if the range
@@ -206,8 +226,19 @@ func (f *PeerFactory) NewPeer(logCtx log.AmbientContext, id GroupID) (*Peer, err
 	// TODO: actually implement
 	// We start out without a peer ID.
 	// We'll get one when we start receiving raft messages hopefully.
-	return &Peer{
-		config:  &f.cfg,
+	f.mu.RLock()
+	p, exists := f.mu.peers[id]
+	f.mu.RUnlock()
+	if exists {
+		return p, nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p, exists = f.mu.peers[id]; exists {
+		return p, nil
+	}
+	p = &Peer{
+		pf:      f,
 		groupID: id,
 		logCtx:  logCtx,
 		raftMessageFactory: func() RaftMessage {
@@ -216,7 +247,10 @@ func (f *PeerFactory) NewPeer(logCtx log.AmbientContext, id GroupID) (*Peer, err
 			return m
 		},
 		onUnquiesce: func() { f.onUnquiesce(id) },
-	}, nil
+	}
+	f.mu.peers[id] = p
+	f.mu.unquiesced[id] = struct{}{}
+	return p, nil
 }
 
 func (f *PeerFactory) LoadPeer(logCtx log.AmbientContext, id GroupID) (*Peer, error) {

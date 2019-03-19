@@ -119,7 +119,7 @@ func entries(
 	}
 	ents := make([]raftpb.Entry, 0, n)
 
-	ents, size, hitIndex, exceededMaxBytes := eCache.Scan(ents, rangeID, lo, hi, maxBytes)
+	ents, size, hitIndex, exceededMaxBytes := eCache.Scan(ents, int64(rangeID), lo, hi, maxBytes)
 
 	// Return results if the correct number of results came back or if
 	// we ran into the max bytes limit.

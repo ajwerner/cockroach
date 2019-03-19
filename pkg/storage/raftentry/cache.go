@@ -21,7 +21,6 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/pkg/errors"
 	"go.etcd.io/etcd/raft/raftpb"
@@ -40,7 +39,7 @@ type Cache struct {
 
 	mu    syncutil.Mutex
 	lru   partitionList
-	parts map[roachpb.RangeID]*partition
+	parts map[int64]*partition
 }
 
 // Design
@@ -86,7 +85,7 @@ type Cache struct {
 //   2) Memory reuse with object pools is difficult.
 
 type partition struct {
-	id roachpb.RangeID
+	id int64
 
 	mu      syncutil.RWMutex
 	ringBuf // implements rangeCache, embedded to avoid interface and allocation
@@ -122,7 +121,7 @@ func NewCache(maxBytes uint64) *Cache {
 	return &Cache{
 		maxBytes: int32(maxBytes),
 		metrics:  makeMetrics(),
-		parts:    map[roachpb.RangeID]*partition{},
+		parts:    map[int64]*partition{},
 	}
 }
 
@@ -135,7 +134,7 @@ func (c *Cache) Metrics() Metrics {
 // all entries with indices equal to or greater than the indices of the entries
 // provided. ents is expected to consist of entries with a contiguous sequence
 // of indices.
-func (c *Cache) Add(id roachpb.RangeID, ents []raftpb.Entry, truncate bool) {
+func (c *Cache) Add(id int64, ents []raftpb.Entry, truncate bool) {
 	if len(ents) == 0 {
 		return
 	}
@@ -189,7 +188,7 @@ func (c *Cache) Add(id roachpb.RangeID, ents []raftpb.Entry, truncate bool) {
 }
 
 // Clear removes all entries on the given range with index less than hi.
-func (c *Cache) Clear(id roachpb.RangeID, hi uint64) {
+func (c *Cache) Clear(id int64, hi uint64) {
 	c.mu.Lock()
 	p := c.getPartLocked(id, false /* create */, false /* recordUse */)
 	if p == nil {
@@ -205,7 +204,7 @@ func (c *Cache) Clear(id roachpb.RangeID, hi uint64) {
 
 // Get returns the entry for the specified index and true for the second return
 // value. If the index is not present in the cache, false is returned.
-func (c *Cache) Get(id roachpb.RangeID, idx uint64) (e raftpb.Entry, ok bool) {
+func (c *Cache) Get(id int64, idx uint64) (e raftpb.Entry, ok bool) {
 	c.metrics.Accesses.Inc(1)
 	c.mu.Lock()
 	p := c.getPartLocked(id, false /* create */, true /* recordUse */)
@@ -229,7 +228,7 @@ func (c *Cache) Get(id roachpb.RangeID, idx uint64) (e raftpb.Entry, ok bool) {
 // cache miss occurs. The returned size reflects the size of the returned
 // entries.
 func (c *Cache) Scan(
-	ents []raftpb.Entry, id roachpb.RangeID, lo, hi, maxBytes uint64,
+	ents []raftpb.Entry, id int64, lo, hi, maxBytes uint64,
 ) (_ []raftpb.Entry, bytes uint64, nextIdx uint64, exceededMaxBytes bool) {
 	c.metrics.Accesses.Inc(1)
 	c.mu.Lock()
@@ -250,7 +249,7 @@ func (c *Cache) Scan(
 	return ents, bytes, nextIdx, exceededMaxBytes
 }
 
-func (c *Cache) getPartLocked(id roachpb.RangeID, create, recordUse bool) *partition {
+func (c *Cache) getPartLocked(id int64, create, recordUse bool) *partition {
 	part := c.parts[id]
 	if create && part == nil {
 		part = c.lru.pushFront(id)
@@ -327,7 +326,7 @@ func (c *Cache) updateGauges(bytes, entries int32) {
 
 var initialSize = newCacheSize(partitionSize, 0)
 
-func newPartition(id roachpb.RangeID) *partition {
+func newPartition(id int64) *partition {
 	return &partition{
 		id:   id,
 		size: initialSize,
@@ -406,7 +405,7 @@ func (l *partitionList) lazyInit() {
 	}
 }
 
-func (l *partitionList) pushFront(id roachpb.RangeID) *partition {
+func (l *partitionList) pushFront(id int64) *partition {
 	l.lazyInit()
 	return l.insert(newPartition(id), &l.root)
 }

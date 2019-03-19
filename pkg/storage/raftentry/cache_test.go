@@ -48,7 +48,7 @@ func newEntries(lo, hi, size uint64) []raftpb.Entry {
 	return ents
 }
 
-func addEntries(c *Cache, rangeID roachpb.RangeID, lo, hi uint64) []raftpb.Entry {
+func addEntries(c *Cache, rangeID int64, lo, hi uint64) []raftpb.Entry {
 	ents := newEntries(lo, hi, 1)
 	c.Add(rangeID, ents, false)
 	return ents
@@ -57,7 +57,7 @@ func addEntries(c *Cache, rangeID roachpb.RangeID, lo, hi uint64) []raftpb.Entry
 func verifyGet(
 	t *testing.T,
 	c *Cache,
-	rangeID roachpb.RangeID,
+	rangeID int64,
 	lo, hi uint64,
 	expEnts []raftpb.Entry,
 	expNextIndex uint64,
@@ -91,10 +91,10 @@ func verifyGet(
 func TestEntryCache(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	c := NewCache(100 + 2*uint64(partitionSize))
-	rangeID := roachpb.RangeID(2)
+	rangeID := int64(2)
 	otherRangeID := rangeID + 1
 	// Note 9 bytes per entry with data size of 1
-	verify := func(rangeID roachpb.RangeID, lo, hi uint64, ents []raftpb.Entry, expNextIndex uint64) {
+	verify := func(rangeID int64, lo, hi uint64, ents []raftpb.Entry, expNextIndex uint64) {
 		t.Helper()
 		verifyGet(t, c, rangeID, lo, hi, ents, expNextIndex, false)
 	}
@@ -110,9 +110,9 @@ func TestEntryCache(t *testing.T) {
 	// Fetch overlapping second half.
 	verify(rangeID, 5, 9, ents[4:], 9)
 	// Fetch data from earlier range.
-	verify(roachpb.RangeID(1), 1, 11, []raftpb.Entry{}, 1)
+	verify(1, 1, 11, []raftpb.Entry{}, 1)
 	// Fetch data from later range.
-	verify(roachpb.RangeID(3), 1, 11, []raftpb.Entry{}, 1)
+	verify(3, 1, 11, []raftpb.Entry{}, 1)
 	// Add another range which we can evict.
 	otherEnts := addEntries(c, otherRangeID, 1, 3)
 	verifyMetrics(t, c, 10, 90+2*int64(partitionSize))
@@ -159,7 +159,7 @@ func verifyMetrics(t *testing.T, c *Cache, expectedEntries, expectedBytes int64)
 
 func TestIgnoredAdd(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	rangeID := roachpb.RangeID(1)
+	rangeID := int64(1)
 	c := NewCache(100 + uint64(partitionSize))
 	// Show that adding entries which are larger than maxBytes is ignored.
 	_ = addEntries(c, rangeID, 1, 41)
@@ -209,7 +209,7 @@ func TestCacheLaterEntries(t *testing.T) {
 
 func TestExceededMaxBytes(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	rangeID := roachpb.RangeID(1)
+	rangeID := int64(1)
 	c := NewCache(100)
 	addEntries(c, rangeID, 1, 10)
 	ents, _, next, exceeded := c.Scan(nil, rangeID, 1, 10, 18)
@@ -221,7 +221,7 @@ func TestExceededMaxBytes(t *testing.T) {
 
 func TestEntryCacheClearTo(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	rangeID := roachpb.RangeID(1)
+	rangeID := int64(1)
 	c := NewCache(100)
 	c.Add(rangeID, []raftpb.Entry{newEntry(20, 1), newEntry(21, 1)}, true)
 	c.Clear(rangeID, 21)
@@ -250,6 +250,18 @@ func TestMaxBytesLimit(t *testing.T) {
 	}
 }
 
+func TestCacheLaterEntries(t *testing.T) {
+	c := NewCache(1000)
+	rangeID := int64(1)
+	ents := addEntries(c, rangeID, 1, 10)
+	verifyGet(t, c, rangeID, 1, 10, ents, 10, false)
+	ents = addEntries(c, rangeID, 11, 21)
+	if got, _, _, _ := c.Scan(nil, rangeID, 1, 10, noLimit); len(got) != 0 {
+		t.Fatalf("Expected not to get entries from range which preceded new values")
+	}
+	verifyGet(t, c, rangeID, 11, 21, ents, 21, false)
+}
+
 func TestConcurrentEvictions(t *testing.T) {
 	// This tests for safety in the face of concurrent updates.
 	// The main goroutine randomly chooses a free partition for a read or write.
@@ -261,13 +273,13 @@ func TestConcurrentEvictions(t *testing.T) {
 	const N = 8000
 	const numRanges = 200
 	const maxEntriesPerWrite = 111
-	rangeData := make(map[roachpb.RangeID][]raftpb.Entry)
-	rangeInUse := make(map[roachpb.RangeID]bool)
+	rangeData := make(map[int64][]raftpb.Entry)
+	rangeInUse := make(map[int64]bool)
 	c := NewCache(1000)
-	rangeDoneChan := make(chan roachpb.RangeID)
-	pickRange := func() (r roachpb.RangeID) {
+	rangeDoneChan := make(chan int64)
+	pickRange := func() (r int64) {
 		for {
-			r = roachpb.RangeID(rand.Intn(numRanges))
+			r = int64(rand.Intn(numRanges))
 			if !rangeInUse[r] {
 				break
 			}
@@ -276,7 +288,7 @@ func TestConcurrentEvictions(t *testing.T) {
 		return r
 	}
 	var wg sync.WaitGroup
-	doRead := func(r roachpb.RangeID) {
+	doRead := func(r int64) {
 		ents := rangeData[r]
 		offset := rand.Intn(len(ents))
 		length := rand.Intn(len(ents) - offset)
@@ -290,7 +302,7 @@ func TestConcurrentEvictions(t *testing.T) {
 			wg.Done()
 		}()
 	}
-	doWrite := func(r roachpb.RangeID) {
+	doWrite := func(r int64) {
 		ents := rangeData[r]
 		offset := rand.Intn(len(ents)+1) - 1
 		length := rand.Intn(maxEntriesPerWrite)
@@ -343,7 +355,7 @@ func TestConcurrentEvictions(t *testing.T) {
 
 func TestHeadWrappingForward(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	rangeID := roachpb.RangeID(1)
+	rangeID := int64(1)
 	c := NewCache(200 + uint64(partitionSize))
 	ents := addEntries(c, rangeID, 1, 8)
 	// Clear some space at the front of the ringBuf.
@@ -360,7 +372,7 @@ func TestHeadWrappingForward(t *testing.T) {
 
 func TestHeadWrappingBackwards(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	rangeID := roachpb.RangeID(1)
+	rangeID := int64(1)
 	c := NewCache(100 + uint64(partitionSize))
 	ents := addEntries(c, rangeID, 3, 5)
 	c.Clear(rangeID, 4)
@@ -381,7 +393,7 @@ func TestPanicOnNonContiguousRange(t *testing.T) {
 
 func TestEntryCacheEviction(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	rangeID, rangeID2 := roachpb.RangeID(1), roachpb.RangeID(2)
+	rangeID, rangeID2 := int64(1), int64(2)
 	c := NewCache(140 + uint64(partitionSize))
 	c.Add(rangeID, []raftpb.Entry{newEntry(1, 40), newEntry(2, 40)}, true)
 	ents, _, hi, _ := c.Scan(nil, rangeID, 1, 3, noLimit)
@@ -489,7 +501,7 @@ func TestConcurrentAddGetAndEviction(t *testing.T) {
 	// partition.
 	c := NewCache(1000)
 	ents := []raftpb.Entry{newEntry(1, 500)}
-	doAddAndGetToRange := func(rangeID roachpb.RangeID) {
+	doAddAndGetToRange := func(rangeID int64) {
 		doAction(func() { c.Add(rangeID, ents, true) })
 		doAction(func() { c.Get(rangeID, ents[0].Index) })
 	}
@@ -499,7 +511,7 @@ func TestConcurrentAddGetAndEviction(t *testing.T) {
 }
 
 func BenchmarkEntryCache(b *testing.B) {
-	rangeID := roachpb.RangeID(1)
+	rangeID := int64(1)
 	ents := make([]raftpb.Entry, 1000)
 	for i := range ents {
 		ents[i] = newEntry(uint64(i+1), 8)
@@ -508,7 +520,7 @@ func BenchmarkEntryCache(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		c := NewCache(uint64(15 * len(ents) * len(ents[0].Data)))
-		for i := roachpb.RangeID(0); i < 10; i++ {
+		for i := int64(0); i < 10; i++ {
 			if i != rangeID {
 				c.Add(i, ents, true)
 			}
@@ -521,7 +533,7 @@ func BenchmarkEntryCache(b *testing.B) {
 }
 
 func BenchmarkEntryCacheClearTo(b *testing.B) {
-	rangeID := roachpb.RangeID(1)
+	rangeID := int64(1)
 	ents := make([]raftpb.Entry, 1000)
 	for i := range ents {
 		ents[i] = newEntry(uint64(i+1), 8)
