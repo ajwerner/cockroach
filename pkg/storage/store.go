@@ -187,25 +187,6 @@ func TestStoreConfig(clock *hlc.Clock) StoreConfig {
 	return sc
 }
 
-func newRaftConfig(
-	strg raft.Storage, id uint64, appliedIndex uint64, storeCfg StoreConfig, logger raft.Logger,
-) *raft.Config {
-	return &raft.Config{
-		ID:                        id,
-		Applied:                   appliedIndex,
-		ElectionTick:              storeCfg.RaftElectionTimeoutTicks,
-		HeartbeatTick:             storeCfg.RaftHeartbeatIntervalTicks,
-		MaxUncommittedEntriesSize: storeCfg.RaftMaxUncommittedEntriesSize,
-		MaxCommittedSizePerReady:  storeCfg.RaftMaxCommittedSizePerReady,
-		MaxSizePerMsg:             storeCfg.RaftMaxSizePerMsg,
-		MaxInflightMsgs:           storeCfg.RaftMaxInflightMsgs,
-		Storage:                   strg,
-		Logger:                    logger,
-
-		PreVote: true,
-	}
-}
-
 // verifyKeys verifies keys. If checkEndKey is true, then the end key
 // is verified to be non-nil and greater than start key. If
 // checkEndKey is false, end key is verified to be nil. Additionally,
@@ -658,9 +639,6 @@ type StoreConfig struct {
 	// Thus we want to make sure that heartbeats are responded to faster than
 	// the quiesce cadence.
 	CoalescedHeartbeatsInterval time.Duration
-
-	// RaftHeartbeatIntervalTicks is the number of ticks that pass between heartbeats.
-	RaftHeartbeatIntervalTicks int
 
 	// ScanInterval is the default value for the scan interval
 	ScanInterval time.Duration

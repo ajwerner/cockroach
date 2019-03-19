@@ -454,6 +454,9 @@ type RaftConfig struct {
 	// unless overridden.
 	RaftElectionTimeoutTicks int
 
+	// RaftHeartbeatIntervalTicks is the number of ticks that pass between heartbeats.
+	RaftHeartbeatIntervalTicks int
+
 	// RangeLeaseRaftElectionTimeoutMultiplier specifies what multiple the leader
 	// lease active duration should be of the raft election timeout.
 	RangeLeaseRaftElectionTimeoutMultiplier float64

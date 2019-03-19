@@ -9,6 +9,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/connect"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/storage/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/storage/replication"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -77,7 +78,8 @@ func TestReplication(t *testing.T) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop(ctx)
 	mt := newManualTransport()
-	pf, err := replication.NewPeerFactory(ctx, cfg, stopper, mt, nil, nil)
+	c := raftentry.NewCache(1 << 20)
+	pf, err := replication.NewPeerFactory(ctx, cfg, stopper, mt, nil, nil, c)
 	if err != nil {
 		panic(err)
 	}
