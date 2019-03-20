@@ -154,6 +154,20 @@ func TestReplication(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfig()
 	defer cfg.Stopper.Stop(ctx)
+
+	// Okay I guess what I should do is erm uh create a few of these factories
+	// and then get them all hooked up and try to replicate some data	between
+	// those for a single group. This is going to be a whole thing.
+	// Open questions about how much bootstrap is needed and how to mirror the
+	// replica tracking on a per group basis. Like who actually intercepts things
+	// and adds replicas and what not. Seems like there's a bunch of complexity
+	// in that.
+
+	// Also, snapshots :facepalm: will need to figure those out too.
+	// This feels like a bunch of work. I think I will rejoice when I have a
+	// single group doing that replication and then see where I'm at.
+	// That sounds laudable.
+
 	pf, err := replication.NewFactory(ctx, cfg)
 	if err != nil {
 		panic(err)
