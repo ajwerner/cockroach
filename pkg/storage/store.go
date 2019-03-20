@@ -162,7 +162,6 @@ func TestStoreConfig(clock *hlc.Clock) StoreConfig {
 		AmbientCtx:                  log.AmbientContext{Tracer: st.Tracer},
 		Clock:                       clock,
 		CoalescedHeartbeatsInterval: 50 * time.Millisecond,
-		RaftHeartbeatIntervalTicks:  1,
 		ScanInterval:                10 * time.Minute,
 		TimestampCachePageSize:      tscache.TestSklPageSize,
 		HistogramWindowInterval:     metric.TestSampleInterval,
@@ -172,6 +171,7 @@ func TestStoreConfig(clock *hlc.Clock) StoreConfig {
 
 	// Use shorter Raft tick settings in order to minimize start up and failover
 	// time in tests.
+	sc.RaftHeartbeatIntervalTicks = 1
 	sc.RaftElectionTimeoutTicks = 3
 	sc.RaftTickInterval = 100 * time.Millisecond
 	sc.SetDefaults()

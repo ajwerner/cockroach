@@ -4,12 +4,9 @@ import (
 	"context"
 	"math"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
-	"github.com/cockroachdb/cockroach/pkg/storage/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/pkg/errors"
@@ -17,7 +14,7 @@ import (
 	"go.etcd.io/etcd/raft/raftpb"
 )
 
-// TODO(ajwerner): move RaftTruncatedState out into its own proto
+// TODO(ajwerner): consider moving RaftTruncatedState out into its own proto
 
 type peerStorage Peer
 
@@ -26,8 +23,8 @@ var _ raft.Storage = (*peerStorage)(nil)
 // InitialState implements the raft.Storage interface.
 // InitialState requires that r.mu is held.
 func (p *peerStorage) InitialState() (raftpb.HardState, raftpb.ConfState, error) {
-	ctx := p.logCtx.AnnotateCtx(context.TODO())
-	hs, err := p.mu.stateLoader.LoadHardState(ctx, p.pf.storage)
+	ctx := p.AnnotateCtx(context.TODO())
+	hs, err := p.mu.stateLoader.LoadHardState(ctx, p.storage)
 	// For uninitialized ranges, membership is unknown at this point.
 	if raft.IsEmptyHardState(hs) || err != nil {
 		return raftpb.HardState{}, raftpb.ConfState{}, err
@@ -41,28 +38,28 @@ func (p *peerStorage) InitialState() (raftpb.HardState, raftpb.ConfState, error)
 
 // FirstIndex implements the raft.Storage interface.
 func (p *peerStorage) FirstIndex() (uint64, error) {
-	ctx := p.logCtx.AnnotateCtx(context.TODO())
+	ctx := p.AnnotateCtx(context.TODO())
 	ts, err := (*Peer)(p).raftTruncatedStateLocked(ctx)
 	if err != nil {
 		return 0, err
 	}
-	return ts.GetIndex() + 1, nil
+	return ts.Index + 1, nil
 }
 
 // raftTruncatedStateLocked returns metadata about the log that preceded the
 // first current entry. This includes both entries that have been compacted away
 // and the dummy entries that make up the starting point of an empty log.
 // raftTruncatedStateLocked requires that r.mu is held.
-func (p *Peer) raftTruncatedStateLocked(ctx context.Context) (RaftTruncatedState, error) {
+func (p *Peer) raftTruncatedStateLocked(ctx context.Context) (roachpb.RaftTruncatedState, error) {
 	if p.mu.truncatedState != nil {
-		return p.mu.truncatedState, nil
+		return *p.mu.truncatedState, nil
 	}
-	ts, _, err := p.mu.stateLoader.LoadRaftTruncatedState(ctx, p.pf.storage)
+	ts, _, err := p.mu.stateLoader.LoadRaftTruncatedState(ctx, p.storage)
 	if err != nil {
 		return ts, err
 	}
-	if ts.GetIndex() != 0 {
-		p.mu.truncatedState = ts
+	if ts.Index != 0 {
+		p.mu.truncatedState = &ts
 	}
 	return ts, nil
 }
@@ -71,13 +68,13 @@ func (p *Peer) raftTruncatedStateLocked(ctx context.Context) (RaftTruncatedState
 // and this method will always return at least one entry even if it exceeds
 // maxBytes. Sideloaded proposals count towards maxBytes with their payloads inlined.
 func (p *peerStorage) Entries(lo, hi, maxBytes uint64) ([]raftpb.Entry, error) {
-	readonly := p.pf.storage.NewReadOnly()
+	readonly := p.storage.NewReadOnly()
 	defer readonly.Close()
-	ctx := p.logCtx.AnnotateCtx(context.TODO())
+	ctx := p.AnnotateCtx(context.TODO())
 	if p.raftMu.sideloaded == nil {
 		return nil, errors.New("sideloaded storage is uninitialized")
 	}
-	return entries(ctx, p.mu.stateLoader, readonly, p.groupID, p.pf.entryCache,
+	return entries(ctx, p.mu.stateLoader, readonly, p.entryReader, p.entryCache,
 		p.raftMu.sideloaded, lo, hi, maxBytes)
 }
 
@@ -99,33 +96,33 @@ func (p *peerStorage) Term(i uint64) (uint64, error) {
 		return p.mu.lastTerm, nil
 	}
 	// Try to retrieve the term for the desired entry from the entry cache.
-	if e, ok := p.pf.entryCache.Get(int64(p.groupID), i); ok {
+	if e, ok := p.entryCache.Get(i); ok {
 		return e.Term, nil
 	}
-	readonly := p.pf.storage.NewReadOnly()
+	readonly := p.storage.NewReadOnly()
 	defer readonly.Close()
-	ctx := p.logCtx.AnnotateCtx(context.TODO())
-	return term(ctx, p.mu.stateLoader, readonly, p.groupID, p.pf.entryCache, i)
+	ctx := p.AnnotateCtx(context.TODO())
+	return term(ctx, p.mu.stateLoader, readonly, p.entryReader, p.entryCache, i)
 }
 
 func term(
 	ctx context.Context,
 	rsl StateLoader,
 	eng engine.Reader,
-	rangeID GroupID,
-	eCache *raftentry.Cache,
+	eReader EntryReader,
+	eCache EntryCache,
 	i uint64,
 ) (uint64, error) {
 	// entries() accepts a `nil` sideloaded storage and will skip inlining of
 	// sideloaded entries. We only need the term, so this is what we do.
-	ents, err := entries(ctx, rsl, eng, rangeID, eCache, nil /* sideloaded */, i, i+1, math.MaxUint64 /* maxBytes */)
+	ents, err := entries(ctx, rsl, eng, eReader, eCache, nil /* sideloaded */, i, i+1, math.MaxUint64 /* maxBytes */)
 	if err == raft.ErrCompacted {
 		ts, _, err := rsl.LoadRaftTruncatedState(ctx, eng)
 		if err != nil {
 			return 0, err
 		}
-		if i == ts.GetIndex() {
-			return ts.GetTerm(), nil
+		if i == ts.Index {
+			return ts.Term, nil
 		}
 		return 0, raft.ErrCompacted
 	} else if err != nil {
@@ -165,8 +162,8 @@ func entries(
 	ctx context.Context,
 	rsl StateLoader,
 	e engine.Reader,
-	gid GroupID,
-	eCache *raftentry.Cache,
+	entryReader EntryReader,
+	eCache EntryCache,
 	sideloaded SideloadStorage,
 	lo, hi, maxBytes uint64,
 ) ([]raftpb.Entry, error) {
@@ -180,7 +177,7 @@ func entries(
 	}
 	ents := make([]raftpb.Entry, 0, n)
 
-	ents, size, hitIndex, exceededMaxBytes := eCache.Scan(ents, int64(gid), lo, hi, maxBytes)
+	ents, size, hitIndex, exceededMaxBytes := eCache.Scan(ents, lo, hi, maxBytes)
 
 	// Return results if the correct number of results came back or if
 	// we ran into the max bytes limit.
@@ -196,11 +193,7 @@ func entries(
 	// sideloaded proposal, but the caller didn't give us a sideloaded storage.
 	canCache := true
 
-	var ent raftpb.Entry
-	scanFunc := func(kv roachpb.KeyValue) (bool, error) {
-		if err := kv.Value.GetProto(&ent); err != nil {
-			return false, err
-		}
+	scanFunc := func(ent raftpb.Entry) (bool, error) {
 		// Exit early if we have any gaps or it has been compacted.
 		if ent.Index != expectedIndex {
 			return true, nil
@@ -210,9 +203,7 @@ func entries(
 		if sniffSideloadedRaftCommand(ent.Data) {
 			canCache = canCache && sideloaded != nil
 			if sideloaded != nil {
-				newEnt, err := maybeInlineSideloadedRaftCommand(
-					ctx, gid, ent, sideloaded, eCache,
-				)
+				newEnt, err := maybeInlineSideloadedRaftCommand(ctx, ent, sideloaded, eCache)
 				if err != nil {
 					return true, err
 				}
@@ -234,13 +225,13 @@ func entries(
 		return exceededMaxBytes, nil
 	}
 
-	if err := iterateEntries(ctx, e, gid, expectedIndex, hi, scanFunc); err != nil {
+	if err := entryReader(ctx, e, expectedIndex, hi, scanFunc); err != nil {
 		return nil, err
 	}
 
 	// Cache the fetched entries, if we may.
 	if canCache {
-		eCache.Add(int64(gid), ents)
+		eCache.Add(ents)
 	}
 
 	// Did the correct number of results come back? If so, we're all good.
@@ -278,7 +269,7 @@ func entries(
 	if err != nil {
 		return nil, err
 	}
-	if ts.GetIndex() >= lo {
+	if ts.Index >= lo {
 		// The requested lo index has already been truncated.
 		return nil, raft.ErrCompacted
 	}
@@ -286,23 +277,23 @@ func entries(
 	return nil, raft.ErrUnavailable
 }
 
-func iterateEntries(
-	ctx context.Context,
-	e engine.Reader,
-	gid GroupID,
-	lo, hi uint64,
-	scanFunc func(roachpb.KeyValue) (bool, error),
-) error {
-	_, err := engine.MVCCIterate(
-		ctx, e,
-		keys.RaftLogKey(roachpb.RangeID(gid), lo),
-		keys.RaftLogKey(roachpb.RangeID(gid), hi),
-		hlc.Timestamp{},
-		engine.MVCCScanOptions{},
-		scanFunc,
-	)
-	return err
-}
+// func iterateEntries(
+// 	ctx context.Context,
+// 	e engine.Reader,
+// 	gid GroupID,
+// 	lo, hi uint64,
+// 	scanFunc func(roachpb.KeyValue) (bool, error),
+// ) error {
+// 	_, err := engine.MVCCIterate(
+// 		ctx, e,
+// 		keys.RaftLogKey(roachpb.RangeID(gid), lo),
+// 		keys.RaftLogKey(roachpb.RangeID(gid), hi),
+// 		hlc.Timestamp{},
+// 		engine.MVCCScanOptions{},
+// 		scanFunc,
+// 	)
+// 	return err
+// }
 
 func sniffSideloadedRaftCommand(data []byte) (sideloaded bool) {
 	return len(data) > 0 && data[0] == byte(raftVersionSideloaded)
@@ -316,11 +307,7 @@ func sniffSideloadedRaftCommand(data []byte) (sideloaded bool) {
 // If a payload is missing, returns an error whose Cause() is
 // errSideloadedFileNotFound.
 func maybeInlineSideloadedRaftCommand(
-	ctx context.Context,
-	gid GroupID,
-	ent raftpb.Entry,
-	sideloaded SideloadStorage,
-	entryCache *raftentry.Cache,
+	ctx context.Context, ent raftpb.Entry, sideloaded SideloadStorage, entryCache EntryCache,
 ) (*raftpb.Entry, error) {
 	if !sniffSideloadedRaftCommand(ent.Data) {
 		return nil, nil
@@ -330,7 +317,7 @@ func maybeInlineSideloadedRaftCommand(
 	// are very likely to have appended it recently, in which case
 	// we can save work.
 	cachedSingleton, _, _, _ := entryCache.Scan(
-		nil, int64(gid), ent.Index, ent.Index+1, 1<<20,
+		nil, ent.Index, ent.Index+1, 1<<20,
 	)
 
 	if len(cachedSingleton) > 0 {

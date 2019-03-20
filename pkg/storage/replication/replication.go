@@ -22,8 +22,8 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/connect"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
-	"github.com/cockroachdb/cockroach/pkg/storage/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -56,53 +56,100 @@ type RaftMessage interface {
 	SetRaftMessage(raftpb.Message)
 }
 
-func NewPeerFactory(
-	ctx context.Context,
-	cfg base.RaftConfig,
-	stopper *stop.Stopper,
-	raftTransport connect.Conn,
-	storage engine.Engine,
-	raftMessageFactory func(GroupID) RaftMessage,
-	c *raftentry.Cache,
-	options ...Option,
-) (*PeerFactory, error) {
-	pf := PeerFactory{
-		cfg:           cfg,
-		stopper:       stopper,
-		raftTransport: raftTransport,
-		storage:       storage,
-		entryCache:    c,
+// SideloadStorage is the interface used for Raft SSTable sideloading.
+// Implementations do not need to be thread safe.
+type SideloadStorage interface {
+	// The directory in which the sideloaded files are stored. May or may not
+	// exist.
+	Dir() string
+	// Writes the given contents to the file specified by the given index and
+	// term. Overwrites the file if it already exists.
+	Put(_ context.Context, index, term uint64, contents []byte) error
+	// Load the file at the given index and term. Return errSideloadedFileNotFound when no
+	// such file is present.
+	Get(_ context.Context, index, term uint64) ([]byte, error)
+	// Purge removes the file at the given index and term. It may also
+	// remove any leftover files at the same index and earlier terms, but
+	// is not required to do so. When no file at the given index and term
+	// exists, returns errSideloadedFileNotFound.
+	//
+	// Returns the total size of the purged payloads.
+	Purge(_ context.Context, index, term uint64) (int64, error)
+	// Clear files that may have been written by this SideloadStorage.
+	Clear(context.Context) error
+	// TruncateTo removes all files belonging to an index strictly smaller than
+	// the given one. Returns the number of bytes freed, the number of bytes in
+	// files that remain, or an error.
+	TruncateTo(_ context.Context, index uint64) (freed, retained int64, _ error)
+	// Returns an absolute path to the file that Get() would return the contents
+	// of. Does not check whether the file actually exists.
+	Filename(_ context.Context, index, term uint64) (string, error)
+}
+
+type StateLoader interface {
+	LoadRaftTruncatedState(context.Context, engine.Reader) (_ roachpb.RaftTruncatedState, isLegacy bool, _ error)
+	SetRaftTruncatedState(context.Context, engine.ReadWriter, *roachpb.RaftTruncatedState) error
+
+	LoadHardState(context.Context, engine.Reader) (raftpb.HardState, error)
+	SetHardState(context.Context, engine.ReadWriter, raftpb.HardState) error
+
+	SynthesizeRaftState(context.Context, engine.ReadWriter) error
+	LoadLastIndex(ctx context.Context, reader engine.Reader) (uint64, error)
+}
+
+type EntryCache interface {
+	Add([]raftpb.Entry)
+	Clear(hi uint64)
+	Get(idx uint64) (raftpb.Entry, bool)
+	Scan(buf []raftpb.Entry, lo, hi, maxBytes uint64) (_ []raftpb.Entry, bytes, nextIdx uint64, exceededMaxBytes bool)
+}
+
+type FactoryConfig struct {
+	base.RaftConfig
+
+	// RaftTransport is the message bus on which RaftMessages are sent and
+	// received.
+	RaftTransport connect.Conn
+
+	// TODO(ajwerner): should there be a start method that takes a stopper?
+	Stopper *stop.Stopper
+
+	// Storage for all of the peers.
+	Storage engine.Engine
+
+	NumWorkers int
+
+	RaftMessageFactory     func() RaftMessage
+	SideloadStorageFactory func(GroupID) SideloadStorage
+	StateLoaderFactory     func(GroupID) StateLoader
+	EntryCacheFactory      func(GroupID) EntryCache
+	EntryScannerFactory    func(GroupID) EntryReader
+}
+
+type EntryReader func(_ context.Context, _ engine.Reader, lo, hi uint64, f func(raftpb.Entry) (wantMore bool, err error)) error
+
+func NewFactory(ctx context.Context, cfg FactoryConfig) (*Factory, error) {
+	pf := Factory{
+		cfg: cfg,
 	}
 	pf.mu.peers = make(map[GroupID]*Peer)
 	pf.mu.unquiesced = make(map[GroupID]struct{})
-	if err := pf.init(options...); err != nil {
-		return nil, err
-	}
-	initScheduler(&pf.scheduler, &pf, pf.numWorkers)
-	pf.scheduler.Start(ctx, pf.stopper)
-	pf.stopper.RunAsyncTask(ctx, "replication.PeerFactory.tickLoop", pf.tickLoop)
-	pf.stopper.RunAsyncTask(ctx, "replication.PeerFactory.recvLoop", pf.recvLoop)
+	initScheduler(&pf.scheduler, &pf, cfg.NumWorkers)
+	pf.scheduler.Start(ctx, pf.cfg.Stopper)
+	pf.cfg.Stopper.RunAsyncTask(ctx, "replication.Factory.tickLoop", pf.tickLoop)
+	pf.cfg.Stopper.RunAsyncTask(ctx, "replication.Factory.recvLoop", pf.recvLoop)
 	return &pf, nil
 }
 
-// PeerFactory creates Peers and schedules their interactions between io and
+// Factory creates Peers and schedules their interactions between io and
 // network resources.
-type PeerFactory struct {
-	config
-	cfg           base.RaftConfig
-	stopper       *stop.Stopper
-	raftTransport connect.Conn
-	storage       engine.Engine
-	entryCache    *raftentry.Cache
+type Factory struct {
+	cfg FactoryConfig
 
 	scheduler scheduler
 
-	liveness           func(GroupID, PeerID) bool
-	raftMessageFactory func() RaftMessage
-	onUnquiesce        func(g GroupID)
-	entries            func()
-
-	tickInterval time.Duration
+	liveness    func(GroupID, PeerID) bool
+	onUnquiesce func(g GroupID)
 
 	mu struct {
 		syncutil.RWMutex
@@ -111,21 +158,21 @@ type PeerFactory struct {
 	}
 }
 
-func (pf *PeerFactory) processReady(ctx context.Context, id GroupID) {
-	if log.V(2) {
-		log.Infof(ctx, "processing ready for %d", id)
-	}
+func (pf *Factory) processReady(ctx context.Context, id GroupID) {
+	// if log.V(0) {
+	log.Infof(ctx, "processing ready for %d", id)
+	// }
 	pf.mu.RLock()
 	p, ok := pf.mu.peers[id]
 	pf.mu.RUnlock()
 	if !ok {
 		return
 	}
-	ctx = p.logCtx.AnnotateCtx(ctx)
+	ctx = p.AnnotateCtx(ctx)
 	p.handleRaftReady(ctx)
 }
 
-func (pf *PeerFactory) processRequestQueue(ctx context.Context, id GroupID) bool {
+func (pf *Factory) processRequestQueue(ctx context.Context, id GroupID) bool {
 	pf.mu.RLock()
 	p, ok := pf.mu.peers[id]
 	pf.mu.RUnlock()
@@ -143,19 +190,28 @@ func (pf *PeerFactory) processRequestQueue(ctx context.Context, id GroupID) bool
 
 // Process a raft tick for the specified range. Return true if the range
 // should be queued for ready processing.
-func (p *PeerFactory) processTick(context.Context, GroupID) bool {
-	panic("not implemented")
+func (f *Factory) processTick(ctx context.Context, gid GroupID) bool {
+	p := f.getPeer(gid)
+	if p == nil {
+		return false
+	}
+	// TODO(ajwerner): add metrics on tick processing
+	exists, err := p.tick(ctx, nil)
+	if err != nil {
+		log.Error(ctx, err)
+	}
+	return exists
 }
 
-func (f *PeerFactory) getPeer(id GroupID) *Peer {
+func (f *Factory) getPeer(id GroupID) *Peer {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.mu.peers[id]
 }
 
-func (f *PeerFactory) recvLoop(ctx context.Context) {
+func (f *Factory) recvLoop(ctx context.Context) {
 	for {
-		msg := f.raftTransport.Recv()
+		msg := f.cfg.RaftTransport.Recv()
 		switch msg := msg.(type) {
 		case RaftMessage:
 			// Enqueue the message for the peer if it exists
@@ -182,9 +238,9 @@ func (f *PeerFactory) recvLoop(ctx context.Context) {
 	}
 }
 
-func (f *PeerFactory) tickLoop(ctx context.Context) {
+func (f *Factory) tickLoop(ctx context.Context) {
 	ticker := time.NewTicker(f.cfg.RaftTickInterval)
-	defer f.raftTransport.Close(ctx, true)
+	defer f.cfg.RaftTransport.Close(ctx, true)
 	defer ticker.Stop()
 	var groupsToTick []GroupID
 	for {
@@ -194,13 +250,13 @@ func (f *PeerFactory) tickLoop(ctx context.Context) {
 			// it gets referenced when ticking the peers.
 			groupsToTick = f.getUnquiescedGroups(groupsToTick[:0])
 			f.scheduler.EnqueueRaftTick(groupsToTick...)
-		case <-f.stopper.ShouldQuiesce():
+		case <-f.cfg.Stopper.ShouldQuiesce():
 			return
 		}
 	}
 }
 
-func (f *PeerFactory) getUnquiescedGroups(buf []GroupID) []GroupID {
+func (f *Factory) getUnquiescedGroups(buf []GroupID) []GroupID {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	for g := range f.mu.unquiesced {
@@ -218,42 +274,52 @@ func (f *PeerFactory) getUnquiescedGroups(buf []GroupID) []GroupID {
 // In merges a peer gets destroyed.
 // All good.
 
-func (f *PeerFactory) Destroy(p *Peer) {
+func (f *Factory) Destroy(p *Peer) {
 	panic("not implemented")
 }
 
-func (f *PeerFactory) NewPeer(logCtx log.AmbientContext, id GroupID) (*Peer, error) {
+type PeerConfig struct {
+	log.AmbientContext
+	GroupID GroupID
+	PeerID  PeerID
+	Peers   []PeerID
+}
+
+func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
 	// TODO: actually implement
 	// We start out without a peer ID.
 	// We'll get one when we start receiving raft messages hopefully.
-	f.mu.RLock()
-	p, exists := f.mu.peers[id]
-	f.mu.RUnlock()
-	if exists {
-		return p, nil
-	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if p, exists = f.mu.peers[id]; exists {
+	p, exists := f.mu.peers[cfg.GroupID]
+	if exists {
+		f.mu.Unlock()
 		return p, nil
 	}
 	p = &Peer{
-		pf:      f,
-		groupID: id,
-		logCtx:  logCtx,
+		AmbientContext: cfg.AmbientContext,
+		groupID:        cfg.GroupID,
+		raftConfig:     &f.cfg.RaftConfig,
 		raftMessageFactory: func() RaftMessage {
-			m := f.raftMessageFactory()
-			m.SetGroupID(id)
+			m := f.cfg.RaftMessageFactory()
+			m.SetGroupID(cfg.GroupID)
 			return m
 		},
-		onUnquiesce: func() { f.onUnquiesce(id) },
+		storage:     f.cfg.Storage,
+		onUnquiesce: func() { f.onUnquiesce(cfg.GroupID) },
 	}
-	f.mu.peers[id] = p
-	f.mu.unquiesced[id] = struct{}{}
+	p.mu.peerID = cfg.PeerID
+	p.mu.peers = cfg.Peers
+	p.entryCache = f.cfg.EntryCacheFactory(cfg.GroupID)
+	p.entryReader = f.cfg.EntryScannerFactory(cfg.GroupID)
+	p.mu.stateLoader = f.cfg.StateLoaderFactory(cfg.GroupID)
+	f.mu.peers[cfg.GroupID] = p
+	f.mu.unquiesced[cfg.GroupID] = struct{}{}
+	f.mu.Unlock()
+	p.withRaftGroupLocked(false, nil)
 	return p, nil
 }
 
-func (f *PeerFactory) LoadPeer(logCtx log.AmbientContext, id GroupID) (*Peer, error) {
+func (f *Factory) LoadPeer(logCtx log.AmbientContext, id GroupID) (*Peer, error) {
 	panic("not implemented")
 }
 
