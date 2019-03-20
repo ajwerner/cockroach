@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 )
@@ -107,7 +108,7 @@ func (q *groupIDQueue) back() *groupIDChunk {
 
 type eventProcessor interface {
 	processReady(context.Context, GroupID)
-	processRequestQueue(context.Context, GroupID)
+	processRequestQueue(context.Context, GroupID) bool
 	// Process a raft tick for the specified range. Return true if the range
 	// should be queued for ready processing.
 	processTick(context.Context, GroupID) bool
@@ -206,6 +207,7 @@ func (s *scheduler) worker(ctx context.Context) {
 				state |= stateRaftReady
 			}
 		}
+		log.Infof(ctx, "ready %v", state&stateRaftReady)
 		if state&stateRaftReady != 0 {
 			s.processor.processReady(ctx, id)
 		}

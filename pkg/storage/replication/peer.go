@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/connect"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -36,23 +37,25 @@ import (
 
 // Peer represents local replication state for a replica group.
 type Peer struct {
-	logCtx  log.AmbientContext
-	groupID GroupID
-	pf      *PeerFactory
+	log.AmbientContext
+	raftConfig *base.RaftConfig
+	groupID    GroupID // Does a Peer need to know this?
 
-	// groupID GroupID // Does it need this?
 	// raftTransport is exclusively for outbound traffic.
 	// inbound traffic will come on the message queue.
 	raftTransport      connect.Conn
 	raftMessageFactory func() RaftMessage
 	shouldCampaign     func(ctx context.Context, status *raft.Status) bool
 	onUnquiesce        func()
+	storage            engine.Engine
+	entryReader        EntryReader
+	entryCache         EntryCache
 
 	// mu < msgQueueMu < unreachablesMu
 	mu struct {
 		syncutil.RWMutex
 
-		truncatedState RaftTruncatedState
+		truncatedState *roachpb.RaftTruncatedState
 
 		appliedIndex uint64 // same as Replica.mu.state.RaftAppliedIndex?
 
@@ -172,7 +175,6 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 
 	logRaftReady(ctx, rd)
 	return stats, "", nil
-
 }
 
 func (p *Peer) withRaftGroupLocked(
@@ -191,12 +193,12 @@ func (p *Peer) withRaftGroupLocked(
 	}
 	// Should we create the raft raw node lazily? I feel like probably not.
 	if p.mu.rawNode == nil {
-		ctx := p.logCtx.AnnotateCtx(context.TODO())
+		ctx := p.AnnotateCtx(context.TODO())
 		raftGroup, err := raft.NewRawNode(newRaftConfig(
 			raft.Storage((*peerStorage)(p)),
 			uint64(p.mu.peerID),
 			p.mu.appliedIndex, // TODO(ajwerner): think about this
-			p.pf.cfg,
+			*p.raftConfig,
 			&raftLogger{ctx: ctx},
 		), nil)
 		if err != nil {
@@ -212,6 +214,9 @@ func (p *Peer) withRaftGroupLocked(
 	// This wrapper function is a hack to add range IDs to stack traces
 	// using the same pattern as Replica.sendWithRangeID.
 	unquiesce, err := func(groupID GroupID, raftGroup *raft.RawNode) (bool, error) {
+		if f == nil {
+			return false, nil
+		}
 		return f(raftGroup)
 	}(p.groupID, p.mu.rawNode)
 	if unquiesce {
@@ -285,7 +290,7 @@ func (p *Peer) updateProposalQuota(ctx context.Context, lastLeaderID PeerID) {
 			// through the code paths where we acquire quota from the pool. To
 			// offset this we reset the quota pool whenever leadership changes
 			// hands.
-			p.mu.proposalQuota = newQuotaPool(p.pf.cfg.RaftProposalQuota)
+			p.mu.proposalQuota = newQuotaPool(p.raftConfig.RaftProposalQuota)
 			// TODO(ajwerner): figure out last update
 			p.mu.commandSizes = make(map[storagebase.CmdIDKey]int)
 		} else if p.mu.proposalQuota != nil {
@@ -426,7 +431,10 @@ func (p *Peer) raftStatusRLocked() *raft.Status {
 func (p *Peer) tick(
 	ctx context.Context, isAlive func(peerID PeerID) bool,
 ) (exists bool, err error) {
-	ctx = p.logCtx.AnnotateCtx(ctx)
+	ctx = p.AnnotateCtx(ctx)
+	if log.V(2) {
+		log.Infof(ctx, "ticking")
+	}
 
 	p.unreachablesMu.Lock()
 	remotes := p.unreachablesMu.remotes
@@ -457,25 +465,61 @@ func (p *Peer) tick(
 	p.maybeTransferRaftLeadershipLocked(ctx)
 
 	p.mu.ticks++
-	p.mu.internalRaftGroup.Tick()
+	p.mu.rawNode.Tick()
 
-	refreshAtDelta := p.store.cfg.RaftElectionTimeoutTicks
-	if knob := p.store.TestingKnobs().RefreshReasonTicksPeriod; knob > 0 {
-		refreshAtDelta = knob
-	}
-	if !p.store.TestingKnobs().DisableRefreshReasonTicks && p.mu.ticks%refreshAtDelta == 0 {
-		// RaftElectionTimeoutTicks is a reasonable approximation of how long we
-		// should wait before deciding that our previous proposal didn't go
-		// through. Note that the combination of the above condition and passing
-		// RaftElectionTimeoutTicks to refreshProposalsLocked means that commands
-		// will be refreshed when they have been pending for 1 to 2 election
-		// cycles.
-		p.refreshProposalsLocked(refreshAtDelta, reasonTicks)
-	}
+	// refreshAtDelta := p.pf.cfg.RaftElectionTimeoutTicks
+	// TODO(ajwerner): add back testing knobs
+	// if knob := p.store.TestingKnobs().RefreshReasonTicksPeriod; knob > 0 {
+	// 	refreshAtDelta = knob
+	// }
+	// if !p.store.TestingKnobs().DisableRefreshReasonTicks && p.mu.ticks%refreshAtDelta == 0 {
+	// 	// RaftElectionTimeoutTicks is a reasonable approximation of how long we
+	// 	// should wait before deciding that our previous proposal didn't go
+	// 	// through. Note that the combination of the above condition and passing
+	// 	// RaftElectionTimeoutTicks to refreshProposalsLocked means that commands
+	// 	// will be refreshed when they have been pending for 1 to 2 election
+	// 	// cycles.
+	// 	p.refreshProposalsLocked(refreshAtDelta, reasonTicks)
+	// }
 	return true, nil
 }
 
+// maybeTransferRaftLeadershipLocked attempts to transfer the leadership away
+// from this node to the leaseholder, if this node is the current raft leader
+// but not the leaseholder. We don't attempt to transfer leadership if the
+// leaseholder is behind on applying the log.
+//
+// We like it when leases and raft leadership are collocated because that
+// facilitates quick command application (requests generally need to make it to
+// both the lease holder and the raft leader before being applied by other
+// replicas).
+// TODO(fix this)
+func (p *Peer) maybeTransferRaftLeadershipLocked(ctx context.Context) {
+	// TODO(ajwerner): add back testing knobs
+	// if r.store.TestingKnobs().DisableLeaderFollowsLeaseholder {
+	// 	return
+	// }
+	// lease := *r.mu.state.Lease
+	// if lease.OwnedBy(r.StoreID()) || !r.isLeaseValidRLocked(lease, r.Clock().Now()) {
+	// 	return
+	// }
+	// raftStatus := r.raftStatusRLocked()
+	// if raftStatus == nil || raftStatus.RaftState != raft.StateLeader {
+	// 	return
+	// }
+	// lhReplicaID := uint64(lease.Replica.ReplicaID)
+	// lhProgress, ok := raftStatus.Progress[lhReplicaID]
+	// if (ok && lhProgress.Match >= raftStatus.Commit) || r.mu.draining {
+	// 	log.VEventf(ctx, 1, "transferring raft leadership to replica ID %v", lhReplicaID)
+	// 	r.store.metrics.RangeRaftLeaderTransfers.Inc(1)
+	// 	r.mu.internalRaftGroup.TransferLeader(lhReplicaID)
+	// }
+}
+
 func (p *Peer) maybeQuiesceLocked(ctx context.Context, isAlive func(peerID PeerID) bool) bool {
+	// TODO(ajwerner): implement
+	return false
+
 }
 
 func (p *Peer) maybeAcquireProposalQuota(prop *proposal) error {
@@ -565,7 +609,7 @@ func makeIDKey() storagebase.CmdIDKey {
 
 func (p *Peer) unquiesceAndWakeLeaderLocked() {
 	if p.mu.quiescent && p.mu.rawNode != nil {
-		ctx := p.logCtx.AnnotateCtx(context.TODO())
+		ctx := p.AnnotateCtx(context.TODO())
 		if log.V(3) {
 			log.Infof(ctx, "unquiescing %d: waking leader", p.groupID)
 		}
