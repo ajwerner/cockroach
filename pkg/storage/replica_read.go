@@ -47,13 +47,13 @@ func (r *Replica) executeReadOnlyBatch(
 	r.limitTxnMaxTimestamp(ctx, &ba, status)
 	isSystem := func() bool {
 		for _, arg := range ba.Requests {
-			if arg.GetInner().Header().Key.Less(keys.UserTableDataMin) {
+			if arg.GetInner().Header().Key.Compare(keys.UserTableDataMin) < 0 {
 				return true
 			}
 		}
 		return false
 	}
-	if isSystem() {
+	if !isSystem() {
 		q, err := r.store.readQuota.Acquire(ctx)
 		if err != nil {
 			return nil, roachpb.NewError(err)

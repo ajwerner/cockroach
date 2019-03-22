@@ -1371,10 +1371,14 @@ func (ds *DistSender) sendToReplicas(
 	maxSeenLeaseSequence := roachpb.LeaseSequence(-1)
 	inTransferRetry := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
 	inTransferRetry.Next() // The first call to Next does not block.
+	backpressureRetry := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
+	backpressureRetry.Next() // The first call to Next does not block.
 
 	// This loop will retry operations that fail with errors that reflect
 	// per-replica state and may succeed on other replicas.
+
 	for {
+		var gotRetry bool
 		if err != nil {
 			// For most connection errors, we cannot tell whether or not
 			// the request may have succeeded on the remote server, so we
@@ -1425,8 +1429,11 @@ func (ds *DistSender) sendToReplicas(
 				}
 				return br, nil
 			case *roachpb.StoreNotFoundError, *roachpb.NodeUnavailableError:
-				// These errors are likely to be unique to the replica that reported
-				// them, so no action is required before the next retry.
+			// These errors are likely to be unique to the replica that reported
+			// them, so no action is required before the next retry.
+			case *roachpb.ScanBackpressureError:
+				gotRetry = true
+				backpressureRetry.Next()
 			case *roachpb.RangeNotFoundError:
 				// The store we routed to doesn't have this replica. This can happen when
 				// our descriptor is outright outdated, but it can also be caused by a
@@ -1515,7 +1522,9 @@ func (ds *DistSender) sendToReplicas(
 				fmt.Sprintf("sending to all %d replicas failed; last error: %v %v", len(replicas), br, err),
 			)
 		}
-
+		if !gotRetry {
+			backpressureRetry.Reset()
+		}
 		ds.metrics.NextReplicaErrCount.Inc(1)
 		curReplica = transport.NextReplica()
 		log.VEventf(ctx, 2, "error: %v %v; trying next peer %s", br, err, curReplica)
