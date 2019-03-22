@@ -47,6 +47,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/idalloc"
 	"github.com/cockroachdb/cockroach/pkg/storage/intentresolver"
+	"github.com/cockroachdb/cockroach/pkg/storage/quota"
 	"github.com/cockroachdb/cockroach/pkg/storage/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/storage/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/storage/tscache"
@@ -423,6 +424,8 @@ type Store struct {
 	// re-gossiping the store.
 	gossipQueriesPerSecondVal syncutil.AtomicFloat64
 	gossipWritesPerSecondVal  syncutil.AtomicFloat64
+
+	readQuota *quota.QuotaPool
 
 	coalescedMu struct {
 		syncutil.Mutex
@@ -1318,6 +1321,9 @@ func (s *Store) Start(ctx context.Context, stopper *stop.Stopper) error {
 	)
 
 	s.metrics.registry.AddMetricStruct(s.intentResolver.Metrics)
+
+	s.readQuota = quota.NewReadQuota(ctx, stopper, quota.Config{})
+	s.metrics.registry.AddMetricStruct(s.readQuota.Metrics())
 
 	s.rangeIDAlloc = idAlloc
 

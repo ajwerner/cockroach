@@ -45,7 +45,30 @@ func (r *Replica) executeReadOnlyBatch(
 		}
 	}
 	r.limitTxnMaxTimestamp(ctx, &ba, status)
-
+	isSystem := func() bool {
+		for _, arg := range ba.Requests {
+			if arg.GetInner().Header().Key.Less(keys.UserTableDataMin) {
+				return true
+			}
+		}
+		return false
+	}
+	if isSystem() {
+		q, err := r.store.readQuota.Acquire(ctx)
+		if err != nil {
+			return nil, roachpb.NewError(err)
+		}
+		defer func() {
+			var size uint32
+			if br != nil {
+				size += uint32(br.Size())
+			}
+			if pErr != nil {
+				size += uint32(pErr.Size())
+			}
+			r.store.readQuota.Release(q, size)
+		}()
+	}
 	spans, err := r.collectSpans(&ba)
 	if err != nil {
 		return nil, roachpb.NewError(err)
@@ -126,5 +149,6 @@ func (r *Replica) executeReadOnlyBatch(
 	} else {
 		log.Event(ctx, "read completed")
 	}
+	br.Size()
 	return br, pErr
 }
