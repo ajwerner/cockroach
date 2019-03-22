@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/gofrs/uuid"
 	"github.com/pkg/errors"
 	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
@@ -163,6 +164,7 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 		}
 		return hasReady /* unquiesceAndWakeLeader */, nil
 	})
+	log.Infof(ctx, "%+#v", rd)
 	p.mu.Unlock()
 	if err != nil {
 		const expl = "while checking raft group for Ready"
@@ -174,8 +176,43 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 	}
 
 	logRaftReady(ctx, rd)
+	if rd.SoftState != nil && leaderID != PeerID(rd.SoftState.Lead) {
+		// TODO(ajwerner): deal with leadership changes?
+		log.Infof(ctx, "Leader changed? %v %v", rd.SoftState, leaderID)
+		if log.V(3) {
+			log.Infof(ctx, "raft leader changed: %d -> %d", leaderID, rd.SoftState.Lead)
+		}
+		leaderID = PeerID(rd.SoftState.Lead)
+	}
+
+	if !raft.IsEmptySnap(rd.Snapshot) {
+		snapUUID, err := uuid.FromBytes(rd.Snapshot.Data)
+		log.Infof(ctx, "got a snapshot? %v %v", snapUUID, err)
+	}
+	// Use a more efficient write-only batch because we don't need to do any
+	// reads from the batch. Any reads are performed via the "distinct" batch
+	// which passes the reads through to the underlying DB.
+	batch := p.storage.NewWriteOnlyBatch()
+	defer batch.Close()
+
 	return stats, "", nil
+
 }
+
+//go:generate stringer -type refreshRaftReason
+type refreshRaftReason int
+
+const (
+	noReason refreshRaftReason = iota
+	reasonNewLeader
+	reasonNewLeaderOrConfigChange
+	// A snapshot was just applied and so it may have contained commands that we
+	// proposed whose proposal we still consider to be inflight. These commands
+	// will never receive a response through the regular channel.
+	reasonSnapshotApplied
+	reasonReplicaIDChanged
+	reasonTicks
+)
 
 func (p *Peer) withRaftGroupLocked(
 	mayCampaignOnWake bool, f func(r *raft.RawNode) (unquiesceAndWakeLeader bool, _ error),
