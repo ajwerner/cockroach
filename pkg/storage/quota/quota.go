@@ -6,7 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -55,6 +57,19 @@ var (
 		Measurement: "Nanoseconds spend queueing",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
+	metaAcquiredBytes = metric.Metadata{
+		Name:        "quota.acquired_bytes",
+		Help:        "Total number of bytes acquired",
+		Measurement: "Nanoseconds spend queueing",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
+)
+
+// QuotaSize is the follower reads closed timestamp update target duration.
+var QuotaSize = settings.RegisterIntSetting(
+	"kv.read_quota.byte_size",
+	"bytes allocated by read quota pool",
+	1<<28,
 )
 
 func newMetrics() Metrics {
@@ -83,6 +98,7 @@ type Metrics struct {
 // One idea that seems interesting from the foundationdb folks is to put
 
 type Config struct {
+	Settings *cluster.Settings
 
 	// QuotaSize is the number of bytes which can be used for read requests.
 	QuotaSize uint64
@@ -189,7 +205,7 @@ type QuotaPool struct {
 
 func (rq *QuotaPool) Metrics() *Metrics { return &rq.metrics }
 
-var errQueueFull = errors.New("queue full")
+var ErrNoQuota = errors.New("queue full")
 
 func (rq *QuotaPool) Release(q Quota, used uint32) {
 	q.used = used
@@ -210,14 +226,17 @@ func (rq *QuotaPool) Acquire(ctx context.Context) (Quota, error) {
 	}
 	select {
 	case q := <-c:
+		if q.acquired == 0 {
+			return q, &roachpb.ScanBackpressureError{}
+		}
 		rq.chanPool.Put(c)
 		return q, nil
-	case <-ctx.Done():
-		select {
-		case rq.canceling <- c:
-		case <-rq.stopper.ShouldQuiesce():
-		}
-		return Quota{}, ctx.Err()
+		// case <-ctx.Done():
+		// 	select {
+		// 	case rq.canceling <- c:
+		// 	case <-rq.stopper.ShouldQuiesce():
+		// 	}
+		// 	return Quota{}, ctx.Err()
 	}
 }
 
@@ -264,7 +283,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			last = now
 			qpsEstimate := (qps / 2) + (lastQPS / 2)
 			lastQPS = qpsEstimate
-			log.Infof(ctx, "queries %v qps %v", queries, qpsEstimate)
+			// log.Infof(ctx, "queries %v qps %v", queries, qpsEstimate)
 			queries = 0
 			if estimate < trailingAvg {
 				estimate = trailingAvg
@@ -276,6 +295,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 				qpsEstimate = 64
 			}
 			step = deltaY / (recoveryTarget * qpsEstimate)
+			rq.cfg.QuotaSize = uint64(QuotaSize.Get(&rq.cfg.Settings.SV))
 		}
 		ticker = timeutil.NewTimer()
 	)
@@ -283,18 +303,18 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 	for {
 		select {
 		case t := <-ticker.C:
-			log.Infof(ctx, "tick: %v %v %v %v", inUse, estimate, trailingAvg, queries)
+			//log.Infof(ctx, "tick: %v %v %v %v", inUse, estimate, trailingAvg, queries)
 			ticker.Read = true
 			tick(t)
 			ticker.Reset(rq.cfg.TickInterval)
 		case c := <-rq.acquiring:
 			if est := uint64(estimate); est+inUse > rq.cfg.QuotaSize {
-				// if len(queue) > rq.cfg.QueueMax {
-				// 	c <- Quota{}
-				// } else {
-				rq.metrics.TotalQueued.Inc(1)
-				queue = append(queue, queueEntry{c: c, entered: time.Now()})
-				// }
+				if len(queue) > rq.cfg.QueueMax {
+					c <- Quota{}
+				} else {
+					rq.metrics.TotalQueued.Inc(1)
+					queue = append(queue, queueEntry{c: c, entered: time.Now()})
+				}
 			} else {
 				queries++
 				inUse += est
@@ -306,7 +326,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 				if uint32(estimate) > rq.cfg.MaxEstimate {
 					estimate = float64(rq.cfg.MaxEstimate)
 				}
-				log.Infof(ctx, "increasing estimate to %v", estimate)
+				// log.Infof(ctx, "increasing estimate to %v", estimate)
 			} else if q.used > rq.cfg.ResponseMin {
 				if totalQueries == 0 {
 					trailingAvg = float64(q.used)
@@ -323,7 +343,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 						estimate = trailingAvg
 					}
 				}
-				log.Infof(ctx, "decreasing estimate by %v to %v %v", step, estimate, len(queue))
+				//log.Infof(ctx, "decreasing estimate by %v to %v %v", step, estimate, len(queue))
 			}
 			inUse -= uint64(q.acquired)
 			est := uint64(estimate)

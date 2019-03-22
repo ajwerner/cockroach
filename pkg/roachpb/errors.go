@@ -305,6 +305,16 @@ func (e *RangeKeyMismatchError) message(_ *Error) string {
 	return fmt.Sprintf("key range %s-%s could not be located within a range on store", e.RequestStartKey, e.RequestEndKey)
 }
 
+var _ ErrorDetailInterface = &ScanBackpressureError{}
+
+func (e *ScanBackpressureError) Error() string {
+	return e.message(nil)
+}
+
+func (e *ScanBackpressureError) message(_ *Error) string {
+	return "read quota exceeded"
+}
+
 var _ ErrorDetailInterface = &RangeKeyMismatchError{}
 
 // NewAmbiguousResultError initializes a new AmbiguousResultError with

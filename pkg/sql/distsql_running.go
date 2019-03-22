@@ -105,6 +105,18 @@ func (dsp *DistSQLPlanner) initRunners() {
 	}
 }
 
+type FlowBackpressurer struct {
+	// we want to track a total number of concurrent flows graphs which we allow
+	// we want to decrease this number when the percentage of retried requests
+	// increases and then we want to decrease it as the number of retried requests
+	// decreases.
+
+}
+
+type NodeBackpressure interface {
+	ShouldBackpressure() bool
+}
+
 // Run executes a physical plan. The plan should have been finalized using
 // FinalizePlan.
 //
