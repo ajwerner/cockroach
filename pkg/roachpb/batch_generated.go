@@ -72,6 +72,8 @@ func (ru ErrorDetail) GetInner() error {
 		return t.RangefeedRetry
 	case *ErrorDetail_IndeterminateCommit:
 		return t.IndeterminateCommit
+	case *ErrorDetail_ScanBackpressure:
+		return t.ScanBackpressure
 	default:
 		return nil
 	}
@@ -323,6 +325,8 @@ func (ru *ErrorDetail) SetInner(r error) bool {
 		union = &ErrorDetail_RangefeedRetry{t}
 	case *IndeterminateCommitError:
 		union = &ErrorDetail_IndeterminateCommit{t}
+	case *ScanBackpressureError:
+		union = &ErrorDetail_ScanBackpressure{t}
 	default:
 		return false
 	}

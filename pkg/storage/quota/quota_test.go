@@ -22,7 +22,7 @@ func TestQuota(t *testing.T) {
 	const N = 1000
 	quotas := make([]Quota, N)
 	for i := 0; i < N; i++ {
-		q, err := qp.Acquire(ctx)
+		q, err := qp.Acquire(ctx, false)
 		if err != nil {
 			panic(err)
 		}

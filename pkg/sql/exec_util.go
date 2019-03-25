@@ -34,6 +34,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/ratekeeper"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -378,6 +379,7 @@ type ExecutorConfig struct {
 	Locality         roachpb.Locality
 	AmbientCtx       log.AmbientContext
 	DB               *client.DB
+	RateKeeper       *ratekeeper.RateKeeper
 	Gossip           *gossip.Gossip
 	DistSender       *kv.DistSender
 	RPCContext       *rpc.Context

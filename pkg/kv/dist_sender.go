@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/ratekeeper"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
@@ -185,6 +186,7 @@ type DistSender struct {
 	transportFactory TransportFactory
 	rpcContext       *rpc.Context
 	nodeDialer       *nodedialer.Dialer
+	ratekeeper       *ratekeeper.RateKeeper
 	rpcRetryOptions  retry.Options
 	asyncSenderSem   chan struct{}
 	// clusterID is used to verify access to enterprise features.
@@ -214,6 +216,7 @@ type DistSenderConfig struct {
 	nodeDescriptor    *roachpb.NodeDescriptor
 	RPCContext        *rpc.Context
 	RangeDescriptorDB RangeDescriptorDB
+	RateKeeper        *ratekeeper.RateKeeper
 
 	NodeDialer *nodedialer.Dialer
 
@@ -230,6 +233,7 @@ func NewDistSender(cfg DistSenderConfig, g *gossip.Gossip) *DistSender {
 		clock:      cfg.Clock,
 		gossip:     g,
 		metrics:    makeDistSenderMetrics(),
+		ratekeeper: cfg.RateKeeper,
 		nodeDialer: cfg.NodeDialer,
 	}
 	if ds.st == nil {
@@ -1371,6 +1375,7 @@ func (ds *DistSender) sendToReplicas(
 	maxSeenLeaseSequence := roachpb.LeaseSequence(-1)
 	inTransferRetry := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
 	inTransferRetry.Next() // The first call to Next does not block.
+	numBackpressureRetries := 0
 	backpressureRetry := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
 	backpressureRetry.Next() // The first call to Next does not block.
 
@@ -1378,7 +1383,7 @@ func (ds *DistSender) sendToReplicas(
 	// per-replica state and may succeed on other replicas.
 
 	for {
-		var gotRetry bool
+		var gotBackpressureRetry bool
 		if err != nil {
 			// For most connection errors, we cannot tell whether or not
 			// the request may have succeeded on the remote server, so we
@@ -1412,6 +1417,7 @@ func (ds *DistSender) sendToReplicas(
 				}
 			}
 		} else {
+			log.VErrEventf(ctx, 2, "RPC error: %v %T", br.Error.GetDetail(), br.Error.GetDetail())
 			// NB: This section of code may have unfortunate performance implications. If we
 			// exit the below type switch with propagateError remaining at `false`, we'll try
 			// more replicas. That may succeed and future requests might do the same thing over
@@ -1432,7 +1438,13 @@ func (ds *DistSender) sendToReplicas(
 			// These errors are likely to be unique to the replica that reported
 			// them, so no action is required before the next retry.
 			case *roachpb.ScanBackpressureError:
-				gotRetry = true
+				ds.ratekeeper.ReportError()
+				numBackpressureRetries++
+				gotBackpressureRetry = true
+				if numBackpressureRetries == 3 {
+					return nil, tErr
+				}
+				ba.Header.BackpressureRetry = true
 				backpressureRetry.Next()
 			case *roachpb.RangeNotFoundError:
 				// The store we routed to doesn't have this replica. This can happen when
@@ -1522,7 +1534,7 @@ func (ds *DistSender) sendToReplicas(
 				fmt.Sprintf("sending to all %d replicas failed; last error: %v %v", len(replicas), br, err),
 			)
 		}
-		if !gotRetry {
+		if !gotBackpressureRetry {
 			backpressureRetry.Reset()
 		}
 		ds.metrics.NextReplicaErrCount.Inc(1)
