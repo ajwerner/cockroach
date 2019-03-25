@@ -355,8 +355,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			if est := uint64(estimate); est+inUse > rq.cfg.QuotaSize {
 				lq := len(queue)
 				if (lq > rq.cfg.QueueMax) ||
-					(!qr.isRetry && lq > (rq.cfg.QueueMax/2) &&
-						rand.Float64() < (float64(lq)/float64(rq.cfg.QueueMax))) {
+					(!qr.isRetry && rand.Float64() < (float64(lq)/float64(rq.cfg.QueueMax))) {
 					if send(qr, Quota{}) {
 						rq.metrics.Rejected.Inc(1)
 					}

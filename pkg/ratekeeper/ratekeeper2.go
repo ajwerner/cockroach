@@ -8,6 +8,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -101,28 +102,28 @@ func (rk *RateKeeper) Acquire(ctx context.Context, cost float64) (Quota, error) 
 		entered: time.Now(),
 	}:
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return Quota{}, ctx.Err()
 	case <-rk.stopper.ShouldQuiesce():
-		return 0, stop.ErrUnavailable
+		return Quota{}, stop.ErrUnavailable
 	}
 	select {
 	case q := <-c:
 		rk.chanPool.Put(c)
-		if q == 0 {
+		if q.cost == 0 {
 			return q, &roachpb.ScanBackpressureError{}
 		}
 		return q, nil
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return Quota{}, ctx.Err()
 	case <-rk.stopper.ShouldQuiesce():
-		return 0, stop.ErrUnavailable
+		return Quota{}, stop.ErrUnavailable
 	}
 }
 
 func (rk *RateKeeper) Release(ctx context.Context, q Quota, took time.Duration, err error) {
 	select {
 	case rk.releasing <- releaseRequest{
-		quota: float64(q),
+		Quota: q,
 		err:   err,
 		took:  took,
 	}:
@@ -139,64 +140,111 @@ func (rk *RateKeeper) loop(ctx context.Context) {
 	// sum the time / query average for the window
 	// with that we'll say we want to quota to be some factor above the smoothed
 	// cost per second flowing through the system.
-
+	// TODO(ajwerner): move this to a cluster setting
+	const maxLargeInFlight = 3
+	const maxLargeQueue = 10
 	var (
-		releases              int
-		totalCost             float64
-		trailingCostPerSecond float64
-		trailingAvgCost       float64
-		timePerCost           float64
-		trailingQPS           float64
-		trailingTimePerCost   float64
+		releases                  int
+		totalCost                 float64
+		trailingCostPerSecond     float64
+		trailingAvgCost           float64
+		timePerCost               float64
+		trailingQPS               float64
+		trailingTimePerCost       float64
+		totalTime                 time.Duration
+		trailingSecondsPerRequest float64
 
-		inFlight  float64
-		quotaSize = 200 * rk.cfg.MinCost
+		inFlight    float64
+		quotaSize   = 200 * rk.cfg.MinCost
+		targetQuota float64
 
 		queue []acquireRequest
 
-		last          time.Time
-		largeInFlight int
-		largeQueue    []acquireRequest
+		last              time.Time
+		largeInFlight     int
+		largeInFlightCost float64
+		largeQueue        []acquireRequest
 
 		handleRelease = func(rr releaseRequest) {
-			totalCost += float64(rr.quota)
-			inFlight -= float64(rr.quota)
-			timePerCost += (rr.took.Seconds() * 1e9) / float64(rr.quota)
+			log.Infof(ctx, "got release %v %v %v", rr.cost, rr.took, rr.isLarge)
+			totalCost += rr.cost
+			if !rr.isLarge {
+				inFlight -= rr.cost
+			} else {
+				largeInFlightCost -= rr.cost
+				largeInFlight--
+				rk.metrics.LargeInFlight.Dec(1)
+			}
+			rk.metrics.TotalCost.Inc(int64(rr.cost))
+			totalTime += rr.took
+			timePerCost += rr.took.Seconds() / rr.cost
 			releases++
 		}
 		recordMetrics = func() {
-			rk.metrics.InFlightCost.Update(inFlight)
+			rk.metrics.InFlightCost.Update(inFlight + largeInFlightCost)
 			rk.metrics.NanosPerCost.Update(trailingTimePerCost)
-			rk.metrics.AverageCost.Update(trailingCostPerSecond)
+			rk.metrics.AverageCost.Update(trailingAvgCost)
+			rk.metrics.CostPerSecond.Update(trailingCostPerSecond)
 			rk.metrics.Quota.Update(quotaSize)
 			rk.metrics.LargeInFlight.Update(int64(largeInFlight))
+			rk.metrics.QPS.Update(trailingQPS)
+			rk.metrics.SecondsPerRequest.Update(trailingSecondsPerRequest)
+			rk.metrics.TargetQuota.Update(targetQuota)
 		}
-		logState = func() {
-			//log.Infof(ctx, "trailingAvgNanosPerCost: %v; trailingAvgCost: %v", trailingAvgNanosPerCost, trailingAvgCost)
-		}
-		tick = func(now time.Time) {
-			defer logState()
+
+		healthy = true
+		tick    = func(now time.Time) {
 			defer recordMetrics()
-			if releases == 0 {
-				return
-			}
 			// TODO(ajwerner): we should have some target interval after which
 			// information exists in the average below some threshold and then
 			// use that to pick a decay factor with the tick interval.
 			//
 			// Imagine we want to say that after 2 minutes we want a value to have
 			// a weight of .001 then what's the decay factor?
-			const trailingDecay = .95
-			avgCost := totalCost / float64(releases)
-			avgTimePerCost := timePerCost / float64(releases)
-			trailingCostPerSecond = totalCost / now.Sub(last).Seconds()
-			trailingAvgCost = (trailingAvgCost * trailingDecay) + (avgCost * (1 - trailingDecay))
+			const trailingDecay = .99
+			var avgCost, avgTimePerCost, timePerRequest float64
+			if releases > 0 {
+				avgCost = totalCost / float64(releases)
+				avgTimePerCost = timePerCost / float64(releases)
 
-			trailingTimePerCost = (trailingTimePerCost * trailingDecay) + (avgTimePerCost * (1 - trailingDecay))
+				trailingTimePerCost = (trailingTimePerCost * trailingDecay) + (avgTimePerCost * (1 - trailingDecay))
+				trailingAvgCost = (trailingAvgCost * trailingDecay) + (avgCost * (1 - trailingDecay))
+				timePerRequest = totalTime.Seconds() / float64(releases)
+
+			} else {
+				timePerRequest = .5 * trailingSecondsPerRequest
+			}
+			trailingSecondsPerRequest = (trailingSecondsPerRequest * trailingDecay) + (timePerRequest * (1 - trailingDecay))
+			trailingCostPerSecond = (trailingCostPerSecond * trailingDecay) + (totalCost / now.Sub(last).Seconds() * (1 - trailingDecay))
 			trailingQPS = (trailingQPS * trailingDecay) + (float64(releases) * (1 - trailingDecay))
 			timePerCost = 0
 			totalCost = 0
 			releases = 0
+			lastErr := rk.LastError()
+			newTargetQuota := 2 * trailingAvgCost * trailingQPS * trailingSecondsPerRequest
+			targetQuota = (targetQuota * trailingDecay) + newTargetQuota*(1-trailingDecay)
+			// TODO(ajwerner): make this more sophisticated.
+			healthy = false
+			if timeSince := now.Sub(lastErr); timeSince < time.Second {
+				quotaSize *= .90
+			} else if timeSince > 30*time.Second {
+				healthy = true
+				// step towards targetQuota linearly
+				if quotaSize > targetQuota {
+					quotaSize = targetQuota
+				} else {
+					// 1 minute from now we'd like to be at targetQuota
+					deltaY := targetQuota - quotaSize
+					step := deltaY * (rk.cfg.TickInterval.Seconds() / 3 * time.Minute.Seconds())
+					if step > quotaSize*.05 {
+						quotaSize *= 1.05
+					}
+				}
+			}
+			const minQuota = 1024
+			if quotaSize < minQuota {
+				quotaSize = minQuota
+			}
 			last = now
 		}
 
@@ -209,7 +257,42 @@ func (rk *RateKeeper) loop(ctx context.Context) {
 				return true
 			}
 		}
-		healthy = true
+		dequeueLarge = func(countsAsLarge bool) {
+			ar := largeQueue[0]
+			if send(ar, Quota{cost: ar.cost, isLarge: countsAsLarge}) {
+				if countsAsLarge {
+					largeInFlight++
+					largeInFlightCost += ar.cost
+					rk.metrics.LargeInFlight.Inc(1)
+				} else {
+					inFlight += ar.cost
+				}
+			}
+			rk.metrics.QueuedLargeRequests.Dec(1)
+			largeQueue[0] = acquireRequest{}
+			largeQueue = largeQueue[1:]
+		}
+		dequeueNormal = func() {
+			ar := queue[0]
+			if send(ar, Quota{cost: ar.cost}) {
+				inFlight += ar.cost
+			}
+			rk.metrics.QueuedRequests.Dec(1)
+			queue[0] = acquireRequest{}
+			queue = queue[1:]
+		}
+		dequeue = func() {
+			// first we want to check if we can now declassify any of the large requests
+			for len(largeQueue) > 0 && largeQueue[0].cost < quotaSize-inFlight && largeQueue[0].cost < quotaSize/2 && largeQueue[0].cost < trailingAvgCost*10 {
+				dequeueLarge(false)
+			}
+			for healthy && len(largeQueue) > 0 && largeInFlight < maxLargeInFlight {
+				dequeueLarge(true)
+			}
+			for len(queue) > 0 && queue[0].cost < quotaSize-inFlight {
+				dequeueNormal()
+			}
+		}
 	)
 	ticker.Reset(rk.cfg.TickInterval)
 	for {
@@ -217,35 +300,49 @@ func (rk *RateKeeper) loop(ctx context.Context) {
 		case t := <-ticker.C:
 			ticker.Read = true
 			tick(t)
+			dequeue()
 			ticker.Reset(rk.cfg.TickInterval)
 		case ar := <-rk.acquiring:
-			if /* ar.cost < quotaSize-inFlight */ true {
-				if send(ar, Quota(ar.cost)) {
+			if ar.cost < quotaSize-inFlight {
+				if send(ar, Quota{cost: ar.cost}) {
 					inFlight += ar.cost
 				}
-			} else if ar.cost > quotaSize/2 {
-				// TODO(ajwerner): move this to a cluster setting
-				const maxLargeInFlight = 3
+			} else if ar.cost > quotaSize/2 || ar.cost > trailingAvgCost*10 {
 				if healthy && largeInFlight < maxLargeInFlight {
-					if send(ar, Quota(ar.cost)) {
+					if send(ar, Quota{cost: ar.cost, isLarge: true}) {
+						largeInFlightCost += ar.cost
 						largeInFlight++
 					}
-				} else {
+				} else if len(largeQueue) < maxLargeQueue {
 					// TODO: check queue size
 					largeQueue = append(largeQueue, ar)
+					rk.metrics.QueuedLargeRequests.Inc(1)
+				} else {
+					if send(ar, Quota{}) {
+						rk.metrics.RejectedLargeRequests.Inc(1)
+					}
 				}
-			} else {
+			} else if len(queue) < rk.cfg.QueueMax {
 				queue = append(queue, ar)
+				rk.metrics.QueuedRequests.Inc(1)
+			} else {
+				if send(ar, Quota{}) {
+					rk.metrics.RejectedRequests.Inc(1)
+				}
 			}
 		case rr := <-rk.releasing:
 			handleRelease(rr)
+			dequeue()
 		case <-rk.stopper.ShouldQuiesce():
 			return
 		}
 	}
 }
 
-type Quota float64
+type Quota struct {
+	cost    float64
+	isLarge bool
+}
 
 type acquireRequest struct {
 	ctx     context.Context
@@ -255,9 +352,9 @@ type acquireRequest struct {
 }
 
 type releaseRequest struct {
-	quota float64
-	err   error
-	took  time.Duration
+	Quota
+	err  error
+	took time.Duration
 }
 
 type Config struct {
@@ -283,7 +380,6 @@ func (c *Config) setDefaults() {
 	if c.QueueMax <= 0 {
 		c.QueueMax = defaultQueueMax
 	}
-
 	if c.TickInterval <= 0 {
 		c.TickInterval = defaultTickInterval
 	}
@@ -293,6 +389,11 @@ func (c *Config) setDefaults() {
 }
 
 var (
+	metaTargetQuota = metric.Metadata{
+		Name: "ratekeeper.target_quota",
+		Help: "target quota",
+		Unit: metric.Unit_COUNT,
+	}
 	metaInFlightCost = metric.Metadata{
 		Name: "ratekeeper.in_flight_cost",
 		Help: "cost of in flight requests",
@@ -313,6 +414,11 @@ var (
 		Help: "time per cost estimate",
 		Unit: metric.Unit_NANOSECONDS,
 	}
+	metaCostPerSec = metric.Metadata{
+		Name: "ratekeeper.cost_per_second",
+		Help: "Exponential moving average of cost per second",
+		Unit: metric.Unit_COUNT,
+	}
 	metaAvgCost = metric.Metadata{
 		Name: "ratekeeper.average_cost",
 		Help: "average cost per",
@@ -323,24 +429,87 @@ var (
 		Help: "errors seen",
 		Unit: metric.Unit_COUNT,
 	}
+	metaRejectedLargeRequests = metric.Metadata{
+		Name: "ratekeeper.rejected_large_requests",
+		Help: "number of large requests rejected",
+		Unit: metric.Unit_COUNT,
+	}
+	metaRejectedRequests = metric.Metadata{
+		Name: "ratekeeper.rejected_requests",
+		Help: "number of requests rejected",
+		Unit: metric.Unit_COUNT,
+	}
+	metaQueuedRequests = metric.Metadata{
+		Name: "ratekeeper.queued",
+		Help: "number of requests currently queued",
+		Unit: metric.Unit_COUNT,
+	}
+	metaQueuedLargeRequests = metric.Metadata{
+		Name: "ratekeeper.queued_large_requests",
+		Help: "number of large requests currently queued",
+		Unit: metric.Unit_COUNT,
+	}
+	metaTotalCost = metric.Metadata{
+		Name: "ratekeeper.total_cost",
+		Help: "counter of total cost which has completed",
+		Unit: metric.Unit_COUNT,
+	}
+	metaTotalTimePerCost = metric.Metadata{
+		Name: "ratekeeper.total_time_per_cost",
+		Help: "counter of total seconds/cost",
+		Unit: metric.Unit_SECONDS,
+	}
+	metaTotalTime = metric.Metadata{
+		Name: "ratekeeper.total_time",
+		Help: "counter of total time",
+		Unit: metric.Unit_SECONDS,
+	}
+	metaQPS = metric.Metadata{
+		Name: "ratekeeper.trailing_qps",
+		Help: "trailing qps",
+		Unit: metric.Unit_COUNT,
+	}
+	metaSecondsPerRequest = metric.Metadata{
+		Name: "ratekeeper.seconds_per_request",
+		Help: "trailing average seconds per request",
+		Unit: metric.Unit_SECONDS,
+	}
 )
 
 type Metrics struct {
-	InFlightCost  *metric.GaugeFloat64
-	Quota         *metric.GaugeFloat64
-	LargeInFlight *metric.Gauge
-	AverageCost   *metric.GaugeFloat64
-	NanosPerCost  *metric.GaugeFloat64
-	Errors        *metric.Counter
+	InFlightCost          *metric.GaugeFloat64
+	Quota                 *metric.GaugeFloat64
+	LargeInFlight         *metric.Gauge
+	CostPerSecond         *metric.GaugeFloat64
+	AverageCost           *metric.GaugeFloat64
+	NanosPerCost          *metric.GaugeFloat64
+	Errors                *metric.Counter
+	RejectedLargeRequests *metric.Counter
+	RejectedRequests      *metric.Counter
+	QueuedRequests        *metric.Gauge
+	QueuedLargeRequests   *metric.Gauge
+	TotalCost             *metric.Counter
+	QPS                   *metric.GaugeFloat64
+	SecondsPerRequest     *metric.GaugeFloat64
+	TargetQuota           *metric.GaugeFloat64
 }
 
 func newMetrics() Metrics {
 	return Metrics{
-		InFlightCost:  metric.NewGaugeFloat64(metaInFlightCost),
-		Quota:         metric.NewGaugeFloat64(metaCurQuota),
-		AverageCost:   metric.NewGaugeFloat64(metaAvgCost),
-		LargeInFlight: metric.NewGauge(metaLargeInFlight),
-		NanosPerCost:  metric.NewGaugeFloat64(metaNanosPerCost),
-		Errors:        metric.NewCounter(metaErrorsReported),
+		InFlightCost:          metric.NewGaugeFloat64(metaInFlightCost),
+		CostPerSecond:         metric.NewGaugeFloat64(metaCostPerSec),
+		Quota:                 metric.NewGaugeFloat64(metaCurQuota),
+		AverageCost:           metric.NewGaugeFloat64(metaAvgCost),
+		LargeInFlight:         metric.NewGauge(metaLargeInFlight),
+		NanosPerCost:          metric.NewGaugeFloat64(metaNanosPerCost),
+		Errors:                metric.NewCounter(metaErrorsReported),
+		RejectedLargeRequests: metric.NewCounter(metaRejectedLargeRequests),
+		RejectedRequests:      metric.NewCounter(metaRejectedRequests),
+		QueuedRequests:        metric.NewGauge(metaQueuedRequests),
+		QueuedLargeRequests:   metric.NewGauge(metaQueuedLargeRequests),
+		TotalCost:             metric.NewCounter(metaTotalCost),
+		QPS:                   metric.NewGaugeFloat64(metaQPS),
+		SecondsPerRequest:     metric.NewGaugeFloat64(metaSecondsPerRequest),
+		TargetQuota:           metric.NewGaugeFloat64(metaTargetQuota),
 	}
 }

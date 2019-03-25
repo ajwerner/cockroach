@@ -843,8 +843,6 @@ func canFallbackFromOpt(err error, optMode sessiondata.OptimizerMode, stmt *Stat
 	return true
 }
 
-var every = log.Every(time.Second)
-
 // execWithDistSQLEngine converts a plan to a distributed SQL physical plan and
 // runs it.
 // If an error is returned, the connection needs to stop processing queries.
@@ -867,7 +865,6 @@ func (ex *connExecutor) execWithDistSQLEngine(
 		q, err := evalCtx.ExecCfg.RateKeeper.Acquire(ctx, cost)
 		if err != nil {
 			res.SetError(err)
-			log.Errorf(ctx, "Returning error %v", err)
 			return nil
 		}
 		start := time.Now()
