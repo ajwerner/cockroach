@@ -3,6 +3,7 @@ package quota
 import (
 	"context"
 	"errors"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -57,8 +58,8 @@ var (
 		Measurement: "Nanoseconds spend queueing",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
-	metaAcquiredBytes = metric.Metadata{
-		Name:        "quota.acquired_bytes",
+	metaRejected = metric.Metadata{
+		Name:        "quota.rejected_requests",
 		Help:        "Total number of bytes acquired",
 		Measurement: "Nanoseconds spend queueing",
 		Unit:        metric.Unit_NANOSECONDS,
@@ -81,6 +82,7 @@ func newMetrics() Metrics {
 		QPS:              metric.NewGaugeFloat64(metaQPS),
 		TotalQueued:      metric.NewCounter(metaTotalQueued),
 		TotalTimeQueued:  metric.NewCounter(metaTotalTimeQueued),
+		Rejected:         metric.NewCounter(metaRejected),
 	}
 }
 
@@ -92,6 +94,7 @@ type Metrics struct {
 	QPS              *metric.GaugeFloat64
 	TotalQueued      *metric.Counter
 	TotalTimeQueued  *metric.Counter
+	Rejected         *metric.Counter
 }
 
 // TODO(ajwerner): there's a lot we could do to make this more sophisticated.
@@ -180,15 +183,15 @@ func NewReadQuota(ctx context.Context, stopper *stop.Stopper, cfg Config) *Quota
 		metrics: newMetrics(),
 		stopper: stopper,
 		chanPool: sync.Pool{
-			New: func() interface{} { return make(chan Quota, 1) },
+			New: func() interface{} { return make(chan Quota) },
 		},
-		acquiring: make(chan chan<- Quota),
-		canceling: make(chan chan Quota),
-		releasing: make(chan Quota),
+		acquiring: make(chan quotaRequest, 1024),
+		//		canceling: make(chan chan Quota),
+		releasing: make(chan Quota, 1024),
 	}
 	rq.cfg.setDefaults()
 	stopper.RunAsyncTask(ctx, "quota.loop", rq.loop)
-	stopper.RunAsyncTask(ctx, "quota.loop", rq.cancelLoop)
+	//	stopper.RunAsyncTask(ctx, "quota.loop", rq.cancelLoop)
 	return rq
 }
 
@@ -198,8 +201,8 @@ type QuotaPool struct {
 	stopper  *stop.Stopper
 	chanPool sync.Pool
 
-	acquiring chan chan<- Quota
-	canceling chan chan Quota
+	acquiring chan quotaRequest
+	// canceling chan chan Quota
 	releasing chan Quota
 }
 
@@ -215,10 +218,15 @@ func (rq *QuotaPool) Release(q Quota, used uint32) {
 	}
 }
 
-func (rq *QuotaPool) Acquire(ctx context.Context) (Quota, error) {
+func (rq *QuotaPool) Acquire(ctx context.Context, isRetry bool) (Quota, error) {
 	c := rq.chanPool.Get().(chan Quota)
 	select {
-	case rq.acquiring <- c:
+	case rq.acquiring <- quotaRequest{
+		ctx:     ctx,
+		c:       c,
+		entered: time.Now(),
+		isRetry: isRetry,
+	}:
 	case <-ctx.Done():
 		return Quota{}, ctx.Err()
 	case <-rq.stopper.ShouldQuiesce():
@@ -226,28 +234,30 @@ func (rq *QuotaPool) Acquire(ctx context.Context) (Quota, error) {
 	}
 	select {
 	case q := <-c:
+		rq.chanPool.Put(c)
 		if q.acquired == 0 {
 			return q, &roachpb.ScanBackpressureError{}
 		}
-		rq.chanPool.Put(c)
 		return q, nil
-		// case <-ctx.Done():
-		// 	select {
-		// 	case rq.canceling <- c:
-		// 	case <-rq.stopper.ShouldQuiesce():
-		// 	}
-		// 	return Quota{}, ctx.Err()
+	case <-ctx.Done():
+		return Quota{}, ctx.Err()
+	case <-rq.stopper.ShouldQuiesce():
+		return Quota{}, stop.ErrUnavailable
 	}
 }
 
+type quotaRequest struct {
+	ctx     context.Context
+	c       chan<- Quota
+	entered time.Time
+	isRetry bool
+}
+
 func (rq *QuotaPool) loop(ctx context.Context) {
-	type queueEntry struct {
-		c       chan<- Quota
-		entered time.Time
-	}
+
 	var (
 		// TODO(ajwerner): Make this a ring buffer.
-		queue []queueEntry
+		queue []quotaRequest
 
 		recoveryTarget = (60 * time.Second).Seconds()
 
@@ -271,6 +281,40 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			rq.metrics.InUse.Update(int64(inUse))
 			rq.metrics.TargetEstimate.Update(int64(trailingAvg))
 			rq.metrics.ResponseEstimate.Update(int64(estimate))
+		}
+		send = func(qr quotaRequest, q Quota) bool {
+			select {
+			case <-qr.ctx.Done():
+				return false
+			case qr.c <- q:
+				return true
+			}
+		}
+		updateEstimate = func(q Quota) {
+			if q.acquired < q.used {
+				estimate *= rq.cfg.BackoffFactor
+				if uint32(estimate) > rq.cfg.MaxEstimate {
+					estimate = float64(rq.cfg.MaxEstimate)
+				}
+				// log.Infof(ctx, "increasing estimate to %v", estimate)
+			} else if q.used > rq.cfg.ResponseMin {
+				if totalQueries == 0 {
+					trailingAvg = float64(q.used)
+				} else if totalQueries < 1024 {
+					trailingAvg = float64(q.used) * (1 / totalQueries)
+				} else {
+					trailingDecay := 2 / (lastQPS + 1)
+					trailingAvg = float64(q.used)*trailingDecay + float64(q.used)*(1-trailingDecay)
+				}
+				if len(queue) < rq.cfg.QueueThreshold {
+					if newEstimate := estimate - step; newEstimate > trailingAvg {
+						estimate = newEstimate
+					} else {
+						estimate = trailingAvg
+					}
+				}
+				//log.Infof(ctx, "decreasing estimate by %v to %v %v", step, estimate, len(queue))
+			}
 		}
 		tick = func(now time.Time) {
 			defer updateMetrics()
@@ -307,52 +351,36 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			ticker.Read = true
 			tick(t)
 			ticker.Reset(rq.cfg.TickInterval)
-		case c := <-rq.acquiring:
+		case qr := <-rq.acquiring:
 			if est := uint64(estimate); est+inUse > rq.cfg.QuotaSize {
-				if len(queue) > rq.cfg.QueueMax {
-					c <- Quota{}
+				lq := len(queue)
+				if (lq > rq.cfg.QueueMax) ||
+					(!qr.isRetry && lq > (rq.cfg.QueueMax/2) &&
+						rand.Float64() < (float64(lq)/float64(rq.cfg.QueueMax))) {
+					if send(qr, Quota{}) {
+						rq.metrics.Rejected.Inc(1)
+					}
 				} else {
 					rq.metrics.TotalQueued.Inc(1)
-					queue = append(queue, queueEntry{c: c, entered: time.Now()})
+					queue = append(queue, qr)
 				}
 			} else {
-				queries++
-				inUse += est
-				c <- Quota{acquired: uint32(est)}
+				if send(qr, Quota{acquired: uint32(est)}) {
+					queries++
+					inUse += est
+				}
 			}
 		case q := <-rq.releasing:
-			if q.acquired < q.used {
-				estimate *= rq.cfg.BackoffFactor
-				if uint32(estimate) > rq.cfg.MaxEstimate {
-					estimate = float64(rq.cfg.MaxEstimate)
-				}
-				// log.Infof(ctx, "increasing estimate to %v", estimate)
-			} else if q.used > rq.cfg.ResponseMin {
-				if totalQueries == 0 {
-					trailingAvg = float64(q.used)
-				} else if totalQueries < 1024 {
-					trailingAvg = float64(q.used) * (1 / totalQueries)
-				} else {
-					trailingDecay := 2 / (lastQPS + 1)
-					trailingAvg = float64(q.used)*trailingDecay + float64(q.used)*(1-trailingDecay)
-				}
-				if len(queue) < rq.cfg.QueueThreshold {
-					if newEstimate := estimate - step; newEstimate > trailingAvg {
-						estimate = newEstimate
-					} else {
-						estimate = trailingAvg
-					}
-				}
-				//log.Infof(ctx, "decreasing estimate by %v to %v %v", step, estimate, len(queue))
-			}
+			updateEstimate(q)
 			inUse -= uint64(q.acquired)
 			est := uint64(estimate)
 			for len(queue) > 0 && inUse+est < rq.cfg.QuotaSize {
-				rq.metrics.TotalTimeQueued.Inc(time.Since(queue[0].entered).Nanoseconds())
-				queries++
-				inUse += est
-				queue[0].c <- Quota{acquired: uint32(est)}
-				queue[0] = queueEntry{}
+				if send(queue[0], Quota{acquired: uint32(est)}) {
+					rq.metrics.TotalTimeQueued.Inc(time.Since(queue[0].entered).Nanoseconds())
+					queries++
+					inUse += est
+				}
+				queue[0] = quotaRequest{}
 				queue = queue[1:]
 			}
 		case <-rq.stopper.ShouldQuiesce():
@@ -361,40 +389,40 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 	}
 }
 
-// cancelLoop
-func (rq *QuotaPool) cancelLoop(ctx context.Context) {
-	var (
-		toCancel     []chan Quota
-		nextToCancel = func() chan Quota {
-			if len(toCancel) > 0 {
-				return toCancel[0]
-			}
-			return nil
-		}
-		toRelease     []Quota
-		nextToRelease = func() Quota {
-			if len(toRelease) > 0 {
-				return toRelease[0]
-			}
-			return Quota{}
-		}
-		releaseChan = func() chan<- Quota {
-			if len(toRelease) > 0 {
-				return rq.releasing
-			}
-			return nil
-		}
-	)
-	for {
-		select {
-		case c := <-rq.canceling:
-			toCancel = append(toCancel, c)
-		case q := <-nextToCancel():
-			toRelease = append(toRelease, q)
-		case releaseChan() <- nextToRelease():
-			toRelease = toRelease[1:]
-		case <-rq.stopper.ShouldQuiesce():
-			return
-		}
-	}
-}
+// // cancelLoop
+// func (rq *QuotaPool) cancelLoop(ctx context.Context) {
+// 	var (
+// 		toCancel     []chan Quota
+// 		nextToCancel = func() chan Quota {
+// 			if len(toCancel) > 0 {
+// 				return toCancel[0]
+// 			}
+// 			return nil
+// 		}
+// 		toRelease     []Quota
+// 		nextToRelease = func() Quota {
+// 			if len(toRelease) > 0 {
+// 				return toRelease[0]
+// 			}
+// 			return Quota{}
+// 		}
+// 		releaseChan = func() chan<- Quota {
+// 			if len(toRelease) > 0 {
+// 				return rq.releasing
+// 			}
+// 			return nil
+// 		}
+// 	)
+// 	for {
+// 		select {
+// 		case c := <-rq.canceling:
+// 			toCancel = append(toCancel, c)
+// 		case q := <-nextToCancel():
+// 			toRelease = append(toRelease, q)
+// 		case releaseChan() <- nextToRelease():
+// 			toRelease = toRelease[1:]
+// 		case <-rq.stopper.ShouldQuiesce():
+// 			return
+// 		}
+// 	}
+// }

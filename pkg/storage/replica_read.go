@@ -54,9 +54,10 @@ func (r *Replica) executeReadOnlyBatch(
 		return false
 	}
 	if !isSystem() {
-		q, err := r.store.readQuota.Acquire(ctx)
+		q, err := r.store.readQuota.Acquire(ctx, ba.BackpressureRetry)
 		if err != nil {
-			return nil, roachpb.NewError(err)
+			pErr := roachpb.NewError(err)
+			return nil, pErr
 		}
 		defer func() {
 			var size uint32

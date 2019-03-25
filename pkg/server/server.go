@@ -37,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/ratekeeper"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
@@ -288,12 +289,15 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		retryOpts = base.DefaultRetryOptions()
 	}
 	retryOpts.Closer = s.stopper.ShouldQuiesce()
+	rk := ratekeeper.NewRateKeeper(ctx, s.stopper, ratekeeper.Config{})
+	s.registry.AddMetricStruct(rk.Metrics())
 	distSenderCfg := kv.DistSenderConfig{
 		AmbientCtx:      s.cfg.AmbientCtx,
 		Settings:        st,
 		Clock:           s.clock,
 		RPCContext:      s.rpcContext,
 		RPCRetryOptions: &retryOpts,
+		RateKeeper:      rk,
 		TestingKnobs:    clientTestingKnobs,
 		NodeDialer:      s.nodeDialer,
 	}
@@ -604,6 +608,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		NodeInfo:                nodeInfo,
 		Locality:                s.cfg.Locality,
 		AmbientCtx:              s.cfg.AmbientCtx,
+		RateKeeper:              rk,
 		DB:                      s.db,
 		Gossip:                  s.gossip,
 		MetricsRecorder:         s.recorder,
