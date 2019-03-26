@@ -241,7 +241,7 @@ func (rk *RateKeeper) loop(ctx context.Context) {
 					}
 				}
 			}
-			const minQuota = 1024
+			const minQuota = 64 * 1024
 			if quotaSize < minQuota {
 				quotaSize = minQuota
 			}
