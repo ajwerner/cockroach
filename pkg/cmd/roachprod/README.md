@@ -5,11 +5,32 @@ CockroachDB clusters. Use at your own risk! ⚠️
 
 ## Setup
 
+### GCP
+
 1. Make sure you have [gcloud installed] and configured (`gcloud auth list` to
 check, `gcloud auth login` to authenticate). You may want to update old
 installations (`gcloud components update`).
 1. Build a local binary of `roachprod`: `make bin/roachprod`
 1. Add `$PWD/bin` to your `PATH` so you can run `roachprod` from the root directory of `cockroach`.
+
+### AWS
+
+Setting up AWS for roachprod use requires creating VPCs and peering for all
+desired regions. This repo provides tooling to generate a [terraform] file
+which declares the expected AWS state and produces an output which can be
+consumed by the roachprod binary to properly interact with AWS.
+
+The code checked in to the repo is set up to use Cockroach Lab's account
+and configuration. To use your own you will need to
+
+1. Make sure you have [aws installed] and configured (`aws configure`)
+1. Build and run ./vm/aws/genterraform with your --account-number and the
+   desired regions to produce a terraform file that likely overwrites the
+   checked in `main.tf` in ./vm/aws.
+1. Run `terraform apply` to create the expected resources.
+1. Run `terraform output -json` to produce a json artifact that corresponds to
+   the newly created AWS VPC state.
+1. Use that artifact with `--aws-config` flag with roachprod.
 
 ## Summary
 
@@ -162,3 +183,4 @@ See `roachprod help <command>` for further details.
 
 [cockroach-ephemeral]: https://console.cloud.google.com/home/dashboard?project=cockroach-ephemeral
 [gcloud installed]: https://cloud.google.com/sdk/downloads
+[aws installed]: https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-install.html

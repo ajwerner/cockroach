@@ -1486,6 +1486,7 @@ bins = \
   bin/docgen \
   bin/execgen \
   bin/generate-binary \
+  bin/genterraform \
   bin/github-post \
   bin/github-pull-request-make \
   bin/gossipsim \
@@ -1516,7 +1517,7 @@ optgen-package = ./pkg/sql/opt/optgen/cmd/optgen
 logictest-package = ./pkg/sql/logictest
 logictestccl-package = ./pkg/ccl/logictestccl
 logictestopt-package = ./pkg/sql/opt/exec/execbuilder
-
+genterraform-package = ./pkg/cmd/roachprod/vm/aws/genterraform
 logictest-bins := bin/logictest bin/logictestopt bin/logictestccl
 
 # Additional dependencies for binaries that depend on generated code.
