@@ -25,22 +25,60 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/connect"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
+	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/gofrs/uuid"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/pkg/errors"
 	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
 )
 
+// TODO(ajwerner): unify this setting.
+
+var disableSyncRaftLog = settings.RegisterBoolSetting(
+	"kv.replication_raft_log.disable_synchronization_unsafe",
+	"set to true to disable synchronization on Raft log writes to persistent storage. "+
+		"Setting to true risks data loss or data corruption on server crashes. "+
+		"The setting is meant for internal testing only and SHOULD NOT be used in production.",
+	false,
+)
+
+// MaxCommandSizeFloor is the minimum allowed value for the MaxCommandSize
+// cluster setting.
+const MaxCommandSizeFloor = 4 << 20 // 4MB
+
+// MaxCommandSize wraps "kv.raft.command.max_size".
+var MaxCommandSize = settings.RegisterValidatedByteSizeSetting(
+	"kv.replication_raft.command.max_size",
+	"maximum size of a raft command",
+	64<<20,
+	func(size int64) error {
+		if size < MaxCommandSizeFloor {
+			return fmt.Errorf("max_size must be greater than %s", humanizeutil.IBytes(MaxCommandSizeFloor))
+		}
+		return nil
+	},
+)
+
 // Peer represents local replication state for a replica group.
 type Peer struct {
 	log.AmbientContext
-	raftConfig *base.RaftConfig
-	groupID    GroupID // Does a Peer need to know this?
+	// TODO(ajwerner): consider just storing a peer factory pointer here
+	// and accessing fields either directly or through an interface.
+	settings     *settings.Values
+	raftConfig   *base.RaftConfig
+	testingKnobs *TestingKnobs
+
+	groupID GroupID // Does a Peer need to know this?
 
 	// raftTransport is exclusively for outbound traffic.
 	// inbound traffic will come on the message queue.
@@ -60,12 +98,18 @@ type Peer struct {
 
 		appliedIndex uint64 // same as Replica.mu.state.RaftAppliedIndex?
 
+		// initialized is true when either a peer has been created as a part of a
+		// new group or after a peer created eagerly from a message send receives
+		// a snapshot.
+		initialized bool
+
 		// PeerID is the current peer's ID.
 		// It is zero when the Peer was created from a snapshot.
 		peerID              PeerID
 		leaderID            PeerID
 		ticks               uint64
 		lastIndex, lastTerm uint64
+		raftLogSize         int64
 		quiescent           bool
 		destroyed           bool
 		stateLoader         StateLoader
@@ -132,6 +176,12 @@ type Peer struct {
 	}
 }
 
+func (p *Peer) isInitialized() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.mu.initialized
+}
+
 // TODO: see cleanupFailedProposalsLocked
 func (p *Peer) Progress() Progress {
 	panic("not implemented")
@@ -154,9 +204,31 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 	var hasReady bool
 	var rd raft.Ready
 	p.mu.Lock()
+	lastIndex := p.mu.lastIndex // used for append below
+	lastTerm := p.mu.lastTerm
+	raftLogSize := p.mu.raftLogSize
 	leaderID := p.mu.leaderID
 	lastLeaderID := leaderID
 
+	// We defer the check to Replica.updateProposalQuotaRaftMuLocked because we need
+	// to check it in both cases, if hasReady is false and otherwise.
+	// If hasReady == false:
+	//     Consider the case when our quota is of size 1 and two out of three
+	//     replicas have committed one log entry while the third is lagging
+	//     behind. When the third replica finally does catch up and sends
+	//     along a MsgAppResp, since the entry is already committed on the
+	//     leader replica, no Ready is emitted. But given that the third
+	//     replica has caught up, we can release
+	//     some quota back to the pool.
+	// Otherwise:
+	//     Consider the case where there are two replicas and we have a quota
+	//     of size 1. We acquire the quota when the write gets proposed on the
+	//     leader and expect it to be released when the follower commits it
+	//     locally. In order to do so we need to have the entry 'come out of
+	//     raft' and in the case of a two node raft group, this only happens if
+	//     hasReady == true.
+	//     If we don't release quota back at the end of
+	//     handleRaftReadyRaftMuLocked, the next write will get blocked.
 	defer p.updateProposalQuota(ctx, lastLeaderID)
 	err := p.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
 		if hasReady = raftGroup.HasReady(); hasReady {
@@ -164,7 +236,7 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 		}
 		return hasReady /* unquiesceAndWakeLeader */, nil
 	})
-	log.Infof(ctx, "%+#v", rd)
+	log.Infof(ctx, "%+#v %v", rd, hasReady)
 	p.mu.Unlock()
 	if err != nil {
 		const expl = "while checking raft group for Ready"
@@ -176,11 +248,15 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 	}
 
 	logRaftReady(ctx, rd)
+	refreshReason := noReason
 	if rd.SoftState != nil && leaderID != PeerID(rd.SoftState.Lead) {
 		// TODO(ajwerner): deal with leadership changes?
 		log.Infof(ctx, "Leader changed? %v %v", rd.SoftState, leaderID)
 		if log.V(3) {
 			log.Infof(ctx, "raft leader changed: %d -> %d", leaderID, rd.SoftState.Lead)
+		}
+		if !p.testingKnobs.DisableRefreshReasonNewLeader {
+			refreshReason = reasonNewLeader
 		}
 		leaderID = PeerID(rd.SoftState.Lead)
 	}
@@ -188,16 +264,389 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 	if !raft.IsEmptySnap(rd.Snapshot) {
 		snapUUID, err := uuid.FromBytes(rd.Snapshot.Data)
 		log.Infof(ctx, "got a snapshot? %v %v", snapUUID, err)
+		panic("snapshots not implemented")
 	}
+
+	// Separate the MsgApp messages from all other Raft message types so that we
+	// can take advantage of the optimization discussed in the Raft thesis under
+	// the section: `10.2.1 Writing to the leader’s disk in parallel`. The
+	// optimization suggests that instead of a leader writing new log entries to
+	// disk before replicating them to its followers, the leader can instead
+	// write the entries to disk in parallel with replicating to its followers
+	// and them writing to their disks.
+	//
+	// Here, we invoke this optimization by:
+	// 1. sending all MsgApps.
+	// 2. syncing all entries and Raft state to disk.
+	// 3. sending all other messages.
+	//
+	// Since this is all handled in handleRaftReadyRaftMuLocked, we're assured
+	// that even though we may sync new entries to disk after sending them in
+	// MsgApps to followers, we'll always have them synced to disk before we
+	// process followers' MsgAppResps for the corresponding entries because this
+	// entire method requires RaftMu to be locked. This is a requirement because
+	// etcd/raft does not support commit quorums that do not include the leader,
+	// even though the Raft thesis states that this would technically be safe:
+	// > The leader may even commit an entry before it has been written to its
+	// > own disk, if a majority of followers have written it to their disks;
+	// > this is still safe.
+	//
+	// However, MsgApps are also used to inform followers of committed entries
+	// through the Commit index that they contains. Because the optimization
+	// sends all MsgApps before syncing to disc, we may send out a commit index
+	// in a MsgApp that we have not ourselves written in HardState.Commit. This
+	// is ok, because the Commit index can be treated as volatile state, as is
+	// supported by raft.MustSync. The Raft thesis corroborates this, stating in
+	// section: `3.8 Persisted state and server restarts` that:
+	// > Other state variables are safe to lose on a restart, as they can all be
+	// > recreated. The most interesting example is the commit index, which can
+	// > safely be reinitialized to zero on a restart.
+	msgApps, otherMsgs := splitMsgApps(rd.Messages)
+	p.traceMessageSends(msgApps, "sending msgApp")
+	p.sendRaftMessages(ctx, msgApps)
+
 	// Use a more efficient write-only batch because we don't need to do any
 	// reads from the batch. Any reads are performed via the "distinct" batch
 	// which passes the reads through to the underlying DB.
 	batch := p.storage.NewWriteOnlyBatch()
 	defer batch.Close()
 
+	// We know that all of the writes from here forward will be to distinct keys.
+	writer := batch.Distinct()
+	prevLastIndex := lastIndex
+	if len(rd.Entries) > 0 {
+		// All of the entries are appended to distinct keys, returning a new
+		// last index.
+		thinEntries, sideLoadedEntriesSize, err := p.maybeSideloadEntriesRaftMuLocked(ctx, rd.Entries)
+		if err != nil {
+			const expl = "during sideloading"
+			return stats, expl, errors.Wrap(err, expl)
+		}
+		raftLogSize += sideLoadedEntriesSize
+		if lastIndex, lastTerm, raftLogSize, err = p.append(
+			ctx, writer, lastIndex, lastTerm, raftLogSize, thinEntries,
+		); err != nil {
+			const expl = "during append"
+			return stats, expl, errors.Wrap(err, expl)
+		}
+	}
+	if !raft.IsEmptyHardState(rd.HardState) {
+		if !p.isInitialized() && rd.HardState.Commit != 0 {
+			log.Fatalf(ctx, "setting non-zero HardState.Commit on uninitialized replica %s. HS=%+v", p, rd.HardState)
+		}
+		log.Infof(ctx, "setting that hard state %v %v", p.raftMu.stateLoader, rd.HardState)
+		if err := p.raftMu.stateLoader.SetHardState(ctx, writer, rd.HardState); err != nil {
+			const expl = "during setHardState"
+			return stats, expl, errors.Wrap(err, expl)
+		}
+	}
+	writer.Close()
+	// Synchronously commit the batch with the Raft log entries and Raft hard
+	// state as we're promising not to lose this data.
+	//
+	// Note that the data is visible to other goroutines before it is synced to
+	// disk. This is fine. The important constraints are that these syncs happen
+	// before Raft messages are sent and before the call to RawNode.Advance. Our
+	// regular locking is sufficient for this and if other goroutines can see the
+	// data early, that's fine. In particular, snapshots are not a problem (I
+	// think they're the only thing that might access log entries or HardState
+	// from other goroutines). Snapshots do not include either the HardState or
+	// uncommitted log entries, and even if they did include log entries that
+	// were not persisted to disk, it wouldn't be a problem because raft does not
+	// infer the that entries are persisted on the node that sends a snapshot.
+	//commitStart := timeutil.Now()
+	mustSync := rd.MustSync && !disableSyncRaftLog.Get(p.settings)
+	if err := batch.Commit(mustSync); err != nil {
+		const expl = "while committing batch"
+		return stats, expl, errors.Wrap(err, expl)
+	}
+	//elapsed := timeutil.Since(commitStart)
+	// TODO(ajwerner): metrics
+	// r.metrics.RaftLogCommitLatency.RecordValue(elapsed.Nanoseconds())
+
+	if len(rd.Entries) > 0 {
+		// We may have just overwritten parts of the log which contain
+		// sideloaded SSTables from a previous term (and perhaps discarded some
+		// entries that we didn't overwrite). Remove any such leftover on-disk
+		// payloads (we can do that now because we've committed the deletion
+		// just above).
+		firstPurge := rd.Entries[0].Index // first new entry written
+		purgeTerm := rd.Entries[0].Term - 1
+		lastPurge := prevLastIndex // old end of the log, include in deletion
+		purgedSize, err := maybePurgeSideloaded(ctx, p.raftMu.sideloaded, firstPurge, lastPurge, purgeTerm)
+		if err != nil {
+			const expl = "while purging sideloaded storage"
+			return stats, expl, err
+		}
+		raftLogSize -= purgedSize
+		if raftLogSize < 0 {
+			// Might have gone negative if node was recently restarted.
+			raftLogSize = 0
+		}
+
+	}
+
+	// Update protected state - last index, last term, raft log size, and raft
+	// leader ID.
+	p.mu.Lock()
+	p.mu.lastIndex = lastIndex
+	p.mu.lastTerm = lastTerm
+	p.mu.raftLogSize = raftLogSize
+	var becameLeader bool
+	if p.mu.leaderID != leaderID {
+		p.mu.leaderID = leaderID
+		// Clear the remote proposal set. Would have been nil already if not
+		// previously the leader.
+		becameLeader = p.mu.leaderID == p.mu.peerID
+	}
+	// When becoming the leader, proactively add the replica to the replicate
+	// queue. We might have been handed leadership by a remote node which wanted
+	// to remove itself from the range.
+	if becameLeader /* && r.store.replicateQueue != nil */ {
+		// TODO(ajwerner): deal with this
+		log.Infof(ctx, "I became leader and should do something about it with the replicate queue: %v",
+			becameLeader)
+	}
+	p.mu.Unlock()
+
+	// Update raft log entry cache. We clear any older, uncommitted log entries
+	// and cache the latest ones.
+	p.entryCache.Add(rd.Entries, true /* truncate */)
+	p.sendRaftMessages(ctx, otherMsgs)
+	p.traceEntries(rd.CommittedEntries, "committed, before applying any entries")
+	// applicationStart := timeutil.Now()
+	for _, e := range rd.CommittedEntries {
+		switch e.Type {
+		case raftpb.EntryNormal:
+			// NB: Committed entries are handed to us by Raft. Raft does not
+			// know about sideloading. Consequently the entries here are all
+			// already inlined.
+
+			var commandID storagebase.CmdIDKey
+			var command storagepb.RaftCommand
+
+			// Process committed entries. etcd raft occasionally adds a nil entry
+			// (our own commands are never empty). This happens in two situations:
+			// When a new leader is elected, and when a config change is dropped due
+			// to the "one at a time" rule. In both cases we may need to resubmit our
+			// pending proposals (In the former case we resubmit everything because
+			// we proposed them to a former leader that is no longer able to commit
+			// them. In the latter case we only need to resubmit pending config
+			// changes, but it's hard to distinguish so we resubmit everything
+			// anyway). We delay resubmission until after we have processed the
+			// entire batch of entries.
+			if len(e.Data) == 0 {
+				// Overwrite unconditionally since this is the most aggressive
+				// reproposal mode.
+				if !p.testingKnobs.DisableRefreshReasonNewLeaderOrConfigChange {
+					refreshReason = reasonNewLeaderOrConfigChange
+				}
+				commandID = "" // special-cased value, command isn't used
+			} else {
+				var encodedCommand []byte
+				commandID, encodedCommand = DecodeRaftCommand(e.Data)
+				// An empty command is used to unquiesce a range and wake the
+				// leader. Clear commandID so it's ignored for processing.
+				if len(encodedCommand) == 0 {
+					commandID = ""
+				} else if err := protoutil.Unmarshal(encodedCommand, &command); err != nil {
+					const expl = "while unmarshalling entry"
+					return stats, expl, errors.Wrap(err, expl)
+				}
+			}
+
+			if changedRepl := p.processRaftCommand(ctx, commandID, e.Term, e.Index, command); changedRepl {
+				log.Fatalf(ctx, "unexpected replication change from command %s", &command)
+			}
+			// r.store.metrics.RaftCommandsApplied.Inc(1)
+			stats.processed++
+
+			p.mu.Lock()
+			if p.mu.peerID == p.mu.leaderID {
+				// At this point we're not guaranteed to have proposalQuota
+				// initialized, the same is true for quotaReleaseQueue and
+				// commandSizes. By checking if the specified commandID is
+				// present in commandSizes, we'll only queue the cmdSize if
+				// they're all initialized.
+				if cmdSize, ok := p.mu.commandSizes[commandID]; ok {
+					p.mu.quotaReleaseQueue = append(p.mu.quotaReleaseQueue, cmdSize)
+					delete(p.mu.commandSizes, commandID)
+				}
+			}
+			p.mu.Unlock()
+
+		case raftpb.EntryConfChange:
+			var cc raftpb.ConfChange
+			if err := protoutil.Unmarshal(e.Data, &cc); err != nil {
+				const expl = "while unmarshaling ConfChange"
+				return stats, expl, errors.Wrap(err, expl)
+			}
+			// var ccCtx ConfChangeContext
+			// if err := protoutil.Unmarshal(cc.Context, &ccCtx); err != nil {
+			// 	const expl = "while unmarshaling ConfChangeContext"
+			// 	return stats, expl, errors.Wrap(err, expl)
+			// }
+			var commandID storagebase.CmdIDKey
+			var command storagepb.RaftCommand
+			var encodedCommand []byte
+			commandID, encodedCommand = DecodeRaftCommand(cc.Context)
+			// An empty command is used to unquiesce a range and wake the
+			// leader. Clear commandID so it's ignored for processing.
+			if len(encodedCommand) == 0 {
+				commandID = ""
+			} else if err := protoutil.Unmarshal(encodedCommand, &command); err != nil {
+				const expl = "while unmarshalling entry"
+				return stats, expl, errors.Wrap(err, expl)
+			}
+			if changedRepl := p.processRaftCommand(
+				ctx, commandID, e.Term, e.Index, command,
+			); !changedRepl {
+				// If we did not apply the config change, tell raft that the config change was aborted.
+				cc = raftpb.ConfChange{}
+			}
+			stats.processed++
+
+			p.mu.Lock()
+			if p.mu.peerID == p.mu.leaderID {
+				if cmdSize, ok := p.mu.commandSizes[commandID]; ok {
+					p.mu.quotaReleaseQueue = append(p.mu.quotaReleaseQueue, cmdSize)
+					delete(p.mu.commandSizes, commandID)
+				}
+			}
+			p.mu.Unlock()
+
+			if err := p.withRaftGroup(true, func(raftGroup *raft.RawNode) (bool, error) {
+				raftGroup.ApplyConfChange(cc)
+				return true, nil
+			}); err != nil {
+				const expl = "during ApplyConfChange"
+				return stats, expl, errors.Wrap(err, expl)
+			}
+		default:
+			log.Fatalf(ctx, "unexpected Raft entry: %v", e)
+		}
+	}
+	// applicationElapsed := timeutil.Since(applicationStart).Nanoseconds()
+	// r.store.metrics.RaftApplyCommittedLatency.RecordValue(applicationElapsed)
+	if refreshReason != noReason {
+		// p.mu.Lock()
+		// p.refreshProposalsLocked(0, refreshReason)
+		// p.mu.Unlock()
+		panic("not implemented")
+	}
+
+	// TODO(bdarnell): need to check replica id and not Advance if it
+	// has changed. Or do we need more locking to guarantee that replica
+	// ID cannot change during handleRaftReady?
+	const expl = "during advance"
+	if err := p.withRaftGroup(true, func(raftGroup *raft.RawNode) (bool, error) {
+		raftGroup.Advance(rd)
+
+		// If the Raft group still has more to process then we immediately
+		// re-enqueue it for another round of processing. This is possible if
+		// the group's committed entries were paginated due to size limitations
+		// and we didn't apply all of them in this pass.
+		if raftGroup.HasReady() {
+			// TODO(ajwerner): deal with this case
+			panic("need to reenqueue this peer")
+			// p.store.enqueueRaftUpdateCheck(r.RangeID)
+		}
+		return true, nil
+	}); err != nil {
+		return stats, expl, errors.Wrap(err, expl)
+	}
 	return stats, "", nil
 
 }
+
+func (p *Peer) sendRaftMessages(ctx context.Context, messages []raftpb.Message) {
+	var lastAppResp raftpb.Message
+	for _, message := range messages {
+		drop := false
+		switch message.Type {
+		case raftpb.MsgApp:
+			if util.RaceEnabled {
+				// Iterate over the entries to assert that all sideloaded commands
+				// are already inlined. replicaRaftStorage.Entries already performs
+				// the sideload inlining for stable entries and raft.unstable always
+				// contain fat entries. Since these are the only two sources that
+				// raft.sendAppend gathers entries from to populate MsgApps, we
+				// should never see thin entries here.
+				for j := range message.Entries {
+					assertSideloadedRaftCommandInlined(ctx, &message.Entries[j])
+				}
+			}
+
+		case raftpb.MsgAppResp:
+			// A successful (non-reject) MsgAppResp contains one piece of
+			// information: the highest log index. Raft currently queues up
+			// one MsgAppResp per incoming MsgApp, and we may process
+			// multiple messages in one handleRaftReady call (because
+			// multiple messages may arrive while we're blocked syncing to
+			// disk). If we get redundant MsgAppResps, drop all but the
+			// last (we've seen that too many MsgAppResps can overflow
+			// message queues on the receiving side).
+			//
+			// Note that this reorders the chosen MsgAppResp relative to
+			// other messages (including any MsgAppResps with the Reject flag),
+			// but raft is fine with this reordering.
+			//
+			// TODO(bdarnell): Consider pushing this optimization into etcd/raft.
+			// Similar optimizations may be possible for other message types,
+			// although MsgAppResp is the only one that has been seen as a
+			// problem in practice.
+			if !message.Reject && message.Index > lastAppResp.Index {
+				lastAppResp = message
+				drop = true
+			}
+		}
+
+		if !drop {
+			p.sendRaftMessage(ctx, message)
+		}
+	}
+	if lastAppResp.Index > 0 {
+		p.sendRaftMessage(ctx, lastAppResp)
+	}
+}
+
+// sendRaftMessage sends a Raft message.
+func (p *Peer) sendRaftMessage(ctx context.Context, msg raftpb.Message) {
+	p.mu.Lock()
+	if msg.Type == raftpb.MsgHeartbeat {
+		if p.mu.peerID == 0 {
+			log.Fatalf(ctx, "preemptive snapshot attempted to send a heartbeat: %+v", msg)
+		}
+		// For followers, we update lastUpdateTimes when we step a message from
+		// them into the local Raft group. The leader won't hit that path, so we
+		// update it whenever it sends a heartbeat. In effect, this makes sure
+		// it always sees itself as alive.
+		p.mu.lastUpdateTimes.update(p.mu.peerID, timeutil.Now())
+	}
+	p.mu.Unlock()
+
+	// TODO(ajwerner): deal with snapshots, probably do this above inside the
+	// conn. Also coalesced heartbeats.
+
+	raftMsg := p.raftMessageFactory()
+	raftMsg.SetRaftMessage(msg)
+	p.raftTransport.Send(ctx, raftMsg)
+
+	// TODO(ajwerner): need to figure out how much the peer needs to know about
+	// where remote replicas live. Who tracks this? It probably can't be the
+	// transport exactly. We want to just
+}
+
+func (p *Peer) processRaftCommand(
+	ctx context.Context,
+	idKey storagebase.CmdIDKey,
+	term, raftIndex uint64,
+	raftCmd storagepb.RaftCommand,
+) (changedRepl bool) {
+	panic("not implemented")
+}
+
+// TODO(ajwerner): add feedback for failed message sends
 
 //go:generate stringer -type refreshRaftReason
 type refreshRaftReason int
@@ -213,6 +662,14 @@ const (
 	reasonReplicaIDChanged
 	reasonTicks
 )
+
+func (p *Peer) withRaftGroup(
+	mayCampaignOnWake bool, f func(r *raft.RawNode) (unquiesceAndWakeLeader bool, _ error),
+) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.withRaftGroupLocked(mayCampaignOnWake, f)
+}
 
 func (p *Peer) withRaftGroupLocked(
 	mayCampaignOnWake bool, f func(r *raft.RawNode) (unquiesceAndWakeLeader bool, _ error),
@@ -283,9 +740,86 @@ func (p *Peer) enqueueRaftMessage(m raftpb.Message) {
 }
 
 func (p *Peer) addProposal(prop *proposal) {
+	// TODO(ajwerner): deal with returning things?
+	proposalSize := prop.msg.size()
+	if proposalSize > int(MaxCommandSize.Get(p.settings)) {
+		// Once a command is written to the raft log, it must be loaded
+		// into memory and replayed on all replicas. If a command is
+		// too big, stop it here.
+		panic(roachpb.NewError(errors.Errorf(
+			"command is too large: %d bytes (max: %d)",
+			proposalSize, MaxCommandSize.Get(p.settings),
+		)))
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if p.mu.rawNode == nil {
+		// Unlock first before locking in {raft,replica}mu order.
+		p.mu.Unlock()
+
+		p.raftMu.Lock()
+		defer p.raftMu.Unlock()
+		p.mu.Lock()
+		log.Event(prop.ctx, "acquired {raft,replica}mu")
+	} else {
+		log.Event(prop.ctx, "acquired replica mu")
+	}
+	id := prop.msg.id()
+	// Add size of proposal to commandSizes map.
+	if p.mu.commandSizes != nil {
+		p.mu.commandSizes[id] = proposalSize
+	}
+	// TODO(ajwerner): deal with replica state here?
+	// Some sort of callback magic for dealing with grabbing lease index?
+	switch msg := prop.msg.(type) {
+	case ProposalMessage:
+		if log.V(4) {
+			log.Infof(prop.ctx, "proposing command %x", id)
+		}
+		if err := p.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
+			// We're proposing a command so there is no need to wake the leader if
+			// we're quiesced.
+			// TODO(ajwerner): deal with unquiesce
+			// p.unquiesceLocked()
+			if err := raftGroup.Campaign(); err != nil {
+				panic(err)
+			}
+			return false /* unquiesceAndWakeLeader */, raftGroup.Propose([]byte(msg))
+		}); err != nil {
+			panic(err)
+		}
+	case *ConfChangeMessage:
+		// EndTransactionRequest with a ChangeReplicasTrigger is special
+		// because raft needs to understand it; it cannot simply be an
+		// opaque command.
+		log.Infof(prop.ctx, "proposing %s", msg)
+
+		// Ensure that we aren't trying to remove ourselves from the range without
+		// having previously given up our lease, since the range won't be able
+		// to make progress while the lease is owned by a removed replica (and
+		// leases can stay in such a state for a very long time when using epoch-
+		// based range leases). This shouldn't happen often, but has been seen
+		// before (#12591).
+		if msg.Type == raftpb.ConfChangeRemoveNode && msg.PeerID == p.mu.peerID {
+			log.Errorf(prop.ctx, "received invalid ChangeReplicasTrigger %s to remove self (leaseholder)", msg)
+			panic(errors.Errorf("%v: received invalid ChangeReplicasTrigger %v to remove self (leaseholder)", p, p.mu.peerID))
+		}
+		if err := p.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
+			// We're proposing a command here so there is no need to wake the
+			// leader if we were quiesced.
+			// p.unquiesceLocked()
+			return false, /* unquiesceAndWakeLeader */
+				raftGroup.ProposeConfChange(raftpb.ConfChange{
+					Type:    msg.Type,
+					NodeID:  uint64(msg.PeerID),
+					Context: []byte(msg.Command),
+				})
+		}); err != nil {
+			panic(err)
+		}
+	}
 }
 
 func (p *Peer) updateProposalQuota(ctx context.Context, lastLeaderID PeerID) {
@@ -472,7 +1006,6 @@ func (p *Peer) tick(
 	if log.V(2) {
 		log.Infof(ctx, "ticking")
 	}
-
 	p.unreachablesMu.Lock()
 	remotes := p.unreachablesMu.remotes
 	p.unreachablesMu.remotes = nil
@@ -583,14 +1116,14 @@ func (p *Peer) maybeAcquireProposalQuota(prop *proposal) error {
 // a lastUpdateTimesMap is maintained on the Raft leader to keep track of the
 // last communication received from followers, which in turn informs the quota
 // pool and log truncations.
-type lastUpdateTimesMap map[roachpb.ReplicaID]time.Time
+type lastUpdateTimesMap map[PeerID]time.Time
 
-// // func (m lastUpdateTimesMap) update(replicaID roachpb.ReplicaID, now time.Time) {
-// // 	if m == nil {
-// // 		return
-// // 	}
-// // 	m[replicaID] = now
-// // }
+func (m lastUpdateTimesMap) update(peerID PeerID, now time.Time) {
+	if m == nil {
+		return
+	}
+	m[peerID] = now
+}
 
 // // // updateOnUnquiesce is called when the leader unquiesces. In that case, we
 // // // don't want live followers to appear as dead before their next message reaches
@@ -659,7 +1192,7 @@ func (p *Peer) unquiesceAndWakeLeaderLocked() {
 			}
 		}
 		// Propose an empty command which will wake the leader.
-		_ = p.mu.rawNode.Propose(encodeRaftCommandV1(makeIDKey(), nil))
+		_ = p.mu.rawNode.Propose(EncodeRaftCommandV1(makeIDKey(), nil))
 	}
 }
 
@@ -671,8 +1204,6 @@ type raftCommandEncodingVersion byte
 //
 // TODO(bdarnell): is this commandID still appropriate for our needs?
 const (
-	// The prescribed length for each command ID.
-	raftCommandIDLen = 8
 	// The initial Raft command version, used for all regular Raft traffic.
 	raftVersionStandard raftCommandEncodingVersion = 0
 	// A proposal containing an SSTable which preferably should be sideloaded
@@ -681,6 +1212,10 @@ const (
 	// Raft log it necessary to inline the payload first as it has usually
 	// been sideloaded.
 	raftVersionSideloaded raftCommandEncodingVersion = 1
+	// The prescribed length for each command ID.
+	raftCommandIDLen = 8
+	// The prescribed length of each encoded command's prefix.
+	raftCommandPrefixLen = 1 + raftCommandIDLen
 	// The no-split bit is now unused, but we still apply the mask to the first
 	// byte of the command for backward compatibility.
 	//
@@ -689,27 +1224,40 @@ const (
 	raftCommandNoSplitMask = raftCommandNoSplitBit - 1
 )
 
-func encodeRaftCommandV1(commandID storagebase.CmdIDKey, command []byte) []byte {
+func MakeIDKey() storagebase.CmdIDKey {
+	idKeyBuf := make([]byte, 0, raftCommandIDLen)
+	idKeyBuf = encoding.EncodeUint64Ascending(idKeyBuf, uint64(rand.Int63()))
+	return storagebase.CmdIDKey(idKeyBuf)
+}
+
+func EncodeRaftCommandV1(commandID storagebase.CmdIDKey, command []byte) EncodedCommand {
 	return encodeRaftCommand(raftVersionStandard, commandID, command)
 }
 
-func encodeRaftCommandV2(commandID storagebase.CmdIDKey, command []byte) []byte {
+func EncodeRaftCommandV2(commandID storagebase.CmdIDKey, command []byte) EncodedCommand {
 	return encodeRaftCommand(raftVersionSideloaded, commandID, command)
 }
 
-// encode a command ID, an encoded storagebase.RaftCommand, and
-// whether the command contains a split.
 func encodeRaftCommand(
 	version raftCommandEncodingVersion, commandID storagebase.CmdIDKey, command []byte,
 ) []byte {
+	b := make([]byte, raftCommandPrefixLen+len(command))
+	encodeRaftCommandPrefix(b[:raftCommandPrefixLen], version, commandID)
+	copy(b[raftCommandPrefixLen:], command)
+	return b
+}
+
+func encodeRaftCommandPrefix(
+	b []byte, version raftCommandEncodingVersion, commandID storagebase.CmdIDKey,
+) {
 	if len(commandID) != raftCommandIDLen {
 		panic(fmt.Sprintf("invalid command ID length; %d != %d", len(commandID), raftCommandIDLen))
 	}
-	x := make([]byte, 1, 1+raftCommandIDLen+len(command))
-	x[0] = byte(version)
-	x = append(x, []byte(commandID)...)
-	x = append(x, command...)
-	return x
+	if len(b) != raftCommandPrefixLen {
+		panic(fmt.Sprintf("invalid command prefix length; %d != %d", len(b), raftCommandPrefixLen))
+	}
+	b[0] = byte(version)
+	copy(b[1:], []byte(commandID))
 }
 
 // DecodeRaftCommand splits a raftpb.Entry.Data into its commandID and
@@ -742,4 +1290,18 @@ func newRaftConfig(
 
 		PreVote: true,
 	}
+}
+
+// splitMsgApps splits the Raft message slice into two slices, one containing
+// MsgApps and one containing all other message types. Each slice retains the
+// relative ordering between messages in the original slice.
+func splitMsgApps(msgs []raftpb.Message) (msgApps, otherMsgs []raftpb.Message) {
+	splitIdx := 0
+	for i, msg := range msgs {
+		if msg.Type == raftpb.MsgApp {
+			msgs[i], msgs[splitIdx] = msgs[splitIdx], msgs[i]
+			splitIdx++
+		}
+	}
+	return msgs[:splitIdx], msgs[splitIdx:]
 }

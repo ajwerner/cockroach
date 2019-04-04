@@ -10,6 +10,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/connect"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/storage/replication"
@@ -20,6 +21,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/golang/protobuf/proto"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/raft/raftpb"
 )
 
@@ -78,8 +82,10 @@ type groupCache struct {
 	id replication.GroupID
 }
 
-func (c groupCache) Add(ents []raftpb.Entry) { c.c.Add(int64(c.id), ents) }
-func (c groupCache) Clear(hi uint64)         { c.c.Clear(int64(c.id), hi) }
+func (c groupCache) Add(ents []raftpb.Entry, truncate bool) {
+	c.c.Add(int64(c.id), ents, truncate)
+}
+func (c groupCache) Clear(hi uint64) { c.c.Clear(int64(c.id), hi) }
 func (c groupCache) Get(idx uint64) (e raftpb.Entry, ok bool) {
 	return c.c.Get(int64(c.id), idx)
 }
@@ -91,6 +97,7 @@ func (c groupCache) Scan(
 
 func newTestConfig() replication.FactoryConfig {
 	var cfg replication.FactoryConfig
+	cfg.Settings = cluster.MakeTestingClusterSettings()
 	cfg.RaftConfig.SetDefaults()
 	cfg.RaftHeartbeatIntervalTicks = 1
 	cfg.RaftElectionTimeoutTicks = 3
@@ -153,6 +160,7 @@ func TestReplication(t *testing.T) {
 	// some data.
 	ctx := context.Background()
 	cfg := newTestConfig()
+	cfg2 := newTestConfig()
 	defer cfg.Stopper.Stop(ctx)
 
 	// Okay I guess what I should do is erm uh create a few of these factories
@@ -172,10 +180,11 @@ func TestReplication(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
+	pf2, err := replication.NewFactory(ctx, cfg2)
 	p, err := pf.NewPeer(replication.PeerConfig{
 		GroupID: 1,
 		PeerID:  1,
-		Peers:   []replication.PeerID{2, 3},
+		Peers:   []replication.PeerID{},
 	})
 	if err != nil {
 		panic(err)
@@ -194,9 +203,18 @@ func TestReplication(t *testing.T) {
 	pc.Callbacks.Applied = func() {
 		log.Infof(ctx, "in applied callback")
 	}
-	pc.Send(ctx, &replication.ProposalMessage{
-		ID:      "asdfasdf",
-		Command: &storagepb.RaftCommand{},
-	})
+	time.Sleep(500 * time.Millisecond)
+	cmd := &storagepb.RaftCommand{}
+	data, err := proto.Marshal(cmd)
+	require.Nil(t, err)
+	id := replication.MakeIDKey()
+	msg := replication.EncodeRaftCommandV2(id, data)
+	pc.Send(ctx, replication.ProposalMessage(msg))
+	// we'll need to receive on the raft transport from 1 and send it to two
+	raftMsg := cfg.RaftTransport.Recv()
+	log.Infof(ctx, "%v", raftMsg)
+	cfg2.RaftTransport.Send(ctx, raftMsg)
+	_, err = pf2.LoadPeer(log.AmbientContext{}, 1)
+	assert.Nil(t, err)
 	fmt.Println(pc.Recv())
 }

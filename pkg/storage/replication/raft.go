@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
@@ -186,53 +187,53 @@ func raftEntryFormatter(data []byte) string {
 // 	return h.RaftMessageRequest.ToReplica.ReplicaID == 0
 // }
 
-// // traceEntries records the provided event for all proposals corresponding
-// // to the entries contained in ents. The vmodule level for raft must be at
-// // least 1.
-// func (r *Replica) traceEntries(ents []raftpb.Entry, event string) {
-// 	if log.V(1) {
-// 		ids := extractIDs(nil, ents)
-// 		traceProposals(r, ids, event)
-// 	}
-// }
+// traceEntries records the provided event for all proposals corresponding
+// to the entries contained in ents. The vmodule level for raft must be at
+// least 1.
+func (p *Peer) traceEntries(ents []raftpb.Entry, event string) {
+	if log.V(1) {
+		ids := extractIDs(nil, ents)
+		traceProposals(p, ids, event)
+	}
+}
 
-// // traceMessageSends records the provided event for all proposals contained in
-// // in entries contained in msgs. The vmodule level for raft must be at
-// // least 1.
-// func (r *Replica) traceMessageSends(msgs []raftpb.Message, event string) {
-// 	if log.V(1) {
-// 		var ids []storagebase.CmdIDKey
-// 		for _, m := range msgs {
-// 			ids = extractIDs(ids, m.Entries)
-// 		}
-// 		traceProposals(r, ids, event)
-// 	}
-// }
+// traceMessageSends records the provided event for all proposals contained in
+// in entries contained in msgs. The vmodule level for raft must be at
+// least 1.
+func (p *Peer) traceMessageSends(msgs []raftpb.Message, event string) {
+	if log.V(1) {
+		var ids []storagebase.CmdIDKey
+		for _, m := range msgs {
+			ids = extractIDs(ids, m.Entries)
+		}
+		traceProposals(p, ids, event)
+	}
+}
 
-// // extractIDs decodes and appends each of the ids corresponding to the entries
-// // in ents to ids and returns the result.
-// func extractIDs(ids []storagebase.CmdIDKey, ents []raftpb.Entry) []storagebase.CmdIDKey {
-// 	for _, e := range ents {
-// 		if e.Type == raftpb.EntryNormal && len(e.Data) > 0 {
-// 			id, _ := DecodeRaftCommand(e.Data)
-// 			ids = append(ids, id)
-// 		}
-// 	}
-// 	return ids
-// }
+// extractIDs decodes and appends each of the ids corresponding to the entries
+// in ents to ids and returns the result.
+func extractIDs(ids []storagebase.CmdIDKey, ents []raftpb.Entry) []storagebase.CmdIDKey {
+	for _, e := range ents {
+		if e.Type == raftpb.EntryNormal && len(e.Data) > 0 {
+			id, _ := DecodeRaftCommand(e.Data)
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
 
-// // traceLocalProposals logs a trace event with the provided string for each
-// // locally proposed command which corresponds to an id in ids.
-// func traceProposals(r *Replica, ids []storagebase.CmdIDKey, event string) {
-// 	ctxs := make([]context.Context, 0, len(ids))
-// 	r.mu.RLock()
-// 	for _, id := range ids {
-// 		if prop, ok := r.mu.proposals[id]; ok {
-// 			ctxs = append(ctxs, prop.ctx)
-// 		}
-// 	}
-// 	r.mu.RUnlock()
-// 	for _, ctx := range ctxs {
-// 		log.Event(ctx, event)
-// 	}
-// }
+// traceLocalProposals logs a trace event with the provided string for each
+// locally proposed command which corresponds to an id in ids.
+func traceProposals(p *Peer, ids []storagebase.CmdIDKey, event string) {
+	ctxs := make([]context.Context, 0, len(ids))
+	p.mu.RLock()
+	for _, id := range ids {
+		if prop, ok := p.mu.proposals[id]; ok {
+			ctxs = append(ctxs, prop.ctx)
+		}
+	}
+	p.mu.RUnlock()
+	for _, ctx := range ctxs {
+		log.Event(ctx, event)
+	}
+}

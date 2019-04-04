@@ -187,6 +187,25 @@ func TestStoreConfig(clock *hlc.Clock) StoreConfig {
 	return sc
 }
 
+func newRaftConfig(
+	strg raft.Storage, id uint64, appliedIndex uint64, storeCfg StoreConfig, logger raft.Logger,
+) *raft.Config {
+	return &raft.Config{
+		ID:                        id,
+		Applied:                   appliedIndex,
+		ElectionTick:              storeCfg.RaftElectionTimeoutTicks,
+		HeartbeatTick:             storeCfg.RaftHeartbeatIntervalTicks,
+		MaxUncommittedEntriesSize: storeCfg.RaftMaxUncommittedEntriesSize,
+		MaxCommittedSizePerReady:  storeCfg.RaftMaxCommittedSizePerReady,
+		MaxSizePerMsg:             storeCfg.RaftMaxSizePerMsg,
+		MaxInflightMsgs:           storeCfg.RaftMaxInflightMsgs,
+		Storage:                   strg,
+		Logger:                    logger,
+
+		PreVote: true,
+	}
+}
+
 // verifyKeys verifies keys. If checkEndKey is true, then the end key
 // is verified to be non-nil and greater than start key. If
 // checkEndKey is false, end key is verified to be nil. Additionally,

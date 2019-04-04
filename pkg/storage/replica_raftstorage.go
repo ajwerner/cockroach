@@ -178,7 +178,7 @@ func entries(
 	}
 	// Cache the fetched entries, if we may.
 	if canCache {
-		eCache.Add(rangeID, ents, false /* truncate */)
+		eCache.Add(int64(rangeID), ents, false /* truncate */)
 	}
 
 	// Did the correct number of results come back? If so, we're all good.
@@ -255,7 +255,7 @@ func (r *replicaRaftStorage) Term(i uint64) (uint64, error) {
 		return r.mu.lastTerm, nil
 	}
 	// Try to retrieve the term for the desired entry from the entry cache.
-	if e, ok := r.store.raftEntryCache.Get(r.RangeID, i); ok {
+	if e, ok := r.store.raftEntryCache.Get(int64(r.RangeID), i); ok {
 		return e.Term, nil
 	}
 	readonly := r.store.Engine().NewReadOnly()

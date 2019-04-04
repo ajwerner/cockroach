@@ -160,7 +160,7 @@ func maybeInlineSideloadedRaftCommand(
 	// are very likely to have appended it recently, in which case
 	// we can save work.
 	cachedSingleton, _, _, _ := entryCache.Scan(
-		nil, rangeID, ent.Index, ent.Index+1, 1<<20,
+		nil, int64(rangeID), ent.Index, ent.Index+1, 1<<20,
 	)
 
 	if len(cachedSingleton) > 0 {
