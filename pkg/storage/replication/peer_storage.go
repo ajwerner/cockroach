@@ -6,7 +6,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/pkg/errors"
@@ -76,6 +79,65 @@ func (p *peerStorage) Entries(lo, hi, maxBytes uint64) ([]raftpb.Entry, error) {
 	}
 	return entries(ctx, p.mu.stateLoader, readonly, p.entryReader, p.entryCache,
 		p.raftMu.sideloaded, lo, hi, maxBytes)
+}
+
+// append the given entries to the raft log. Takes the previous values of
+// p.mu.lastIndex, p.mu.lastTerm, and r.mu.raftLogSize, and returns new values.
+// We do this rather than modifying them directly because these modifications
+// need to be atomic with the commit of the batch. This method requires that
+// r.raftMu is held.
+//
+// append is intentionally oblivious to the existence of sideloaded proposals.
+// They are managed by the caller, including cleaning up obsolete on-disk
+// payloads in case the log tail is replaced.
+func (p *Peer) append(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	prevLastIndex uint64,
+	prevLastTerm uint64,
+	prevRaftLogSize int64,
+	entries []raftpb.Entry,
+) (uint64, uint64, int64, error) {
+	if len(entries) == 0 {
+		return prevLastIndex, prevLastTerm, prevRaftLogSize, nil
+	}
+	var diff enginepb.MVCCStats
+	var value roachpb.Value
+	for i := range entries {
+		ent := &entries[i]
+		key := p.raftMu.stateLoader.RaftLogKey(ent.Index)
+
+		if err := value.SetProto(ent); err != nil {
+			return 0, 0, 0, err
+		}
+		value.InitChecksum(key)
+		var err error
+		if ent.Index > prevLastIndex {
+			err = engine.MVCCBlindPut(ctx, batch, &diff, key, hlc.Timestamp{}, value, nil /* txn */)
+		} else {
+			err = engine.MVCCPut(ctx, batch, &diff, key, hlc.Timestamp{}, value, nil /* txn */)
+		}
+		if err != nil {
+			return 0, 0, 0, err
+		}
+	}
+
+	// Delete any previously appended log entries which never committed.
+	lastIndex := entries[len(entries)-1].Index
+	lastTerm := entries[len(entries)-1].Term
+	for i := lastIndex + 1; i <= prevLastIndex; i++ {
+		// Note that the caller is in charge of deleting any sideloaded payloads
+		// (which they must only do *after* the batch has committed).
+		err := engine.MVCCDelete(ctx, batch, &diff, p.raftMu.stateLoader.RaftLogKey(i),
+			hlc.Timestamp{}, nil /* txn */)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+	}
+
+	raftLogSize := prevRaftLogSize + diff.SysBytes
+
+	return lastIndex, lastTerm, raftLogSize, nil
 }
 
 // LastIndex implements the raft.Storage interface.
@@ -231,7 +293,7 @@ func entries(
 
 	// Cache the fetched entries, if we may.
 	if canCache {
-		eCache.Add(ents)
+		eCache.Add(ents, false)
 	}
 
 	// Did the correct number of results come back? If so, we're all good.
@@ -275,6 +337,115 @@ func entries(
 	}
 	// The requested lo index does not yet exist.
 	return nil, raft.ErrUnavailable
+}
+
+// maybeSideloadEntriesRaftMuLocked should be called with a slice of "fat"
+// entries before appending them to the Raft log. For those entries which are
+// sideloadable, this is where the actual sideloading happens: in come fat
+// proposals, out go thin proposals. Note that this method is to be called
+// before modifications are persisted to the log. The other way around is
+// incorrect since an ill-timed crash gives you thin proposals and no files.
+//
+// The passed-in slice is not mutated.
+func (p *Peer) maybeSideloadEntriesRaftMuLocked(
+	ctx context.Context, entriesToAppend []raftpb.Entry,
+) (_ []raftpb.Entry, sideloadedEntriesSize int64, _ error) {
+	// TODO(tschottdorf): allocating this closure could be expensive. If so make
+	// it a method on Replica.
+	maybeRaftCommand := func(cmdID storagebase.CmdIDKey) (storagepb.RaftCommand, bool) {
+		// TODO(ajwerner): fix this
+
+		// p.mu.Lock()
+		// defer p.mu.Unlock()
+		// prop, ok := p.mu.proposals[cmdID]
+		// if ok {
+		// 	return *prop.msg.Command, true
+		// }
+		return storagepb.RaftCommand{}, false
+	}
+	return maybeSideloadEntriesImpl(ctx, entriesToAppend, p.raftMu.sideloaded, maybeRaftCommand)
+}
+
+// maybeSideloadEntriesImpl iterates through the provided slice of entries. If
+// no sideloadable entries are found, it returns the same slice. Otherwise, it
+// returns a new slice in which all applicable entries have been sideloaded to
+// the specified SideloadStorage. maybeRaftCommand is called when sideloading is
+// necessary and can optionally supply a pre-Unmarshaled RaftCommand (which
+// usually is provided by the Replica in-flight proposal map.
+func maybeSideloadEntriesImpl(
+	ctx context.Context,
+	entriesToAppend []raftpb.Entry,
+	sideloaded SideloadStorage,
+	maybeRaftCommand func(storagebase.CmdIDKey) (storagepb.RaftCommand, bool),
+) (_ []raftpb.Entry, sideloadedEntriesSize int64, _ error) {
+
+	cow := false
+	for i := range entriesToAppend {
+		var err error
+		if sniffSideloadedRaftCommand(entriesToAppend[i].Data) {
+			log.Event(ctx, "sideloading command in append")
+			if !cow {
+				// Avoid mutating the passed-in entries directly. The caller
+				// wants them to remain "fat".
+				log.Eventf(ctx, "copying entries slice of length %d", len(entriesToAppend))
+				cow = true
+				entriesToAppend = append([]raftpb.Entry(nil), entriesToAppend...)
+			}
+
+			ent := &entriesToAppend[i]
+			cmdID, data := DecodeRaftCommand(ent.Data) // cheap
+			strippedCmd, ok := maybeRaftCommand(cmdID)
+			if ok {
+				// Happy case: we have this proposal locally (i.e. we proposed
+				// it). In this case, we can save unmarshalling the fat proposal
+				// because it's already in-memory.
+				if strippedCmd.ReplicatedEvalResult.AddSSTable == nil {
+					log.Fatalf(ctx, "encountered sideloaded non-AddSSTable command: %+v", strippedCmd)
+				}
+				log.Eventf(ctx, "command already in memory")
+				// The raft proposal is immutable. To respect that, shallow-copy
+				// the (nullable) AddSSTable struct which we intend to modify.
+				addSSTableCopy := *strippedCmd.ReplicatedEvalResult.AddSSTable
+				strippedCmd.ReplicatedEvalResult.AddSSTable = &addSSTableCopy
+			} else {
+				// Bad luck: we didn't have the proposal in-memory, so we'll
+				// have to unmarshal it.
+				log.Event(ctx, "proposal not already in memory; unmarshaling")
+				if err := protoutil.Unmarshal(data, &strippedCmd); err != nil {
+					return nil, 0, err
+				}
+			}
+
+			if strippedCmd.ReplicatedEvalResult.AddSSTable == nil {
+				// Still no AddSSTable; someone must've proposed a v2 command
+				// but not becaused it contains an inlined SSTable. Strange, but
+				// let's be future proof.
+				log.Warning(ctx, "encountered sideloaded Raft command without inlined payload")
+				continue
+			}
+
+			// Actually strip the command.
+			dataToSideload := strippedCmd.ReplicatedEvalResult.AddSSTable.Data
+			strippedCmd.ReplicatedEvalResult.AddSSTable.Data = nil
+
+			{
+				data = make([]byte, raftCommandPrefixLen+strippedCmd.Size())
+				encodeRaftCommandPrefix(data[:raftCommandPrefixLen], raftVersionSideloaded, cmdID)
+				_, err := protoutil.MarshalToWithoutFuzzing(&strippedCmd, data[raftCommandPrefixLen:])
+				if err != nil {
+					return nil, 0, errors.Wrap(err, "while marshaling stripped sideloaded command")
+				}
+				ent.Data = data
+			}
+
+			log.Eventf(ctx, "writing payload at index=%d term=%d", ent.Index, ent.Term)
+			if err = sideloaded.Put(ctx, ent.Index, ent.Term, dataToSideload); err != nil {
+				return nil, 0, err
+			}
+			sideloadedEntriesSize += int64(len(dataToSideload))
+		}
+	}
+	return entriesToAppend, sideloadedEntriesSize, nil
 }
 
 // func iterateEntries(
@@ -356,7 +527,7 @@ func maybeInlineSideloadedRaftCommand(
 		if err != nil {
 			return nil, err
 		}
-		ent.Data = encodeRaftCommandV2(cmdID, data)
+		ent.Data = EncodeRaftCommandV2(cmdID, data)
 	}
 	return &ent, nil
 }
