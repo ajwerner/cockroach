@@ -2310,7 +2310,6 @@ func (r *Replica) applyRaftCommand(
 		batch = r.store.Engine().NewBatch()
 	}
 	defer batch.Close()
-
 	if writeBatch != nil {
 		if err := batch.ApplyBatchRepr(writeBatch.Data, false); err != nil {
 			return storagepb.ReplicatedEvalResult{}, errors.Wrap(err, "unable to apply WriteBatch")

@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/pkg/errors"
+	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
 )
 
@@ -42,19 +43,43 @@ type GroupID int64
 // PeerID is a replica id :/
 type PeerID int64
 
-type proposalMessage interface {
-	id() storagebase.CmdIDKey
-	size() int
+type ProposalMessage interface {
+	ID() storagebase.CmdIDKey
+	Encoded() []byte
+	Size() int
 }
 
-func (pm ProposalMessage) size() int { return len(pm) }
-func (pm ProposalMessage) id() storagebase.CmdIDKey {
-	return EncodedCommand(pm).ID()
+type ConfChangeMessage interface {
+	ProposalMessage
+	ChangeType() raftpb.ConfChangeType
+	PeerID() PeerID
 }
 
-func (ccm *ConfChangeMessage) size() int { return len(ccm.Command) }
-func (ccm *ConfChangeMessage) id() storagebase.CmdIDKey {
+var _ ProposalMessage = EncodedProposalMessage(nil)
+
+func (epm EncodedProposalMessage) Size() int { return len(epm) }
+func (epm EncodedProposalMessage) ID() storagebase.CmdIDKey {
+	return EncodedCommand(epm).ID()
+}
+func (epm EncodedProposalMessage) Encoded() []byte { return []byte(epm) }
+
+var _ ConfChangeMessage = (*ConfChange)(nil)
+
+func (ccm *ConfChange) Size() int { return len(ccm.Command) }
+func (ccm *ConfChange) ID() storagebase.CmdIDKey {
 	return ccm.Command.ID()
+}
+
+func (ccm *ConfChange) PeerID() PeerID {
+	return ccm.Peer
+}
+
+func (ccm *ConfChange) ChangeType() raftpb.ConfChangeType {
+	return ccm.Type
+}
+
+func (ccm *ConfChange) Encoded() []byte {
+	return []byte(ccm.Command)
 }
 
 type EncodedCommand []byte
@@ -73,11 +98,11 @@ func (ec EncodedCommand) Decode() (storagebase.CmdIDKey, []byte) {
 }
 
 // ProposalMessage is used to propose commands to the system.
-type ProposalMessage EncodedCommand
+type EncodedProposalMessage EncodedCommand
 
-type ConfChangeMessage struct {
+type ConfChange struct {
 	Type    raftpb.ConfChangeType
-	PeerID  PeerID
+	Peer    PeerID
 	Command EncodedCommand
 }
 
@@ -85,9 +110,9 @@ type ConfChangeMessage struct {
 type RaftMessage interface {
 	connect.Message
 	GetGroupID() GroupID
-	SetGroupID(GroupID)
+	// SetGroupID(GroupID)
 	GetRaftMessage() raftpb.Message
-	SetRaftMessage(raftpb.Message)
+	// SetRaftMessage(raftpb.Message)
 }
 
 type TestingKnobs struct {
@@ -178,11 +203,11 @@ type FactoryConfig struct {
 
 	Settings *cluster.Settings
 
-	RaftMessageFactory     func() RaftMessage
-	SideloadStorageFactory func(GroupID) SideloadStorage
-	StateLoaderFactory     func(GroupID) StateLoader
-	EntryCacheFactory      func(GroupID) EntryCache
-	EntryScannerFactory    func(GroupID) EntryReader
+	//RaftMessageFactory     func() RaftMessage
+	// 	SideloadStorageFactory func(GroupID) SideloadStorage
+	StateLoaderFactory  func(GroupID) StateLoader
+	EntryCacheFactory   func(GroupID) EntryCache
+	EntryScannerFactory func(GroupID) EntryReader
 }
 
 type EntryReader func(_ context.Context, _ engine.Reader, lo, hi uint64, f func(raftpb.Entry) (wantMore bool, err error)) error
@@ -205,6 +230,13 @@ func NewFactory(ctx context.Context, cfg FactoryConfig) (*Factory, error) {
 	); err != nil {
 		panic(errors.Wrap(err, "failed to start recv loop"))
 	}
+	if err := pf.cfg.Stopper.RunAsyncTask(
+		ctx, "shutdown waiter", func(ctx context.Context) {
+			<-pf.cfg.Stopper.ShouldQuiesce()
+			pf.cfg.RaftTransport.Close(ctx, false)
+		}); err != nil {
+		panic(errors.Wrap(err, "failed to start shutdown waiter"))
+	}
 	return &pf, nil
 }
 
@@ -226,9 +258,9 @@ type Factory struct {
 }
 
 func (pf *Factory) processReady(ctx context.Context, id GroupID) {
-	// if log.V(0) {
-	log.Infof(ctx, "processing ready for %d", id)
-	// }
+	if log.V(2) {
+		log.Infof(ctx, "processing ready for %d", id)
+	}
 	pf.mu.RLock()
 	p, ok := pf.mu.peers[id]
 	pf.mu.RUnlock()
@@ -240,19 +272,51 @@ func (pf *Factory) processReady(ctx context.Context, id GroupID) {
 }
 
 func (pf *Factory) processRequestQueue(ctx context.Context, id GroupID) bool {
+	log.Infof(ctx, "processing request queue %v", id)
 	pf.mu.RLock()
 	p, ok := pf.mu.peers[id]
 	pf.mu.RUnlock()
+	// TODO(ajwerner): think harder about this locking
 	if !ok {
 		return false
 	}
-	exists, err := p.tick(ctx, func(peerID PeerID) bool {
-		return pf.liveness(id, peerID)
-	})
-	if err != nil {
-		log.Error(ctx, err)
+	p.msgQueueMu.Lock()
+	msgs := p.msgQueueMu.msgQueue
+	p.msgQueueMu.msgQueue = msgs[len(msgs)-1:]
+	p.msgQueueMu.Unlock()
+
+	// TODO(ajwerner): deal with error handling
+	// TODO(ajwerner): deal with life cycle weirdness
+	for _, msg := range msgs {
+		if err := p.withRaftGroup(false, func(raftGroup *raft.RawNode) (bool, error) {
+			// We're processing a message from another replica which means that the
+			// other replica is not quiesced, so we don't need to wake the leader.
+			// Note that we avoid campaigning when receiving raft messages, because
+			// we expect the originator to campaign instead.
+			err := raftGroup.Step(msg)
+			if err == raft.ErrProposalDropped {
+				// A proposal was forwarded to this replica but we couldn't propose it.
+				// Swallow the error since we don't have an effective way of signaling
+				// this to the sender.
+				// TODO(bdarnell): Handle ErrProposalDropped better.
+				// https://github.com/cockroachdb/cockroach/issues/21849
+				err = nil
+			}
+			return false /* unquiesceAndWakeLeader */, err
+		}); err != nil {
+			panic(errors.Wrap(err, "failed to step my messages"))
+		}
 	}
-	return exists
+
+	if _, expl, err := p.handleRaftReady(ctx); err != nil {
+		fatalOnRaftReadyErr(ctx, expl, err)
+	}
+	return true
+}
+
+func fatalOnRaftReadyErr(ctx context.Context, expl string, err error) {
+	// Mimic the behavior in processRaft.
+	log.Fatalf(ctx, "%s: %s", log.Safe(expl), err) // TODO(bdarnell)
 }
 
 // Process a raft tick for the specified range. Return true if the range
@@ -287,7 +351,7 @@ func (f *Factory) recvLoop(ctx context.Context) {
 			// I think what we'll do is have the contract be that messages sent to peers which don't exist will just be dropped
 			groupID := msg.GetGroupID()
 			if groupID == 0 {
-				panic("There shouldn't ever be a zero group ID")
+				panic(errors.Errorf("There shouldn't ever be a zero group ID: %v", msg))
 			}
 			p := f.getPeer(groupID)
 			if p == nil {
@@ -296,7 +360,7 @@ func (f *Factory) recvLoop(ctx context.Context) {
 			}
 			raftMsg := msg.GetRaftMessage()
 			p.enqueueRaftMessage(raftMsg)
-			f.scheduler.EnqueueRaftReady(groupID)
+			f.scheduler.EnqueueRaftRequest(groupID)
 		case nil:
 			return
 		default:
@@ -345,11 +409,18 @@ func (f *Factory) Destroy(p *Peer) {
 	panic("not implemented")
 }
 
+type ProcessCommandFunc func(ctx context.Context, eng engine.ReadWriter, term, index uint64, command []byte)
+type ProcessConfChangeFunc func(ctx context.Context, eng engine.ReadWriter, term, index uint64, command []byte) (confChanged bool)
+
 type PeerConfig struct {
 	log.AmbientContext
-	GroupID GroupID
-	PeerID  PeerID
-	Peers   []PeerID
+	GroupID            GroupID
+	PeerID             PeerID
+	Peers              []PeerID
+	ProcessCommand     ProcessCommandFunc
+	ProcessConfChanged ProcessConfChangeFunc
+	RaftMessageFactory func(raftpb.Message) RaftMessage
+	SideloadStorage    SideloadStorage
 }
 
 func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
@@ -363,27 +434,29 @@ func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
 		return p, nil
 	}
 	p = &Peer{
-		AmbientContext: cfg.AmbientContext,
-		settings:       &f.cfg.Settings.SV,
-		testingKnobs:   &f.cfg.TestingKnobs,
-		groupID:        cfg.GroupID,
-		raftConfig:     &f.cfg.RaftConfig,
-		raftMessageFactory: func() RaftMessage {
-			m := f.cfg.RaftMessageFactory()
-			m.SetGroupID(cfg.GroupID)
-			return m
-		},
-		storage:     f.cfg.Storage,
-		onUnquiesce: func() { f.onUnquiesce(cfg.GroupID) },
+		AmbientContext:     cfg.AmbientContext,
+		settings:           &f.cfg.Settings.SV,
+		testingKnobs:       &f.cfg.TestingKnobs,
+		groupID:            cfg.GroupID,
+		raftConfig:         &f.cfg.RaftConfig,
+		raftMessageFactory: cfg.RaftMessageFactory,
+		storage:            f.cfg.Storage,
+		onUnquiesce:        func() { f.onUnquiesce(cfg.GroupID) },
+		processCommand:     cfg.ProcessCommand,
+		processConfChange:  cfg.ProcessConfChanged,
 	}
+
 	p.mu.peerID = cfg.PeerID
 	p.mu.peers = cfg.Peers
 	p.entryCache = f.cfg.EntryCacheFactory(cfg.GroupID)
+	p.raftTransport = f.cfg.RaftTransport
 	p.entryReader = f.cfg.EntryScannerFactory(cfg.GroupID)
 	p.mu.stateLoader = f.cfg.StateLoaderFactory(cfg.GroupID)
 	p.raftMu.stateLoader = f.cfg.StateLoaderFactory(cfg.GroupID)
+	p.raftMu.sideloaded = cfg.SideloadStorage
 	f.mu.peers[cfg.GroupID] = p
 	f.mu.unquiesced[cfg.GroupID] = struct{}{}
+	p.mu.proposals = make(map[storagebase.CmdIDKey]*proposal)
 	f.mu.Unlock()
 	p.withRaftGroupLocked(false, nil)
 	return p, nil
@@ -443,6 +516,8 @@ func (pc *PeerClient) Send(ctx context.Context, msg connect.Message) {
 	if !ok {
 		panic(fmt.Errorf("got %T, expected %T", msg, (ProposalMessage)(nil)))
 	}
+	pc.syn.Unlock()
+	defer pc.syn.Lock()
 	pc.peer.addProposal(&proposal{
 		ctx: ctx,
 		syn: pc.syn,
@@ -464,6 +539,7 @@ type ErrorMessage struct {
 }
 
 func (pc *PeerClient) Recv() connect.Message {
+
 	pc.cond.Wait()
 	if pc.commitErr != nil {
 		return &ErrorMessage{Err: pc.commitErr}
@@ -477,7 +553,7 @@ type proposal struct {
 	ctx             context.Context
 	syn             sync.Locker
 	pc              *PeerClient
-	msg             proposalMessage
+	msg             ProposalMessage
 	proposedAtTicks int
 }
 

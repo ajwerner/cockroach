@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 )
@@ -207,7 +206,6 @@ func (s *scheduler) worker(ctx context.Context) {
 				state |= stateRaftReady
 			}
 		}
-		log.Infof(ctx, "ready %v", state&stateRaftReady)
 		if state&stateRaftReady != 0 {
 			s.processor.processReady(ctx, id)
 		}

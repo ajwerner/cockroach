@@ -82,13 +82,17 @@ type Peer struct {
 
 	// raftTransport is exclusively for outbound traffic.
 	// inbound traffic will come on the message queue.
-	raftTransport      connect.Conn
-	raftMessageFactory func() RaftMessage
-	shouldCampaign     func(ctx context.Context, status *raft.Status) bool
-	onUnquiesce        func()
-	storage            engine.Engine
-	entryReader        EntryReader
-	entryCache         EntryCache
+	raftTransport connect.Conn
+
+	shouldCampaign func(ctx context.Context, status *raft.Status) bool
+	onUnquiesce    func()
+	storage        engine.Engine
+	entryReader    EntryReader
+	entryCache     EntryCache
+
+	processCommand     ProcessCommandFunc
+	processConfChange  ProcessConfChangeFunc
+	raftMessageFactory func(raftpb.Message) RaftMessage
 
 	// mu < msgQueueMu < unreachablesMu
 	mu struct {
@@ -98,14 +102,9 @@ type Peer struct {
 
 		appliedIndex uint64 // same as Replica.mu.state.RaftAppliedIndex?
 
-		// initialized is true when either a peer has been created as a part of a
-		// new group or after a peer created eagerly from a message send receives
-		// a snapshot.
-		initialized bool
-
 		// PeerID is the current peer's ID.
-		// It is zero when the Peer was created from a snapshot.
-		peerID              PeerID
+		peerID PeerID
+
 		leaderID            PeerID
 		ticks               uint64
 		lastIndex, lastTerm uint64
@@ -176,12 +175,6 @@ type Peer struct {
 	}
 }
 
-func (p *Peer) isInitialized() bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.mu.initialized
-}
-
 // TODO: see cleanupFailedProposalsLocked
 func (p *Peer) Progress() Progress {
 	panic("not implemented")
@@ -236,7 +229,6 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 		}
 		return hasReady /* unquiesceAndWakeLeader */, nil
 	})
-	log.Infof(ctx, "%+#v %v", rd, hasReady)
 	p.mu.Unlock()
 	if err != nil {
 		const expl = "while checking raft group for Ready"
@@ -331,9 +323,6 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 		}
 	}
 	if !raft.IsEmptyHardState(rd.HardState) {
-		if !p.isInitialized() && rd.HardState.Commit != 0 {
-			log.Fatalf(ctx, "setting non-zero HardState.Commit on uninitialized replica %s. HS=%+v", p, rd.HardState)
-		}
 		log.Infof(ctx, "setting that hard state %v %v", p.raftMu.stateLoader, rd.HardState)
 		if err := p.raftMu.stateLoader.SetHardState(ctx, writer, rd.HardState); err != nil {
 			const expl = "during setHardState"
@@ -415,6 +404,11 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 	p.sendRaftMessages(ctx, otherMsgs)
 	p.traceEntries(rd.CommittedEntries, "committed, before applying any entries")
 	// applicationStart := timeutil.Now()
+	var commitBatch engine.Batch
+	if len(rd.CommittedEntries) > 0 {
+		commitBatch = p.storage.NewBatch()
+		defer commitBatch.Close()
+	}
 	for _, e := range rd.CommittedEntries {
 		switch e.Type {
 		case raftpb.EntryNormal:
@@ -423,7 +417,6 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 			// already inlined.
 
 			var commandID storagebase.CmdIDKey
-			var command storagepb.RaftCommand
 
 			// Process committed entries. etcd raft occasionally adds a nil entry
 			// (our own commands are never empty). This happens in two situations:
@@ -443,21 +436,19 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 				}
 				commandID = "" // special-cased value, command isn't used
 			} else {
-				var encodedCommand []byte
-				commandID, encodedCommand = DecodeRaftCommand(e.Data)
-				// An empty command is used to unquiesce a range and wake the
-				// leader. Clear commandID so it's ignored for processing.
-				if len(encodedCommand) == 0 {
-					commandID = ""
-				} else if err := protoutil.Unmarshal(encodedCommand, &command); err != nil {
-					const expl = "while unmarshalling entry"
-					return stats, expl, errors.Wrap(err, expl)
-				}
+
+				// // commandID, encodedCommand = DecodeRaftCommand(e.Data)
+				// // // An empty command is used to unquiesce a range and wake the
+				// // // leader. Clear commandID so it's ignored for processing.
+				// // if len(encodedCommand) == 0 {
+				// // 	commandID = ""
+				// // } else if err := protoutil.Unmarshal(encodedCommand, &command); err != nil {
+				// // 	const expl = "while unmarshalling entry"
+				// // 	return stats, expl, errors.Wrap(err, expl)
+				// // }
 			}
 
-			if changedRepl := p.processRaftCommand(ctx, commandID, e.Term, e.Index, command); changedRepl {
-				log.Fatalf(ctx, "unexpected replication change from command %s", &command)
-			}
+			p.processRaftCommand(ctx, commitBatch, e.Term, e.Index, e.Data)
 			// r.store.metrics.RaftCommandsApplied.Inc(1)
 			stats.processed++
 
@@ -498,9 +489,7 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 				const expl = "while unmarshalling entry"
 				return stats, expl, errors.Wrap(err, expl)
 			}
-			if changedRepl := p.processRaftCommand(
-				ctx, commandID, e.Term, e.Index, command,
-			); !changedRepl {
+			if changedRepl := p.processRaftConfChange(ctx, commitBatch, e.Term, e.Index, e.Data); !changedRepl {
 				// If we did not apply the config change, tell raft that the config change was aborted.
 				cc = raftpb.ConfChange{}
 			}
@@ -526,13 +515,19 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 			log.Fatalf(ctx, "unexpected Raft entry: %v", e)
 		}
 	}
+	if commitBatch != nil {
+		if err := commitBatch.Commit(false); err != nil {
+			panic(err)
+		}
+	}
+
 	// applicationElapsed := timeutil.Since(applicationStart).Nanoseconds()
 	// r.store.metrics.RaftApplyCommittedLatency.RecordValue(applicationElapsed)
 	if refreshReason != noReason {
-		// p.mu.Lock()
-		// p.refreshProposalsLocked(0, refreshReason)
-		// p.mu.Unlock()
-		panic("not implemented")
+		p.mu.Lock()
+		//p.refreshProposalsLocked(0, refreshReason)
+		p.mu.Unlock()
+		log.Warningf(ctx, "TODO(ajwerner): not sure how to handle refresh reason: %v", refreshReason)
 	}
 
 	// TODO(bdarnell): need to check replica id and not Advance if it
@@ -548,7 +543,7 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 		// and we didn't apply all of them in this pass.
 		if raftGroup.HasReady() {
 			// TODO(ajwerner): deal with this case
-			panic("need to reenqueue this peer")
+			log.Warningf(ctx, "need to reenqueue this peer for raftUpdateCheck")
 			// p.store.enqueueRaftUpdateCheck(r.RangeID)
 		}
 		return true, nil
@@ -627,10 +622,10 @@ func (p *Peer) sendRaftMessage(ctx context.Context, msg raftpb.Message) {
 
 	// TODO(ajwerner): deal with snapshots, probably do this above inside the
 	// conn. Also coalesced heartbeats.
-
-	raftMsg := p.raftMessageFactory()
-	raftMsg.SetRaftMessage(msg)
-	p.raftTransport.Send(ctx, raftMsg)
+	raftMsg := p.raftMessageFactory(msg)
+	if raftMsg != nil {
+		p.raftTransport.Send(ctx, raftMsg)
+	}
 
 	// TODO(ajwerner): need to figure out how much the peer needs to know about
 	// where remote replicas live. Who tracks this? It probably can't be the
@@ -638,12 +633,29 @@ func (p *Peer) sendRaftMessage(ctx context.Context, msg raftpb.Message) {
 }
 
 func (p *Peer) processRaftCommand(
-	ctx context.Context,
-	idKey storagebase.CmdIDKey,
-	term, raftIndex uint64,
-	raftCmd storagepb.RaftCommand,
-) (changedRepl bool) {
-	panic("not implemented")
+	ctx context.Context, eng engine.ReadWriter, term, raftIndex uint64, command []byte,
+) {
+	log.Infof(ctx, "processRaftCommand %v %v %v", term, raftIndex, command)
+	if len(command) == 0 {
+		return
+	}
+	id, _ := DecodeRaftCommand(command)
+
+	p.processCommand(ctx, eng, term, raftIndex, command)
+	p.mu.Lock()
+
+	prop, exists := p.mu.proposals[id]
+	if exists {
+		delete(p.mu.proposals, id)
+		defer prop.pc.cond.Signal()
+	}
+	p.mu.Unlock()
+}
+
+func (p *Peer) processRaftConfChange(
+	ctx context.Context, eng engine.ReadWriter, term, raftIndex uint64, command []byte,
+) (changeRepl bool) {
+	return p.processConfChange(ctx, eng, term, raftIndex, command)
 }
 
 // TODO(ajwerner): add feedback for failed message sends
@@ -699,6 +711,7 @@ func (p *Peer) withRaftGroupLocked(
 			return err
 		}
 		p.mu.rawNode = raftGroup
+		log.Infof(ctx, "raft group: %v %v", raftGroup, raftGroup.Status())
 
 		if mayCampaignOnWake {
 			p.maybeCampaignOnWakeLocked(ctx)
@@ -741,7 +754,7 @@ func (p *Peer) enqueueRaftMessage(m raftpb.Message) {
 
 func (p *Peer) addProposal(prop *proposal) {
 	// TODO(ajwerner): deal with returning things?
-	proposalSize := prop.msg.size()
+	proposalSize := prop.msg.Size()
 	if proposalSize > int(MaxCommandSize.Get(p.settings)) {
 		// Once a command is written to the raft log, it must be loaded
 		// into memory and replayed on all replicas. If a command is
@@ -758,7 +771,6 @@ func (p *Peer) addProposal(prop *proposal) {
 	if p.mu.rawNode == nil {
 		// Unlock first before locking in {raft,replica}mu order.
 		p.mu.Unlock()
-
 		p.raftMu.Lock()
 		defer p.raftMu.Unlock()
 		p.mu.Lock()
@@ -766,11 +778,12 @@ func (p *Peer) addProposal(prop *proposal) {
 	} else {
 		log.Event(prop.ctx, "acquired replica mu")
 	}
-	id := prop.msg.id()
+	id := prop.msg.ID()
 	// Add size of proposal to commandSizes map.
 	if p.mu.commandSizes != nil {
 		p.mu.commandSizes[id] = proposalSize
 	}
+	p.mu.proposals[id] = prop
 	// TODO(ajwerner): deal with replica state here?
 	// Some sort of callback magic for dealing with grabbing lease index?
 	switch msg := prop.msg.(type) {
@@ -783,14 +796,16 @@ func (p *Peer) addProposal(prop *proposal) {
 			// we're quiesced.
 			// TODO(ajwerner): deal with unquiesce
 			// p.unquiesceLocked()
-			if err := raftGroup.Campaign(); err != nil {
+			return false /* unquiesceAndWakeLeader */, raftGroup.Propose(msg.Encoded())
+		}); err != nil {
+			if err == raft.ErrProposalDropped {
+				log.Infof(prop.ctx, "failed to submit proposal %q: %v", msg.ID(), err)
+			} else {
 				panic(err)
 			}
-			return false /* unquiesceAndWakeLeader */, raftGroup.Propose([]byte(msg))
-		}); err != nil {
-			panic(err)
 		}
-	case *ConfChangeMessage:
+		// So then at the end we need to go and ack all of the proposals right?
+	case ConfChangeMessage:
 		// EndTransactionRequest with a ChangeReplicasTrigger is special
 		// because raft needs to understand it; it cannot simply be an
 		// opaque command.
@@ -802,7 +817,8 @@ func (p *Peer) addProposal(prop *proposal) {
 		// leases can stay in such a state for a very long time when using epoch-
 		// based range leases). This shouldn't happen often, but has been seen
 		// before (#12591).
-		if msg.Type == raftpb.ConfChangeRemoveNode && msg.PeerID == p.mu.peerID {
+
+		if msg.ChangeType() == raftpb.ConfChangeRemoveNode && msg.PeerID() == p.mu.peerID {
 			log.Errorf(prop.ctx, "received invalid ChangeReplicasTrigger %s to remove self (leaseholder)", msg)
 			panic(errors.Errorf("%v: received invalid ChangeReplicasTrigger %v to remove self (leaseholder)", p, p.mu.peerID))
 		}
@@ -812,9 +828,9 @@ func (p *Peer) addProposal(prop *proposal) {
 			// p.unquiesceLocked()
 			return false, /* unquiesceAndWakeLeader */
 				raftGroup.ProposeConfChange(raftpb.ConfChange{
-					Type:    msg.Type,
-					NodeID:  uint64(msg.PeerID),
-					Context: []byte(msg.Command),
+					Type:    msg.ChangeType(),
+					NodeID:  uint64(msg.PeerID()),
+					Context: []byte(msg.Encoded()),
 				})
 		}); err != nil {
 			panic(err)
@@ -823,6 +839,9 @@ func (p *Peer) addProposal(prop *proposal) {
 }
 
 func (p *Peer) updateProposalQuota(ctx context.Context, lastLeaderID PeerID) {
+	if r := recover(); r != nil {
+		panic(r)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -1186,7 +1205,7 @@ func (p *Peer) unquiesceAndWakeLeaderLocked() {
 		p.mu.quiescent = false
 		p.onUnquiesce()
 		if p.shouldCampaign(ctx, p.mu.rawNode.Status()) {
-			log.VEventf(ctx, 3, "campaigning")
+			log.VEventf(ctx, 3, "campaigning ")
 			if err := p.mu.rawNode.Campaign(); err != nil {
 				log.VEventf(ctx, 1, "failed to campaign: %s", err)
 			}
