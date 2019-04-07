@@ -119,7 +119,7 @@ func logSlowQuota(ctx context.Context, v int64, start time.Time) func() {
 //
 // Safe for concurrent use.
 func (qp *quotaPool) acquire(prop *proposal) error {
-	v := int64(prop.msg.size())
+	v := int64(prop.msg.Size())
 	if v > qp.max {
 		v = qp.max
 	}

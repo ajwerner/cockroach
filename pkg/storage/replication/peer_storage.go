@@ -25,14 +25,14 @@ var _ raft.Storage = (*peerStorage)(nil)
 
 // InitialState implements the raft.Storage interface.
 // InitialState requires that r.mu is held.
-func (p *peerStorage) InitialState() (raftpb.HardState, raftpb.ConfState, error) {
+func (p *peerStorage) InitialState() (hs raftpb.HardState, cs raftpb.ConfState, err error) {
 	ctx := p.AnnotateCtx(context.TODO())
-	hs, err := p.mu.stateLoader.LoadHardState(ctx, p.storage)
+	hs, err = p.mu.stateLoader.LoadHardState(ctx, p.storage)
 	// For uninitialized ranges, membership is unknown at this point.
 	if raft.IsEmptyHardState(hs) || err != nil {
 		return raftpb.HardState{}, raftpb.ConfState{}, err
 	}
-	var cs raftpb.ConfState
+	// var cs raftpb.ConfState
 	for _, peerID := range p.mu.peers {
 		cs.Nodes = append(cs.Nodes, uint64(peerID))
 	}

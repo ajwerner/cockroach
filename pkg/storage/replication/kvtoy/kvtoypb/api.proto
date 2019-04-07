@@ -1,0 +1,194 @@
+// Copyright 2019 The Cockroach Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
+
+
+syntax = "proto3";
+package cockroach.storage.replication.kvtoy;
+option go_package = "kvtoypb";
+
+import "roachpb/errors.proto";
+import "roachpb/metadata.proto";
+import "roachpb/data.proto";
+import "gogoproto/gogo.proto";
+
+
+// RequestHeader is supplied with every storage node request.
+message RequestHeader {
+  option (gogoproto.equal) = true;
+
+  reserved 1, 2;
+  // The key for request. If the request operates on a range, this
+  // represents the starting key for the range.
+  bytes key = 3 [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.Key"];
+}
+
+message ResponseHeader {
+}
+
+
+
+// A RequestUnion contains exactly one of the requests.
+// The values added here must match those in ResponseUnion.
+//
+// Be cautious about deprecating fields as doing so can lead to inconsistencies
+// between replicas.
+message RequestUnion {
+  oneof value {
+    GetRequest get = 1;
+    PutRequest put = 2;
+    ConditionalPutRequest conditional_put = 3;
+    DeleteRequest delete = 5;
+ }
+}
+
+// A ResponseUnion contains exactly one of the responses.
+// The values added here must match those in RequestUnion.
+message ResponseUnion {
+  oneof value {
+    GetResponse get = 1;
+    PutResponse put = 2;
+    ConditionalPutResponse conditional_put = 3;
+    DeleteResponse delete = 5;
+  } 
+}
+
+// A GetRequest is the argument for the Get() method.
+message GetRequest {
+  option (gogoproto.equal) = true;
+
+  RequestHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+}
+
+
+// A GetResponse is the return value from the Get() method.
+// If the key doesn't exist, Value will be nil.
+message GetResponse {
+  ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  roachpb.Value value = 2;
+}
+
+
+// A PutRequest is the argument to the Put() method.
+message PutRequest {
+  option (gogoproto.equal) = true;
+
+  RequestHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  roachpb.Value value = 2 [(gogoproto.nullable) = false];
+  // Specify as true to put the value without a corresponding
+  // timestamp. This option should be used with care as it precludes
+  // the use of this value with transactions.
+  bool inline = 3;
+  // NOTE: For internal use only! Set to indicate that the put is
+  // writing to virgin keyspace and no reads are necessary to
+  // rationalize MVCC.
+  bool blind = 4;
+}
+
+// A PutResponse is the return value from the Put() method.
+message PutResponse {
+}
+
+// A ConditionalPutRequest is the argument to the ConditionalPut() method.
+//
+// - Returns true and sets value if exp_value equals existing value.
+// - If key doesn't exist and exp_value is nil, sets value.
+// - If key exists, but value is empty and exp_value is not nil but empty, sets value.
+// - Otherwise, returns an error containing the actual value of the key.
+message ConditionalPutRequest {
+  option (gogoproto.equal) = true;
+
+  RequestHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  // The value to put.
+  roachpb.Value value = 2 [(gogoproto.nullable) = false];
+  // Set exp_value.bytes empty to test for non-existence. Specify as nil
+  // to indicate there should be no existing entry. This is different
+  // from the expectation that the value exists but is empty.
+  roachpb.Value exp_value = 3;
+  // NOTE: For internal use only! Set to indicate that the put is
+  // writing to virgin keyspace and no reads are necessary to
+  // rationalize MVCC.
+  bool blind = 4;
+  // Typically if a specific, non-empty expected value is supplied, it *must*
+  // exist with that value. Passing this indicates that it is also OK if the key
+  // does not exist. This is useful when a given value is expected but it is
+  // possible it has not yet been written.
+  bool allow_if_does_not_exist = 5;
+}
+
+// A DeleteRequest is the argument to the Delete() method.
+message DeleteRequest {
+  option (gogoproto.equal) = true;
+
+  RequestHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+}
+
+// A DeleteResponse is the return value from the Delete() method.
+message DeleteResponse {
+  ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+}
+
+
+
+// A ConditionalPutResponse is the return value from the
+// ConditionalPut() method.
+message ConditionalPutResponse {
+  ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+}
+
+// A BatchRequest contains one or more requests to be executed in
+// parallel, or if applicable (based on write-only commands and
+// range-locality), as a single update.
+message BatchRequest {
+  option (gogoproto.goproto_stringer) = false;
+
+  Header header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  repeated RequestUnion requests = 2 [(gogoproto.nullable) = false];
+}
+
+// A BatchResponse contains one or more responses, one per request
+// corresponding to the requests in the matching BatchRequest. The
+// error in the response header is set to the first error from the
+// slice of responses, if applicable.
+message BatchResponse {
+  option (gogoproto.goproto_stringer) = false;
+
+  message Header {
+    reserved 4;
+    // error communicates a structured error (i.e. one originating from a Node)
+    // while the BatchResponse is sent over the network. If the code were
+    // written today, the RPC endpoint would return a message containing both a
+    // BatchResponse and an Error, and this embedding would go away. However, it
+    // returns only a BatchResponse, and so the Error needs to be tucked away
+    // somewhere (the structured error cannot be communicated via an RPC-level
+    // error).
+    //
+    // Outside of the RPC boundaries, this field is nil and must neither be
+    // checked nor populated (it is reset by the DistSender, which extracts this
+    // error and returns it separately). In effect, nearly no usage of
+    // BatchResponse needs to care about this field.
+    roachpb.Error error = 1;
+  }
+  Header header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+  repeated ResponseUnion responses = 2 [(gogoproto.nullable) = false];
+}
+
+// A Header is attached to a BatchRequest, encapsulating routing and auxiliary
+// information required for executing it.
+message Header {
+}
+
+// Batch and RangeFeed service implemeted by nodes for KV API requests.
+service Internal {
+  rpc Batch     (BatchRequest)     returns (BatchResponse)         {}
+}
