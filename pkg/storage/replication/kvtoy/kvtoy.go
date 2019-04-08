@@ -14,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/connect"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
@@ -382,8 +383,10 @@ func NewStore(ctx context.Context, cfg StoreConfig) (s *Store, err error) {
 }
 
 type StoreConfig struct {
-	// StoreID is manually assigned for simplicity.
+	// NodeID and StoreID are manually assigned for simplicity.
 	// DO NOT DUPLICATE THEM!
+
+	NodeID  roachpb.NodeID
 	StoreID roachpb.StoreID
 
 	Settings      *cluster.Settings
@@ -392,16 +395,23 @@ type StoreConfig struct {
 	EntryCache    *raftentry.Cache
 	Engine        engine.Engine
 	RaftTransport connect.Conn
+	Clock         *hlc.Clock
+	Ambient       log.AmbientContext
+	NodeDialer    *nodedialer.Dialer
 }
 
-func TestingStoreConfig() StoreConfig {
+func TestingStoreConfig(nodeID roachpb.NodeID) StoreConfig {
 	cfg := StoreConfig{
-		Settings:      cluster.MakeTestingClusterSettings(),
-		Stopper:       stop.NewStopper(),
-		EntryCache:    raftentry.NewCache(1 << 16),
-		Engine:        engine.NewInMem(roachpb.Attributes{}, 1<<26 /* 64 MB */),
-		RaftTransport: newDuplexManualTransport(),
+		NodeID:     nodeID,
+		StoreID:    roachpb.StoreID(nodeID),
+		Settings:   cluster.MakeTestingClusterSettings(),
+		Clock:      hlc.NewClock(hlc.UnixNano, 0),
+		Stopper:    stop.NewStopper(),
+		EntryCache: raftentry.NewCache(1 << 16),
+		Engine:     engine.NewInMem(roachpb.Attributes{}, 1<<26 /* 64 MB */),
+		Ambient:    log.AmbientContext{},
 	}
+	cfg.Ambient.AddLogTag("s", cfg.StoreID)
 	cfg.RaftConfig.SetDefaults()
 	cfg.RaftConfig.RaftHeartbeatIntervalTicks = 1
 	cfg.RaftConfig.RaftElectionTimeoutTicks = 3

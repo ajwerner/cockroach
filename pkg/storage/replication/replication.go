@@ -34,85 +34,36 @@ import (
 	"go.etcd.io/etcd/raft/raftpb"
 )
 
-// Question: does it matter that we've been aggressively focusing on having
-
 // GroupID is the basic unit of replication.
 // Each peer corresponds to a single ID.
 type GroupID int64
 
-// PeerID is a replica id :/
+// PeerID is a ReplicaID.
+// TODO(ajwerner): I am on the fence as to whether the mixed terminology
+// helps or hurts.
 type PeerID int64
 
+// ProposalMessage is used to propose data to raft.
 type ProposalMessage interface {
 	ID() storagebase.CmdIDKey
 	Encoded() []byte
 	Size() int
 }
 
+// ConfChangeMessage is used to propose a configuration change to raft.
 type ConfChangeMessage interface {
 	ProposalMessage
 	ChangeType() raftpb.ConfChangeType
 	PeerID() PeerID
 }
 
-var _ ProposalMessage = EncodedProposalMessage(nil)
-
-func (epm EncodedProposalMessage) Size() int { return len(epm) }
-func (epm EncodedProposalMessage) ID() storagebase.CmdIDKey {
-	return EncodedCommand(epm).ID()
-}
-func (epm EncodedProposalMessage) Encoded() []byte { return []byte(epm) }
-
-var _ ConfChangeMessage = (*ConfChange)(nil)
-
-func (ccm *ConfChange) Size() int { return len(ccm.Command) }
-func (ccm *ConfChange) ID() storagebase.CmdIDKey {
-	return ccm.Command.ID()
-}
-
-func (ccm *ConfChange) PeerID() PeerID {
-	return ccm.Peer
-}
-
-func (ccm *ConfChange) ChangeType() raftpb.ConfChangeType {
-	return ccm.Type
-}
-
-func (ccm *ConfChange) Encoded() []byte {
-	return []byte(ccm.Command)
-}
-
-type EncodedCommand []byte
-
-func (ec EncodedCommand) ID() storagebase.CmdIDKey {
-	id, _ := ec.Decode()
-	return id
-}
-
-func (ec EncodedCommand) Decode() (storagebase.CmdIDKey, []byte) {
-	v := raftCommandEncodingVersion(ec[0] & raftCommandNoSplitMask)
-	if v != raftVersionStandard && v != raftVersionSideloaded {
-		panic(fmt.Sprintf("unknown command encoding version %v", ec[0]))
-	}
-	return storagebase.CmdIDKey(ec[1 : 1+raftCommandIDLen]), []byte(ec[1+raftCommandIDLen:])
-}
-
-// ProposalMessage is used to propose commands to the system.
-type EncodedProposalMessage EncodedCommand
-
-type ConfChange struct {
-	Type    raftpb.ConfChangeType
-	Peer    PeerID
-	Command EncodedCommand
-}
-
 // RaftMessage is a message used to send raft messages on the wire.
+// RaftMessage is created by a client provided factory function and the concrete
+// type is left up to the client.
 type RaftMessage interface {
 	connect.Message
 	GetGroupID() GroupID
-	// SetGroupID(GroupID)
 	GetRaftMessage() raftpb.Message
-	// SetRaftMessage(raftpb.Message)
 }
 
 type TestingKnobs struct {
@@ -409,9 +360,17 @@ func (f *Factory) Destroy(p *Peer) {
 	panic("not implemented")
 }
 
-type ProcessCommandFunc func(ctx context.Context, eng engine.ReadWriter, term, index uint64, command []byte)
-type ProcessConfChangeFunc func(ctx context.Context, eng engine.ReadWriter, term, index uint64, command []byte) (confChanged bool)
+// ProcessCommandFunc is used to handle committed raft commands.
+type ProcessCommandFunc func(
+	ctx context.Context, eng engine.ReadWriter, term, index uint64, command []byte,
+)
 
+// ProcessConfChangeFunc is used to handle committed raft config change commands.
+type ProcessConfChangeFunc func(
+	ctx context.Context, eng engine.ReadWriter, term, index uint64, command []byte,
+) (confChanged bool)
+
+// PeerConfig is used to create a new Peer.
 type PeerConfig struct {
 	log.AmbientContext
 	GroupID            GroupID
@@ -423,8 +382,9 @@ type PeerConfig struct {
 	SideloadStorage    SideloadStorage
 }
 
+// NewPeer creates a new peer.
+// It assumes that there is a peer ID and awareness of all of the other peers.
 func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
-	// TODO: actually implement
 	// We start out without a peer ID.
 	// We'll get one when we start receiving raft messages hopefully.
 	f.mu.Lock()
@@ -446,24 +406,20 @@ func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
 		processConfChange:  cfg.ProcessConfChanged,
 	}
 
-	p.mu.peerID = cfg.PeerID
-	p.mu.peers = cfg.Peers
-	p.entryCache = f.cfg.EntryCacheFactory(cfg.GroupID)
 	p.raftTransport = f.cfg.RaftTransport
 	p.entryReader = f.cfg.EntryScannerFactory(cfg.GroupID)
+	p.entryCache = f.cfg.EntryCacheFactory(cfg.GroupID)
+	p.mu.peerID = cfg.PeerID
+	p.mu.peers = cfg.Peers
 	p.mu.stateLoader = f.cfg.StateLoaderFactory(cfg.GroupID)
 	p.raftMu.stateLoader = f.cfg.StateLoaderFactory(cfg.GroupID)
 	p.raftMu.sideloaded = cfg.SideloadStorage
+	p.mu.proposals = make(map[storagebase.CmdIDKey]*proposal)
 	f.mu.peers[cfg.GroupID] = p
 	f.mu.unquiesced[cfg.GroupID] = struct{}{}
-	p.mu.proposals = make(map[storagebase.CmdIDKey]*proposal)
 	f.mu.Unlock()
 	p.withRaftGroupLocked(false, nil)
 	return p, nil
-}
-
-func (f *Factory) LoadPeer(logCtx log.AmbientContext, id GroupID) (*Peer, error) {
-	panic("not implemented")
 }
 
 var _ peerIface = (*Peer)(nil)
@@ -486,7 +442,6 @@ type PeerClient struct {
 	// TODO(ajwerner): Is it the case that they'll be called in order of the
 	// messages which are sent? Is there enforcement that a client only ever
 	// sends one message? Do we need to decorate the signatures?
-
 	Callbacks struct {
 
 		// DoCommit is a callback which occurs to allow the command to validate that
@@ -528,16 +483,19 @@ func (pc *PeerClient) Send(ctx context.Context, msg connect.Message) {
 
 // TODO(ajwerner): consider cancelling the proposal if possible.
 func (pc *PeerClient) Close(ctx context.Context, drain bool) {
-
+	panic("not implemented")
 }
 
+// CommittedMessage is send when a proposal has been comitted.
 type CommittedMessage struct {
 }
 
+// ErrorMessage is send when a proposal has not been comitted.
 type ErrorMessage struct {
 	Err error
 }
 
+// Recv will return a CommittedMessage or an ErrorMessage
 func (pc *PeerClient) Recv() connect.Message {
 
 	pc.cond.Wait()
@@ -561,6 +519,4 @@ type proposal struct {
 // group.
 type Progress interface {
 	AppliedIndex() uint64
-	LeaseSequence() int64
-	LeaseAppliedIndex() int64
 }

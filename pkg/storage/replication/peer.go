@@ -1249,11 +1249,11 @@ func MakeIDKey() storagebase.CmdIDKey {
 	return storagebase.CmdIDKey(idKeyBuf)
 }
 
-func EncodeRaftCommandV1(commandID storagebase.CmdIDKey, command []byte) EncodedCommand {
+func EncodeRaftCommandV1(commandID storagebase.CmdIDKey, command []byte) []byte {
 	return encodeRaftCommand(raftVersionStandard, commandID, command)
 }
 
-func EncodeRaftCommandV2(commandID storagebase.CmdIDKey, command []byte) EncodedCommand {
+func EncodeRaftCommandV2(commandID storagebase.CmdIDKey, command []byte) []byte {
 	return encodeRaftCommand(raftVersionSideloaded, commandID, command)
 }
 

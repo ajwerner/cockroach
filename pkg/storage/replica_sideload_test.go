@@ -511,7 +511,7 @@ func TestRaftSSTableSideloadingInline(t *testing.T) {
 			thin: mkEnt(v2, 5, 6, &sstThin), fat: mkEnt(v2, 5, 6, &sstFat),
 			setup: func(ec *raftentry.Cache, ss SideloadStorage) {
 				putOnDisk(ec, ss)
-				ec.Add(rangeID, []raftpb.Entry{mkEnt(v2, 5, 6, &sstFat)}, true)
+				ec.Add(int64(rangeID), []raftpb.Entry{mkEnt(v2, 5, 6, &sstFat)}, true)
 			}, expTrace: "using cache hit",
 		},
 		"v2-fat-without-file": {
@@ -995,7 +995,7 @@ func TestRaftSSTableSideloadingSnapshot(t *testing.T) {
 		tc.repl.mu.Lock()
 		defer tc.repl.mu.Unlock()
 		for _, withSS := range []bool{false, true} {
-			tc.store.raftEntryCache.Clear(tc.repl.RangeID, sideloadedIndex+1)
+			tc.store.raftEntryCache.Clear(int64(tc.repl.RangeID), sideloadedIndex+1)
 
 			var ss SideloadStorage
 			if withSS {
@@ -1012,7 +1012,7 @@ func TestRaftSSTableSideloadingSnapshot(t *testing.T) {
 			if len(entries) != 1 {
 				t.Fatalf("no or too many entries returned from cache: %+v", entries)
 			}
-			ents, _, _, _ := tc.store.raftEntryCache.Scan(nil, tc.repl.RangeID, sideloadedIndex, sideloadedIndex+1, 1<<20)
+			ents, _, _, _ := tc.store.raftEntryCache.Scan(nil, int64(tc.repl.RangeID), sideloadedIndex, sideloadedIndex+1, 1<<20)
 			if withSS {
 				// We passed the sideload storage, so we expect to get our
 				// inlined index back from the cache.
@@ -1061,7 +1061,7 @@ func TestRaftSSTableSideloadingSnapshot(t *testing.T) {
 		tc.repl.raftMu.Unlock()
 		// Additionally we need to clear out the entry from the cache because
 		// that would still save the day.
-		tc.store.raftEntryCache.Clear(tc.repl.RangeID, sideloadedIndex+1)
+		tc.store.raftEntryCache.Clear(int64(tc.repl.RangeID), sideloadedIndex+1)
 
 		mockSender := &mockSender{}
 		err = sendSnapshot(

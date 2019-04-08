@@ -6562,7 +6562,7 @@ func TestEntries(t *testing.T) {
 		// Case 19: lo and hi are available, but entry cache evicted.
 		{lo: indexes[5], hi: indexes[9], expResultCount: 4, expCacheCount: 0, setup: func() {
 			// Manually evict cache for the first 10 log entries.
-			repl.store.raftEntryCache.Clear(rangeID, indexes[9]+1)
+			repl.store.raftEntryCache.Clear(int64(rangeID), indexes[9]+1)
 			indexes = append(indexes, populateLogs(10, 40)...)
 		}},
 		// Case 20: lo and hi are available, entry cache evicted and hi available in cache.
@@ -6578,7 +6578,7 @@ func TestEntries(t *testing.T) {
 		if tc.maxBytes == 0 {
 			tc.maxBytes = math.MaxUint64
 		}
-		cacheEntries, _, _, hitLimit := repl.store.raftEntryCache.Scan(nil, rangeID, tc.lo, tc.hi, tc.maxBytes)
+		cacheEntries, _, _, hitLimit := repl.store.raftEntryCache.Scan(nil, int64(rangeID), tc.lo, tc.hi, tc.maxBytes)
 		if len(cacheEntries) != tc.expCacheCount {
 			t.Errorf("%d: expected cache count %d, got %d", i, tc.expCacheCount, len(cacheEntries))
 		}

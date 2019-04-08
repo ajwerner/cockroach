@@ -25,11 +25,9 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -611,35 +609,37 @@ func (t *RaftTransport) startProcessNewQueue(
 	return true
 }
 
-// SendSnapshot streams the given outgoing snapshot. The caller is responsible
-// for closing the OutgoingSnapshot.
-func (t *RaftTransport) SendSnapshot(
-	ctx context.Context,
-	raftCfg *base.RaftConfig,
-	storePool *StorePool,
-	header SnapshotRequest_Header,
-	snap *OutgoingSnapshot,
-	newBatch func() engine.Batch,
-	sent func(),
-) error {
-	var stream MultiRaft_RaftSnapshotClient
-	nodeID := header.RaftMessageRequest.ToReplica.NodeID
+// // The transport stuff is a big ball of wax
 
-	conn, err := t.dialer.Dial(ctx, nodeID)
-	if err != nil {
-		return err
-	}
+// // SendSnapshot streams the given outgoing snapshot. The caller is responsible
+// // for closing the OutgoingSnapshot.
+// func (t *RaftTransport) SendSnapshot(
+// 	ctx context.Context,
+// 	raftCfg *base.RaftConfig,
+// 	storePool *storage.StorePool,
+// 	header SnapshotRequest_Header,
+// 	snap *OutgoingSnapshot,
+// 	newBatch func() engine.Batch,
+// 	sent func(),
+// ) error {
+// 	var stream MultiRaft_RaftSnapshotClient
+// 	nodeID := header.RaftMessageRequest.ToReplica.NodeID
 
-	client := NewMultiRaftClient(conn)
-	stream, err = client.RaftSnapshot(ctx)
-	if err != nil {
-		return err
-	}
+// 	conn, err := t.dialer.Dial(ctx, nodeID)
+// 	if err != nil {
+// 		return err
+// 	}
 
-	defer func() {
-		if err := stream.CloseSend(); err != nil {
-			log.Warningf(ctx, "failed to close snapshot stream: %s", err)
-		}
-	}()
-	return sendSnapshot(ctx, raftCfg, t.st, stream, storePool, header, snap, newBatch, sent)
-}
+// 	client := NewMultiRaftClient(conn)
+// 	stream, err = client.RaftSnapshot(ctx)
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	defer func() {
+// 		if err := stream.CloseSend(); err != nil {
+// 			log.Warningf(ctx, "failed to close snapshot stream: %s", err)
+// 		}
+// 	}()
+// 	return sendSnapshot(ctx, raftCfg, t.st, stream, storePool, header, snap, newBatch, sent)
+// }
