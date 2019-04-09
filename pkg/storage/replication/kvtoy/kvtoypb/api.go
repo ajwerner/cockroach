@@ -21,3 +21,8 @@ type Request interface {
 	// Method returns the request method.
 	Method() Method
 }
+
+// Response is an interface for RPC responses.
+type Response interface {
+	protoutil.Message
+}

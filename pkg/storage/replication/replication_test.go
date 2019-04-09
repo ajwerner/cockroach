@@ -151,6 +151,7 @@ func setUpToyStoresWithRealRPCs(
 		server := rpc.NewServer(rpcCtx)
 		raftTransport := rafttransport.NewRaftTransport(cfg.Ambient, cfg.Settings,
 			cfg.NodeDialer, server, cfg.Stopper)
+		cfg.RaftTransport = newRaftTransport(cfg.StoreID, cfg.Stopper, raftTransport)
 		cfg.Stopper.RunAsyncTask(ctx, "server "+strconv.Itoa(i), func(ctx context.Context) {
 			server.Serve(l)
 		})
@@ -158,7 +159,6 @@ func setUpToyStoresWithRealRPCs(
 			<-cfg.Stopper.ShouldQuiesce()
 			server.Stop()
 		})
-		cfg.RaftTransport = newRaftTransport(cfg.StoreID, cfg.Stopper, raftTransport)
 		require.Nil(t, kvtoy.WriteInitialClusterData(ctx, cfg.Engine))
 		s, err := kvtoy.NewStore(ctx, cfg)
 		require.Nil(t, err)
