@@ -444,6 +444,9 @@ type PeerClient struct {
 	// sends one message? Do we need to decorate the signatures?
 	Callbacks struct {
 
+		// ShouldRepropose takes a reason and erturns an error that gets send back.
+		ShouldRepropose func(ReproposalReason) error
+
 		// DoCommit is a callback which occurs to allow the command to validate that
 		// a commit can proceed given the current state. If an error is returned it
 		// propagate back to the client through a message send. An error prevents
@@ -459,10 +462,11 @@ type PeerClient struct {
 		Applied func()
 	}
 
-	commitErr error
-	cond      sync.Cond
-	syn       sync.Locker
-	peer      *Peer
+	done bool
+	err  error
+	cond sync.Cond
+	syn  sync.Locker
+	peer *Peer
 }
 
 // Send accepts ProposalMessages.
@@ -497,12 +501,26 @@ type ErrorMessage struct {
 
 // Recv will return a CommittedMessage or an ErrorMessage
 func (pc *PeerClient) Recv() connect.Message {
-
-	pc.cond.Wait()
-	if pc.commitErr != nil {
-		return &ErrorMessage{Err: pc.commitErr}
+	pc.syn.Lock()
+	defer pc.syn.Unlock()
+	for !pc.done {
+		pc.sync.Wait()
+	}
+	if pc.err != nil {
+		return &ErrorMessage{Err: pc.err}
 	}
 	return CommittedMessage{}
+}
+
+func (pc *PeerClient) finishWithError(err error) {
+	pc.sync.Lock()
+	defer pc.syn.Signal()
+	defer pc.syn.Unlock()
+	if pc.done {
+		panic("double finish on peer client")
+	}
+	pc.err = err
+	pc.done = true
 }
 
 var _ connect.Conn = (*PeerClient)(nil)

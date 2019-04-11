@@ -6,7 +6,9 @@
 package kvtoy
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"time"
 
@@ -40,19 +42,21 @@ import (
 // This implementation will be simpler than the main implementation in a couple
 // of important ways.
 //
-// Firstly, it will not do anything with leasing
-// Next it won't deal with transactionally managing replica descriptors
+// Firstly, it will not do anything with leasing initially.
+// Next it won't deal with transactionally managing replica descriptors.
 //
-// We'll assume that the above thing can happen out of band.
+// We'll assume that the above things can happen out of band.
 //
 // Next it's not going to eagerly create the replica when it receives raft
-// messages. This is too clever and I don't like the placeholder. Maybe instead
-// we can track on the raft trasport which messages we've seen recently and
-// translate ReplicaNotFound or something.
+// messages. We need a good story here, but I don't have one yet. As soon as the
+// node is part of the raft group from the other nodes perspectives, it can
+// vote. That means that if we don't participate until after we receive snapshot
+// data then we're sort of underreplicated. This is a major TODO.
 //
-// Instead we'll require that the ReplicaState be resident in the engine when
-// the replica is created. That being said, we'll support pre-emptive snapshot
-// and allow a replica to be created without having a ReplicaID.
+// Instead (for now) we'll require that the ReplicaState be resident in the
+// engine when the replica is created. That being said, we'll support
+// pre-emptive snapshot and allow a replica to be created without having a
+// ReplicaID.
 
 // Ideally we'll be able to cover over the implementation of the entry storage
 // and general raft state storage a little bit better but that's not for right
@@ -76,9 +80,6 @@ type Store struct {
 func (s *Store) Batch(
 	ctx context.Context, ba *kvtoypb.BatchRequest,
 ) (*kvtoypb.BatchResponse, error) {
-	if len(ba.Requests) != 1 {
-		return nil, fmt.Errorf("Only handling single requests currently")
-	}
 	resp, err := s.mu.replica.Handle(ctx, ba)
 	if err != nil {
 		return nil, err.GoError()
@@ -96,6 +97,44 @@ func (r *Replica) handleRequest(
 		return r.handlePut(ctx, eng, put)
 	}
 	panic("not implemented")
+}
+
+// getOrCreateMarker protects writes from being applied more than once due to
+// reproposals. All writes do a read to see if they have already been written
+// and then if they have been not write a marker.
+func (r *Replica) getOrCreateMarker(
+	ctx context.Context, h *kvtoypb.Header, eng engine.ReadWriter,
+) (created bool) {
+	k := makeMarkerKey(r.rangeID, h)
+	val, _, err := engine.MVCCGet(ctx, eng, k, hlc.Timestamp{}, engine.MVCCGetOptions{})
+	if err != nil {
+		panic(err)
+	}
+	if val != nil {
+		if _, err := val.GetBytes(); err != nil {
+			panic(err)
+		}
+		log.Infof(ctx, "marker exists for %q %v", k, h)
+		return false
+	}
+	var newVal roachpb.Value
+	newVal.SetBytes(nil)
+	err = engine.MVCCPut(ctx, eng, nil, k, hlc.Timestamp{}, newVal, nil)
+	if err != nil {
+		panic(err)
+	}
+	return true
+}
+
+func makeMarkerKey(rangeID roachpb.RangeID, h *kvtoypb.Header) roachpb.Key {
+	// TODO(ajwerner): fewer allocations here.
+	buf := bytes.Buffer{}
+	buf.Write([]byte(keys.MakeRangeIDReplicatedPrefix(rangeID)))
+	buf.WriteString("mark")
+	binary.Write(&buf, binary.BigEndian, h.Timestamp.WallTime)
+	binary.Write(&buf, binary.BigEndian, h.Timestamp.Logical)
+	binary.Write(&buf, binary.BigEndian, int64(h.Server))
+	return roachpb.Key(buf.Bytes())
 }
 
 func (r *Replica) processRaftCommand(
@@ -119,7 +158,18 @@ func (r *Replica) processRaftCommand(
 			panic(err)
 		}
 	}
-
+	if !ba.IsReadOnly() {
+		// Check if the marker thing exists and, if so assert prop is nil and return
+		if !r.getOrCreateMarker(ctx, &ba.Header, eng) {
+			log.Infof(ctx, "request %v already applied", &ba.Header)
+			return
+		}
+	} else if prop == nil {
+		// Could grab a snapshot and go serve reads asynchronously
+		return
+	}
+	// Could probably look at the spans being written and run non-overlapping
+	// replicated commands in parallel.
 	for i := range ba.Requests {
 		resp, err := r.handleRequest(ctx, eng, &ba.Requests[i])
 		if err != nil {
@@ -141,8 +191,12 @@ func (r *Replica) processRaftCommand(
 func (r *Replica) Handle(
 	ctx context.Context, ba *kvtoypb.BatchRequest,
 ) (*kvtoypb.BatchResponse, *roachpb.Error) {
-
 	idKey := replication.MakeIDKey()
+	if !ba.IsReadOnly() {
+		ts := r.store.cfg.Clock.Now()
+		ba.Header.Timestamp = &ts
+		ba.Header.Server = r.store.cfg.NodeID
+	}
 	prop := &proposal{
 		ctx: ctx,
 		id:  idKey,
@@ -189,15 +243,6 @@ func (r *Replica) handlePut(
 		Value: &kvtoypb.ResponseUnion_Put{&kvtoypb.PutResponse{}},
 	}, nil
 }
-
-// func evaluateCommand(ctx context.Context, eng engine.ReadWriter, req kvtoypb.Request) error {
-// 	switch cmd := req.(type) {
-// 	case *kvtoypb.PutRequest:
-// 		return engine.MVCCPut(ctx, eng, nil, cmd.Key, hlc.Timestamp{}, cmd.Value, nil)
-// 	default:
-// 		panic("not implemented")
-// 	}
-// }
 
 func (r *Replica) handleDelete(
 	ctx context.Context, req *kvtoypb.DeleteRequest,

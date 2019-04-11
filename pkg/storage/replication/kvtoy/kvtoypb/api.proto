@@ -21,6 +21,7 @@ import "roachpb/errors.proto";
 import "roachpb/metadata.proto";
 import "roachpb/data.proto";
 import "gogoproto/gogo.proto";
+import "util/hlc/timestamp.proto";
 
 
 // RequestHeader is supplied with every storage node request.
@@ -186,9 +187,26 @@ message BatchResponse {
 // A Header is attached to a BatchRequest, encapsulating routing and auxiliary
 // information required for executing it.
 message Header {
+
+  // Timestamp is provided by the client as the unique time at which this
+  // request occurred. 
+
+  // Timestamp is used when applying a replicated batch to determine whether
+  // the event still needs to be applied. It is part of the mechanism for
+  // reorder and replay which can occur due to reproposals.
+  //
+  // So long as two commands never use the same timestamp value when writing
+  // to the same server there is no hazard of non-idempotent multiple
+  // application.
+  util.hlc.Timestamp timestamp = 1;
+
+  // Server is the node id which wrote this command.
+  int32 server = 2 [
+      (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/roachpb.NodeID"];
+  
 }
 
 // Batch and RangeFeed service implemeted by nodes for KV API requests.
 service Internal {
-  rpc Batch     (BatchRequest)     returns (BatchResponse)         {}
+  rpc Batch (BatchRequest) returns (BatchResponse) {}
 }

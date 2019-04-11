@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 	"time"
 
@@ -525,9 +526,8 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 	// r.store.metrics.RaftApplyCommittedLatency.RecordValue(applicationElapsed)
 	if refreshReason != noReason {
 		p.mu.Lock()
-		//p.refreshProposalsLocked(0, refreshReason)
+		p.refreshProposalsLocked(0, refreshReason)
 		p.mu.Unlock()
-		log.Warningf(ctx, "TODO(ajwerner): not sure how to handle refresh reason: %v", refreshReason)
 	}
 
 	// TODO(bdarnell): need to check replica id and not Advance if it
@@ -660,19 +660,19 @@ func (p *Peer) processRaftConfChange(
 
 // TODO(ajwerner): add feedback for failed message sends
 
-//go:generate stringer -type refreshRaftReason
-type refreshRaftReason int
+//go:generate stringer -type ReproposalReason
+type ReproposalReason int
 
 const (
-	noReason refreshRaftReason = iota
-	reasonNewLeader
-	reasonNewLeaderOrConfigChange
+	NoReason ReproposalReason = iota
+	ReasonNewLeader
+	ReasonNewLeaderOrConfigChange
 	// A snapshot was just applied and so it may have contained commands that we
 	// proposed whose proposal we still consider to be inflight. These commands
 	// will never receive a response through the regular channel.
-	reasonSnapshotApplied
-	reasonReplicaIDChanged
-	reasonTicks
+	ReasonSnapshotApplied
+	ReasonReplicaIDChanged
+	ReasonTicks
 )
 
 func (p *Peer) withRaftGroup(
@@ -839,9 +839,6 @@ func (p *Peer) addProposal(prop *proposal) {
 }
 
 func (p *Peer) updateProposalQuota(ctx context.Context, lastLeaderID PeerID) {
-	if r := recover(); r != nil {
-		panic(r)
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -1056,20 +1053,20 @@ func (p *Peer) tick(
 	p.mu.ticks++
 	p.mu.rawNode.Tick()
 
-	// refreshAtDelta := p.pf.cfg.RaftElectionTimeoutTicks
+	refreshAtDelta := uint64(p.raftConfig.RaftElectionTimeoutTicks)
 	// TODO(ajwerner): add back testing knobs
 	// if knob := p.store.TestingKnobs().RefreshReasonTicksPeriod; knob > 0 {
 	// 	refreshAtDelta = knob
 	// }
-	// if !p.store.TestingKnobs().DisableRefreshReasonTicks && p.mu.ticks%refreshAtDelta == 0 {
-	// 	// RaftElectionTimeoutTicks is a reasonable approximation of how long we
-	// 	// should wait before deciding that our previous proposal didn't go
-	// 	// through. Note that the combination of the above condition and passing
-	// 	// RaftElectionTimeoutTicks to refreshProposalsLocked means that commands
-	// 	// will be refreshed when they have been pending for 1 to 2 election
-	// 	// cycles.
-	// 	p.refreshProposalsLocked(refreshAtDelta, reasonTicks)
-	// }
+	if /* !p.store.TestingKnobs().DisableRefreshReasonTicks && */ p.mu.ticks%refreshAtDelta == 0 {
+		// RaftElectionTimeoutTicks is a reasonable approximation of how long we
+		// should wait before deciding that our previous proposal didn't go
+		// through. Note that the combination of the above condition and passing
+		// RaftElectionTimeoutTicks to refreshProposalsLocked means that commands
+		// will be refreshed when they have been pending for 1 to 2 election
+		// cycles.
+		p.refreshProposalsLocked(refreshAtDelta, reasonTicks)
+	}
 	return true, nil
 }
 
@@ -1212,6 +1209,60 @@ func (p *Peer) unquiesceAndWakeLeaderLocked() {
 		}
 		// Propose an empty command which will wake the leader.
 		_ = p.mu.rawNode.Propose(EncodeRaftCommandV1(makeIDKey(), nil))
+	}
+}
+
+// refreshProposalsLocked goes through the pending proposals, notifying
+// proposers whose proposals need to be retried, and resubmitting proposals
+// which were likely dropped (but may still apply at a legal Lease index) -
+// ensuring that the proposer will eventually get a reply on the channel it's
+// waiting on.
+// mu must be held.
+//
+// refreshAtDelta only applies for reasonTicks and specifies how old (in ticks)
+// a command must be for it to be inspected; the usual value is the number of
+// ticks of an election timeout (affect only proposals that have had ample time
+// to apply but didn't).
+func (p *Peer) refreshProposalsLocked(refreshAtDelta int, reason ReproposalReason) {
+	if refreshAtDelta != 0 && reason != reasonTicks {
+		log.Fatalf(context.TODO(), "refreshAtDelta specified for reason %s != reasonTicks", reason)
+	}
+
+	for _, prop := range p.mu.proposals {
+		if err := prop.pc.ShouldRepropose(reason); err != nil {
+			prop.pc.finishWithError(err)
+			continue
+		}
+	}
+
+	if log.V(1) && len(reproposals) > 0 {
+		ctx := r.AnnotateCtx(context.TODO())
+		log.Infof(ctx,
+			"pending commands: reproposing %d (at %d.%d) %s",
+			len(reproposals), r.mu.state.RaftAppliedIndex,
+			r.mu.state.LeaseAppliedIndex, reason)
+	}
+
+	// Reproposals are those commands which we weren't able to send back to the
+	// client (since we're not sure that another copy of them could apply at
+	// the "correct" index). For reproposals, it's generally pretty unlikely
+	// that they can make it in the right place. Reproposing in order is
+	// definitely required, however.
+	//
+	// TODO(tschottdorf): evaluate whether `r.mu.proposals` should
+	// be a list/slice.
+	sort.Sort(reproposals)
+	for _, p := range reproposals {
+		log.Eventf(p.ctx, "re-submitting command %x to Raft: %s", p.idKey, reason)
+		if err := r.submitProposalLocked(p); err == raft.ErrProposalDropped {
+			// TODO(bdarnell): Handle ErrProposalDropped better.
+			// https://github.com/cockroachdb/cockroach/issues/21849
+		} else if err != nil {
+			r.cleanupFailedProposalLocked(p)
+			p.finishApplication(proposalResult{
+				Err: roachpb.NewError(roachpb.NewAmbiguousResultError(err.Error())),
+			})
+		}
 	}
 }
 
