@@ -9,7 +9,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
-	"github.com/cockroachdb/cockroach/pkg/storage/replication/kvtoy/kvtoypb"
 	"github.com/cockroachdb/cockroach/pkg/storage/replication/part1/kvtoy"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -57,7 +56,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 		Engine: eng,
 	}
 	store := kvtoy.NewStore(storeCfg)
-	kvtoypb.RegisterInternalServer(grpcServer, store)
+	roachpb.RegisterInternalServer(grpcServer, store)
 	listener, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to listen on %v", cfg.Addr)

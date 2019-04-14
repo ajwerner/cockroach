@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/storage/replication/kvtoy/kvtoypb"
-	"github.com/cockroachdb/cockroach/pkg/storage/replication/part1/client"
+	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/storage/replication/part1/server"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
+
+const DefaultAddr = ":10103"
 
 // Main is the entry point for the cli, with a single line calling it intended
 // to be the body of an action package main `main` func elsewhere. It is
@@ -50,75 +50,63 @@ var startCmd = func() *cobra.Command {
 		Args: cobra.NoArgs,
 	}
 	flags := cmd.Flags()
-	flags.StringVar(&cfg.Addr, "addr", ":0", "Address on which the server will listen")
+	flags.StringVar(&cfg.Addr, "addr", DefaultAddr, "Address on which the server will listen")
 	return cmd
 }()
 
 // batchCmd is going to create a client and issue a batch to the server.
 // This is critical for testing.
 var putCmd = func() *cobra.Command {
-	var cfg client.Config
 	cmd := &cobra.Command{
 		Use: "put",
 		Run: wrapRun(func(cmd *cobra.Command, args []string) error {
-			cfg.Stopper = stop.NewStopper()
-			client, err := client.NewClient(cfg)
+			db, err := newClient()
 			if err != nil {
 				return err
 			}
-			var ba kvtoypb.BatchRequest
-			ba.Requests = make([]kvtoypb.RequestUnion, 1)
-			pr := kvtoypb.PutRequest{}
-			pr.Key = roachpb.Key(args[0])
-			pr.Value.SetString(args[1])
-			ba.Requests[0].SetInner(&pr)
-			_, err = client.Client.Batch(context.TODO(), &ba)
-			if err != nil {
+			txn := client.NewTxn(context.TODO(), db, 0, client.RootTxn)
+			b := txn.NewBatch()
+			b.Put(args[0], args[1])
+			if txn.Run(context.TODO(), b); err != nil {
 				return err
 			}
-			fmt.Printf("put %v = %v\n", pr.Key, pr.Value)
+			fmt.Printf("put %v = %v\n", args[0], args[1])
 			return nil
 		}),
 		Args: cobra.ExactArgs(2),
 	}
 	flags := cmd.Flags()
-	flags.StringVar(&cfg.Addr, "addr", "", "Address for client to connect to.")
+	flags.StringVar(&cfg.addr, "addr", DefaultAddr, "Address for client to connect to.")
 	return cmd
 }()
 
 // batchCmd is going to create a client and issue a batch to the server.
 // This is critical for testing.
 var getCmd = func() *cobra.Command {
-	var cfg client.Config
 	cmd := &cobra.Command{
 		Use: "get",
 		Run: wrapRun(func(cmd *cobra.Command, args []string) error {
-			cfg.Stopper = stop.NewStopper()
-			client, err := client.NewClient(cfg)
+			db, err := newClient()
 			if err != nil {
 				return err
 			}
-			var ba kvtoypb.BatchRequest
-			ba.Requests = make([]kvtoypb.RequestUnion, 1)
-			gr := kvtoypb.GetRequest{}
-			gr.Key = roachpb.Key(args[0])
-			ba.Requests[0].SetInner(&gr)
-			resp, err := client.Client.Batch(context.TODO(), &ba)
-			if err != nil {
+			txn := client.NewTxn(context.TODO(), db, 0, client.RootTxn)
+			b := txn.NewBatch()
+			b.Get(args[0])
+			if txn.Run(context.TODO(), b); err != nil {
 				return err
 			}
-			getResp := resp.Responses[0].GetInner().(*kvtoypb.GetResponse)
-			respBytes, err := getResp.Value.GetBytes()
+			data, err := b.Results[0].Rows[0].Value.GetBytes()
 			if err != nil {
-				return errors.Wrapf(err, "failed to decode value %v as bytes", getResp.Value.RawBytes)
+				return errors.Wrapf(err, "failed to decode value at key %q as bytes", args[0])
 			}
-			fmt.Printf("get %v = %v\n", gr.Key, string(respBytes))
+			fmt.Printf("get %v = %v\n", args[0], string(data))
 			return nil
 		}),
 		Args: cobra.ExactArgs(1),
 	}
 	flags := cmd.Flags()
-	flags.StringVar(&cfg.Addr, "addr", "", "Address for client to connect to.")
+	flags.StringVar(&cfg.addr, "addr", DefaultAddr, "Address for client to connect to.")
 	return cmd
 }()
 

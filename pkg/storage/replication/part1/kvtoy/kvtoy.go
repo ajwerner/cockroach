@@ -3,8 +3,8 @@ package kvtoy
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
-	"github.com/cockroachdb/cockroach/pkg/storage/replication/kvtoy/kvtoypb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/pkg/errors"
@@ -32,28 +32,32 @@ func NewStore(cfg Config) *Store {
 	}
 }
 
-// Batch implements the kvtoypb.Internal interface.
+// Batch implements the roachpb.Internal interface.
 func (s *Store) Batch(
-	ctx context.Context, ba *kvtoypb.BatchRequest,
-) (*kvtoypb.BatchResponse, error) {
+	ctx context.Context, ba *roachpb.BatchRequest,
+) (*roachpb.BatchResponse, error) {
 	if ba.IsReadOnly() {
 		return s.handleReadOnlyBatch(ctx, ba)
 	}
 	return s.handleReadWriteBatch(ctx, ba)
 }
 
+func (s *Store) RangeFeed(*roachpb.RangeFeedRequest, roachpb.Internal_RangeFeedServer) error {
+	panic("not implemented")
+}
+
 func (s *Store) handleReadOnlyBatch(
-	ctx context.Context, ba *kvtoypb.BatchRequest,
-) (*kvtoypb.BatchResponse, error) {
+	ctx context.Context, ba *roachpb.BatchRequest,
+) (*roachpb.BatchResponse, error) {
 	s.mu.RLock()
 	snap := s.engine.NewSnapshot()
 	s.mu.RUnlock()
 	br := ba.CreateReply()
 	for i, req := range ba.Requests {
-		var resp kvtoypb.Response
+		var resp roachpb.Response
 		var err error
 		switch req := req.GetInner().(type) {
-		case *kvtoypb.GetRequest:
+		case *roachpb.GetRequest:
 			resp, err = s.handleGet(ctx, req, snap)
 		default:
 			return nil, errors.Errorf("unknown request type %T", req)
@@ -67,24 +71,24 @@ func (s *Store) handleReadOnlyBatch(
 }
 
 func (s *Store) handleReadWriteBatch(
-	ctx context.Context, ba *kvtoypb.BatchRequest,
-) (*kvtoypb.BatchResponse, error) {
+	ctx context.Context, ba *roachpb.BatchRequest,
+) (*roachpb.BatchResponse, error) {
 	br := ba.CreateReply()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	batch := s.engine.NewBatch()
 	defer batch.Close()
 	for i, req := range ba.Requests {
-		var resp kvtoypb.Response
+		var resp roachpb.Response
 		var err error
 		switch req := req.GetInner().(type) {
-		case *kvtoypb.PutRequest:
+		case *roachpb.PutRequest:
 			resp, err = s.handlePut(ctx, req, batch)
-		case *kvtoypb.ConditionalPutRequest:
+		case *roachpb.ConditionalPutRequest:
 			resp, err = s.handleConditionalPut(ctx, req, batch)
-		case *kvtoypb.DeleteRequest:
+		case *roachpb.DeleteRequest:
 			resp, err = s.handleDelete(ctx, req, batch)
-		case *kvtoypb.GetRequest:
+		case *roachpb.GetRequest:
 			resp, err = s.handleGet(ctx, req, batch)
 		default:
 			// The type system should prevent this case.
@@ -102,38 +106,38 @@ func (s *Store) handleReadWriteBatch(
 }
 
 func (s *Store) handleGet(
-	ctx context.Context, req *kvtoypb.GetRequest, eng engine.Reader,
-) (kvtoypb.Response, error) {
+	ctx context.Context, req *roachpb.GetRequest, eng engine.Reader,
+) (roachpb.Response, error) {
 	val, _, err := engine.MVCCGet(ctx, eng, req.Key, hlc.Timestamp{}, engine.MVCCGetOptions{})
 	if err != nil {
 		return nil, err
 	}
-	return &kvtoypb.GetResponse{Value: val}, nil
+	return &roachpb.GetResponse{Value: val}, nil
 }
 
 func (s *Store) handlePut(
-	ctx context.Context, req *kvtoypb.PutRequest, eng engine.ReadWriter,
-) (kvtoypb.Response, error) {
+	ctx context.Context, req *roachpb.PutRequest, eng engine.ReadWriter,
+) (roachpb.Response, error) {
 	err := engine.MVCCPut(ctx, eng, nil, req.Key, hlc.Timestamp{}, req.Value, nil)
 	if err != nil {
 		return nil, err
 	}
-	return &kvtoypb.PutResponse{}, nil
+	return &roachpb.PutResponse{}, nil
 }
 
 func (s *Store) handleDelete(
-	ctx context.Context, req *kvtoypb.DeleteRequest, eng engine.ReadWriter,
-) (kvtoypb.Response, error) {
+	ctx context.Context, req *roachpb.DeleteRequest, eng engine.ReadWriter,
+) (roachpb.Response, error) {
 	err := engine.MVCCDelete(ctx, eng, nil, req.Key, hlc.Timestamp{}, nil)
 	if err != nil {
 		return nil, err
 	}
-	return &kvtoypb.DeleteResponse{}, nil
+	return &roachpb.DeleteResponse{}, nil
 }
 
 func (s *Store) handleConditionalPut(
-	ctx context.Context, req *kvtoypb.ConditionalPutRequest, eng engine.ReadWriter,
-) (kvtoypb.Response, error) {
+	ctx context.Context, req *roachpb.ConditionalPutRequest, eng engine.ReadWriter,
+) (roachpb.Response, error) {
 	val, _, err := engine.MVCCGet(ctx, eng, req.Key, hlc.Timestamp{}, engine.MVCCGetOptions{})
 	if err != nil {
 		return nil, err
@@ -146,5 +150,5 @@ func (s *Store) handleConditionalPut(
 	if err != nil {
 		return nil, err
 	}
-	return &kvtoypb.ConditionalPutResponse{}, nil
+	return &roachpb.ConditionalPutResponse{}, nil
 }
