@@ -157,7 +157,7 @@ lease-holder isolation and batch evaluation.
 This system which we'll call `kvtoy` begins with a couple of basic components.
 
 The basic business logic is driven through the `Store` which handles 
-`BatchRequest`s via the `Internal` GRPC service defined in `kvtoypb`.
+`BatchRequest`s via the `Internal` GRPC service defined in `roachpb`.
 
 ```protobuf
 service Internal {
@@ -198,8 +198,8 @@ func NewStore(cfg Config) *Store {
 }
 
 func (s *Store) Batch(
-	ctx context.Context, ba *kvtoypb.BatchRequest,
-) (*kvtoypb.BatchResponse, error) {
+	ctx context.Context, ba *roachpb.BatchRequest,
+) (*roachpb.BatchResponse, error) {
     if ba.IsReadOnly() {
         return s.handleReadOnlyBatch(ctx, ba)
     }
@@ -207,17 +207,17 @@ func (s *Store) Batch(
 }
 
 func (s *Store) handleReadOnlyBatch(
-	ctx context.Context, ba *kvtoypb.BatchRequest,
-) (*kvtoypb.BatchResponse, error) {
+	ctx context.Context, ba *roachpb.BatchRequest,
+) (*roachpb.BatchResponse, error) {
     s.mu.RLock()
     snap := s.engine.NewSnapshot
     s.mu.RUnlock()
     br := ba.CreateReply()
     for i, req := range ba.Requests {
-       var resp kvtoypb.Response
+       var resp roachpb.Response
        var err error
        switch req := req.GetInner().(type) {
-       case *kvtoypb.ReadRequest:
+       case *roachpb.ReadRequest:
            resp, err = s.handleGet(ctx, req, snap)
        default:
            return nil, errors.Errorf("unknown request type %T", req)
@@ -231,24 +231,24 @@ func (s *Store) handleReadOnlyBatch(
 }
 
 func (s *Store) handleReadWriteBatch(
-	ctx context.Context, ba *kvtoypb.BatchRequest,
-) (*kvtoypb.BatchResponse, error) {
+	ctx context.Context, ba *roachpb.BatchRequest,
+) (*roachpb.BatchResponse, error) {
     br := ba.CreateReply()
     s.mu.Lock()
     defer s.mu.Unlock()
     batch := s.engine.NewBatch()
     defer batch.Close()
     for i, req := range ba.Requests {
-       var resp kvtoypb.Response
+       var resp roachpb.Response
        var err error 
        switch req := req.GetInner().(type) {
-       case *kvtoypb.PutRequest:
+       case *roachpb.PutRequest:
            resp, err = s.handleGet(ctx, req, batch)
-       case *kvtoypb.ConditionalPutRequest:
+       case *roachpb.ConditionalPutRequest:
            resp, err = s.handleConditionalPut(ctx, req, batch)
-       case *kvtoypb.DeleteRequest:
+       case *roachpb.DeleteRequest:
            resp, err = s.handleDelete(ctx, req, batch)
-       case *kvtoypb.GetRequest:
+       case *roachpb.GetRequest:
            resp, err = s.handleGet(ctx, req, batch)
        default:
            // The type system should prevent this case.
@@ -300,3 +300,111 @@ func NewServer(cfg Config) {
     // Make a 
 }
 ```
+
+The amazing this is this works. Sure the thing we made isn't distributed but it
+is a durable key-value store with batch semantics that can actually perform
+admirably for workloads dominated by reads.
+
+Now we're going to more on to the problem of replicating this this data.
+
+## Part II - A replicated KV
+
+Now that we saw how easy it is to build a non-replicated key-value store we're
+going to take the existing logic and replicate across a variety of servers in
+a fault-tolerant way. This next architecture is not going to be a panacea for
+the following reason:
+
+1) Node identity is static and determined out-of-band via pre-configuration
+
+The storage layer in cockroachdb uses a leasing mechanism that gives it a number
+of advantages over the part 2 architecture.
+
+1) Allows for simpler distributed command semantics. We can just replicate a
+   write batch as opposed to logical commands which will evolve over time.
+1) Is more efficient because command logic only needs to be evaluated on one
+   replica instead of all.
+
+We hope to build up to this lease-based architecture but we're not going to
+start there. Instead we'll start by taking the batched which previously were
+evaluated under the single-server mutex and replicate them using a raft-based
+concensus mechanism.
+
+We also begin to sow seeds for an important concept, multiple distinct sets
+of replicated data. We do this primarily due to our goal to create a replication
+library to serve the later stages of this project. We create a new abstraction
+called a replica which together with other replicas form a range. For now all
+stores will house a single replica. Additionally we have a notion of node and
+store where a store corresponds to a single disk and a node is a single machine
+which may have several stores. Again, for simplicity, in part 2 each store
+corresponds to a single node and a single replica for range id 1.
+
+In order to kick-start a replicated storage system we need to provide each
+node with information about the state of the other nodes. We set this up in
+`init.go` where we provide a function to write initial state to the storage
+engine which the store will use upon construction to learn about the replication
+configuration.
+
+Up front we decide on the number of nodes which will be participating in
+replication and we create a `RangeDescriptor` which describes all of the nodes.
+This concept of a `Range` will become more important later as we deal with
+architectures where not all data is on all nodes in the cluster. A range is a
+set of data which can be atomically modified by a `BatchRequest`. In the
+cockroachdb architecture this range stores user addressible data that in a
+contiguous key range together a set of ranges forms the entire keyspace.
+
+We'll dive in to some of those details later as we deal in part 4 with multiple
+ranges existing and then in part 5 where we add the logic to implement
+cross-range transactions.
+
+For now we'll assume that there is just one range which carries the ID 1 and
+that all of our nodes replicate it.
+
+```go
+
+func makeRangeDescriptor(numNodes int) roachpb.RangeDescriptor {
+    replicas := make([]roachpb.ReplicaDescriptor, 0, numNodes)
+    for i := 0; i < numNodes; i++ {
+        replicas = append(replicas, roachpb.ReplicaDescriptor{
+            NodeID:    roachpb.NodeID(i),
+            StoreID:   roachpb.StoreID(i),
+            ReplicaID: roachpb.ReplicaID(i),
+        })
+    }
+    return &roachpb.RangeDescriptor{
+        StartKey: roachpb.RKeyMin,
+        RangeID: 1,
+        Replicas: replicas,
+    }
+}
+
+func WriteInitialClusterData(ctx context.Context, eng engine.Engine) error {
+     rangeDesc := makeRangeDescriptor(3)
+     err := engine.MVCCPutProto(ctx, b, nil, 
+         keys.RangeDescriptorKey(roachpb.RKeyMin), hlc.Timestamp{}, 
+         nil, rangeDesc)
+     if err != nil {
+         return err
+     }
+     if _, err := rsl.Save(ctx, b, storagepb.ReplicaState{
+         Lease: &roachpb.Lease{
+             Replica: replicas[0],
+          },
+          TruncatedState: &roachpb.RaftTruncatedState{
+              Term: 1,
+          },
+          GCThreshold:        &hlc.Timestamp{},
+          Stats:              &enginepb.MVCCStats{},
+          TxnSpanGCThreshold: &hlc.Timestamp{},
+     }, stateloader.TruncatedStateUnreplicated); err != nil {
+         return err
+     }
+     if err := rsl.SynthesizeRaftState(ctx, b); err != nil {
+         return err
+     }
+     return b.Commit(true)
+}
+```
+
+There are some things in there which should be a little bit surprising because
+they haven't yet been introduced but we'll get there. The particularly
+unfortunate bits are the `ReplicaState` 

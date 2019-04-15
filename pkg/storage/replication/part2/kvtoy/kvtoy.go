@@ -3,22 +3,46 @@ package kvtoy
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/storage/raftentry"
+	"github.com/cockroachdb/cockroach/pkg/storage/replication"
+	"github.com/cockroachdb/cockroach/pkg/storage/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachlabs/acidlib/v1/connect"
 	"github.com/pkg/errors"
+	"go.etcd.io/etcd/raft/raftpb"
 )
 
 // Config configures the Store.
 type Config struct {
-	// Engine is the storage engine used by the store.
-	Engine engine.Engine
+	// NodeID and StoreID are manually assigned for simplicity.
+	// DO NOT DUPLICATE THEM!
+	NodeID  roachpb.NodeID
+	StoreID roachpb.StoreID
+
+	Settings      *cluster.Settings
+	Stopper       *stop.Stopper
+	RaftConfig    base.RaftConfig
+	EntryCache    *raftentry.Cache
+	Engine        engine.Engine
+	RaftTransport connect.Conn
+	Clock         *hlc.Clock
+	Ambient       log.AmbientContext
+	NodeDialer    *nodedialer.Dialer
 }
 
 // Store stores key-value data.
 type Store struct {
-	engine engine.Engine
+	cfg         Config
+	peerFactory *replication.Factory
 
 	mu struct {
 		syncutil.RWMutex
@@ -28,8 +52,52 @@ type Store struct {
 // NewStore creates a new Store.
 func NewStore(cfg Config) *Store {
 	return &Store{
-		engine: cfg.Engine,
+		cfg: cfg,
 	}
+}
+
+// makeReplicationFactoryConfig sets up the configuration for the replication
+// factory.
+func (s *Store) makeReplicationFactoryConfig() replication.FactoryConfig {
+	var cfg replication.FactoryConfig
+	cfg.Settings = s.cfg.Settings
+	cfg.Storage = s.cfg.Engine
+	cfg.Stopper = s.cfg.Stopper
+	cfg.RaftConfig = s.cfg.RaftConfig
+	cfg.RaftTransport = s.cfg.RaftTransport
+	cfg.EntryCacheFactory = func(id replication.GroupID) replication.EntryCache {
+		return groupCache{c: s.cfg.EntryCache, id: id}
+	}
+	cfg.StateLoaderFactory = func(id replication.GroupID) replication.StateLoader {
+		return stateloader.Make(roachpb.RangeID(id))
+	}
+	cfg.EntryScannerFactory = func(id replication.GroupID) replication.EntryReader {
+		return func(
+			ctx context.Context,
+			eng engine.Reader,
+			lo, hi uint64,
+			f func(raftpb.Entry) (wantMore bool, err error),
+		) error {
+			var ent raftpb.Entry
+			scanFunc := func(kv roachpb.KeyValue) (bool, error) {
+				if err := kv.Value.GetProto(&ent); err != nil {
+					return false, err
+				}
+				return f(ent)
+			}
+			_, err := engine.MVCCIterate(
+				ctx, eng,
+				keys.RaftLogKey(roachpb.RangeID(id), lo),
+				keys.RaftLogKey(roachpb.RangeID(id), hi),
+				hlc.Timestamp{},
+				engine.MVCCScanOptions{},
+				scanFunc,
+			)
+			return err
+		}
+	}
+	cfg.NumWorkers = 16
+	return cfg
 }
 
 // Batch implements the roachpb.Internal interface.
