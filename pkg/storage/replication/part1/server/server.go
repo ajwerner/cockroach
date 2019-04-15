@@ -36,7 +36,7 @@ type Server struct {
 
 // NewServer creates a new server with in-memory storage.
 func NewServer(ctx context.Context, cfg Config) (*Server, error) {
-	// Make an engine and a server
+	// Make an engine and a server.
 	eng := engine.NewInMem(roachpb.Attributes{}, 1<<26 /* 64 MB */)
 	clock := hlc.NewClock(hlc.UnixNano, 0)
 	baseConfig := base.Config{

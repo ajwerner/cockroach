@@ -123,10 +123,11 @@ service Internal {
 In order to save ourselves some complexity later, we're going to reuse some rich
 types from the `roachpb` protocol but leave some fields with zero value until we
 need them. This will ensure that we are true to the existing API as
-functionality is layered on. Additionally we'll be using the
-`pkg/storage/engine` package to store data. This storage interface contains
-logic relating to MVCC which we will not be using for likely quite some time
-but it would be a bad idea to duplicate this package.
+functionality is layered on. We'll also be using the `pkg/storage/engine`
+package to store data. This storage interface contains logic relating to MVCC
+which we will not be using for likely quite some time but it would be a bad idea
+to duplicate this package. Another thing to note is that the `Internal`
+interface contains a `RangeFeed` method which we will not be implementing.
 
 Let's look at the logic for the most basic store:
 
@@ -160,7 +161,14 @@ func (s *Store) Batch(
     }
     return s.handleReadWriteBatch(ctx, ba)
 }
+```
 
+The separation of read and write batches is an optimization that will greatly
+improve the performance of the server for read-heavy workloads as `engine`
+offers cheap snapshots which we can use to serve reads. Let's look at these
+two workhorse methods now.
+
+```go
 func (s *Store) handleReadOnlyBatch(
 	ctx context.Context, ba *roachpb.BatchRequest,
 ) (*roachpb.BatchResponse, error) {
@@ -221,9 +229,64 @@ func (s *Store) handleReadWriteBatch(
 }
 ```
 
-This is sort of all we need. We need to be able to store data on disk and we
-need to do some synchronization between requests. The glaringly missing problem
-here is the lack of a server but we're going to set that up separately.
+Now let's look at the implementation of the individual requests.
+
+```go
+
+func (s *Store) handleGet(
+	ctx context.Context, req *roachpb.GetRequest, eng engine.Reader,
+) (roachpb.Response, error) {
+	val, _, err := engine.MVCCGet(ctx, eng, req.Key, hlc.Timestamp{}, engine.MVCCGetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return &roachpb.GetResponse{Value: val}, nil
+}
+
+func (s *Store) handlePut(
+	ctx context.Context, req *roachpb.PutRequest, eng engine.ReadWriter,
+) (roachpb.Response, error) {
+	err := engine.MVCCPut(ctx, eng, nil, req.Key, hlc.Timestamp{}, req.Value, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &roachpb.PutResponse{}, nil
+}
+
+func (s *Store) handleDelete(
+	ctx context.Context, req *roachpb.DeleteRequest, eng engine.ReadWriter,
+) (roachpb.Response, error) {
+	err := engine.MVCCDelete(ctx, eng, nil, req.Key, hlc.Timestamp{}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &roachpb.DeleteResponse{}, nil
+}
+
+func (s *Store) handleConditionalPut(
+	ctx context.Context, req *roachpb.ConditionalPutRequest, eng engine.ReadWriter,
+) (roachpb.Response, error) {
+	val, _, err := engine.MVCCGet(ctx, eng, req.Key, hlc.Timestamp{}, engine.MVCCGetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if !val.Equal(req.Value) {
+		return nil, errors.Errorf("conditional put: expectation failed for key %v: %v != %v",
+			req.Key, val, req.Value)
+	}
+	err = engine.MVCCPut(ctx, eng, nil, req.Key, hlc.Timestamp{}, req.Value, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &roachpb.ConditionalPutResponse{}, nil
+}
+```
+
+This is sort of all we need to produce a working implementation of the Internal
+interface. We need to be able to store data on disk and we need to do some 
+synchronization between requests. Now we need to test that this all work. 
+The glaringly missing problem here is the lack of a server so let's go ahead
+and set that up separately in a `server` package.
 
 ```go
 package server
@@ -252,7 +315,9 @@ func NewServer(cfg Config) {
     // Make a store
     // Make a listener
     // Make an rpc context
-    // Make a 
+    // Make a grpc server
+    // Register the store with the server
+    // Serve the server on the listener
 }
 ```
 
@@ -260,18 +325,45 @@ The amazing this is this works. Sure the thing we made isn't distributed but it
 is a durable key-value store with batch semantics that can actually perform
 admirably for workloads dominated by reads.
 
+In order to test all of this we need to build a binary that can run this server
+and then we should write some tests. 
+
+TODO(ajwerner): come back and fill this in, it exists in the `cli`, and
+`cmd/kvtoy` packages.
+
 Now we're going to more on to the problem of replicating this this data.
 
+## Part 1 - A basic replicated KV
 
-### Replication 
+Let's sketch out an overview of the goals of this section before spending a
+while discussing the replication package, its interfaces, dependencies and
+their initial implementation. Unlike the previous section, we now want to build
+an implementation of the above storage interface which operates across multiple
+servers in a fault-tolerant way. Furthermore we're going to require that this
+implementation provides linearizable consistency. In order to do this we're
+going to leverage a concensus-based replication protocol whereby all batches are
+replicated to a quorum of nodes before they are evaluated. It's worth keeping in
+mind that this isn't exactly how cockroachdb works but is a useful stepping
+stone. Before we can talk about adopting replication we need to introduce the
+concept and discuss the dependencies.
 
-I did roughly this, I came up with what felt like a nice API for the primary
-case of replication. The main thing you want to replicate is data. It seems
-useful to provide a mechanism to identify commands so we leave the ID.
-Furthermore we leave encoding to the replication package. This may imply a
-need for a hook to describe the encoding type but I suspect this can all be
-handled in an orthogonal package that deals with storage. This is yet to be
-actively explored.
+### Replication
+
+The goal of a concensus-backed replication is to enable a group of coordinating
+servers safetly distribute and store data. We'll go further and say that the
+goal of this specific replication package is to enable "state-machine
+replication" whereby the members of this coordinating group of nodes
+deterministically change state based on evaluation of shared log of commands.
+In our case, for this section, these commands will be serialized `BatchRequest`
+messages.
+
+#### Client Interface
+
+Let's begin by looking at the client-facing interface to replicate data.
+As discussed in the introduction, we'd like to adopt the connect model.
+Central to the `connect` model is having a well-defined set of messages
+which will be sent on a client `Conn`. For replication the primary message
+will be a `ProposalMessage` as defined below.
 
 ```go
 type ProposalMessage interface {
@@ -279,6 +371,12 @@ type ProposalMessage interface {
     Data() []byte
 }
 ```
+
+Historically it has been useful to provide a mechanism to identify commands
+so we leave the ID. It is worth noting that this interface leaves details of
+proposal encoding to the replication package. This may imply a need for a hook
+to describe the encoding type but I suspect this can all be handled in an
+orthogonal package that deals with storage to be discussed below.
 
 This interface allows actively proposing clients to associate whatever
 in-memory state with a command that they'd like but is also an interface that
@@ -292,14 +390,20 @@ Note:
   Would it obviate the need for the ID? Maybe sideloading prevents us from
   removing the ID?
 
-For now the replication package exposes an implementation of ProposalMessage
-called EncodedProposalMessage
+The replication package exposes an implementation of ProposalMessage called
+`EncodedProposalMessage` which represents an encoded proposal on replicas which
+did not send the original `ProposalMessage`.
 
 ```go
 // Should this expose the fact that it's just bytes?
 // Would it be better as struct { data []byte } ?
 type EncodedProposalMessage []byte
 ```
+
+#### Replication Package
+
+Now that we've looked at how users will interact with replication, we need to
+discuss the design of the system which will coordinate this replication.
 
 ## Storage
 
