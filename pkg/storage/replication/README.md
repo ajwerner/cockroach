@@ -1,7 +1,7 @@
 # Storage from the bottom up
 
-This document will hopefully evolve in to a blog post about my experience trying
-to refactor the replication path of the storage package.
+This document will hopefully evolve in to a post of sorts about my experience
+refactoring the replication path of the storage package.
 
 In the process I learned that I needed to understand not just what the
 mechanisms which existed in the storage package were but I also needed to
@@ -22,7 +22,6 @@ entails:
 Complexity arises when considering how clients interact with the proposal
 lifecycle as well as how the local replication state evolves relative to
 on disk state as well as side effects of applying commands.
-   * This paragraph is unfortunately unclear
    * The replication package needs to maintain on-disk state
    * That on-disk state will include the hard state for votes and commits as
      well as the actual log.
@@ -30,28 +29,33 @@ on disk state as well as side effects of applying commands.
      but is something that the replication storage layer is likely going to
      need to be aware of.
 
-This post will proceed by introducing a replication abstraction and then
+This post will proceed by first introducing the user to a simplified single-host
+key-value store and then layering on a replication abstraction to meet and then
 layering functionality on top of and into this replication abstraction to
 create a functional storage system. This process will force us to confront
 the challenges adopters of this library will face and to design an abstraction
 to anticipate and work with those challenges.
 
-The initial approach was to start from roughly basic principles looking at the
-primary API functionality. An ancillary goal to adopt design patterns
-from the `acidlib/v2/connect` library. This post will breifly introduce the
-`connect` design pattern, will present the initial attempt at a replication
-library and then will work through the process of adopting this library to
-built an at first simple and then slowly more complex distributed storage
-system.
+In part 0 we introduce a completely non-replicated storage abstraction. This
+preliminary exercise is a valuable framing for the rest of the work to come.
+From there, in part 1, we dive in to adding inflexible replication which does
+not permit configuration changes or deal with snapshots. This section forces us
+to engage with the meat of the client-facing replication interface as well as
+the underlying dependencies to interact with on disk state and network
+communication. In part 2 we tackle configuration changes which forces use to
+deal with snapshots and proposals which reconfigure the state.
 
 ### The `connect` package
 
-The connect package is worth a longer discussion to justify its architecture
-but I'll give a brief overview here to motivate its use. The connect pattern
-defines the scaffolding for a design pattern that primarily revolves around
-clients issuing requests to servers over connections. The pattern provides
-guidance on how synchronization and state management between clients and servers
-ought to be structured.
+An ancillary goal to adopt design patterns from the `acidlib/v2/connect`
+library. The connect package is worth a longer discussion to justify its
+architecture but I'll give a brief overview here to motivate its use. The
+connect pattern defines the scaffolding for a design pattern that primarily
+revolves around clients issuing requests to servers over connections. The
+pattern provides guidance on how synchronization and state management between
+clients and servers ought to be structured. Note that while a major goal is to
+adopt this pattern for the replication package, we will not make use of it until
+part 1. Don't be alarmed when it does not appear in the preliminary part 0.
 
 #### Why `connect`?
 
@@ -69,64 +73,15 @@ there one day.
 #### What is `connect`?
 
 The main workhorse of the connect model is the `Connection`. A connection is a
-logical bus for clients to send messages and receive responses. 
+logical bus for clients to send messages and receive responses. I personally am
+struggling between the terms `Client` and `Connection` but the takeaway should
+be that when a piece of code needs to leverage functionality provided by a
+service it should create a client object on which it can send messages. This
+client object should be seen as the workhorse which provides hooks for callbacks
+and injections as appropriate for the API. Messages on the other hand ought to
+be pieces of data which generally have a clear serialization.
 
-
-## High level initial API
-
-
-### Replication 
-
-I did roughly this, I came up with what felt like a nice API for the primary
-case of replication. The main thing you want to replicate is data. It seems
-useful to provide a mechanism to identify commands so we leave the ID.
-Furthermore we leave encoding to the replication package. This may imply a
-need for a hook to describe the encoding type but I suspect this can all be
-handled in an orthogonal package that deals with storage. This is yet to be
-actively explored.
-
-```go
-type ProposalMessage interface {
-    ID() storagebase.CmdIDKey
-    Data() []byte
-}
-```
-
-This interface allows actively proposing clients to associate whatever
-in-memory state with a command that they'd like but is also an interface that
-the system will implement with just raw encoded replicated data so that
-non-proposing replicas can have a uniform mechanism to deal with the command.
-
-Note:
-  
-  We could imagine just passing the originally proposed value during application
-  if one exists. Maybe we should do that. Would that make the contract clearer?
-  Would it obviate the need for the ID? Maybe sideloading prevents us from
-  removing the ID?
-
-For now the replication package exposes an implementation of ProposalMessage
-called EncodedProposalMessage
-
-```go
-// Should this expose the fact that it's just bytes?
-// Would it be better as struct { data []byte } ?
-type EncodedProposalMessage []byte
-```
-
-## Storage
-
-Raft requires that we feed it an API to access its state.
-This means accessing log entries and hard state.
-
-...
-
-## Transport
-
-Raft requires that messages be sent between nodes to step the state machine.
-
-The way that the 
-
-## The initial storage system
+## Part 0 - Unreplicated storage
 
 Before we talk about replication, let's talk about a storage system.
 
@@ -307,7 +262,60 @@ admirably for workloads dominated by reads.
 
 Now we're going to more on to the problem of replicating this this data.
 
-## Part II - A replicated KV
+
+### Replication 
+
+I did roughly this, I came up with what felt like a nice API for the primary
+case of replication. The main thing you want to replicate is data. It seems
+useful to provide a mechanism to identify commands so we leave the ID.
+Furthermore we leave encoding to the replication package. This may imply a
+need for a hook to describe the encoding type but I suspect this can all be
+handled in an orthogonal package that deals with storage. This is yet to be
+actively explored.
+
+```go
+type ProposalMessage interface {
+    ID() storagebase.CmdIDKey
+    Data() []byte
+}
+```
+
+This interface allows actively proposing clients to associate whatever
+in-memory state with a command that they'd like but is also an interface that
+the system will implement with just raw encoded replicated data so that
+non-proposing replicas can have a uniform mechanism to deal with the command.
+
+Note:
+  
+  We could imagine just passing the originally proposed value during application
+  if one exists. Maybe we should do that. Would that make the contract clearer?
+  Would it obviate the need for the ID? Maybe sideloading prevents us from
+  removing the ID?
+
+For now the replication package exposes an implementation of ProposalMessage
+called EncodedProposalMessage
+
+```go
+// Should this expose the fact that it's just bytes?
+// Would it be better as struct { data []byte } ?
+type EncodedProposalMessage []byte
+```
+
+## Storage
+
+Raft requires that we feed it an API to access its state.
+This means accessing log entries and hard state.
+
+...
+
+## Transport
+
+Raft requires that messages be sent between nodes to step the state machine.
+
+The way that the 
+
+
+## Part I - A replicated KV
 
 Now that we saw how easy it is to build a non-replicated key-value store we're
 going to take the existing logic and replicate across a variety of servers in
