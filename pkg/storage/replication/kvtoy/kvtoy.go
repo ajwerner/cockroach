@@ -484,31 +484,6 @@ func (s *Store) makeReplicationFactoryConfig() replication.FactoryConfig {
 	cfg.StateLoaderFactory = func(id replication.GroupID) replication.StateLoader {
 		return stateloader.Make(roachpb.RangeID(id))
 	}
-	cfg.EntryScannerFactory = func(id replication.GroupID) replication.EntryReader {
-		return func(
-			ctx context.Context,
-			eng engine.Reader,
-			lo, hi uint64,
-			f func(raftpb.Entry) (wantMore bool, err error),
-		) error {
-			var ent raftpb.Entry
-			scanFunc := func(kv roachpb.KeyValue) (bool, error) {
-				if err := kv.Value.GetProto(&ent); err != nil {
-					return false, err
-				}
-				return f(ent)
-			}
-			_, err := engine.MVCCIterate(
-				ctx, eng,
-				keys.RaftLogKey(roachpb.RangeID(id), lo),
-				keys.RaftLogKey(roachpb.RangeID(id), hi),
-				hlc.Timestamp{},
-				engine.MVCCScanOptions{},
-				scanFunc,
-			)
-			return err
-		}
-	}
 	cfg.NumWorkers = 16
 	return cfg
 }

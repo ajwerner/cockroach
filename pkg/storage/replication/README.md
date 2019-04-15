@@ -403,7 +403,29 @@ type EncodedProposalMessage []byte
 #### Replication Package
 
 Now that we've looked at how users will interact with replication, we need to
-discuss the design of the system which will coordinate this replication.
+discuss the design of the system which will coordinate this replication. Some of
+the considerations of the replication package fall out of scope for the system
+we're attempting to build in this section but please bear with me as they'll
+come back up. Let's introduce the key terminology that will be used by the
+replication package.
+
+The basic unit for replicated data is a `Group`. A group is identified by an
+`int64` value called a `GroupID`. Each group corresponds to a replicated state
+machine and consists of a number of `Peer`s. Each peer similarly is identified
+by an `int64` value called a `PeerID`. In an attempt to mitigate confusion, in
+the context of CRDB a group corresponds to a Range, and a Peer corresponds to a
+Replica. Throughout this section there will only be a single Group. Because
+later on we'll build a system which must simultaneously deal with `Peer`s from
+different groups we make some API considerations for that now.
+
+It is imperative that the replication library be capable of managing peers from
+many groups without requiring goroutines for each group.
+
+
+
+The biggest consideration is that eventually we'll want to have multiple
+overlapping replication groups. 
+hand but we'll tackle them eagerly
 
 ## Storage
 

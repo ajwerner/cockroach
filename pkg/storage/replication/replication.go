@@ -22,7 +22,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/connect"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
@@ -80,59 +79,6 @@ type TestingKnobs struct {
 	// DisableRefreshReasonTicks disables refreshing pending commands
 	// periodically.
 	DisableRefreshReasonTicks bool
-}
-
-// SideloadStorage is the interface used for Raft SSTable sideloading.
-// Implementations do not need to be thread safe.
-type SideloadStorage interface {
-	// The directory in which the sideloaded files are stored. May or may not
-	// exist.
-	Dir() string
-	// Writes the given contents to the file specified by the given index and
-	// term. Overwrites the file if it already exists.
-	Put(_ context.Context, index, term uint64, contents []byte) error
-	// Load the file at the given index and term. Return errSideloadedFileNotFound when no
-	// such file is present.
-	Get(_ context.Context, index, term uint64) ([]byte, error)
-	// Purge removes the file at the given index and term. It may also
-	// remove any leftover files at the same index and earlier terms, but
-	// is not required to do so. When no file at the given index and term
-	// exists, returns errSideloadedFileNotFound.
-	//
-	// Returns the total size of the purged payloads.
-	Purge(_ context.Context, index, term uint64) (int64, error)
-	// Clear files that may have been written by this SideloadStorage.
-	Clear(context.Context) error
-	// TruncateTo removes all files belonging to an index strictly smaller than
-	// the given one. Returns the number of bytes freed, the number of bytes in
-	// files that remain, or an error.
-	TruncateTo(_ context.Context, index uint64) (freed, retained int64, _ error)
-	// Returns an absolute path to the file that Get() would return the contents
-	// of. Does not check whether the file actually exists.
-	Filename(_ context.Context, index, term uint64) (string, error)
-}
-
-type StateLoader interface {
-	LoadRaftTruncatedState(context.Context, engine.Reader) (_ roachpb.RaftTruncatedState, isLegacy bool, _ error)
-	SetRaftTruncatedState(context.Context, engine.ReadWriter, *roachpb.RaftTruncatedState) error
-
-	LoadHardState(context.Context, engine.Reader) (raftpb.HardState, error)
-	SetHardState(context.Context, engine.ReadWriter, raftpb.HardState) error
-
-	SynthesizeRaftState(context.Context, engine.ReadWriter) error
-	LoadLastIndex(ctx context.Context, reader engine.Reader) (uint64, error)
-
-	RaftLastIndexKey() roachpb.Key
-	RaftLogPrefix() roachpb.Key
-	RaftLogKey(logIndex uint64) roachpb.Key
-	RangeLastReplicaGCTimestampKey() roachpb.Key
-}
-
-type EntryCache interface {
-	Add(_ []raftpb.Entry, truncate bool)
-	Clear(hi uint64)
-	Get(idx uint64) (raftpb.Entry, bool)
-	Scan(buf []raftpb.Entry, lo, hi, maxBytes uint64) (_ []raftpb.Entry, bytes, nextIdx uint64, exceededMaxBytes bool)
 }
 
 type FactoryConfig struct {
