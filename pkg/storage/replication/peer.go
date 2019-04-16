@@ -500,7 +500,6 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 func (p *Peer) sendRaftMessages(ctx context.Context, messages []raftpb.Message) {
 	var lastAppResp raftpb.Message
 	for _, message := range messages {
-		drop := false
 		switch message.Type {
 		case raftpb.MsgApp:
 			// TODO(ajwerner): re-enable this check
@@ -536,13 +535,10 @@ func (p *Peer) sendRaftMessages(ctx context.Context, messages []raftpb.Message) 
 			// problem in practice.
 			if !message.Reject && message.Index > lastAppResp.Index {
 				lastAppResp = message
-				drop = true
+				continue
 			}
 		}
-
-		if !drop {
-			p.sendRaftMessage(ctx, message)
-		}
+		p.sendRaftMessage(ctx, message)
 	}
 	if lastAppResp.Index > 0 {
 		p.sendRaftMessage(ctx, lastAppResp)
@@ -1192,10 +1188,7 @@ func (p *Peer) refreshProposalsLocked(refreshAtDelta int, reason ReproposalReaso
 	}
 	if log.V(1) && len(reproposals) > 0 {
 		ctx := p.AnnotateCtx(context.TODO())
-		log.Infof(ctx,
-			"pending commands: reproposing %d: %v",
-			len(reproposals), reason) /*, r.mu.state.RaftAppliedIndex,
-		  r.mu.state.LeaseAppliedIndex, reason) */
+		log.Infof(ctx, "pending commands: reproposing %d: %v", len(reproposals), reason)
 	}
 
 	// Reproposals are those commands which we weren't able to send back to the
