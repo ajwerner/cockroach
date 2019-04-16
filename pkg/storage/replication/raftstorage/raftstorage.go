@@ -2,9 +2,11 @@ package raftstorage
 
 import (
 	"context"
+	"math"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -34,14 +36,7 @@ import (
 // about encoding (this is still poorly defined in terms of its interface) as
 // well as the entry cache.
 
-// TODO(ajwerner): need a constructor to load the last index from the stateloader
-// set the term to something invalid.
-
-func NewRaftStorate() *RaftStorage {
-	panic("not implemented")
-}
-
-var _ raft.Storage = (*RaftStorage)(nil)
+// The below two interfaces are the dependencies for this package.
 
 type StateLoader interface {
 	// TODO(ajwerner): figure out the dynamics of this call
@@ -96,47 +91,290 @@ type SideloadStorage interface {
 	Filename(_ context.Context, index, term uint64) (string, error)
 }
 
+// TODO(ajwerner): need a constructor to load the last index from the stateloader
+// set the term to something invalid.
+
+type Config struct {
+	Ambient         log.AmbientContext
+	Engine          engine.Engine
+	StateLoader     StateLoader
+	EntryCache      EntryCache
+	SideloadStorage SideloadStorage
+
+	// MaybeGetCommandByID can be used to look up an already deserialized
+	// RaftCommand by its ID. This function is used in a best-effort fashion
+	// and can always return zero values or be nil.
+	MaybeGetCommandByID func(storagebase.CmdIDKey) (storagepb.RaftCommand, bool)
+
+	// GetConfState is used to provide a value for InitialState.
+	// It is sort of a bummer. On the one hand it's sort of problematic because of
+	// locking. You might imagine that you want this call to grab a lock but what
+	// if you're already holding that lock when this call is made? Well maybe it's
+	// the case that you are already always holding that lock when this is called
+	// what sort of contract is that? I guess this might just push the client to
+	// use an atomic.Value. Would that be alright? Probably not. :/
+	GetConfState func() raftpb.ConfState
+}
+
 type RaftStorage struct {
 	ambient             log.AmbientContext
+	engine              engine.Engine
 	stateLoader         StateLoader
 	entryCache          EntryCache
-	storage             engine.Engine
+	sideloadStorage     SideloadStorage
 	maybeGetRaftCommand func(id storagebase.CmdIDKey) (storagepb.RaftCommand, bool)
+	getConfState        func() raftpb.ConfState
 	mu                  struct {
 		syncutil.RWMutex
 		// TODO(ajwerner): think about peers and locking
-		peers           []uint64
-		truncatedState  *roachpb.RaftTruncatedState
-		sideloadStorage SideloadStorage
+		truncatedState *roachpb.RaftTruncatedState
 
-		lastTerm    int64
-		lastIndex   int64
-		raftLogSize int64
+		lastTerm           uint64
+		lastIndex          uint64
+		raftLogSize        int64
+		raftLogSizeTrusted bool
 	}
 }
 
-func (rs *RaftStorage) NewEntryBatch(
-	ctx context.Context, entries []raftpb.Entry, writeBatch engine.Batch,
-) (EntryBatch, error) {
+// invalidLastTerm is an out-of-band value for r.mu.lastTerm that
+// invalidates lastTerm caching and forces retrieval of Term(lastTerm)
+// from the raftEntryCache/RocksDB.
+const invalidLastTerm = 0
+
+func NewRaftStorage(ctx context.Context, cfg Config) (*RaftStorage, error) {
+	rs := &RaftStorage{
+		ambient:         cfg.Ambient,
+		stateLoader:     cfg.StateLoader,
+		entryCache:      cfg.EntryCache,
+		engine:          cfg.Engine,
+		sideloadStorage: cfg.SideloadStorage,
+		getConfState:    cfg.GetConfState,
+	}
+	// Now we need to load some state.
+	var err error
+	rs.mu.lastIndex, err = rs.stateLoader.LoadLastIndex(ctx, rs.engine)
+	if err != nil {
+		return nil, err
+	}
+	rs.mu.lastTerm = invalidLastTerm
+	return rs, nil
+}
+
+func (rs *RaftStorage) LogSize() (size int64, trusted bool) {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+	return rs.mu.raftLogSize, rs.mu.raftLogSizeTrusted
+}
+
+// NewEntryBatch is how clients add new log entries to RaftStorage.
+func (rs *RaftStorage) Append(
+	ctx context.Context, writer engine.ReadWriter, entries []raftpb.Entry,
+) (onCommit func() error, _ error) {
 	// We start by grabbing the mutex and recording the current value for the
 	// lastTerm, lastIndex, and raftLogSize.
 	// Then we attempt to sideload entries
 	// Then we do the append which writes
 	// the entries into the writeBatch, then finally
+	rs.mu.RLock()
+	lastIndex := rs.mu.lastIndex // used for append below
+	lastTerm := rs.mu.lastTerm
+	raftLogSize := rs.mu.raftLogSize
+	rs.mu.RUnlock()
+	prevLastIndex := lastIndex
+
+	// TODO(ajwerner): eliminate some of the allocations here.
+	// All of the entries are appended to distinct keys, returning a new
+	// last index.
+	thinEntries, sideLoadedEntriesSize, err := rs.maybeSideloadEntriesRaftMuLocked(ctx, entries)
+	if err != nil {
+		const expl = "during sideloading"
+		return nil, errors.Wrap(err, expl)
+	}
+	raftLogSize += sideLoadedEntriesSize
+	if lastIndex, lastTerm, raftLogSize, err = rs.append(
+		ctx, writer, lastIndex, lastTerm, raftLogSize, thinEntries,
+	); err != nil {
+		const expl = "during append"
+		return nil, errors.Wrap(err, expl)
+	}
+	return func() (err error) {
+		// We may have just overwritten parts of the log which contain
+		// sideloaded SSTables from a previous term (and perhaps discarded some
+		// entries that we didn't overwrite). Remove any such leftover on-disk
+		// payloads (we can do that now because we've committed the deletion
+		// just above).
+
+		firstPurge := entries[0].Index // first new entry written
+		purgeTerm := entries[0].Term - 1
+		lastPurge := prevLastIndex // old end of the log, include in deletion
+		purgedSize, err := maybePurgeSideloaded(ctx, rs.sideloadStorage, firstPurge, lastPurge, purgeTerm)
+		if err != nil {
+			const expl = "while purging sideloaded storage"
+			return errors.Wrap(err, expl)
+		}
+		raftLogSize -= purgedSize
+		if raftLogSize < 0 {
+			// Might have gone negative if node was recently restarted.
+			raftLogSize = 0
+		}
+		rs.mu.Lock()
+		rs.mu.lastIndex = lastIndex
+		rs.mu.lastTerm = lastTerm
+		rs.mu.raftLogSize = raftLogSize
+		rs.mu.Unlock()
+		rs.entryCache.Add(entries, true /* truncate */)
+		return nil
+	}, nil
 }
 
+// append the given entries to the raft log. Takes the previous values of
+// p.mu.lastIndex, p.mu.lastTerm, and r.mu.raftLogSize, and returns new values.
+// We do this rather than modifying them directly because these modifications
+// need to be atomic with the commit of the batch. This method requires that
+// r.raftMu is held.
+//
+// append is intentionally oblivious to the existence of sideloaded proposals.
+// They are managed by the caller, including cleaning up obsolete on-disk
+// payloads in case the log tail is replaced.
+func (rs *RaftStorage) append(
+	ctx context.Context,
+	batch engine.ReadWriter,
+	prevLastIndex uint64,
+	prevLastTerm uint64,
+	prevRaftLogSize int64,
+	entries []raftpb.Entry,
+) (uint64, uint64, int64, error) {
+	if len(entries) == 0 {
+		return prevLastIndex, prevLastTerm, prevRaftLogSize, nil
+	}
+	var diff enginepb.MVCCStats
+	var value roachpb.Value
+	for i := range entries {
+		ent := &entries[i]
+		key := rs.stateLoader.RaftLogKey(ent.Index)
+
+		if err := value.SetProto(ent); err != nil {
+			return 0, 0, 0, err
+		}
+		value.InitChecksum(key)
+		var err error
+		if ent.Index > prevLastIndex {
+			err = engine.MVCCBlindPut(ctx, batch, &diff, key, hlc.Timestamp{}, value, nil /* txn */)
+		} else {
+			err = engine.MVCCPut(ctx, batch, &diff, key, hlc.Timestamp{}, value, nil /* txn */)
+		}
+		if err != nil {
+			return 0, 0, 0, err
+		}
+	}
+
+	// Delete any previously appended log entries which never committed.
+	lastIndex := entries[len(entries)-1].Index
+	lastTerm := entries[len(entries)-1].Term
+	for i := lastIndex + 1; i <= prevLastIndex; i++ {
+		// Note that the caller is in charge of deleting any sideloaded payloads
+		// (which they must only do *after* the batch has committed).
+		err := engine.MVCCDelete(ctx, batch, &diff, rs.stateLoader.RaftLogKey(i),
+			hlc.Timestamp{}, nil /* txn */)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+	}
+
+	raftLogSize := prevRaftLogSize + diff.SysBytes
+
+	return lastIndex, lastTerm, raftLogSize, nil
+}
+
+func (rs *RaftStorage) SetHardState(
+	ctx context.Context, writeBatch engine.ReadWriter, hs raftpb.HardState,
+) error {
+	return rs.stateLoader.SetHardState(ctx, writeBatch, hs)
+}
+
+var _ raft.Storage = (*RaftStorage)(nil)
+
+// InitialState returns the saved HardState and ConfState information.
 // InitialState implements the raft.Storage interface.
 func (rs *RaftStorage) InitialState() (hs raftpb.HardState, cs raftpb.ConfState, err error) {
 	ctx := rs.ambient.AnnotateCtx(context.TODO())
-	hs, err = rs.stateLoader.LoadHardState(ctx, rs.storage)
+	hs, err = rs.stateLoader.LoadHardState(ctx, rs.engine)
 	// For uninitialized ranges, membership is unknown at this point.
 	if raft.IsEmptyHardState(hs) || err != nil {
 		return raftpb.HardState{}, raftpb.ConfState{}, err
 	}
-	for _, peerID := range rs.mu.peers {
-		cs.Nodes = append(cs.Nodes, uint64(peerID))
+	return hs, rs.getConfState(), nil
+}
+
+// Entries returns a slice of log entries in the range [lo,hi).
+// MaxSize limits the total size of the log entries returned, but Entries
+// returns at least one entry if any.
+// Entries implements the raft.Storage interface. Note that maxBytes is advisory
+// and this method will always return at least one entry even if it exceeds
+// maxBytes. Sideloaded proposals count towards maxBytes with their payloads inlined.
+func (rs *RaftStorage) Entries(lo, hi, maxBytes uint64) ([]raftpb.Entry, error) {
+	readonly := rs.engine.NewReadOnly()
+	defer readonly.Close()
+	ctx := rs.ambient.AnnotateCtx(context.TODO())
+	if rs.sideloadStorage == nil {
+		return nil, errors.New("sideloaded storage is uninitialized")
 	}
-	return hs, cs, nil
+	return entries(ctx, rs.stateLoader, readonly, rs.entryCache,
+		rs.sideloadStorage, lo, hi, maxBytes)
+}
+
+// Term returns the term of entry i, which must be in the range
+// [FirstIndex()-1, LastIndex()]. The term of the entry before
+// FirstIndex is retained for matching purposes even though the
+// rest of that entry may not be available.
+// Term implements the raft.Storage interface.
+func (rs *RaftStorage) Term(i uint64) (uint64, error) {
+	// TODO(nvanbenschoten): should we set r.mu.lastTerm when
+	//   r.mu.lastIndex == i && r.mu.lastTerm == invalidLastTerm?
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+	if rs.mu.lastIndex == i && rs.mu.lastTerm != invalidLastTerm {
+		return rs.mu.lastTerm, nil
+	}
+	// Try to retrieve the term for the desired entry from the entry cache.
+	if e, ok := rs.entryCache.Get(i); ok {
+		return e.Term, nil
+	}
+	readonly := rs.engine.NewReadOnly()
+	defer readonly.Close()
+	ctx := rs.ambient.AnnotateCtx(context.TODO())
+	return term(ctx, rs.stateLoader, readonly, rs.entryCache, i)
+}
+
+func term(
+	ctx context.Context, rsl StateLoader, eng engine.Reader, eCache EntryCache, i uint64,
+) (uint64, error) {
+	// entries() accepts a `nil` sideloaded storage and will skip inlining of
+	// sideloaded entries. We only need the term, so this is what we do.
+	ents, err := entries(ctx, rsl, eng, eCache, nil /* sideloaded */, i, i+1, math.MaxUint64 /* maxBytes */)
+	if err == raft.ErrCompacted {
+		ts, _, err := rsl.LoadRaftTruncatedState(ctx, eng)
+		if err != nil {
+			return 0, err
+		}
+		if i == ts.Index {
+			return ts.Term, nil
+		}
+		return 0, raft.ErrCompacted
+	} else if err != nil {
+		return 0, err
+	}
+	if len(ents) == 0 {
+		return 0, nil
+	}
+	return ents[0].Term, nil
+}
+
+// LastIndex returns the index of the last entry in the log.
+func (rs *RaftStorage) LastIndex() (uint64, error) {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+	return rs.mu.lastIndex, nil
 }
 
 func (rs *RaftStorage) FirstIndex() (uint64, error) {
@@ -160,7 +398,7 @@ func (rs *RaftStorage) raftTruncatedStateLocked(
 	if rs.mu.truncatedState != nil {
 		return *rs.mu.truncatedState, nil
 	}
-	ts, _, err := rs.stateLoader.LoadRaftTruncatedState(ctx, rs.storage)
+	ts, _, err := rs.stateLoader.LoadRaftTruncatedState(ctx, rs.engine)
 	if err != nil {
 		return ts, err
 	}
@@ -170,18 +408,12 @@ func (rs *RaftStorage) raftTruncatedStateLocked(
 	return ts, nil
 }
 
-// Entries implements the raft.Storage interface. Note that maxBytes is advisory
-// and this method will always return at least one entry even if it exceeds
-// maxBytes. Sideloaded proposals count towards maxBytes with their payloads inlined.
-func (rs *RaftStorage) Entries(lo, hi, maxBytes uint64) ([]raftpb.Entry, error) {
-	readonly := rs.storage.NewReadOnly()
-	defer readonly.Close()
-	ctx := rs.ambient.AnnotateCtx(context.TODO())
-	if rs.mu.sideloadStorage == nil {
-		return nil, errors.New("sideloaded storage is uninitialized")
-	}
-	return entries(ctx, rs.stateLoader, readonly, rs.entryCache,
-		rs.mu.sideloadStorage, lo, hi, maxBytes)
+// Snapshot returns the most recent snapshot.
+// If snapshot is temporarily unavailable, it should return ErrSnapshotTemporarilyUnavailable,
+// so raft state machine could know that Storage needs some time to prepare
+// snapshot and call Snapshot later.
+func (rs *RaftStorage) Snapshot() (raftpb.Snapshot, error) {
+	panic("not implemented")
 }
 
 // TODO(ajwerner): refactor this to be cleaner
@@ -331,7 +563,7 @@ func entries(
 func (rs *RaftStorage) maybeSideloadEntriesRaftMuLocked(
 	ctx context.Context, entriesToAppend []raftpb.Entry,
 ) (_ []raftpb.Entry, sideloadedEntriesSize int64, _ error) {
-	return maybeSideloadEntriesImpl(ctx, entriesToAppend, rs.mu.sideloadStorage,
+	return maybeSideloadEntriesImpl(ctx, entriesToAppend, rs.sideloadStorage,
 		rs.maybeGetRaftCommand)
 }
 

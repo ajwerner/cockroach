@@ -23,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/storage/replication"
 	"github.com/cockroachdb/cockroach/pkg/storage/replication/kvtoy/kvtoypb"
+	"github.com/cockroachdb/cockroach/pkg/storage/replication/raftstorage"
 	"github.com/cockroachdb/cockroach/pkg/storage/replication/rafttransport"
 	"github.com/cockroachdb/cockroach/pkg/storage/replication/sideload"
 	"github.com/cockroachdb/cockroach/pkg/storage/stateloader"
@@ -202,17 +203,20 @@ func (r *Replica) Handle(
 		id:  idKey,
 		ba:  ba,
 	}
+	var syn syncutil.Mutex
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.mu.proposals[idKey] = prop
-	pc := r.mu.peer.NewClient(&r.mu)
+	r.mu.Unlock()
+	syn.Lock()
+	defer syn.Unlock()
+	pc := r.mu.peer.NewClient(&syn)
 	pc.Callbacks.Apply = func(eng engine.Writer) error {
 		log.Infof(ctx, "here in apply")
 		panic("here")
 	}
 	pc.Send(ctx, prop)
 	msg := pc.Recv()
-	log.Infof(ctx, "got a response! %v %v, %v", msg, prop.br, len(prop.br.Responses))
+	log.Infof(ctx, "got a response! %v %v", msg, prop.br)
 	// realistically we need to wait for applied
 	return prop.br, prop.err
 }
@@ -341,6 +345,24 @@ func newReplica(
 	for _, r := range r.mu.state.Desc.Replicas {
 		peers = append(peers, replication.PeerID(r.ReplicaID))
 	}
+	sideloadStorage := sideload.MustNewInMemSideloadStorage(r.mu.state.Desc.RangeID, r.mu.replicaID, "")
+	rs, err := raftstorage.NewRaftStorage(ctx, raftstorage.Config{
+		Ambient:         store.cfg.Ambient,
+		Engine:          store.cfg.Engine,
+		StateLoader:     stateloader.Make(roachpb.RangeID(1)),
+		EntryCache:      groupCache{c: store.cfg.EntryCache, id: 1},
+		SideloadStorage: sideloadStorage,
+		GetConfState: func() (cs raftpb.ConfState) {
+			cs.Nodes = make([]uint64, 0, len(peers))
+			for _, p := range peers {
+				cs.Nodes = append(cs.Nodes, uint64(p))
+			}
+			return cs
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
 	r.mu.peer, err = store.peerFactory.NewPeer(replication.PeerConfig{
 		GroupID:        1,
 		PeerID:         replication.PeerID(replDesc.ReplicaID),
@@ -368,7 +390,7 @@ func newReplica(
 			}
 			return &m
 		},
-		SideloadStorage: sideload.MustNewInMemSideloadStorage(r.mu.state.Desc.RangeID, r.mu.replicaID, ""),
+		RaftStorage: rs,
 	})
 	if err != nil {
 		return nil, err
@@ -478,13 +500,7 @@ func (s *Store) makeReplicationFactoryConfig() replication.FactoryConfig {
 	cfg.Stopper = s.cfg.Stopper
 	cfg.RaftConfig = s.cfg.RaftConfig
 	cfg.RaftTransport = s.cfg.RaftTransport
-	cfg.EntryCacheFactory = func(id replication.GroupID) replication.EntryCache {
-		return groupCache{c: s.cfg.EntryCache, id: id}
-	}
-	cfg.StateLoaderFactory = func(id replication.GroupID) replication.StateLoader {
-		return stateloader.Make(roachpb.RangeID(id))
-	}
-	cfg.NumWorkers = 16
+	cfg.NumWorkers = 1
 	return cfg
 }
 

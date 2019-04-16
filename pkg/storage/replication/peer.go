@@ -19,7 +19,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"sort"
 	"sync"
 	"time"
 
@@ -30,7 +29,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -85,11 +83,11 @@ type Peer struct {
 	// inbound traffic will come on the message queue.
 	raftTransport connect.Conn
 
+	raftStorage RaftStorage
+
 	shouldCampaign func(ctx context.Context, status *raft.Status) bool
 	onUnquiesce    func()
 	storage        engine.Engine
-	entryReader    EntryReader
-	entryCache     EntryCache
 
 	processCommand     ProcessCommandFunc
 	processConfChange  ProcessConfChangeFunc
@@ -112,7 +110,6 @@ type Peer struct {
 		raftLogSize         int64
 		quiescent           bool
 		destroyed           bool
-		stateLoader         StateLoader
 		peers               []PeerID // ugh this is sort of from the replica descriptor?
 		rawNode             *raft.RawNode
 
@@ -159,11 +156,6 @@ type Peer struct {
 	// TODO(ajwerner): justify and understand this
 	raftMu struct {
 		syncutil.Mutex
-		// Note that there are two StateLoaders, in raftMu and mu,
-		// depending on which lock is being held.
-		stateLoader StateLoader
-		// on-disk storage for sideloaded SSTables. nil when there's no ReplicaID.
-		sideloaded SideloadStorage
 	}
 	msgQueueMu struct {
 		syncutil.RWMutex
@@ -198,9 +190,6 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 	var hasReady bool
 	var rd raft.Ready
 	p.mu.Lock()
-	lastIndex := p.mu.lastIndex // used for append below
-	lastTerm := p.mu.lastTerm
-	raftLogSize := p.mu.raftLogSize
 	leaderID := p.mu.leaderID
 	lastLeaderID := leaderID
 
@@ -241,7 +230,7 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 	}
 
 	logRaftReady(ctx, rd)
-	refreshReason := noReason
+	refreshReason := NoReason
 	if rd.SoftState != nil && leaderID != PeerID(rd.SoftState.Lead) {
 		// TODO(ajwerner): deal with leadership changes?
 		log.Infof(ctx, "Leader changed? %v %v", rd.SoftState, leaderID)
@@ -249,7 +238,7 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 			log.Infof(ctx, "raft leader changed: %d -> %d", leaderID, rd.SoftState.Lead)
 		}
 		if !p.testingKnobs.DisableRefreshReasonNewLeader {
-			refreshReason = reasonNewLeader
+			refreshReason = ReasonNewLeader
 		}
 		leaderID = PeerID(rd.SoftState.Lead)
 	}
@@ -306,26 +295,16 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 
 	// We know that all of the writes from here forward will be to distinct keys.
 	writer := batch.Distinct()
-	prevLastIndex := lastIndex
+	var onLogCommit func() error
 	if len(rd.Entries) > 0 {
-		// All of the entries are appended to distinct keys, returning a new
-		// last index.
-		thinEntries, sideLoadedEntriesSize, err := p.maybeSideloadEntriesRaftMuLocked(ctx, rd.Entries)
+		onLogCommit, err = p.raftStorage.Append(ctx, writer, rd.Entries)
 		if err != nil {
-			const expl = "during sideloading"
-			return stats, expl, errors.Wrap(err, expl)
-		}
-		raftLogSize += sideLoadedEntriesSize
-		if lastIndex, lastTerm, raftLogSize, err = p.append(
-			ctx, writer, lastIndex, lastTerm, raftLogSize, thinEntries,
-		); err != nil {
 			const expl = "during append"
 			return stats, expl, errors.Wrap(err, expl)
 		}
 	}
 	if !raft.IsEmptyHardState(rd.HardState) {
-		log.Infof(ctx, "setting that hard state %v %v", p.raftMu.stateLoader, rd.HardState)
-		if err := p.raftMu.stateLoader.SetHardState(ctx, writer, rd.HardState); err != nil {
+		if err := p.raftStorage.SetHardState(ctx, writer, rd.HardState); err != nil {
 			const expl = "during setHardState"
 			return stats, expl, errors.Wrap(err, expl)
 		}
@@ -353,35 +332,16 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 	//elapsed := timeutil.Since(commitStart)
 	// TODO(ajwerner): metrics
 	// r.metrics.RaftLogCommitLatency.RecordValue(elapsed.Nanoseconds())
-
-	if len(rd.Entries) > 0 {
-		// We may have just overwritten parts of the log which contain
-		// sideloaded SSTables from a previous term (and perhaps discarded some
-		// entries that we didn't overwrite). Remove any such leftover on-disk
-		// payloads (we can do that now because we've committed the deletion
-		// just above).
-		firstPurge := rd.Entries[0].Index // first new entry written
-		purgeTerm := rd.Entries[0].Term - 1
-		lastPurge := prevLastIndex // old end of the log, include in deletion
-		purgedSize, err := maybePurgeSideloaded(ctx, p.raftMu.sideloaded, firstPurge, lastPurge, purgeTerm)
-		if err != nil {
+	if onLogCommit != nil {
+		if err := onLogCommit(); err != nil {
 			const expl = "while purging sideloaded storage"
 			return stats, expl, err
 		}
-		raftLogSize -= purgedSize
-		if raftLogSize < 0 {
-			// Might have gone negative if node was recently restarted.
-			raftLogSize = 0
-		}
-
 	}
 
 	// Update protected state - last index, last term, raft log size, and raft
 	// leader ID.
 	p.mu.Lock()
-	p.mu.lastIndex = lastIndex
-	p.mu.lastTerm = lastTerm
-	p.mu.raftLogSize = raftLogSize
 	var becameLeader bool
 	if p.mu.leaderID != leaderID {
 		p.mu.leaderID = leaderID
@@ -401,7 +361,6 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 
 	// Update raft log entry cache. We clear any older, uncommitted log entries
 	// and cache the latest ones.
-	p.entryCache.Add(rd.Entries, true /* truncate */)
 	p.sendRaftMessages(ctx, otherMsgs)
 	p.traceEntries(rd.CommittedEntries, "committed, before applying any entries")
 	// applicationStart := timeutil.Now()
@@ -433,7 +392,7 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 				// Overwrite unconditionally since this is the most aggressive
 				// reproposal mode.
 				if !p.testingKnobs.DisableRefreshReasonNewLeaderOrConfigChange {
-					refreshReason = reasonNewLeaderOrConfigChange
+					refreshReason = ReasonNewLeaderOrConfigChange
 				}
 				commandID = "" // special-cased value, command isn't used
 			} else {
@@ -524,7 +483,7 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 
 	// applicationElapsed := timeutil.Since(applicationStart).Nanoseconds()
 	// r.store.metrics.RaftApplyCommittedLatency.RecordValue(applicationElapsed)
-	if refreshReason != noReason {
+	if refreshReason != NoReason {
 		p.mu.Lock()
 		p.refreshProposalsLocked(0, refreshReason)
 		p.mu.Unlock()
@@ -560,17 +519,18 @@ func (p *Peer) sendRaftMessages(ctx context.Context, messages []raftpb.Message) 
 		drop := false
 		switch message.Type {
 		case raftpb.MsgApp:
-			if util.RaceEnabled {
-				// Iterate over the entries to assert that all sideloaded commands
-				// are already inlined. replicaRaftStorage.Entries already performs
-				// the sideload inlining for stable entries and raft.unstable always
-				// contain fat entries. Since these are the only two sources that
-				// raft.sendAppend gathers entries from to populate MsgApps, we
-				// should never see thin entries here.
-				for j := range message.Entries {
-					assertSideloadedRaftCommandInlined(ctx, &message.Entries[j])
-				}
-			}
+			// TODO(ajwerner): re-enable this check
+			// if util.RaceEnabled {
+			// 	// Iterate over the entries to assert that all sideloaded commands
+			// 	// are already inlined. replicaRaftStorage.Entries already performs
+			// 	// the sideload inlining for stable entries and raft.unstable always
+			// 	// contain fat entries. Since these are the only two sources that
+			// 	// raft.sendAppend gathers entries from to populate MsgApps, we
+			// 	// should never see thin entries here.
+			// 	for j := range message.Entries {
+			// 		assertSideloadedRaftCommandInlined(ctx, &message.Entries[j])
+			// 	}
+			// }
 
 		case raftpb.MsgAppResp:
 			// A successful (non-reject) MsgAppResp contains one piece of
@@ -647,6 +607,7 @@ func (p *Peer) processRaftCommand(
 	prop, exists := p.mu.proposals[id]
 	if exists {
 		delete(p.mu.proposals, id)
+		prop.pc.done = true
 		defer prop.pc.cond.Signal()
 	}
 	p.mu.Unlock()
@@ -701,7 +662,7 @@ func (p *Peer) withRaftGroupLocked(
 	if p.mu.rawNode == nil {
 		ctx := p.AnnotateCtx(context.TODO())
 		raftGroup, err := raft.NewRawNode(newRaftConfig(
-			raft.Storage((*peerStorage)(p)),
+			p.raftStorage,
 			uint64(p.mu.peerID),
 			p.mu.appliedIndex, // TODO(ajwerner): think about this
 			*p.raftConfig,
@@ -1065,7 +1026,7 @@ func (p *Peer) tick(
 		// RaftElectionTimeoutTicks to refreshProposalsLocked means that commands
 		// will be refreshed when they have been pending for 1 to 2 election
 		// cycles.
-		p.refreshProposalsLocked(refreshAtDelta, reasonTicks)
+		p.refreshProposalsLocked(int(refreshAtDelta), ReasonTicks)
 	}
 	return true, nil
 }
@@ -1224,46 +1185,49 @@ func (p *Peer) unquiesceAndWakeLeaderLocked() {
 // ticks of an election timeout (affect only proposals that have had ample time
 // to apply but didn't).
 func (p *Peer) refreshProposalsLocked(refreshAtDelta int, reason ReproposalReason) {
-	if refreshAtDelta != 0 && reason != reasonTicks {
+	if refreshAtDelta != 0 && reason != ReasonTicks {
 		log.Fatalf(context.TODO(), "refreshAtDelta specified for reason %s != reasonTicks", reason)
 	}
-
+	/// var reproposals []*proposal
 	for _, prop := range p.mu.proposals {
-		if err := prop.pc.ShouldRepropose(reason); err != nil {
-			prop.pc.finishWithError(err)
-			continue
-		}
+		prop.pc.finishWithError(errors.Errorf("TODO(ajwerner): repropose better"))
+		// if err := prop.pc.Callbacks.ShouldRepropose(reason); err != nil {
+		// 	prop.pc.finishWithError(err)
+		// 	continue
+		// }
+		// reproposals = append(reproposals, prop)
 	}
+	return
+	// if log.V(1) && len(reproposals) > 0 {
+	// 	ctx := p.AnnotateCtx(context.TODO())
+	// 	log.Infof(ctx,
+	// 		"pending commands: reproposing %d: %v",
+	// 		len(reproposals), reason) /*, r.mu.state.RaftAppliedIndex,
+	// 	  r.mu.state.LeaseAppliedIndex, reason) */
+	// }
 
-	if log.V(1) && len(reproposals) > 0 {
-		ctx := r.AnnotateCtx(context.TODO())
-		log.Infof(ctx,
-			"pending commands: reproposing %d (at %d.%d) %s",
-			len(reproposals), r.mu.state.RaftAppliedIndex,
-			r.mu.state.LeaseAppliedIndex, reason)
-	}
-
-	// Reproposals are those commands which we weren't able to send back to the
-	// client (since we're not sure that another copy of them could apply at
-	// the "correct" index). For reproposals, it's generally pretty unlikely
-	// that they can make it in the right place. Reproposing in order is
-	// definitely required, however.
-	//
-	// TODO(tschottdorf): evaluate whether `r.mu.proposals` should
-	// be a list/slice.
-	sort.Sort(reproposals)
-	for _, p := range reproposals {
-		log.Eventf(p.ctx, "re-submitting command %x to Raft: %s", p.idKey, reason)
-		if err := r.submitProposalLocked(p); err == raft.ErrProposalDropped {
-			// TODO(bdarnell): Handle ErrProposalDropped better.
-			// https://github.com/cockroachdb/cockroach/issues/21849
-		} else if err != nil {
-			r.cleanupFailedProposalLocked(p)
-			p.finishApplication(proposalResult{
-				Err: roachpb.NewError(roachpb.NewAmbiguousResultError(err.Error())),
-			})
-		}
-	}
+	// // Reproposals are those commands which we weren't able to send back to the
+	// // client (since we're not sure that another copy of them could apply at
+	// // the "correct" index). For reproposals, it's generally pretty unlikely
+	// // that they can make it in the right place. Reproposing in order is
+	// // definitely required, however.
+	// //
+	// // TODO(tschottdorf): evaluate whether `r.mu.proposals` should
+	// // be a list/slice.
+	// // TODO(ajwerner): add hook for sorting proposals.
+	// // sort.Sort(reproposals)
+	// for _, p := range reproposals {
+	// 	log.Eventf(p.ctx, "re-submitting command %x to Raft: %s", p.idKey, reason)
+	// 	if err := r.submitProposalLocked(p); err == raft.ErrProposalDropped {
+	// 		// TODO(bdarnell): Handle ErrProposalDropped better.
+	// 		// https://github.com/cockroachdb/cockroach/issues/21849
+	// 	} else if err != nil {
+	// 		r.cleanupFailedProposalLocked(p)
+	// 		p.finishApplication(proposalResult{
+	// 			Err: roachpb.NewError(roachpb.NewAmbiguousResultError(err.Error())),
+	// 		})
+	// 	}
+	// }
 }
 
 type raftCommandEncodingVersion byte

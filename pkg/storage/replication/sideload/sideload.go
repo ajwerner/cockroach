@@ -22,7 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
-	"github.com/cockroachdb/cockroach/pkg/storage/replication"
+	"github.com/cockroachdb/cockroach/pkg/storage/replication/raftstorage"
 	"github.com/pkg/errors"
 )
 
@@ -37,7 +37,7 @@ type inMemSideloadStorage struct {
 
 func MustNewInMemSideloadStorage(
 	rangeID roachpb.RangeID, replicaID roachpb.ReplicaID, baseDir string,
-) replication.SideloadStorage {
+) raftstorage.SideloadStorage {
 	ss, err := NewInMemSideloadStorage(cluster.MakeTestingClusterSettings(), rangeID, replicaID, baseDir, nil)
 	if err != nil {
 		panic(err)
@@ -51,7 +51,7 @@ func NewInMemSideloadStorage(
 	replicaID roachpb.ReplicaID,
 	baseDir string,
 	eng engine.Engine,
-) (replication.SideloadStorage, error) {
+) (raftstorage.SideloadStorage, error) {
 	return &inMemSideloadStorage{
 		prefix: filepath.Join(baseDir, fmt.Sprintf("%d.%d", rangeID, replicaID)),
 		m:      make(map[slKey][]byte),

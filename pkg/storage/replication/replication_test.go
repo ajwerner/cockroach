@@ -138,7 +138,6 @@ func setUpToyStoresWithRealRPCs(
 		cfg := kvtoy.TestingStoreConfig(roachpb.NodeID(i))
 		l, err := net.Listen("tcp", ":0")
 		require.Nil(t, err)
-
 		rpcCtx := rpc.NewContext(cfg.Ambient,
 			&base.Config{
 				Insecure: true,
@@ -201,7 +200,7 @@ func TestReplication(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	resp, err := s1.Batch(ctx, put(roachpb.Key("asdf"), 1))
-	assert.Nil(t, err)
+	require.Nil(t, err)
 	resp, err = s1.Batch(ctx, get(roachpb.Key("asdf")))
 	assert.Nil(t, err)
 	respVal, err := resp.Responses[0].GetGet().Value.GetFloat()

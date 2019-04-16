@@ -39,6 +39,7 @@ import (
 // unreplicated starting in 19.2. The HardState likely belongs with the
 // raft log.
 
+// RaftStorage is used to store on-disk state for raft.
 type RaftStorage interface {
 	raft.Storage
 
@@ -46,7 +47,9 @@ type RaftStorage interface {
 		ctx context.Context, batch engine.ReadWriter, entries []raftpb.Entry,
 	) (onCommit func() error, err error)
 
-	LogSize() int64
+	SetHardState(ctx context.Context, batch engine.ReadWriter, hs raftpb.HardState) error
+
+	LogSize() (size int64, trusted bool)
 }
 
 // GroupID is the basic unit of replication.
@@ -117,10 +120,8 @@ type FactoryConfig struct {
 	// received.
 	RaftTransport connect.Conn
 
-	RaftStorageFactory func(GroupID) RaftStorage
-
-	//RaftMessageFactory     func() RaftMessage
-	// 	SideloadStorageFactory func(GroupID) SideloadStorage
+	// RaftMessageFactory     func() RaftMessage
+	// SideloadStorageFactory func(GroupID) SideloadStorage
 	// StateLoaderFactory  func(GroupID) StateLoader
 	// EntryCacheFactory   func(GroupID) EntryCache
 	// EntryScannerFactory func(GroupID) EntryReader
@@ -284,7 +285,7 @@ func (f *Factory) recvLoop(ctx context.Context) {
 }
 
 func (f *Factory) tickLoop(ctx context.Context) {
-	ticker := time.NewTicker(f.cfg.RaftTickInterval)
+	ticker := time.NewTicker(f.cfg.RaftConfig.RaftTickInterval)
 	defer f.cfg.RaftTransport.Close(ctx, true)
 	defer ticker.Stop()
 	var groupsToTick []GroupID
@@ -342,7 +343,7 @@ type PeerConfig struct {
 	ProcessCommand     ProcessCommandFunc
 	ProcessConfChanged ProcessConfChangeFunc
 	RaftMessageFactory func(raftpb.Message) RaftMessage
-	SideloadStorage    SideloadStorage
+	RaftStorage        RaftStorage
 }
 
 // NewPeer creates a new peer.
@@ -362,6 +363,7 @@ func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
 		testingKnobs:       &f.cfg.TestingKnobs,
 		groupID:            cfg.GroupID,
 		raftConfig:         &f.cfg.RaftConfig,
+		raftStorage:        cfg.RaftStorage,
 		raftMessageFactory: cfg.RaftMessageFactory,
 		storage:            f.cfg.Storage,
 		onUnquiesce:        func() { f.onUnquiesce(cfg.GroupID) },
@@ -370,13 +372,13 @@ func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
 	}
 
 	p.raftTransport = f.cfg.RaftTransport
-	p.entryReader = f.cfg.EntryScannerFactory(cfg.GroupID)
-	p.entryCache = f.cfg.EntryCacheFactory(cfg.GroupID)
+	// p.entryReader = f.cfg.EntryScannerFactory(cfg.GroupID)
+	// p.entryCache = f.cfg.EntryCacheFactory(cfg.GroupID)
 	p.mu.peerID = cfg.PeerID
 	p.mu.peers = cfg.Peers
-	p.mu.stateLoader = f.cfg.StateLoaderFactory(cfg.GroupID)
-	p.raftMu.stateLoader = f.cfg.StateLoaderFactory(cfg.GroupID)
-	p.raftMu.sideloaded = cfg.SideloadStorage
+	// p.mu.stateLoader = f.cfg.StateLoaderFactory(cfg.GroupID)
+	// p.raftMu.stateLoader = f.cfg.StateLoaderFactory(cfg.GroupID)
+	// p.raftMu.sideloaded = cfg.SideloadStorage
 	p.mu.proposals = make(map[storagebase.CmdIDKey]*proposal)
 	f.mu.peers[cfg.GroupID] = p
 	f.mu.unquiesced[cfg.GroupID] = struct{}{}
@@ -464,10 +466,8 @@ type ErrorMessage struct {
 
 // Recv will return a CommittedMessage or an ErrorMessage
 func (pc *PeerClient) Recv() connect.Message {
-	pc.syn.Lock()
-	defer pc.syn.Unlock()
 	for !pc.done {
-		pc.sync.Wait()
+		pc.cond.Wait()
 	}
 	if pc.err != nil {
 		return &ErrorMessage{Err: pc.err}
@@ -476,8 +476,8 @@ func (pc *PeerClient) Recv() connect.Message {
 }
 
 func (pc *PeerClient) finishWithError(err error) {
-	pc.sync.Lock()
-	defer pc.syn.Signal()
+	pc.syn.Lock()
+	defer pc.cond.Signal()
 	defer pc.syn.Unlock()
 	if pc.done {
 		panic("double finish on peer client")
