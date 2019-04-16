@@ -31,22 +31,25 @@ import (
 // not.
 
 // We definitely deal with sideloading here. This package is going to exist
-// orthogonally to replication. Replication will be passed this object and will
-// interact with it through interfaces. In particular, this pacakge will know
+// in parallel to replication. Replication will be passed this object and will
+// interact with it through an interface. In particular, this pacakge will know
 // about encoding (this is still poorly defined in terms of its interface) as
 // well as the entry cache.
 
 // The below two interfaces are the dependencies for this package.
 
 type StateLoader interface {
-	// TODO(ajwerner): figure out the dynamics of this call
+	// TODO(ajwerner): figure out the dynamics of this call. What sort of atomicity
+	// does this need?
 	LoadRaftTruncatedState(context.Context, engine.Reader) (_ roachpb.RaftTruncatedState, isLegacy bool, _ error)
+
+	// TODO(ajwerner): Do we need this?
 	SetRaftTruncatedState(context.Context, engine.ReadWriter, *roachpb.RaftTruncatedState) error
 
 	LoadHardState(context.Context, engine.Reader) (raftpb.HardState, error)
 	SetHardState(context.Context, engine.ReadWriter, raftpb.HardState) error
 
-	// TODO(ajwerner): figure out the dynamics of this call. Do we need it?
+	// TODO(ajwerner): Do we need this at this layer?
 	SynthesizeRaftState(context.Context, engine.ReadWriter) error
 
 	LoadLastIndex(ctx context.Context, reader engine.Reader) (uint64, error)

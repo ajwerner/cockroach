@@ -211,14 +211,22 @@ func (r *Replica) Handle(
 	defer syn.Unlock()
 	pc := r.mu.peer.NewClient(&syn)
 	pc.Callbacks.Apply = func(eng engine.Writer) error {
-		log.Infof(ctx, "here in apply")
-		panic("here")
+		panic("TODO(ajwerner): deal with callbacks and lifecycles here")
+	}
+	pc.Callbacks.ShouldRepropose = func(_ replication.ReproposalReason) error {
+		return nil
 	}
 	pc.Send(ctx, prop)
 	msg := pc.Recv()
-	log.Infof(ctx, "got a response! %v %v", msg, prop.br)
-	// realistically we need to wait for applied
-	return prop.br, prop.err
+	switch msg := msg.(type) {
+	case *replication.ErrorMessage:
+		return nil, roachpb.NewError(msg.Err)
+	case replication.CommittedMessage:
+		// realistically we need to wait for applied
+		return prop.br, prop.err
+	default:
+		panic(errors.Errorf("unexpected response type %T", msg))
+	}
 }
 
 func (r *Replica) handleGet(

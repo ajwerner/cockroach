@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/connect"
@@ -194,10 +193,6 @@ func TestReplication(t *testing.T) {
 	defer cleanup()
 	s1 := stores[0]
 	s2 := stores[1]
-
-	// This is a terrible hack to deal with the fact that initial proposals will
-	// be dropped and I haven't handled reproposals yet.
-	time.Sleep(500 * time.Millisecond)
 
 	resp, err := s1.Batch(ctx, put(roachpb.Key("asdf"), 1))
 	require.Nil(t, err)

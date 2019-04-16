@@ -28,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
-	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -395,17 +394,6 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 					refreshReason = ReasonNewLeaderOrConfigChange
 				}
 				commandID = "" // special-cased value, command isn't used
-			} else {
-
-				// // commandID, encodedCommand = DecodeRaftCommand(e.Data)
-				// // // An empty command is used to unquiesce a range and wake the
-				// // // leader. Clear commandID so it's ignored for processing.
-				// // if len(encodedCommand) == 0 {
-				// // 	commandID = ""
-				// // } else if err := protoutil.Unmarshal(encodedCommand, &command); err != nil {
-				// // 	const expl = "while unmarshalling entry"
-				// // 	return stats, expl, errors.Wrap(err, expl)
-				// // }
 			}
 
 			p.processRaftCommand(ctx, commitBatch, e.Term, e.Index, e.Data)
@@ -438,16 +426,12 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 			// 	return stats, expl, errors.Wrap(err, expl)
 			// }
 			var commandID storagebase.CmdIDKey
-			var command storagepb.RaftCommand
 			var encodedCommand []byte
 			commandID, encodedCommand = DecodeRaftCommand(cc.Context)
 			// An empty command is used to unquiesce a range and wake the
 			// leader. Clear commandID so it's ignored for processing.
 			if len(encodedCommand) == 0 {
 				commandID = ""
-			} else if err := protoutil.Unmarshal(encodedCommand, &command); err != nil {
-				const expl = "while unmarshalling entry"
-				return stats, expl, errors.Wrap(err, expl)
 			}
 			if changedRepl := p.processRaftConfChange(ctx, commitBatch, e.Term, e.Index, e.Data); !changedRepl {
 				// If we did not apply the config change, tell raft that the config change was aborted.
@@ -745,12 +729,21 @@ func (p *Peer) addProposal(prop *proposal) {
 		p.mu.commandSizes[id] = proposalSize
 	}
 	p.mu.proposals[id] = prop
+	if err := p.submitProposalLocked(prop); err != nil {
+		if err != raft.ErrProposalDropped {
+			// Probably safe to just ignore these.
+			panic(errors.Wrapf(err, "TODO(ajwerner): deal with errors submitting proposals"))
+		}
+	}
+}
+
+func (p *Peer) submitProposalLocked(prop *proposal) error {
 	// TODO(ajwerner): deal with replica state here?
 	// Some sort of callback magic for dealing with grabbing lease index?
 	switch msg := prop.msg.(type) {
 	case ProposalMessage:
 		if log.V(4) {
-			log.Infof(prop.ctx, "proposing command %x", id)
+			log.Infof(prop.ctx, "proposing command %x", prop.msg.ID())
 		}
 		if err := p.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
 			// We're proposing a command so there is no need to wake the leader if
@@ -761,10 +754,10 @@ func (p *Peer) addProposal(prop *proposal) {
 		}); err != nil {
 			if err == raft.ErrProposalDropped {
 				log.Infof(prop.ctx, "failed to submit proposal %q: %v", msg.ID(), err)
-			} else {
-				panic(err)
 			}
+			return err
 		}
+		return nil
 		// So then at the end we need to go and ack all of the proposals right?
 	case ConfChangeMessage:
 		// EndTransactionRequest with a ChangeReplicasTrigger is special
@@ -783,7 +776,7 @@ func (p *Peer) addProposal(prop *proposal) {
 			log.Errorf(prop.ctx, "received invalid ChangeReplicasTrigger %s to remove self (leaseholder)", msg)
 			panic(errors.Errorf("%v: received invalid ChangeReplicasTrigger %v to remove self (leaseholder)", p, p.mu.peerID))
 		}
-		if err := p.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
+		return p.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
 			// We're proposing a command here so there is no need to wake the
 			// leader if we were quiesced.
 			// p.unquiesceLocked()
@@ -793,9 +786,9 @@ func (p *Peer) addProposal(prop *proposal) {
 					NodeID:  uint64(msg.PeerID()),
 					Context: []byte(msg.Encoded()),
 				})
-		}); err != nil {
-			panic(err)
-		}
+		})
+	default:
+		panic(errors.Errorf("unknown message of type %T", msg))
 	}
 }
 
@@ -1188,46 +1181,43 @@ func (p *Peer) refreshProposalsLocked(refreshAtDelta int, reason ReproposalReaso
 	if refreshAtDelta != 0 && reason != ReasonTicks {
 		log.Fatalf(context.TODO(), "refreshAtDelta specified for reason %s != reasonTicks", reason)
 	}
-	/// var reproposals []*proposal
+	var reproposals []*proposal
 	for _, prop := range p.mu.proposals {
-		prop.pc.finishWithError(errors.Errorf("TODO(ajwerner): repropose better"))
-		// if err := prop.pc.Callbacks.ShouldRepropose(reason); err != nil {
-		// 	prop.pc.finishWithError(err)
-		// 	continue
-		// }
-		// reproposals = append(reproposals, prop)
+		if err := prop.pc.Callbacks.ShouldRepropose(reason); err != nil {
+			delete(p.mu.proposals, prop.msg.ID())
+			prop.pc.finishWithError(err)
+			continue
+		}
+		reproposals = append(reproposals, prop)
 	}
-	return
-	// if log.V(1) && len(reproposals) > 0 {
-	// 	ctx := p.AnnotateCtx(context.TODO())
-	// 	log.Infof(ctx,
-	// 		"pending commands: reproposing %d: %v",
-	// 		len(reproposals), reason) /*, r.mu.state.RaftAppliedIndex,
-	// 	  r.mu.state.LeaseAppliedIndex, reason) */
-	// }
+	if log.V(1) && len(reproposals) > 0 {
+		ctx := p.AnnotateCtx(context.TODO())
+		log.Infof(ctx,
+			"pending commands: reproposing %d: %v",
+			len(reproposals), reason) /*, r.mu.state.RaftAppliedIndex,
+		  r.mu.state.LeaseAppliedIndex, reason) */
+	}
 
-	// // Reproposals are those commands which we weren't able to send back to the
-	// // client (since we're not sure that another copy of them could apply at
-	// // the "correct" index). For reproposals, it's generally pretty unlikely
-	// // that they can make it in the right place. Reproposing in order is
-	// // definitely required, however.
-	// //
-	// // TODO(tschottdorf): evaluate whether `r.mu.proposals` should
-	// // be a list/slice.
-	// // TODO(ajwerner): add hook for sorting proposals.
-	// // sort.Sort(reproposals)
-	// for _, p := range reproposals {
-	// 	log.Eventf(p.ctx, "re-submitting command %x to Raft: %s", p.idKey, reason)
-	// 	if err := r.submitProposalLocked(p); err == raft.ErrProposalDropped {
-	// 		// TODO(bdarnell): Handle ErrProposalDropped better.
-	// 		// https://github.com/cockroachdb/cockroach/issues/21849
-	// 	} else if err != nil {
-	// 		r.cleanupFailedProposalLocked(p)
-	// 		p.finishApplication(proposalResult{
-	// 			Err: roachpb.NewError(roachpb.NewAmbiguousResultError(err.Error())),
-	// 		})
-	// 	}
-	// }
+	// Reproposals are those commands which we weren't able to send back to the
+	// client (since we're not sure that another copy of them could apply at
+	// the "correct" index). For reproposals, it's generally pretty unlikely
+	// that they can make it in the right place. Reproposing in order is
+	// definitely required, however.
+	//
+	// TODO(tschottdorf): evaluate whether `r.mu.proposals` should
+	// be a list/slice.
+	// TODO(ajwerner): add hook for sorting proposals.
+	// sort.Sort(reproposals)
+	for _, prop := range reproposals {
+		log.Eventf(prop.ctx, "re-submitting command %x to Raft: %v", prop.msg.ID(), reason)
+		if err := p.submitProposalLocked(prop); err == raft.ErrProposalDropped {
+			// TODO(bdarnell): Handle ErrProposalDropped better.
+			// https://github.com/cockroachdb/cockroach/issues/21849
+		} else if err != nil {
+			delete(p.mu.proposals, prop.msg.ID())
+			prop.pc.finishWithError(roachpb.NewAmbiguousResultError(err.Error()))
+		}
+	}
 }
 
 type raftCommandEncodingVersion byte
