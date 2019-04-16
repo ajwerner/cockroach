@@ -33,6 +33,22 @@ import (
 	"go.etcd.io/etcd/raft/raftpb"
 )
 
+// Open Question: where does raft hard state and truncated state belong?
+// With the log or with the rest of the data? The truncated state likely
+// belongs with the rest of the data in the primary storage engine and is
+// unreplicated starting in 19.2. The HardState likely belongs with the
+// raft log.
+
+type RaftStorage interface {
+	raft.Storage
+
+	Append(
+		ctx context.Context, batch engine.ReadWriter, entries []raftpb.Entry,
+	) (onCommit func() error, err error)
+
+	LogSize() int64
+}
+
 // GroupID is the basic unit of replication.
 // Each peer corresponds to a single ID.
 type GroupID int64
@@ -82,11 +98,6 @@ type TestingKnobs struct {
 }
 
 type FactoryConfig struct {
-	base.RaftConfig
-
-	// RaftTransport is the message bus on which RaftMessages are sent and
-	// received.
-	RaftTransport connect.Conn
 
 	// TODO(ajwerner): should there be a start method that takes a stopper?
 	Stopper *stop.Stopper
@@ -100,14 +111,20 @@ type FactoryConfig struct {
 
 	Settings *cluster.Settings
 
+	RaftConfig base.RaftConfig
+
+	// RaftTransport is the message bus on which RaftMessages are sent and
+	// received.
+	RaftTransport connect.Conn
+
+	RaftStorageFactory func(GroupID) RaftStorage
+
 	//RaftMessageFactory     func() RaftMessage
 	// 	SideloadStorageFactory func(GroupID) SideloadStorage
-	StateLoaderFactory  func(GroupID) StateLoader
-	EntryCacheFactory   func(GroupID) EntryCache
-	EntryScannerFactory func(GroupID) EntryReader
+	// StateLoaderFactory  func(GroupID) StateLoader
+	// EntryCacheFactory   func(GroupID) EntryCache
+	// EntryScannerFactory func(GroupID) EntryReader
 }
-
-type EntryReader func(_ context.Context, _ engine.Reader, lo, hi uint64, f func(raftpb.Entry) (wantMore bool, err error)) error
 
 func NewFactory(ctx context.Context, cfg FactoryConfig) (*Factory, error) {
 	pf := Factory{

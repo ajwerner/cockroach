@@ -16,6 +16,31 @@ import (
 	"go.etcd.io/etcd/raft/raftpb"
 )
 
+// Notes(ajwerner): It seems like this object should track things in memory like
+// raft log size, last term, etc. Given the general need (or at least desire)
+// for atomicity when committing data inside a raft ready we probably should
+// create some object like an append batch with a mechanism to commit changes.
+
+// The goal of this package is to encapsulate logic related to storing raft
+// state. I could see an argument in favor of having it exclusively deal with
+// log entries. For now it also deals with hard state.
+
+// Additionally it deals with truncation state. Maybe that's crazy, maybe it's
+// not.
+
+// We definitely deal with sideloading here. This package is going to exist
+// orthogonally to replication. Replication will be passed this object and will
+// interact with it through interfaces. In particular, this pacakge will know
+// about encoding (this is still poorly defined in terms of its interface) as
+// well as the entry cache.
+
+// TODO(ajwerner): need a constructor to load the last index from the stateloader
+// set the term to something invalid.
+
+func NewRaftStorate() *RaftStorage {
+	panic("not implemented")
+}
+
 var _ raft.Storage = (*RaftStorage)(nil)
 
 type StateLoader interface {
@@ -26,7 +51,7 @@ type StateLoader interface {
 	LoadHardState(context.Context, engine.Reader) (raftpb.HardState, error)
 	SetHardState(context.Context, engine.ReadWriter, raftpb.HardState) error
 
-	// TODO(ajwerner): figure out the dynamics of this call.
+	// TODO(ajwerner): figure out the dynamics of this call. Do we need it?
 	SynthesizeRaftState(context.Context, engine.ReadWriter) error
 
 	LoadLastIndex(ctx context.Context, reader engine.Reader) (uint64, error)
@@ -80,10 +105,24 @@ type RaftStorage struct {
 	mu                  struct {
 		syncutil.RWMutex
 		// TODO(ajwerner): think about peers and locking
-
+		peers           []uint64
 		truncatedState  *roachpb.RaftTruncatedState
 		sideloadStorage SideloadStorage
+
+		lastTerm    int64
+		lastIndex   int64
+		raftLogSize int64
 	}
+}
+
+func (rs *RaftStorage) NewEntryBatch(
+	ctx context.Context, entries []raftpb.Entry, writeBatch engine.Batch,
+) (EntryBatch, error) {
+	// We start by grabbing the mutex and recording the current value for the
+	// lastTerm, lastIndex, and raftLogSize.
+	// Then we attempt to sideload entries
+	// Then we do the append which writes
+	// the entries into the writeBatch, then finally
 }
 
 // InitialState implements the raft.Storage interface.
@@ -94,7 +133,6 @@ func (rs *RaftStorage) InitialState() (hs raftpb.HardState, cs raftpb.ConfState,
 	if raft.IsEmptyHardState(hs) || err != nil {
 		return raftpb.HardState{}, raftpb.ConfState{}, err
 	}
-	// var cs raftpb.ConfState
 	for _, peerID := range rs.mu.peers {
 		cs.Nodes = append(cs.Nodes, uint64(peerID))
 	}
