@@ -100,6 +100,7 @@ type TestingKnobs struct {
 	DisableRefreshReasonTicks bool
 }
 
+// FactoryConfig contains the for a Factory.
 type FactoryConfig struct {
 
 	// TODO(ajwerner): should there be a start method that takes a stopper?
@@ -108,23 +109,21 @@ type FactoryConfig struct {
 	// Storage for all of the peers.
 	Storage engine.Engine
 
-	NumWorkers int
-
-	TestingKnobs TestingKnobs
-
+	// Settings are the cluster settings.
 	Settings *cluster.Settings
 
+	// NumWorkers is the number of worker goroutines which will be used to handle
+	// events on behalf of peers.
+	NumWorkers int
+
+	// RaftConfig configures etcd raft.
 	RaftConfig base.RaftConfig
 
 	// RaftTransport is the message bus on which RaftMessages are sent and
 	// received.
 	RaftTransport connect.Conn
 
-	// RaftMessageFactory     func() RaftMessage
-	// SideloadStorageFactory func(GroupID) SideloadStorage
-	// StateLoaderFactory  func(GroupID) StateLoader
-	// EntryCacheFactory   func(GroupID) EntryCache
-	// EntryScannerFactory func(GroupID) EntryReader
+	TestingKnobs TestingKnobs
 }
 
 func NewFactory(ctx context.Context, cfg FactoryConfig) (*Factory, error) {

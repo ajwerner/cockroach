@@ -357,8 +357,6 @@ deterministically change state based on evaluation of shared log of commands.
 In our case, for this section, these commands will be serialized `BatchRequest`
 messages.
 
-#### Client Interface
-
 Let's begin by looking at the client-facing interface to replicate data.
 As discussed in the introduction, we'd like to adopt the connect model.
 Central to the `connect` model is having a well-defined set of messages
@@ -384,11 +382,13 @@ the system will implement with just raw encoded replicated data so that
 non-proposing replicas can have a uniform mechanism to deal with the command.
 
 Note:
-  
+
+```  
   We could imagine just passing the originally proposed value during application
   if one exists. Maybe we should do that. Would that make the contract clearer?
   Would it obviate the need for the ID? Maybe sideloading prevents us from
   removing the ID?
+```
 
 The replication package exposes an implementation of ProposalMessage called
 `EncodedProposalMessage` which represents an encoded proposal on replicas which
@@ -400,14 +400,12 @@ did not send the original `ProposalMessage`.
 type EncodedProposalMessage []byte
 ```
 
-#### Replication Package
-
-Now that we've looked at how users will interact with replication, we need to
-discuss the design of the system which will coordinate this replication. Some of
-the considerations of the replication package fall out of scope for the system
-we're attempting to build in this section but please bear with me as they'll
-come back up. Let's introduce the key terminology that will be used by the
-replication package.
+Now that we've looked at the high level concept of how users will interact with
+replication, we need to discuss the design of the system which will coordinate
+this replication. Some of the considerations of the replication package fall
+out of scope for the system we're attempting to build in this section but
+please bear with me as they'll come back up. Let's introduce the key terminology
+that will be used by the replication package.
 
 The basic unit for replicated data is a `Group`. A group is identified by an
 `int64` value called a `GroupID`. Each group corresponds to a replicated state
@@ -419,29 +417,102 @@ later on we'll build a system which must simultaneously deal with `Peer`s from
 different groups we make some API considerations for that now.
 
 It is imperative that the replication library be capable of managing peers from
-many groups without requiring goroutines for each group.
+many groups without requiring goroutines for each group. A client interacts with
+a group via a handle to a `Peer` struct. A Peer is a local replica which
+corresponds to a single group. A `Peer` is created via a `Factory`. The `Factory`
+orchestrates lifecycle for all of the `Peer`s it creates, managing a thread pool,
+dispatching messages, ticking, etc.
+
+The `Factory` has a number of important dependencies which we'll dig in to
+momentarily. Furthermore the `Peer` has some of its own dependencies. Let's
+take a peek at the `FactoryConfig`. 
+
+```go
+// FactoryConfig contains the necessary dependencies to create a Factory.
+type FactoryConfig struct {
+
+	// TODO(ajwerner): should there be a start method that takes a stopper?
+	Stopper *stop.Stopper
+
+	// Storage for all of the peers.
+	Storage engine.Engine
+
+	// Settings are the cluster settings.
+	Settings *cluster.Settings
+
+	// NumWorkers is the number of worker goroutines which will be used to handle
+	// events on behalf of peers.
+	NumWorkers int
+
+	// RaftConfig configures etcd raft.
+	RaftConfig base.RaftConfig
+
+	// RaftTransport is the message bus on which RaftMessages are sent and
+	// received.
+	RaftTransport connect.Conn
+
+	TestingKnobs TestingKnobs
+}
+```
+
+The only really interesting piece worth digging in to here is that
+RaftTransport. Notice that it is a connect.Conn, my hope is that this
+is not an abuse. The `Factory` will receive messages from this Conn and
+enqueue them for processing by a peer. A RaftMessage must implement the
+following interface:
+
+```
+// RaftMessage is a message used to send raft messages on the wire.
+// RaftMessage is created by a client provided factory function and the concrete
+// type is left up to the client.
+type RaftMessage interface {
+	connect.Message
+	GetGroupID() GroupID
+	GetRaftMessage() raftpb.Message
+}
+```
+
+We will see soon that each peer is configured with a function to create
+instances of these `RaftMessage`s. The GroupID enables the replication package
+to route messages internally. The client of the replication package is
+responsible for routing messages to the intended `RaftTransport` on the other
+side. In a below section we'll explore the `rafttransport` package which
+provides a concrete implementation of the `RaftTransport` that we will adopt and
+use in our KV.
+
+Now let's explore what it takes to create a `Peer`.
+
+```
+// PeerConfig is used to create a new Peer.
+type PeerConfig struct {
+	log.AmbientContext
+	GroupID            GroupID
+	PeerID             PeerID
+	Peers              []PeerID
+	ProcessCommand     ProcessCommandFunc
+	ProcessConfChanged ProcessConfChangeFunc
+	RaftMessageFactory func(raftpb.Message) RaftMessage
+	RaftStorage        RaftStorage
+}
+```
+
+Unlike the `FactoryConfig` the `PeerConfig` has a lot to unpack.
 
 
-
-The biggest consideration is that eventually we'll want to have multiple
-overlapping replication groups. 
-hand but we'll tackle them eagerly
-
-## Storage
+#### RaftStorage
 
 Raft requires that we feed it an API to access its state.
 This means accessing log entries and hard state.
 
 ...
 
-## Transport
+#### RaftTransport
 
 Raft requires that messages be sent between nodes to step the state machine.
 
-The way that the 
+...
 
-
-## Part I - A replicated KV
+### The replicated Store
 
 Now that we saw how easy it is to build a non-replicated key-value store we're
 going to take the existing logic and replicate across a variety of servers in
