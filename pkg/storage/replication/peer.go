@@ -81,8 +81,7 @@ type Peer struct {
 	// raftTransport is exclusively for outbound traffic.
 	// inbound traffic will come on the message queue.
 	raftTransport connect.Conn
-
-	raftStorage RaftStorage
+	raftStorage   RaftStorage
 
 	shouldCampaign func(ctx context.Context, status *raft.Status) bool
 	onUnquiesce    func()
@@ -211,6 +210,7 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 	//     hasReady == true.
 	//     If we don't release quota back at the end of
 	//     handleRaftReadyRaftMuLocked, the next write will get blocked.
+	// TODO(ajwerner): move proposal quota out of here!
 	defer p.updateProposalQuota(ctx, lastLeaderID)
 	err := p.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
 		if hasReady = raftGroup.HasReady(); hasReady {
@@ -1029,7 +1029,7 @@ func (p *Peer) tick(
 // facilitates quick command application (requests generally need to make it to
 // both the lease holder and the raft leader before being applied by other
 // replicas).
-// TODO(fix this)
+// TODO(ajwerner): move this to a callback
 func (p *Peer) maybeTransferRaftLeadershipLocked(ctx context.Context) {
 	// TODO(ajwerner): add back testing knobs
 	// if r.store.TestingKnobs().DisableLeaderFollowsLeaseholder {

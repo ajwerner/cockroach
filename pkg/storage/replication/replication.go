@@ -325,22 +325,28 @@ func (f *Factory) Destroy(p *Peer) {
 
 // ProcessCommandFunc is used to handle committed raft commands.
 type ProcessCommandFunc func(
-	ctx context.Context, eng engine.ReadWriter, term, index uint64, command []byte,
+	ctx context.Context, eng engine.ReadWriter, term, index uint64, prop ProposalMessage,
 )
 
 // ProcessConfChangeFunc is used to handle committed raft config change commands.
 type ProcessConfChangeFunc func(
-	ctx context.Context, eng engine.ReadWriter, term, index uint64, command []byte,
+	ctx context.Context, eng engine.ReadWriter, term, index uint64, prop ConfChangeMessage,
 ) (confChanged bool)
 
 // PeerConfig is used to create a new Peer.
 type PeerConfig struct {
 	log.AmbientContext
-	GroupID            GroupID
-	PeerID             PeerID
-	Peers              []PeerID
+
+	// Static configuration for the peer at initialization time
+	// Perhaps this should be hidden behind and func or interface.
+	GroupID GroupID
+	PeerID  PeerID
+	Peers   []PeerID
+
+	// Lifecycle functions for proposals.
 	ProcessCommand     ProcessCommandFunc
 	ProcessConfChanged ProcessConfChangeFunc
+
 	RaftMessageFactory func(raftpb.Message) RaftMessage
 	RaftStorage        RaftStorage
 }
@@ -371,13 +377,8 @@ func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
 	}
 
 	p.raftTransport = f.cfg.RaftTransport
-	// p.entryReader = f.cfg.EntryScannerFactory(cfg.GroupID)
-	// p.entryCache = f.cfg.EntryCacheFactory(cfg.GroupID)
 	p.mu.peerID = cfg.PeerID
 	p.mu.peers = cfg.Peers
-	// p.mu.stateLoader = f.cfg.StateLoaderFactory(cfg.GroupID)
-	// p.raftMu.stateLoader = f.cfg.StateLoaderFactory(cfg.GroupID)
-	// p.raftMu.sideloaded = cfg.SideloadStorage
 	p.mu.proposals = make(map[storagebase.CmdIDKey]*proposal)
 	f.mu.peers[cfg.GroupID] = p
 	f.mu.unquiesced[cfg.GroupID] = struct{}{}
