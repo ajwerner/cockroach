@@ -3,10 +3,17 @@ package cli
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/storage/replication/part1/kvtoy"
 	"github.com/cockroachdb/cockroach/pkg/storage/replication/part1/server"
+	"github.com/cockroachdb/cockroach/pkg/storage/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
@@ -32,12 +39,64 @@ var kvtoyCmd = &cobra.Command{
 	SilenceUsage: true,
 }
 
+type addrMapFlag server.AddrMap
+
+func (amf addrMapFlag) String() string { return fmt.Sprintf("%v", server.AddrMap(amf)) }
+func (amf addrMapFlag) Set(val string) error {
+	// we want to split on @ where the first is the node id and the second is the
+	// address.
+	atIdx := strings.Index(val, "@")
+	if atIdx == -1 {
+		return errors.Errorf("malformed node address mapping, no @ found")
+	}
+	idInt, err := strconv.Atoi(val[:atIdx])
+	if err != nil {
+		return errors.Wrap(err, "failed to parse node ID from address mapping")
+	}
+	id := roachpb.NodeID(idInt)
+	addr, err := net.ResolveTCPAddr("tcp", val[atIdx+1:])
+	if err != nil {
+		return errors.Wrap(err, "failed to parse addr from address mapping")
+	}
+	if existing, exists := amf[id]; exists {
+		return errors.Errorf("duplicate node address mapping for %d: %v and %v", id, existing, addr)
+	}
+	amf[id] = addr
+	return nil
+}
+
+func (amf addrMapFlag) Type() string { return "address map" }
+
 var startCmd = func() *cobra.Command {
-	var cfg server.Config
+	cfg := server.Config{
+		AddrMap: server.AddrMap{},
+	}
+	var myNodeID int
+	var init bool
 	cmd := &cobra.Command{
 		Use: "start",
 		Run: wrapRun(func(cmd *cobra.Command, args []string) error {
+			if myNodeID <= 0 {
+				return errors.Errorf("Invalid negative node id")
+			}
+			cfg.NodeID = roachpb.NodeID(myNodeID)
+			if addr, exists := cfg.AddrMap[cfg.NodeID]; exists {
+				cfg.Addr = addr.String()
+			} else {
+				return errors.Errorf("No address for own node id %v found in addresses", cfg.NodeID)
+			}
 			ctx := context.Background()
+			cfg.Engine = engine.NewInMem(roachpb.Attributes{}, 1<<26 /* 64 MB */)
+			if init {
+				nodes := make([]int, 0, len(cfg.AddrMap))
+				for id := range cfg.AddrMap {
+					nodes = append(nodes, int(id))
+				}
+				rsl := stateloader.Make(1)
+				if err := kvtoy.WriteInitialClusterData(ctx, cfg.Engine, rsl, nodes...); err != nil {
+					return err
+				}
+			}
 			cfg.Stopper = stop.NewStopper()
 			_, err := server.NewServer(ctx, cfg)
 			if err != nil {
@@ -50,7 +109,10 @@ var startCmd = func() *cobra.Command {
 		Args: cobra.NoArgs,
 	}
 	flags := cmd.Flags()
-	flags.StringVar(&cfg.Addr, "addr", DefaultAddr, "Address on which the server will listen")
+	flags.IntVar(&myNodeID, "node-id", 1, "Node ID for this node to use")
+	flags.BoolVar(&init, "init", false, "Initialize the cluster state")
+	flags.Var(addrMapFlag(cfg.AddrMap), "addresses", "Addresses of the other nodes, should be repeated values of <nodeID>@<addr>")
+	// flags.StringVar(&cfg.Addr, "addr", DefaultAddr, "Address on which the server will listen")
 	return cmd
 }()
 
@@ -96,11 +158,18 @@ var getCmd = func() *cobra.Command {
 			if txn.Run(context.TODO(), b); err != nil {
 				return err
 			}
-			data, err := b.Results[0].Rows[0].Value.GetBytes()
-			if err != nil {
-				return errors.Wrapf(err, "failed to decode value at key %q as bytes", args[0])
+			if len(b.Results) < 1 || len(b.Results[0].Rows) < 1 {
+				return errors.Errorf("unexpected empty results: %v", b.Results)
 			}
-			fmt.Printf("get %v = %v\n", args[0], string(data))
+			if b.Results[0].Rows[0].Value == nil {
+				fmt.Printf("get: %v not found\n", args[0])
+			} else {
+				data, err := b.Results[0].Rows[0].Value.GetBytes()
+				if err != nil {
+					return errors.Wrapf(err, "failed to decode value at key %q as bytes", args[0])
+				}
+				fmt.Printf("get: %v = %v\n", args[0], string(data))
+			}
 			return nil
 		}),
 		Args: cobra.ExactArgs(1),

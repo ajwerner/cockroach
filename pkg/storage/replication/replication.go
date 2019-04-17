@@ -54,26 +54,33 @@ type RaftStorage interface {
 
 // GroupID is the basic unit of replication.
 // Each peer corresponds to a single ID.
-type GroupID int64
+type GroupID = uint64
 
 // PeerID is a ReplicaID.
 // TODO(ajwerner): I am on the fence as to whether the mixed terminology
 // helps or hurts.
-type PeerID int64
+type PeerID = uint64
 
-// ProposalMessage is used to propose data to raft.
-type ProposalMessage interface {
-	ID() storagebase.CmdIDKey
-	Encoded() []byte
-	Size() int
-}
+// TODO(ajwerner): should these process functions take an engine?
+// My sense is no. A ReadWriter doesn't work because we already assume all over
+// the place that we can create batches whenever we want. Maybe we assume this
+// function is going to have access to storage on its own.
 
-// ConfChangeMessage is used to propose a configuration change to raft.
-type ConfChangeMessage interface {
-	ProposalMessage
-	ChangeType() raftpb.ConfChangeType
-	PeerID() PeerID
-}
+// ProcessCommandFunc is used to handle committed raft commands.
+type ProcessCommandFunc func(
+	ctx context.Context,
+	term, index uint64,
+	id storagebase.CmdIDKey,
+	prop ProposalMessage,
+)
+
+// ProcessConfChangeFunc is used to handle committed raft config change commands.
+type ProcessConfChangeFunc func(
+	ctx context.Context,
+	term, index uint64,
+	id storagebase.CmdIDKey,
+	confChange ConfChangeMessage,
+) (confChanged bool)
 
 // RaftMessage is a message used to send raft messages on the wire.
 // RaftMessage is created by a client provided factory function and the concrete
@@ -186,7 +193,9 @@ func (pf *Factory) processReady(ctx context.Context, id GroupID) {
 }
 
 func (pf *Factory) processRequestQueue(ctx context.Context, id GroupID) bool {
-	log.Infof(ctx, "processing request queue %v", id)
+	if log.V(2) {
+		log.Infof(ctx, "processing request queue %v", id)
+	}
 	pf.mu.RLock()
 	p, ok := pf.mu.peers[id]
 	pf.mu.RUnlock()
@@ -323,15 +332,17 @@ func (f *Factory) Destroy(p *Peer) {
 	panic("not implemented")
 }
 
-// ProcessCommandFunc is used to handle committed raft commands.
-type ProcessCommandFunc func(
-	ctx context.Context, eng engine.ReadWriter, term, index uint64, prop ProposalMessage,
-)
+// RaftTransport is used to connect a peer to its other peers.
+type RaftTransport interface {
+	connect.Conn
 
-// ProcessConfChangeFunc is used to handle committed raft config change commands.
-type ProcessConfChangeFunc func(
-	ctx context.Context, eng engine.ReadWriter, term, index uint64, prop ConfChangeMessage,
-) (confChanged bool)
+	NewRaftMessage(raftpb.Message) RaftMessage
+
+	// I really want to install some notion of node-liveness here.
+	IsLive(PeerID)
+}
+
+// Okay so we define a peer conn which
 
 // PeerConfig is used to create a new Peer.
 type PeerConfig struct {
@@ -339,6 +350,7 @@ type PeerConfig struct {
 
 	// Static configuration for the peer at initialization time
 	// Perhaps this should be hidden behind and func or interface.
+	// In fact, maybe we pull this off of the RaftStorage.
 	GroupID GroupID
 	PeerID  PeerID
 	Peers   []PeerID
@@ -347,6 +359,16 @@ type PeerConfig struct {
 	ProcessCommand     ProcessCommandFunc
 	ProcessConfChanged ProcessConfChangeFunc
 
+	// Is this a good idea? We really want there to be a buffer and then we can
+	// clear that buffer.
+
+	// RaftMessageFactory should return a RaftMessage which can be sent on the
+	// Factory's underlying RaftTransport.
+	// Should the PeerConfig have a transport to send on and receive from? Should
+	// we change the transport set up to
+
+	// The question is how are we going to have the grpc connection call back in to
+	// this to tell us about the message. I guess we can then have this
 	RaftMessageFactory func(raftpb.Message) RaftMessage
 	RaftStorage        RaftStorage
 }
@@ -369,13 +391,12 @@ func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
 		groupID:            cfg.GroupID,
 		raftConfig:         &f.cfg.RaftConfig,
 		raftStorage:        cfg.RaftStorage,
-		raftMessageFactory: cfg.RaftMessageFactory,
 		storage:            f.cfg.Storage,
 		onUnquiesce:        func() { f.onUnquiesce(cfg.GroupID) },
+		raftMessageFactory: cfg.RaftMessageFactory,
 		processCommand:     cfg.ProcessCommand,
 		processConfChange:  cfg.ProcessConfChanged,
 	}
-
 	p.raftTransport = f.cfg.RaftTransport
 	p.mu.peerID = cfg.PeerID
 	p.mu.peers = cfg.Peers

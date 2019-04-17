@@ -139,10 +139,11 @@ func makeMarkerKey(rangeID roachpb.RangeID, h *kvtoypb.Header) roachpb.Key {
 }
 
 func (r *Replica) processRaftCommand(
-	ctx context.Context, eng engine.ReadWriter, term, raftIndex uint64, command []byte,
+	ctx context.Context,
+	term, raftIndex uint64,
+	id storagebase.CmdIDKey,
+	msg replication.ProposalMessage,
 ) {
-
-	id, op := replication.DecodeRaftCommand(command)
 	var ba *kvtoypb.BatchRequest
 	r.mu.Lock()
 	prop, exists := r.mu.proposals[id]
@@ -152,16 +153,19 @@ func (r *Replica) processRaftCommand(
 		delete(r.mu.proposals, id)
 	}
 	r.mu.Unlock()
-	// Now we're going to evaluate and apply the op
+	batch := r.store.cfg.Engine.NewBatch()
+	defer batch.Close()
+	// This gets gnarly because we need some information about the
+	// "encoding version".
 	if !exists {
 		ba = new(kvtoypb.BatchRequest)
-		if err := proto.Unmarshal(op, ba); err != nil {
+		if err := proto.Unmarshal(msg.Encoded(), ba); err != nil {
 			panic(err)
 		}
 	}
 	if !ba.IsReadOnly() {
 		// Check if the marker thing exists and, if so assert prop is nil and return
-		if !r.getOrCreateMarker(ctx, &ba.Header, eng) {
+		if !r.getOrCreateMarker(ctx, &ba.Header, batch) {
 			log.Infof(ctx, "request %v already applied", &ba.Header)
 			return
 		}
@@ -172,7 +176,7 @@ func (r *Replica) processRaftCommand(
 	// Could probably look at the spans being written and run non-overlapping
 	// replicated commands in parallel.
 	for i := range ba.Requests {
-		resp, err := r.handleRequest(ctx, eng, &ba.Requests[i])
+		resp, err := r.handleRequest(ctx, batch, &ba.Requests[i])
 		if err != nil {
 			panic(errors.Wrap(err, "we made an error"))
 		}
@@ -184,7 +188,10 @@ func (r *Replica) processRaftCommand(
 	stateLoader := r.mu.stateLoader
 	r.mu.RUnlock()
 	stats := enginepb.MVCCStats{}
-	if err := stateLoader.SetRangeAppliedState(ctx, eng, raftIndex, 0, &stats); err != nil {
+	if err := stateLoader.SetRangeAppliedState(ctx, batch, raftIndex, 0, &stats); err != nil {
+		panic(err)
+	}
+	if err := batch.Commit(false); err != nil {
 		panic(err)
 	}
 }
@@ -302,7 +309,7 @@ func (p *proposal) Encoded() []byte {
 	if err != nil {
 		panic(err)
 	}
-	return []byte(replication.EncodeRaftCommandV1(p.id, data))
+	return []byte(data)
 }
 func (p *proposal) Size() int { return p.ba.Size() }
 
@@ -371,6 +378,7 @@ func newReplica(
 	if err != nil {
 		return nil, err
 	}
+
 	r.mu.peer, err = store.peerFactory.NewPeer(replication.PeerConfig{
 		GroupID:        1,
 		PeerID:         replication.PeerID(replDesc.ReplicaID),

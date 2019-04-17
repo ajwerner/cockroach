@@ -156,6 +156,8 @@ type Peer struct {
 		syncutil.Mutex
 	}
 	msgQueueMu struct {
+		// TODO(ajwerner): limit queue size, make this a ring-buffer, hide it in
+		// a transport abstraction
 		syncutil.RWMutex
 		msgQueue        []raftpb.Message
 		droppedMessages int
@@ -164,6 +166,18 @@ type Peer struct {
 		syncutil.Mutex
 		remotes map[GroupID]struct{}
 	}
+}
+
+// a lastUpdateTimesMap is maintained on the Raft leader to keep track of the
+// last communication received from followers, which in turn informs the quota
+// pool and log truncations.
+type lastUpdateTimesMap map[PeerID]time.Time
+
+func (m lastUpdateTimesMap) update(peerID PeerID, now time.Time) {
+	if m == nil {
+		return
+	}
+	m[peerID] = now
 }
 
 // TODO: see cleanupFailedProposalsLocked
@@ -375,8 +389,6 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 			// know about sideloading. Consequently the entries here are all
 			// already inlined.
 
-			var commandID storagebase.CmdIDKey
-
 			// Process committed entries. etcd raft occasionally adds a nil entry
 			// (our own commands are never empty). This happens in two situations:
 			// When a new leader is elected, and when a config change is dropped due
@@ -387,32 +399,34 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 			// changes, but it's hard to distinguish so we resubmit everything
 			// anyway). We delay resubmission until after we have processed the
 			// entire batch of entries.
-			if len(e.Data) == 0 {
+			command := encodedProposalMessage(e.Data)
+			commandID := command.ID()
+			if command.Size() == 0 {
 				// Overwrite unconditionally since this is the most aggressive
 				// reproposal mode.
 				if !p.testingKnobs.DisableRefreshReasonNewLeaderOrConfigChange {
 					refreshReason = ReasonNewLeaderOrConfigChange
 				}
-				commandID = "" // special-cased value, command isn't used
+				commandID = ""
 			}
-
-			p.processRaftCommand(ctx, commitBatch, e.Term, e.Index, e.Data)
+			p.processRaftCommand(ctx, commitBatch, e.Term, e.Index, commandID, command)
 			// r.store.metrics.RaftCommandsApplied.Inc(1)
 			stats.processed++
 
-			p.mu.Lock()
-			if p.mu.peerID == p.mu.leaderID {
-				// At this point we're not guaranteed to have proposalQuota
-				// initialized, the same is true for quotaReleaseQueue and
-				// commandSizes. By checking if the specified commandID is
-				// present in commandSizes, we'll only queue the cmdSize if
-				// they're all initialized.
-				if cmdSize, ok := p.mu.commandSizes[commandID]; ok {
-					p.mu.quotaReleaseQueue = append(p.mu.quotaReleaseQueue, cmdSize)
-					delete(p.mu.commandSizes, commandID)
-				}
-			}
-			p.mu.Unlock()
+			// TODO(ajwerner): deal with proposal quota
+			// p.mu.Lock()
+			// if p.mu.peerID == p.mu.leaderID {
+			// 	// At this point we're not guaranteed to have proposalQuota
+			// 	// initialized, the same is true for quotaReleaseQueue and
+			// 	// commandSizes. By checking if the specified commandID is
+			// 	// present in commandSizes, we'll only queue the cmdSize if
+			// 	// they're all initialized.
+			// 	if cmdSize, ok := p.mu.commandSizes[commandID]; ok {
+			// 		p.mu.quotaReleaseQueue = append(p.mu.quotaReleaseQueue, cmdSize)
+			// 		delete(p.mu.commandSizes, commandID)
+			// 	}
+			// }
+			// p.mu.Unlock()
 
 		case raftpb.EntryConfChange:
 			var cc raftpb.ConfChange
@@ -420,33 +434,29 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 				const expl = "while unmarshaling ConfChange"
 				return stats, expl, errors.Wrap(err, expl)
 			}
-			// var ccCtx ConfChangeContext
-			// if err := protoutil.Unmarshal(cc.Context, &ccCtx); err != nil {
-			// 	const expl = "while unmarshaling ConfChangeContext"
-			// 	return stats, expl, errors.Wrap(err, expl)
-			// }
-			var commandID storagebase.CmdIDKey
-			var encodedCommand []byte
-			commandID, encodedCommand = DecodeRaftCommand(cc.Context)
+			command := encodedConfChangeMessage{cc: &cc}
+			commandID := command.ID()
 			// An empty command is used to unquiesce a range and wake the
 			// leader. Clear commandID so it's ignored for processing.
-			if len(encodedCommand) == 0 {
+			if command.Size() == 0 {
 				commandID = ""
 			}
-			if changedRepl := p.processRaftConfChange(ctx, commitBatch, e.Term, e.Index, e.Data); !changedRepl {
+
+			if changedRepl := p.processRaftConfChange(ctx, commitBatch, e.Term, e.Index, commandID, command); !changedRepl {
 				// If we did not apply the config change, tell raft that the config change was aborted.
 				cc = raftpb.ConfChange{}
 			}
 			stats.processed++
 
-			p.mu.Lock()
-			if p.mu.peerID == p.mu.leaderID {
-				if cmdSize, ok := p.mu.commandSizes[commandID]; ok {
-					p.mu.quotaReleaseQueue = append(p.mu.quotaReleaseQueue, cmdSize)
-					delete(p.mu.commandSizes, commandID)
-				}
-			}
-			p.mu.Unlock()
+			// TODO(ajwerner): deal with proposal quota
+			// p.mu.Lock()
+			// if p.mu.peerID == p.mu.leaderID {
+			// 	if cmdSize, ok := p.mu.commandSizes[commandID]; ok {
+			// 		p.mu.quotaReleaseQueue = append(p.mu.quotaReleaseQueue, cmdSize)
+			// 		delete(p.mu.commandSizes, commandID)
+			// 	}
+			// }
+			// p.mu.Unlock()
 
 			if err := p.withRaftGroup(true, func(raftGroup *raft.RawNode) (bool, error) {
 				raftGroup.ApplyConfChange(cc)
@@ -573,18 +583,29 @@ func (p *Peer) sendRaftMessage(ctx context.Context, msg raftpb.Message) {
 }
 
 func (p *Peer) processRaftCommand(
-	ctx context.Context, eng engine.ReadWriter, term, raftIndex uint64, command []byte,
+	ctx context.Context,
+	eng engine.ReadWriter,
+	term, raftIndex uint64,
+	id storagebase.CmdIDKey,
+	command ProposalMessage,
 ) {
-	log.Infof(ctx, "processRaftCommand %v %v %v", term, raftIndex, command)
-	if len(command) == 0 {
+	if log.V(1) {
+		log.Infof(ctx, "processRaftCommand %v %v %q", term, raftIndex, id)
+	}
+	if command.Size() == 0 {
 		return
 	}
-	id, _ := DecodeRaftCommand(command)
-
-	p.processCommand(ctx, eng, term, raftIndex, command)
-	p.mu.Lock()
-
+	p.mu.RLock()
 	prop, exists := p.mu.proposals[id]
+	p.mu.RUnlock()
+	if exists {
+		command = prop.msg
+	}
+	p.processCommand(ctx, term, raftIndex, id, command)
+
+	// TODO(ajwerner): consider if we can avoid this lock if !exists
+	p.mu.Lock()
+	prop, exists = p.mu.proposals[id]
 	if exists {
 		delete(p.mu.proposals, id)
 		prop.pc.done = true
@@ -594,9 +615,25 @@ func (p *Peer) processRaftCommand(
 }
 
 func (p *Peer) processRaftConfChange(
-	ctx context.Context, eng engine.ReadWriter, term, raftIndex uint64, command []byte,
+	ctx context.Context,
+	eng engine.ReadWriter,
+	term, raftIndex uint64,
+	id storagebase.CmdIDKey,
+	command ConfChangeMessage,
 ) (changeRepl bool) {
-	return p.processConfChange(ctx, eng, term, raftIndex, command)
+	if log.V(1) {
+		log.Infof(ctx, "processRaftConfChange %v %v %q", term, raftIndex, id)
+	}
+	if command.Size() == 0 {
+		return
+	}
+	p.mu.RLock()
+	prop, exists := p.mu.proposals[id]
+	p.mu.RUnlock()
+	if exists {
+		command = prop.msg.(ConfChangeMessage)
+	}
+	return p.processConfChange(ctx, term, raftIndex, id, command)
 }
 
 // TODO(ajwerner): add feedback for failed message sends
@@ -737,24 +774,7 @@ func (p *Peer) submitProposalLocked(prop *proposal) error {
 	// TODO(ajwerner): deal with replica state here?
 	// Some sort of callback magic for dealing with grabbing lease index?
 	switch msg := prop.msg.(type) {
-	case ProposalMessage:
-		if log.V(4) {
-			log.Infof(prop.ctx, "proposing command %x", prop.msg.ID())
-		}
-		if err := p.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
-			// We're proposing a command so there is no need to wake the leader if
-			// we're quiesced.
-			// TODO(ajwerner): deal with unquiesce
-			// p.unquiesceLocked()
-			return false /* unquiesceAndWakeLeader */, raftGroup.Propose(msg.Encoded())
-		}); err != nil {
-			if err == raft.ErrProposalDropped {
-				log.Infof(prop.ctx, "failed to submit proposal %q: %v", msg.ID(), err)
-			}
-			return err
-		}
-		return nil
-		// So then at the end we need to go and ack all of the proposals right?
+
 	case ConfChangeMessage:
 		// EndTransactionRequest with a ChangeReplicasTrigger is special
 		// because raft needs to understand it; it cannot simply be an
@@ -783,6 +803,25 @@ func (p *Peer) submitProposalLocked(prop *proposal) error {
 					Context: []byte(msg.Encoded()),
 				})
 		})
+	case ProposalMessage:
+		if log.V(4) {
+			log.Infof(prop.ctx, "proposing command %x", prop.msg.ID())
+		}
+		if err := p.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
+			// We're proposing a command so there is no need to wake the leader if
+			// we're quiesced.
+			// TODO(ajwerner): deal with unquiesce
+			// p.unquiesceLocked()
+			encoded := EncodeRaftCommandV1(msg.ID(), msg.Encoded())
+			return false /* unquiesceAndWakeLeader */, raftGroup.Propose(encoded)
+		}); err != nil {
+			if err == raft.ErrProposalDropped {
+				log.Infof(prop.ctx, "failed to submit proposal %q: %v", msg.ID(), err)
+			}
+			return err
+		}
+		return nil
+		// So then at the end we need to go and ack all of the proposals right?
 	default:
 		panic(errors.Errorf("unknown message of type %T", msg))
 	}
@@ -1077,18 +1116,6 @@ func (p *Peer) maybeAcquireProposalQuota(prop *proposal) error {
 	}
 
 	return quotaPool.acquire(prop)
-}
-
-// a lastUpdateTimesMap is maintained on the Raft leader to keep track of the
-// last communication received from followers, which in turn informs the quota
-// pool and log truncations.
-type lastUpdateTimesMap map[PeerID]time.Time
-
-func (m lastUpdateTimesMap) update(peerID PeerID, now time.Time) {
-	if m == nil {
-		return
-	}
-	m[peerID] = now
 }
 
 // // // updateOnUnquiesce is called when the leader unquiesces. In that case, we

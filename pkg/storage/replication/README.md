@@ -482,35 +482,135 @@ use in our KV.
 
 Now let's explore what it takes to create a `Peer`.
 
-```
+```go
 // PeerConfig is used to create a new Peer.
 type PeerConfig struct {
 	log.AmbientContext
-	GroupID            GroupID
-	PeerID             PeerID
-	Peers              []PeerID
+
+	// Static configuration for the peer at initialization time
+	// Perhaps this should be hidden behind and func or interface.
+	// In fact, maybe we pull this off of the RaftStorage.
+	GroupID GroupID
+	PeerID  PeerID
+	Peers   []PeerID
+
+	// Lifecycle functions for proposals.
 	ProcessCommand     ProcessCommandFunc
 	ProcessConfChanged ProcessConfChangeFunc
-	RaftMessageFactory func(raftpb.Message) RaftMessage
-	RaftStorage        RaftStorage
+
+	// Is this a good idea? We really want there to be a buffer and then we can
+	// clear that buffer.
+
+	// RaftMessageFactory should return a RaftMessage which can be sent on the
+	// Factory's underlying RaftTransport.
+	// Should the PeerConfig have a transport to send on and receive from? Should
+	// we change the transport set up to
+
+	// The question is how are we going to have the grpc connection call back in to
+	// this to tell us about the message. I guess we can then have this
+	RaftTransport RaftTransport
+	RaftStorage   RaftStorage
 }
 ```
 
-Unlike the `FactoryConfig` the `PeerConfig` has a lot to unpack.
+Unlike the `FactoryConfig` the `PeerConfig` has a lot to unpack. The less
+certain configuration components like GroupID, PeerID, and Peers I want to
+sidestep for the moment. Having them hard-coded for now plays in to our design
+for part 1. In later parts we may want to expose functions to access this state.
 
+The RaftMessageFactory should be pretty straight-forward. Above we discussed the
+RaftTransport interface, this function is how the peer gets a handle to one of
+these messages to send on that transport. By passing a function here the peer
+can allocate the struct which the raft transport later expects as opposed to
+needing to allocate an intermediate object. The ProcessCommand and
+ProcessConfChange hook the creator of the Peer up to the lifecycle of commands
+being replicated by the Group. In case the need for this isn't obvious.
 
-#### RaftStorage
+In order for Raft to work it needs to durably write things to the disk and to
+make progress it needs to be able to send and receive messages from the network.
+
+These two dependencies are fulfilled by the RaftTransport and the RaftStorage
+interfaces. 
+
+I have been having thoughts that the RaftTransport may better be derived from
+some sort of RaftNetwork object that can track all of the raft message network
+state. This abstraction will also provide information about liveness which
+could roughly be considered tracking when the last message was received from
+somewhere. This is important for determining when to quiesce and during leader
+elections.
+
+#### replication.RaftStorage interface
 
 Raft requires that we feed it an API to access its state.
-This means accessing log entries and hard state.
+This means reading and writing log entries and hard state for raft.
 
-...
+The RaftStorage object is also going to track the size of logs stored and keep
+the in-memory bookkeeping for last term and last index.
+
+```
+// RaftStorage is used to store on-disk state for raft.
+type RaftStorage interface {
+	raft.Storage
+
+	Append(
+		ctx context.Context, batch engine.ReadWriter, entries []raftpb.Entry,
+	) (onCommit func() error, err error)
+
+	SetHardState(ctx context.Context, batch engine.ReadWriter, hs raftpb.HardState) error
+
+	LogSize() (size int64, trusted bool)
+}
+```
+
+#### RaftStorage implemention
+
+TODO: discuss implementation
+
+      Engine
+      StateLoader
+      Sideload
+      MaybeGetCommandByID
+      GetConfState
+
+Needs snapshot
 
 #### RaftTransport
 
-Raft requires that messages be sent between nodes to step the state machine.
+Raft requires that messages be sent between nodes to move the state machine
+(also ticks, but let's not worry about that here). We do not want the
+replication package to think at all about the network. We want it to work only
+in terms of `PeerID`s.
+
+My working theory is that it will be valuable to move not just the handling of
+gRPC but also the general buffering of messages into a RaftTransport abstraction.
+
+I'm struggling with how best to do this. The network abstraction feels like the
+right place to house liveness as it relates directly to communication. It also
+seems not crazy to create inboxes eagerly but not the entire replica object as
+we do today. This will allow us to gracefully create a replica object in the
+store's own lifecycle rather than today's GetOrCreateReplica complexity.
+
+My goal is to eliminate the need to create replicas reactively but to not lose
+the benefits of being able to change state in response to inbound messages.
+This behavior is critical for robustness as once other peers know about the
+current node, the current node can and should vote in leader elections.
+
+At its core, a raft transport is a pair of goroutines per node dealing with
+requests and responses. 
+
+We'd like to use the connect pattern as much as possible where it makes sense.
+
+When we receive raft messages from a node we want to enqueue the message for
+processing and we want to signal the scheduler to notify the peer that it has
+messages.
+
+We can acheive this without switching stacks but that's going to be left for
+a later optimization.
 
 ...
+
+
+
 
 ### The replicated Store
 

@@ -9,12 +9,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/storage/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
-	"github.com/cockroachlabs/acidlib/v1/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/pkg/errors"
 )
 
-func makeRangeDescriptor(numNodes int) roachpb.RangeDescriptor {
-	replicas := make([]roachpb.ReplicaDescriptor, 0, numNodes)
-	for i := 0; i < numNodes; i++ {
+func makeRangeDescriptor(nodes []int) *roachpb.RangeDescriptor {
+	replicas := make([]roachpb.ReplicaDescriptor, 0, len(nodes))
+	for _, i := range nodes {
 		replicas = append(replicas, roachpb.ReplicaDescriptor{
 			NodeID:    roachpb.NodeID(i),
 			StoreID:   roachpb.StoreID(i),
@@ -28,8 +29,15 @@ func makeRangeDescriptor(numNodes int) roachpb.RangeDescriptor {
 	}
 }
 
-func WriteInitialClusterData(ctx context.Context, eng engine.Engine) error {
-	rangeDesc := makeRangeDescriptor(3)
+func WriteInitialClusterData(
+	ctx context.Context, eng engine.Engine, rsl stateloader.StateLoader, nodes ...int,
+) error {
+	if len(nodes) < 1 {
+		return errors.Errorf("failed to write initial cluster data: must provide at least 1 node")
+	}
+	b := eng.NewBatch()
+	defer b.Close()
+	rangeDesc := makeRangeDescriptor(nodes)
 	err := engine.MVCCPutProto(ctx, b, nil,
 		keys.RangeDescriptorKey(roachpb.RKeyMin), hlc.Timestamp{},
 		nil, rangeDesc)
@@ -38,7 +46,7 @@ func WriteInitialClusterData(ctx context.Context, eng engine.Engine) error {
 	}
 	if _, err := rsl.Save(ctx, b, storagepb.ReplicaState{
 		Lease: &roachpb.Lease{
-			Replica: replicas[0],
+			Replica: rangeDesc.Replicas[0],
 		},
 		TruncatedState: &roachpb.RaftTruncatedState{
 			Term: 1,
