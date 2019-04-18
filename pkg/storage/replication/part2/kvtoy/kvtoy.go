@@ -107,6 +107,7 @@ func (s *Store) getAppliedIndex() uint64 {
 // NewStore creates a new Store.
 func NewStore(ctx context.Context, cfg Config) (s *Store, err error) {
 	s = &Store{cfg: cfg}
+	ctx = s.cfg.Ambient.AnnotateCtx(ctx)
 	replConfig := s.makeReplicationFactoryConfig()
 	if s.peerFactory, err = replication.NewFactory(ctx, replConfig); err != nil {
 		return nil, errors.Wrap(err, "failed to make replication factory")
@@ -157,6 +158,13 @@ func NewStore(ctx context.Context, cfg Config) (s *Store, err error) {
 		Peers:             peers,
 		ProcessCommand:    s.processRaftCommand,
 		ProcessConfChange: s.processConfChange,
+		RaftStorage:       rs,
+		ShouldSendSnapshot: func() {
+			log.Infof(ctx, "hi I'm here")
+			go func() {
+				log.Infof(ctx, "so peer, what's the status?", s.peer.Progress())
+			}()
+		},
 		RaftMessageFactory: func(msg raftpb.Message) replication.RaftMessage {
 			var m rafttransport.RaftMessageRequest
 			m.Message = msg
@@ -182,7 +190,6 @@ func NewStore(ctx context.Context, cfg Config) (s *Store, err error) {
 			}
 			return &m
 		},
-		RaftStorage: rs,
 	})
 	if err != nil {
 		return nil, err

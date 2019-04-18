@@ -173,10 +173,15 @@ func (rs *RaftStorage) LogSize() (size int64, trusted bool) {
 	return rs.mu.raftLogSize, rs.mu.raftLogSizeTrusted
 }
 
+var noop = func() error { return nil }
+
 // NewEntryBatch is how clients add new log entries to RaftStorage.
 func (rs *RaftStorage) Append(
 	ctx context.Context, writer engine.ReadWriter, entries []raftpb.Entry,
 ) (onCommit func() error, _ error) {
+	if len(entries) == 0 {
+		return noop, nil
+	}
 	// We start by grabbing the mutex and recording the current value for the
 	// lastTerm, lastIndex, and raftLogSize.
 	// Then we attempt to sideload entries
@@ -210,7 +215,6 @@ func (rs *RaftStorage) Append(
 		// entries that we didn't overwrite). Remove any such leftover on-disk
 		// payloads (we can do that now because we've committed the deletion
 		// just above).
-
 		firstPurge := entries[0].Index // first new entry written
 		purgeTerm := entries[0].Term - 1
 		lastPurge := prevLastIndex // old end of the log, include in deletion
@@ -228,8 +232,8 @@ func (rs *RaftStorage) Append(
 		rs.mu.lastIndex = lastIndex
 		rs.mu.lastTerm = lastTerm
 		rs.mu.raftLogSize = raftLogSize
-		rs.mu.Unlock()
 		rs.entryCache.Add(entries, true /* truncate */)
+		rs.mu.Unlock()
 		return nil
 	}, nil
 }
@@ -320,8 +324,8 @@ func (rs *RaftStorage) InitialState() (hs raftpb.HardState, cs raftpb.ConfState,
 // and this method will always return at least one entry even if it exceeds
 // maxBytes. Sideloaded proposals count towards maxBytes with their payloads inlined.
 func (rs *RaftStorage) Entries(lo, hi, maxBytes uint64) ([]raftpb.Entry, error) {
-	rs.mu.RLock()
-	defer rs.mu.RUnlock()
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
 	readonly := rs.engine.NewReadOnly()
 	defer readonly.Close()
 	ctx := rs.ambient.AnnotateCtx(context.TODO())
@@ -462,7 +466,6 @@ func entries(
 	ents := make([]raftpb.Entry, 0, n)
 
 	ents, size, hitIndex, exceededMaxBytes := eCache.Scan(ents, lo, hi, maxBytes)
-
 	// Return results if the correct number of results came back or if
 	// we ran into the max bytes limit.
 	if uint64(len(ents)) == hi-lo || exceededMaxBytes {
@@ -518,8 +521,9 @@ func entries(
 		hlc.Timestamp{},
 		engine.MVCCScanOptions{},
 		func(kv roachpb.KeyValue) (bool, error) {
+
 			if err := kv.Value.GetProto(&ent); err != nil {
-				return false, err
+				return true, err
 			}
 			return scanFunc(ent)
 		})

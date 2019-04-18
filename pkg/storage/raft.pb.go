@@ -3,21 +3,23 @@
 
 package storage
 
-import proto "github.com/gogo/protobuf/proto"
-import fmt "fmt"
-import math "math"
-import raftpb "go.etcd.io/etcd/raft/raftpb"
-import roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
-import storagepb "github.com/cockroachdb/cockroach/pkg/storage/storagepb"
-
-import github_com_cockroachdb_cockroach_pkg_roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
-
 import (
 	context "context"
+	fmt "fmt"
+	io "io"
+	math "math"
+
+	roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
+	github_com_cockroachdb_cockroach_pkg_roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
+	storagepb "github.com/cockroachdb/cockroach/pkg/storage/storagepb"
+	proto "github.com/gogo/protobuf/proto"
+	raftpb "go.etcd.io/etcd/raft/raftpb"
 	grpc "google.golang.org/grpc"
 )
 
-import io "io"
+
+
+
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
@@ -593,7 +595,9 @@ func NewMultiRaftClient(cc *grpc.ClientConn) MultiRaftClient {
 	return &multiRaftClient{cc}
 }
 
-func (c *multiRaftClient) RaftMessageBatch(ctx context.Context, opts ...grpc.CallOption) (MultiRaft_RaftMessageBatchClient, error) {
+func (c *multiRaftClient) RaftMessageBatch(
+	ctx context.Context, opts ...grpc.CallOption,
+) (MultiRaft_RaftMessageBatchClient, error) {
 	stream, err := c.cc.NewStream(ctx, &_MultiRaft_serviceDesc.Streams[0], "/cockroach.storage.MultiRaft/RaftMessageBatch", opts...)
 	if err != nil {
 		return nil, err
@@ -624,7 +628,9 @@ func (x *multiRaftRaftMessageBatchClient) Recv() (*RaftMessageResponse, error) {
 	return m, nil
 }
 
-func (c *multiRaftClient) RaftSnapshot(ctx context.Context, opts ...grpc.CallOption) (MultiRaft_RaftSnapshotClient, error) {
+func (c *multiRaftClient) RaftSnapshot(
+	ctx context.Context, opts ...grpc.CallOption,
+) (MultiRaft_RaftSnapshotClient, error) {
 	stream, err := c.cc.NewStream(ctx, &_MultiRaft_serviceDesc.Streams[1], "/cockroach.storage.MultiRaft/RaftSnapshot", opts...)
 	if err != nil {
 		return nil, err

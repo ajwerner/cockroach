@@ -714,3 +714,37 @@ func WriteInitialClusterData(ctx context.Context, eng engine.Engine) error {
 There are some things in there which should be a little bit surprising because
 they haven't yet been introduced but we'll get there. The particularly
 unfortunate bits are the `ReplicaState` 
+
+## Part 2 - A less static replicated KV
+
+In part 2 we explore layering on configuration changes and snapshots. This will
+push on the relationships between storage, network, the client, and the raft
+state machine more than we have so far. In particular it highlights the need to
+
+* Expose application state of the client to the underlying raft storage
+* Expose a hook from under raft to kick off the snapshot process
+   * Need to go back around, probably to the client, and grab a snapshot
+   * We also need to grab a snapshot of raftstore (notice they are not the same :()
+   
+
+Cases where snapshots come up:
+
+1) Raft says we need one
+2) We know for other reasons that we need one, like we're doing one of those preemptive snapshots.
+
+Okay so when a snapshot happens we need to grab the various engine snapshots
+while holding some locks and then construct some object and send it on the wire
+then when we're all done we need to free those resources.
+
+To be more specific, we need to atomically grab the view of the client's state
+and we need to grab the corresponding raft state. The raft state lives in the
+RaftStorage object (right?) which the client should have a handle to.
+We do need to think about how to ensure that the raft state is not being
+concurrently modified (today protected by the raftMu) but that happens to be
+something that the client does not know a thing about.
+
+Let's take some time to reflect on what goes in outgoing and incoming snapshots
+to come up with a more reasonable plan.
+
+1) 
+

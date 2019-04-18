@@ -82,6 +82,11 @@ type PeerConfig struct {
 	ProcessCommand    ProcessCommandFunc
 	ProcessConfChange ProcessConfChangeFunc
 
+	// ShouldSendSnapshot indicates that this client should send a snapshot to
+	// one or more peers. It should consult the peer's progress to determine which
+	// peer is in need of a snapshot.
+	ShouldSendSnapshot func()
+
 	// Is this a good idea? We really want there to be a buffer and then we can
 	// clear that buffer.
 
@@ -112,10 +117,11 @@ type Peer struct {
 	raftTransport connect.Conn
 	raftStorage   RaftStorage
 
-	shouldCampaign func(ctx context.Context, status *raft.Status) bool
-	onUnquiesce    func()
-	onRaftReady    func()
-	storage        engine.Engine
+	shouldCampaign     func(ctx context.Context, status *raft.Status) bool
+	onUnquiesce        func()
+	onRaftReady        func()
+	shouldSendSnapshot func()
+	storage            engine.Engine
 
 	processCommand     ProcessCommandFunc
 	processConfChange  ProcessConfChangeFunc
@@ -259,6 +265,7 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 		if r := recover(); r == nil {
 			p.updateProposalQuota(ctx, lastLeaderID)
 		} else {
+			log.Errorf(ctx, "got a panic", r)
 			panic(r)
 		}
 	}()
@@ -608,7 +615,9 @@ func (p *Peer) sendRaftMessage(ctx context.Context, msg raftpb.Message) {
 		p.mu.lastUpdateTimes.update(p.mu.peerID, timeutil.Now())
 	}
 	p.mu.Unlock()
-
+	if msg.Type == raftpb.MsgSnap {
+		p.shouldSendSnapshot()
+	}
 	// TODO(ajwerner): deal with snapshots, probably do this above inside the
 	// conn. Also coalesced heartbeats.
 	raftMsg := p.raftMessageFactory(msg)
@@ -628,7 +637,7 @@ func (p *Peer) processRaftCommand(
 	id storagebase.CmdIDKey,
 	command ProposalMessage,
 ) {
-	if log.V(1) {
+	if log.V(3) {
 		log.Infof(ctx, "processRaftCommand %v %v %q", term, raftIndex, id)
 	}
 	if command.Size() == 0 {

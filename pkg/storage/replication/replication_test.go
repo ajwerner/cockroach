@@ -77,6 +77,8 @@ func TestConfChange(t *testing.T) {
 				// Also I'm curious about truncating the log.
 				funcOp(func(ctx context.Context, t *testing.T, c *testCluster) {
 					sem := make(chan struct{}, 500)
+					// Note that with a large value here this test fails due to the need
+					// to send a snapshot.
 					const N = 10000
 					var wg sync.WaitGroup
 					wg.Add(N)
@@ -127,7 +129,7 @@ func TestConfChange(t *testing.T) {
 				reqOp{3, getOp{key: k, expValue: 1}},
 				reqOp{3, putOp{key: k, value: 2}},
 				reqOp{2, getOp{key: k, expValue: 2}},
-				reqOp{3, getOp{key: roachpb.Key(strconv.Itoa(2000)), expValue: 2000}},
+				reqOp{3, getOp{key: roachpb.Key(strconv.Itoa(1)), expValue: 1}},
 			},
 		},
 	}
@@ -211,7 +213,7 @@ func (o getOp) run(ctx context.Context, t *testing.T, s *kvtoy.Store) {
 		assert.Nil(t, resp.Responses[0].GetGet().Value)
 		return
 	}
-	require.NotNil(t, resp.Responses[0].GetGet().Value)
+	require.NotNilf(t, resp.Responses[0].GetGet().Value, "%v", o)
 	respVal, err := resp.Responses[0].GetGet().Value.GetFloat()
 	assert.Nil(t, err)
 	assert.Equal(t, respVal, o.expValue)
