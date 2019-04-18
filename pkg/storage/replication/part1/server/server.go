@@ -60,8 +60,9 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	// Make an engine and a server
 	clock := hlc.NewClock(hlc.UnixNano, 0)
 	baseConfig := base.Config{
-		Insecure: true,
-		Addr:     cfg.Addr,
+		Insecure:          true,
+		Addr:              cfg.Addr,
+		HeartbeatInterval: 2 * time.Second,
 	}
 	// NodeID and StoreID are always the same for this part.
 	storeID := roachpb.StoreID(cfg.NodeID)

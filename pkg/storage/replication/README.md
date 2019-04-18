@@ -607,9 +607,10 @@ messages.
 We can acheive this without switching stacks but that's going to be left for
 a later optimization.
 
+Where does heartbeat coalescing belong?
+
+
 ...
-
-
 
 
 ### The replicated Store

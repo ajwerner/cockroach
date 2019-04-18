@@ -319,6 +319,12 @@ func (f *Factory) getUnquiescedGroups(buf []GroupID) []GroupID {
 	return buf
 }
 
+// enqueueRaftUpdateCheck asynchronously registers the given range ID to be
+// checked for raft updates when the processRaft goroutine is idle.
+func (s *Factory) enqueueRaftUpdateCheck(groupID GroupID) {
+	s.scheduler.EnqueueRaftReady(groupID)
+}
+
 // Random thoughts:
 
 // Merges and splits don't really happen here at all right?
@@ -384,6 +390,7 @@ func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
 		f.mu.Unlock()
 		return p, nil
 	}
+	groupID := cfg.GroupID // goes on the heap because it's captured
 	p = &Peer{
 		AmbientContext:     cfg.AmbientContext,
 		settings:           &f.cfg.Settings.SV,
@@ -392,11 +399,12 @@ func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
 		raftConfig:         &f.cfg.RaftConfig,
 		raftStorage:        cfg.RaftStorage,
 		storage:            f.cfg.Storage,
-		onUnquiesce:        func() { f.onUnquiesce(cfg.GroupID) },
 		raftMessageFactory: cfg.RaftMessageFactory,
 		processCommand:     cfg.ProcessCommand,
 		processConfChange:  cfg.ProcessConfChanged,
 	}
+	p.onUnquiesce = func() { f.onUnquiesce(groupID) }
+	p.onRaftReady = func() { f.scheduler.EnqueueRaftReady(groupID) }
 	p.raftTransport = f.cfg.RaftTransport
 	p.mu.peerID = cfg.PeerID
 	p.mu.peers = cfg.Peers

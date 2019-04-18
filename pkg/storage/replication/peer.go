@@ -85,6 +85,7 @@ type Peer struct {
 
 	shouldCampaign func(ctx context.Context, status *raft.Status) bool
 	onUnquiesce    func()
+	onRaftReady    func()
 	storage        engine.Engine
 
 	processCommand     ProcessCommandFunc
@@ -336,13 +337,15 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 	// uncommitted log entries, and even if they did include log entries that
 	// were not persisted to disk, it wouldn't be a problem because raft does not
 	// infer the that entries are persisted on the node that sends a snapshot.
-	//commitStart := timeutil.Now()
+	commitStart := timeutil.Now()
 	mustSync := rd.MustSync && !disableSyncRaftLog.Get(p.settings)
 	if err := batch.Commit(mustSync); err != nil {
 		const expl = "while committing batch"
 		return stats, expl, errors.Wrap(err, expl)
 	}
-	//elapsed := timeutil.Since(commitStart)
+	if log.V(2) {
+		log.Infof(ctx, "commit took %v", timeutil.Since(commitStart))
+	}
 	// TODO(ajwerner): metrics
 	// r.metrics.RaftLogCommitLatency.RecordValue(elapsed.Nanoseconds())
 	if onLogCommit != nil {
@@ -376,7 +379,7 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 	// and cache the latest ones.
 	p.sendRaftMessages(ctx, otherMsgs)
 	p.traceEntries(rd.CommittedEntries, "committed, before applying any entries")
-	// applicationStart := timeutil.Now()
+	applicationStart := timeutil.Now()
 	var commitBatch engine.Batch
 	if len(rd.CommittedEntries) > 0 {
 		commitBatch = p.storage.NewBatch()
@@ -477,6 +480,9 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 
 	// applicationElapsed := timeutil.Since(applicationStart).Nanoseconds()
 	// r.store.metrics.RaftApplyCommittedLatency.RecordValue(applicationElapsed)
+	if log.V(2) {
+		log.Infof(ctx, "application took %v", time.Since(applicationStart))
+	}
 	if refreshReason != NoReason {
 		p.mu.Lock()
 		p.refreshProposalsLocked(0, refreshReason)
@@ -495,9 +501,7 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 		// the group's committed entries were paginated due to size limitations
 		// and we didn't apply all of them in this pass.
 		if raftGroup.HasReady() {
-			// TODO(ajwerner): deal with this case
-			log.Warningf(ctx, "need to reenqueue this peer for raftUpdateCheck")
-			// p.store.enqueueRaftUpdateCheck(r.RangeID)
+			p.onRaftReady()
 		}
 		return true, nil
 	}); err != nil {
@@ -771,6 +775,7 @@ func (p *Peer) addProposal(prop *proposal) {
 }
 
 func (p *Peer) submitProposalLocked(prop *proposal) error {
+	defer p.onRaftReady()
 	// TODO(ajwerner): deal with replica state here?
 	// Some sort of callback magic for dealing with grabbing lease index?
 	switch msg := prop.msg.(type) {

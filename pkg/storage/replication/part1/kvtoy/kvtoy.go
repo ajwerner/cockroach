@@ -158,7 +158,7 @@ func (s *Store) makeReplicationFactoryConfig() replication.FactoryConfig {
 	cfg.Stopper = s.cfg.Stopper
 	cfg.RaftConfig = s.cfg.RaftConfig
 	cfg.RaftTransport = s.cfg.RaftTransport
-	cfg.NumWorkers = 1
+	cfg.NumWorkers = 16
 	return cfg
 }
 
@@ -189,10 +189,6 @@ func (s *Store) Batch(
 		return s.handleReadOnlyBatch(ctx, ba)
 	}
 	return s.handleReadWriteBatch(ctx, ba)
-	// if ba.IsReadOnly() {
-	// 	return s.handleReadOnlyBatch(ctx, ba)
-	// }
-	// return s.handleReadWriteBatch(ctx, ba)
 }
 
 const rangeID roachpb.RangeID = 1

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/connect"
@@ -139,8 +140,9 @@ func setUpToyStoresWithRealRPCs(
 		require.Nil(t, err)
 		rpcCtx := rpc.NewContext(cfg.Ambient,
 			&base.Config{
-				Insecure: true,
-				Addr:     l.Addr().String(),
+				Insecure:          true,
+				Addr:              l.Addr().String(),
+				HeartbeatInterval: 2 * time.Second,
 			},
 			cfg.Clock,
 			cfg.Stopper,

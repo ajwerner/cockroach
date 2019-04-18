@@ -435,7 +435,6 @@ func entries(
 	if lo > hi {
 		return nil, errors.Errorf("lo:%d is greater than hi:%d", lo, hi)
 	}
-
 	n := hi - lo
 	if n > 100 {
 		n = 100
@@ -491,9 +490,10 @@ func entries(
 	}
 
 	var ent raftpb.Entry
+	loKey := append(roachpb.Key(nil), rsl.RaftLogKey(lo)...)
 	_, err := engine.MVCCIterate(
 		ctx, eng,
-		rsl.RaftLogKey(lo),
+		loKey,
 		rsl.RaftLogKey(hi),
 		hlc.Timestamp{},
 		engine.MVCCScanOptions{},
