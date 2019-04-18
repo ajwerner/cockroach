@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/connect"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
@@ -96,7 +95,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 		Engine:        cfg.Engine,
 		Clock:         clock,
 		EntryCache:    raftentry.NewCache(1 << 20 /* 1MB */),
-		RaftTransport: newRaftTransport(storeID, cfg.Stopper, raftTransport),
+		RaftTransport: raftTransport,
 	}
 	storeCfg.RaftConfig.SetDefaults()
 	storeCfg.RaftConfig.RaftHeartbeatIntervalTicks = 1
@@ -133,71 +132,4 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 		grpcServer: grpcServer,
 		store:      store,
 	}, nil
-}
-
-type raftTransport struct {
-	stopper *stop.Stopper
-	send    *rafttransport.RaftTransport
-	recv    chan connect.Message
-}
-
-func (rt *raftTransport) Recv() connect.Message {
-	select {
-	case msg := <-rt.recv:
-		return msg
-	case <-rt.stopper.ShouldQuiesce():
-		return nil
-	}
-}
-
-func (rt *raftTransport) Send(ctx context.Context, msg connect.Message) {
-	switch msg := msg.(type) {
-	case *rafttransport.RaftMessageRequest:
-		rt.send.SendAsync(msg)
-	default:
-		panic(errors.Errorf("unknown message type %T", msg))
-	}
-}
-
-func (rt *raftTransport) Close(ctx context.Context, drain bool) {
-	log.Errorf(ctx, "Got unhandled close")
-}
-
-func newRaftTransport(
-	storeID roachpb.StoreID, stopper *stop.Stopper, rt *rafttransport.RaftTransport,
-) *raftTransport {
-	t := &raftTransport{
-		send: rt,
-		// TODO(ajwerner): give this a buffer when I figure it out.
-		recv:    make(chan connect.Message),
-		stopper: stopper,
-	}
-	rt.Listen(storeID, t)
-	return t
-}
-
-func (rt *raftTransport) HandleRaftRequest(
-	ctx context.Context,
-	req *rafttransport.RaftMessageRequest,
-	respStream rafttransport.RaftMessageResponseStream,
-) *roachpb.Error {
-	select {
-	case rt.recv <- req:
-		return nil
-	case <-rt.stopper.ShouldQuiesce():
-		return roachpb.NewError(stop.ErrUnavailable)
-	}
-}
-
-func (rt *raftTransport) HandleRaftResponse(
-	ctx context.Context, resp *rafttransport.RaftMessageResponse,
-) error {
-	log.Errorf(ctx, "Got unhandled RaftResponse %v", resp)
-	return nil
-}
-
-func (rt *raftTransport) HandleSnapshot(
-	header *rafttransport.SnapshotRequest_Header, respStream rafttransport.SnapshotResponseStream,
-) error {
-	panic("not implemented")
 }

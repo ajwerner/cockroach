@@ -267,12 +267,14 @@ func (s *Store) processRaftCommand(
 	s.mu.Lock()
 	// TODO(ajwerner): think about what this actually does with regards to
 	// consistency.
-	s.servePendingReadsLocked() // this call serves to sequence reads
 	prop, exists := s.mu.proposals[id]
 	if exists {
 		ctx = prop.ctx
 		ba = prop.ba
 		delete(s.mu.proposals, id)
+		// This call serves to sequence reads.
+		// We know that this command is still in flight.
+		s.servePendingReadsLocked()
 	}
 	s.mu.Unlock()
 
@@ -403,6 +405,7 @@ func (s *Store) submitEmptyBatchLocked(ctx context.Context) {
 		id:  idKey,
 		ba:  &ba,
 	}
+	s.mu.proposals[idKey] = prop
 	prop.mu.Lock()
 	defer prop.mu.Unlock()
 	pc := s.peer.NewClient(&prop.mu)
@@ -515,7 +518,7 @@ func (s *Store) handleConditionalPut(
 		return nil, err
 	}
 	if val != nil && req.ExpValue == nil {
-		return nil, errors.Errorf("conditional put: expectation failed for key %v, expected missing",
+		return nil, errors.Errorf("conditional put: expectation failed for key %v, expected missing got %v",
 			req.Key, val)
 	} else if !val.Equal(req.ExpValue) {
 		return nil, errors.Errorf("conditional put: expectation failed for key %v: %v != %v",

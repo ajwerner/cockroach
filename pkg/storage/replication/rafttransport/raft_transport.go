@@ -25,6 +25,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/cockroachdb/cockroach/pkg/connect"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -154,6 +155,31 @@ type RaftTransport struct {
 	stats    syncutil.IntMap // map[roachpb.NodeID]*raftTransportStats
 	dialer   *nodedialer.Dialer
 	handlers syncutil.IntMap // map[roachpb.StoreID]*RaftMessageHandler
+
+	// This is a hack to simplify mapping back to the connect model
+	recv chan connect.Message
+}
+
+func (t *RaftTransport) Recv() connect.Message {
+	select {
+	case msg := <-t.recv:
+		return msg
+	case <-t.stopper.ShouldQuiesce():
+		return nil
+	}
+}
+
+func (t *RaftTransport) Send(ctx context.Context, msg connect.Message) {
+	switch msg := msg.(type) {
+	case *RaftMessageRequest:
+		t.SendAsync(msg)
+	default:
+		panic(errors.Errorf("unknown message type %T", msg))
+	}
+}
+
+func (t *RaftTransport) Close(ctx context.Context, drain bool) {
+	log.Errorf(ctx, "Got unhandled close")
 }
 
 // NewDummyRaftTransport returns a dummy raft transport for use in tests which
@@ -180,6 +206,7 @@ func NewRaftTransport(
 
 		stopper: stopper,
 		dialer:  dialer,
+		recv:    make(chan connect.Message),
 	}
 
 	if grpcServer != nil {
@@ -264,25 +291,26 @@ func (t *RaftTransport) queuedMessageCount() int64 {
 	return n
 }
 
-func (t *RaftTransport) getHandler(storeID roachpb.StoreID) (RaftMessageHandler, bool) {
-	if value, ok := t.handlers.Load(int64(storeID)); ok {
-		return *(*RaftMessageHandler)(value), true
-	}
-	return nil, false
-}
+// func (t *RaftTransport) getHandler(storeID roachpb.StoreID) (RaftMessageHandler, bool) {
+// 	if value, ok := t.handlers.Load(int64(storeID)); ok {
+// 		return *(*RaftMessageHandler)(value), true
+// 	}
+// 	return nil, false
+// }
 
 // handleRaftRequest proxies a request to the listening server interface.
 func (t *RaftTransport) handleRaftRequest(
 	ctx context.Context, req *RaftMessageRequest, respStream RaftMessageResponseStream,
 ) *roachpb.Error {
-	handler, ok := t.getHandler(req.ToReplica.StoreID)
-	if !ok {
-		log.Warningf(ctx, "unable to accept Raft message from %+v: no handler registered for %+v",
-			req.FromReplica, req.ToReplica)
-		return roachpb.NewError(roachpb.NewStoreNotFoundError(req.ToReplica.StoreID))
+	// Note that we are throwing away the respStream here because hopefully it
+	// doesn't matter how responses correspond to requests. If I have a new stream
+	// from the same node, I better use that.
+	select {
+	case t.recv <- req:
+		return nil
+	case <-t.stopper.ShouldQuiesce():
+		return roachpb.NewError(stop.ErrUnavailable)
 	}
-
-	return handler.HandleRaftRequest(ctx, req, respStream)
 }
 
 // newRaftMessageResponse constructs a RaftMessageResponse from the
@@ -375,14 +403,16 @@ func (t *RaftTransport) RaftSnapshot(stream MultiRaft_RaftSnapshotServer) error 
 						Status:  SnapshotResponse_ERROR,
 						Message: "client error: no header in first snapshot request message"})
 				}
-				rmr := req.Header.RaftMessageRequest
-				handler, ok := t.getHandler(rmr.ToReplica.StoreID)
-				if !ok {
-					log.Warningf(ctx, "unable to accept Raft message from %+v: no handler registered for %+v",
-						rmr.FromReplica, rmr.ToReplica)
-					return roachpb.NewStoreNotFoundError(rmr.ToReplica.StoreID)
-				}
-				return handler.HandleSnapshot(req.Header, stream)
+				// TODO(ajwerner): implement
+				panic("not implemented")
+				// rmr := req.Header.RaftMessageRequest
+
+				// handler, ok := t.getHandler(rmr.ToReplica.StoreID)
+				// if !ok {
+				// 	log.Warningf(ctx, "unable to accept Raft message from %+v: no handler registered for %+v",
+				// 		rmr.FromReplica, rmr.ToReplica)
+				// 	return roachpb.NewStoreNotFoundError(rmr.ToReplica.StoreID)
+				// }
 			}()
 		}); err != nil {
 		return err
@@ -430,15 +460,17 @@ func (t *RaftTransport) processQueue(
 							return err
 						}
 						atomic.AddInt64(&stats.clientRecv, 1)
-						handler, ok := t.getHandler(resp.ToReplica.StoreID)
-						if !ok {
-							log.Warningf(ctx, "no handler found for store %s in response %s",
-								resp.ToReplica.StoreID, resp)
-							continue
-						}
-						if err := handler.HandleRaftResponse(ctx, resp); err != nil {
-							return err
-						}
+						// TODO(ajwerner): better handle raft responses
+						log.Errorf(ctx, "Got unhandled RaftResponse %v", resp)
+						// handler, ok := t.getHandler(resp.ToReplica.StoreID)
+						// if !ok {
+						// 	log.Warningf(ctx, "no handler found for store %s in response %s",
+						// 		resp.ToReplica.StoreID, resp)
+						// 	continue
+						// }
+						// The comment on the response makes it seems like this is a good
+						// signal for closing a connection.
+
 					}
 				}()
 			})
