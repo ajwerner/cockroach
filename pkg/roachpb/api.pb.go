@@ -3,22 +3,26 @@
 
 package roachpb
 
-import (
-	bytes "bytes"
-	context "context"
-	encoding_binary "encoding/binary"
-	fmt "fmt"
-	io "io"
-	math "math"
+import proto "github.com/gogo/protobuf/proto"
+import fmt "fmt"
+import math "math"
+import enginepb "github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
+import hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
+import tracing "github.com/cockroachdb/cockroach/pkg/util/tracing"
 
-	enginepb "github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
-	github_com_cockroachdb_cockroach_pkg_storage_engine_enginepb "github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
-	hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
-	tracing "github.com/cockroachdb/cockroach/pkg/util/tracing"
-	github_com_cockroachdb_cockroach_pkg_util_uuid "github.com/cockroachdb/cockroach/pkg/util/uuid"
-	proto "github.com/gogo/protobuf/proto"
+import github_com_cockroachdb_cockroach_pkg_storage_engine_enginepb "github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
+import github_com_cockroachdb_cockroach_pkg_util_uuid "github.com/cockroachdb/cockroach/pkg/util/uuid"
+
+import bytes "bytes"
+
+import (
+	context "context"
 	grpc "google.golang.org/grpc"
 )
+
+import encoding_binary "encoding/binary"
+
+import io "io"
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
@@ -1515,9 +1519,7 @@ func (*CheckConsistencyResponse_Result) Descriptor() ([]byte, []int) {
 func (m *CheckConsistencyResponse_Result) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
-func (m *CheckConsistencyResponse_Result) XXX_Marshal(
-	b []byte, deterministic bool,
-) ([]byte, error) {
+func (m *CheckConsistencyResponse_Result) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
 	b = b[:cap(b)]
 	n, err := m.MarshalTo(b)
 	if err != nil {
@@ -5238,12 +5240,7 @@ func (m *RequestUnion) GetRangeStats() *RangeStatsRequest {
 }
 
 // XXX_OneofFuncs is for the internal use of the proto package.
-func (*RequestUnion) XXX_OneofFuncs() (
-	func(msg proto.Message, b *proto.Buffer) error,
-	func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error),
-	func(msg proto.Message) (n int),
-	[]interface{},
-) {
+func (*RequestUnion) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
 	return _RequestUnion_OneofMarshaler, _RequestUnion_OneofUnmarshaler, _RequestUnion_OneofSizer, []interface{}{
 		(*RequestUnion_Get)(nil),
 		(*RequestUnion_Put)(nil),
@@ -5511,9 +5508,7 @@ func _RequestUnion_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
 	return nil
 }
 
-func _RequestUnion_OneofUnmarshaler(
-	msg proto.Message, tag, wire int, b *proto.Buffer,
-) (bool, error) {
+func _RequestUnion_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
 	m := msg.(*RequestUnion)
 	switch tag {
 	case 1: // value.get
@@ -6624,12 +6619,7 @@ func (m *ResponseUnion) GetRangeStats() *RangeStatsResponse {
 }
 
 // XXX_OneofFuncs is for the internal use of the proto package.
-func (*ResponseUnion) XXX_OneofFuncs() (
-	func(msg proto.Message, b *proto.Buffer) error,
-	func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error),
-	func(msg proto.Message) (n int),
-	[]interface{},
-) {
+func (*ResponseUnion) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
 	return _ResponseUnion_OneofMarshaler, _ResponseUnion_OneofUnmarshaler, _ResponseUnion_OneofSizer, []interface{}{
 		(*ResponseUnion_Get)(nil),
 		(*ResponseUnion_Put)(nil),
@@ -6891,9 +6881,7 @@ func _ResponseUnion_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
 	return nil
 }
 
-func _ResponseUnion_OneofUnmarshaler(
-	msg proto.Message, tag, wire int, b *proto.Buffer,
-) (bool, error) {
+func _ResponseUnion_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
 	m := msg.(*ResponseUnion)
 	switch tag {
 	case 1: // value.get
@@ -9719,9 +9707,7 @@ func NewInternalClient(cc *grpc.ClientConn) InternalClient {
 	return &internalClient{cc}
 }
 
-func (c *internalClient) Batch(
-	ctx context.Context, in *BatchRequest, opts ...grpc.CallOption,
-) (*BatchResponse, error) {
+func (c *internalClient) Batch(ctx context.Context, in *BatchRequest, opts ...grpc.CallOption) (*BatchResponse, error) {
 	out := new(BatchResponse)
 	err := c.cc.Invoke(ctx, "/cockroach.roachpb.Internal/Batch", in, out, opts...)
 	if err != nil {
@@ -9730,9 +9716,7 @@ func (c *internalClient) Batch(
 	return out, nil
 }
 
-func (c *internalClient) RangeFeed(
-	ctx context.Context, in *RangeFeedRequest, opts ...grpc.CallOption,
-) (Internal_RangeFeedClient, error) {
+func (c *internalClient) RangeFeed(ctx context.Context, in *RangeFeedRequest, opts ...grpc.CallOption) (Internal_RangeFeedClient, error) {
 	stream, err := c.cc.NewStream(ctx, &_Internal_serviceDesc.Streams[0], "/cockroach.roachpb.Internal/RangeFeed", opts...)
 	if err != nil {
 		return nil, err
@@ -9774,12 +9758,7 @@ func RegisterInternalServer(s *grpc.Server, srv InternalServer) {
 	s.RegisterService(&_Internal_serviceDesc, srv)
 }
 
-func _Internal_Batch_Handler(
-	srv interface{},
-	ctx context.Context,
-	dec func(interface{}) error,
-	interceptor grpc.UnaryServerInterceptor,
-) (interface{}, error) {
+func _Internal_Batch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(BatchRequest)
 	if err := dec(in); err != nil {
 		return nil, err

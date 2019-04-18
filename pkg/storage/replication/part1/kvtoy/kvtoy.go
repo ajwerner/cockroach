@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/connect"
@@ -46,6 +47,25 @@ type Config struct {
 	EntryCache    *raftentry.Cache
 	RaftTransport connect.Conn
 	RaftConfig    base.RaftConfig
+}
+
+func TestingStoreConfig(nodeID roachpb.NodeID) Config {
+	cfg := Config{
+		NodeID:     nodeID,
+		StoreID:    roachpb.StoreID(nodeID),
+		Settings:   cluster.MakeTestingClusterSettings(),
+		Clock:      hlc.NewClock(hlc.UnixNano, 0),
+		Stopper:    stop.NewStopper(),
+		EntryCache: raftentry.NewCache(1 << 16),
+		Engine:     engine.NewInMem(roachpb.Attributes{}, 1<<26 /* 64 MB */),
+		Ambient:    log.AmbientContext{},
+	}
+	cfg.Ambient.AddLogTag("s", cfg.StoreID)
+	cfg.RaftConfig.SetDefaults()
+	cfg.RaftConfig.RaftHeartbeatIntervalTicks = 1
+	cfg.RaftConfig.RaftElectionTimeoutTicks = 3
+	cfg.RaftConfig.RaftTickInterval = 100 * time.Millisecond
+	return cfg
 }
 
 // Store stores key-value data.

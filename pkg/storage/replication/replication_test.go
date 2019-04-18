@@ -14,8 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
-	"github.com/cockroachdb/cockroach/pkg/storage/replication/kvtoy"
-	"github.com/cockroachdb/cockroach/pkg/storage/replication/kvtoy/kvtoypb"
+	"github.com/cockroachdb/cockroach/pkg/storage/replication/part1/kvtoy"
 	"github.com/cockroachdb/cockroach/pkg/storage/replication/rafttransport"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -26,25 +25,21 @@ import (
 	"google.golang.org/grpc"
 )
 
-func put(key roachpb.Key, value float64) *kvtoypb.BatchRequest {
-	put := &kvtoypb.PutRequest{}
-	put.Key = key
-	put.Value.SetFloat(value)
-	return &kvtoypb.BatchRequest{
-		Requests: []kvtoypb.RequestUnion{
-			{Value: &kvtoypb.RequestUnion_Put{Put: put}},
-		},
-	}
+func put(key roachpb.Key, value float64) *roachpb.BatchRequest {
+	var br roachpb.BatchRequest
+	pr := roachpb.PutRequest{}
+	pr.Key = key
+	pr.Value.SetFloat(value)
+	br.Add(&pr)
+	return &br
 }
 
-func get(key roachpb.Key) *kvtoypb.BatchRequest {
-	get := &kvtoypb.GetRequest{}
-	get.Key = key
-	return &kvtoypb.BatchRequest{
-		Requests: []kvtoypb.RequestUnion{
-			{Value: &kvtoypb.RequestUnion_Get{Get: get}},
-		},
-	}
+func get(key roachpb.Key) *roachpb.BatchRequest {
+	var br roachpb.BatchRequest
+	pr := roachpb.GetRequest{}
+	pr.Key = key
+	br.Add(&pr)
+	return &br
 }
 
 type raftTransport struct {
@@ -121,7 +116,7 @@ func setUpToyStoresWithRealRPCs(
 	ctx context.Context, t *testing.T, numNodes int,
 ) (stores []*kvtoy.Store, cleanup func()) {
 
-	cfgs := make([]kvtoy.StoreConfig, 0, numNodes)
+	cfgs := make([]kvtoy.Config, 0, numNodes)
 	stores = make([]*kvtoy.Store, 0, numNodes)
 	listeners := make([]net.Listener, 0, numNodes)
 	rpcContexts := make([]*rpc.Context, 0, numNodes)
@@ -133,7 +128,12 @@ func setUpToyStoresWithRealRPCs(
 		}
 		return nil, fmt.Errorf("no known addr for %v", nid)
 	}
-
+	nodeIDs := func() (nodeIDs []int) {
+		for i := 1; i <= numNodes; i++ {
+			nodeIDs = append(nodeIDs, i)
+		}
+		return nodeIDs
+	}()
 	for i := 1; i <= numNodes; i++ {
 		cfg := kvtoy.TestingStoreConfig(roachpb.NodeID(i))
 		l, err := net.Listen("tcp", ":0")
@@ -147,10 +147,10 @@ func setUpToyStoresWithRealRPCs(
 			cfg.Clock,
 			cfg.Stopper,
 			&cfg.Settings.Version)
-		cfg.NodeDialer = nodedialer.New(rpcCtx, resolver)
+		nodeDialer := nodedialer.New(rpcCtx, resolver)
 		server := rpc.NewServer(rpcCtx)
 		raftTransport := rafttransport.NewRaftTransport(cfg.Ambient, cfg.Settings,
-			cfg.NodeDialer, server, cfg.Stopper)
+			nodeDialer, server, cfg.Stopper)
 		cfg.RaftTransport = newRaftTransport(cfg.StoreID, cfg.Stopper, raftTransport)
 		cfg.Stopper.RunAsyncTask(ctx, "server "+strconv.Itoa(i), func(ctx context.Context) {
 			server.Serve(l)
@@ -159,7 +159,7 @@ func setUpToyStoresWithRealRPCs(
 			<-cfg.Stopper.ShouldQuiesce()
 			server.Stop()
 		})
-		require.Nil(t, kvtoy.WriteInitialClusterData(ctx, cfg.Engine))
+		require.Nil(t, kvtoy.WriteInitialClusterData(ctx, cfg.Engine, 1, nodeIDs...))
 		s, err := kvtoy.NewStore(ctx, cfg)
 		require.Nil(t, err)
 		rpcContexts = append(rpcContexts, rpcCtx)
@@ -187,8 +187,6 @@ func setUpToyStoresWithRealRPCs(
 
 func TestReplication(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	// We want to construct a replication layer and then use it to replicate
-	// some data.
 	ctx := context.Background()
 	const numNodes = 3
 	stores, cleanup := setUpToyStoresWithRealRPCs(ctx, t, numNodes)
