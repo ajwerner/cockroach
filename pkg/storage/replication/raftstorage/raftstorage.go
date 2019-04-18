@@ -117,6 +117,8 @@ type Config struct {
 	// what sort of contract is that? I guess this might just push the client to
 	// use an atomic.Value. Would that be alright? Probably not. :/
 	GetConfState func() raftpb.ConfState
+
+	GetAppliedIndex func() uint64
 }
 
 type RaftStorage struct {
@@ -127,6 +129,7 @@ type RaftStorage struct {
 	sideloadStorage     SideloadStorage
 	maybeGetRaftCommand func(id storagebase.CmdIDKey) (storagepb.RaftCommand, bool)
 	getConfState        func() raftpb.ConfState
+	getAppliedIndex     func() uint64
 	mu                  struct {
 		syncutil.RWMutex
 		// TODO(ajwerner): think about peers and locking
@@ -152,6 +155,7 @@ func NewRaftStorage(ctx context.Context, cfg Config) (*RaftStorage, error) {
 		engine:          cfg.Engine,
 		sideloadStorage: cfg.SideloadStorage,
 		getConfState:    cfg.GetConfState,
+		getAppliedIndex: cfg.GetAppliedIndex,
 	}
 	// Now we need to load some state.
 	var err error
@@ -316,6 +320,8 @@ func (rs *RaftStorage) InitialState() (hs raftpb.HardState, cs raftpb.ConfState,
 // and this method will always return at least one entry even if it exceeds
 // maxBytes. Sideloaded proposals count towards maxBytes with their payloads inlined.
 func (rs *RaftStorage) Entries(lo, hi, maxBytes uint64) ([]raftpb.Entry, error) {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
 	readonly := rs.engine.NewReadOnly()
 	defer readonly.Close()
 	ctx := rs.ambient.AnnotateCtx(context.TODO())
@@ -416,7 +422,21 @@ func (rs *RaftStorage) raftTruncatedStateLocked(
 // so raft state machine could know that Storage needs some time to prepare
 // snapshot and call Snapshot later.
 func (rs *RaftStorage) Snapshot() (raftpb.Snapshot, error) {
-	panic("not implemented")
+	ctx := rs.ambient.AnnotateCtx(context.TODO())
+
+	appliedIndex := rs.getAppliedIndex()
+	term, err := rs.Term(appliedIndex)
+	if err != nil {
+		return raftpb.Snapshot{}, err
+	}
+	return raftpb.Snapshot{
+		Metadata: raftpb.SnapshotMetadata{
+			Index: appliedIndex,
+			Term:  term,
+		},
+	}, nil
+	log.Infof(ctx, "snapshot requested")
+	return raftpb.Snapshot{}, raft.ErrSnapshotTemporarilyUnavailable
 }
 
 // TODO(ajwerner): refactor this to be cleaner

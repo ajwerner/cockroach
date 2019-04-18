@@ -54,7 +54,11 @@ func WriteInitialClusterData(
 
 func makeRangeDescriptor(nodes []int) *roachpb.RangeDescriptor {
 	replicas := make([]roachpb.ReplicaDescriptor, 0, len(nodes))
+	maxNodeID := nodes[0]
 	for _, i := range nodes {
+		if i > maxNodeID {
+			maxNodeID = i
+		}
 		replicas = append(replicas, roachpb.ReplicaDescriptor{
 			NodeID:    roachpb.NodeID(i),
 			StoreID:   roachpb.StoreID(i),
@@ -62,8 +66,9 @@ func makeRangeDescriptor(nodes []int) *roachpb.RangeDescriptor {
 		})
 	}
 	return &roachpb.RangeDescriptor{
-		StartKey: roachpb.RKeyMin,
-		RangeID:  1,
-		Replicas: replicas,
+		StartKey:      roachpb.RKeyMin,
+		RangeID:       1,
+		Replicas:      replicas,
+		NextReplicaID: roachpb.ReplicaID(maxNodeID + 1),
 	}
 }

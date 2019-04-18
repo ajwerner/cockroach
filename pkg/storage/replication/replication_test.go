@@ -10,11 +10,14 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
-	"github.com/cockroachdb/cockroach/pkg/storage/replication/part1/kvtoy"
+	"github.com/cockroachdb/cockroach/pkg/storage/engine"
+	"github.com/cockroachdb/cockroach/pkg/storage/replication/part2/kvtoy"
 	"github.com/cockroachdb/cockroach/pkg/storage/replication/rafttransport"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,26 +29,105 @@ func TestReplication(t *testing.T) {
 	var k = roachpb.Key("k")
 	var cases = []testCase{
 		{
-			name: "basic",
+			name:         "basic",
+			numNodes:     3,
+			initialNodes: 3,
 			ops: []op{
-				{0, getOp{key: k, expNil: true}},
-				{0, putOp{key: k, value: 1}},
-				{0, getOp{key: k, expValue: 1}},
+				reqOp{0, getOp{key: k, expNil: true}},
+				reqOp{0, putOp{key: k, value: 1}},
+				reqOp{0, getOp{key: k, expValue: 1}},
 			},
 		},
 		{
-			name: "propose from anywhere, no stale reads",
+			name:         "propose from anywhere, no stale reads",
+			numNodes:     3,
+			initialNodes: 3,
 			ops: []op{
-				{0, getOp{key: k, expNil: true}},
-				{0, putOp{key: k, value: 1}},
-				{2, getOp{key: k, expValue: 1}},
-				{1, putOp{key: k, value: 2}},
-				{0, getOp{key: k, expValue: 2}},
-				{2, cputOp{key: k, expValue: 2, value: 3}},
-				{0, getOp{key: k, expValue: 3}},
-				{1, cputOp{key: k, expValue: 2, expFail: true}},
-				{2, cputOp{key: k, expValue: 3, value: 4}},
-				{0, getOp{key: k, expValue: 4}},
+				reqOp{0, getOp{key: k, expNil: true}},
+				reqOp{0, putOp{key: k, value: 1}},
+				reqOp{2, getOp{key: k, expValue: 1}},
+				reqOp{1, putOp{key: k, value: 2}},
+				reqOp{0, getOp{key: k, expValue: 2}},
+				reqOp{2, cputOp{key: k, expValue: 2, value: 3}},
+				reqOp{0, getOp{key: k, expValue: 3}},
+				reqOp{1, cputOp{key: k, expValue: 2, expFail: true}},
+				reqOp{2, cputOp{key: k, expValue: 3, value: 4}},
+				reqOp{0, getOp{key: k, expValue: 4}},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, tc.run)
+	}
+}
+
+func TestConfChange(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	var k = roachpb.Key("k")
+	var cases = []testCase{
+		{
+			name:         "conf change",
+			numNodes:     4,
+			initialNodes: 3,
+			ops: []op{
+				reqOp{0, getOp{key: k, expNil: true}},
+				reqOp{0, putOp{key: k, value: 1}},
+				reqOp{2, getOp{key: k, expValue: 1}},
+				// Let's put a whole lot of data over there so that a snapshot is important.
+				// Also I'm curious about truncating the log.
+				funcOp(func(ctx context.Context, t *testing.T, c *testCluster) {
+					sem := make(chan struct{}, 500)
+					const N = 10000
+					var wg sync.WaitGroup
+					wg.Add(N)
+					for i := 0; i < N; i++ {
+						sem <- struct{}{}
+						go func(i int) {
+							defer func() { <-sem }()
+							defer wg.Done()
+							k := roachpb.Key(strconv.Itoa(i))
+							reqOp{i % 3, putOp{k, float64(i)}}.run(ctx, t, c)
+						}(i)
+					}
+					wg.Wait()
+
+				}),
+				// Perform the Config Change
+				funcOp(func(ctx context.Context, t *testing.T, c *testCluster) {
+					var br roachpb.BatchRequest
+					acrr := roachpb.AdminChangeReplicasRequest{
+						ChangeType: roachpb.ADD_REPLICA,
+						Targets: []roachpb.ReplicationTarget{
+							{NodeID: 4, StoreID: 4},
+						},
+					}
+					br.Add(&acrr)
+					_, err := c.stores[0].Batch(ctx, &br)
+					require.Nil(t, err)
+				}),
+				// Create the new store.
+				funcOp(func(ctx context.Context, t *testing.T, c *testCluster) {
+					var br roachpb.BatchRequest
+					gr := roachpb.GetRequest{}
+					descKey := keys.RangeDescriptorKey(roachpb.RKeyMin)
+					gr.Key = descKey
+					br.Add(&gr)
+					resp, err := c.stores[2].Batch(ctx, &br)
+					require.Nil(t, err)
+					var desc roachpb.RangeDescriptor
+					err = resp.Responses[0].GetInner().(*roachpb.GetResponse).Value.GetProto(&desc)
+					require.Nil(t, err)
+					err = engine.MVCCPutProto(ctx, c.cfgs[3].Engine, nil,
+						descKey, hlc.Timestamp{}, nil, &desc)
+					require.Nil(t, err)
+					s4, err := kvtoy.NewStore(ctx, c.cfgs[3])
+					require.Nil(t, err)
+					c.stores = append(c.stores, s4)
+				}),
+				reqOp{3, getOp{key: k, expValue: 1}},
+				reqOp{3, putOp{key: k, value: 2}},
+				reqOp{2, getOp{key: k, expValue: 2}},
+				reqOp{3, getOp{key: roachpb.Key(strconv.Itoa(2000)), expValue: 2000}},
 			},
 		},
 	}
@@ -55,29 +137,43 @@ func TestReplication(t *testing.T) {
 }
 
 type testCase struct {
-	name string
-	ops  []op
+	name         string
+	numNodes     int
+	initialNodes int
+	ops          []op
 }
 
 func (tc testCase) run(t *testing.T) {
 	ctx := context.Background()
-	const numNodes = 3
-	stores, cleanup := setUpToyStores(ctx, t, numNodes)
-	defer cleanup()
-	for i, op := range tc.ops {
-		s := stores[op.store]
-		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			op.op.run(ctx, t, s)
-		})
+	c := newTestCluster(ctx, t, tc.numNodes, tc.initialNodes)
+	defer c.cleanup()
+	for _, op := range tc.ops {
+		op.run(ctx, t, c)
 	}
 }
 
-type op struct {
-	store int
-	op    testOp
+type funcOp func(ctx context.Context, t *testing.T, tc *testCluster)
+
+func (fo funcOp) run(ctx context.Context, t *testing.T, tc *testCluster) {
+	t.Helper()
+	fo(ctx, t, tc)
 }
 
-type testOp interface {
+type op interface {
+	run(ctx context.Context, t *testing.T, tc *testCluster)
+}
+
+type reqOp struct {
+	store int
+	op    storeOp
+}
+
+func (ro reqOp) run(ctx context.Context, t *testing.T, tc *testCluster) {
+	t.Helper()
+	ro.op.run(ctx, t, tc.stores[ro.store])
+}
+
+type storeOp interface {
 	run(ctx context.Context, t *testing.T, s *kvtoy.Store)
 }
 
@@ -158,11 +254,11 @@ func cputReq(key roachpb.Key, exp, value float64) *roachpb.BatchRequest {
 	return &br
 }
 
-func setUpToyStores(
-	ctx context.Context, t *testing.T, numNodes int,
-) (stores []*kvtoy.Store, cleanup func()) {
+func newTestCluster(
+	ctx context.Context, t *testing.T, numNodes int, initialNodes int,
+) *testCluster {
 	cfgs := make([]kvtoy.Config, 0, numNodes)
-	stores = make([]*kvtoy.Store, 0, numNodes)
+	stores := make([]*kvtoy.Store, 0, numNodes)
 	listeners := make([]net.Listener, 0, numNodes)
 	rpcContexts := make([]*rpc.Context, 0, numNodes)
 	servers := make([]*grpc.Server, 0, numNodes)
@@ -202,27 +298,39 @@ func setUpToyStores(
 			<-cfg.Stopper.ShouldQuiesce()
 			server.Stop()
 		})
-		require.Nil(t, kvtoy.WriteInitialClusterData(ctx, cfg.Engine, 1, nodeIDs...))
-		s, err := kvtoy.NewStore(ctx, cfg)
-		require.Nil(t, err)
+		require.Nil(t, kvtoy.WriteInitialClusterData(ctx, cfg.Engine, 1, nodeIDs[:initialNodes]...))
+		if i <= initialNodes {
+			s, err := kvtoy.NewStore(ctx, cfg)
+			require.Nil(t, err)
+			stores = append(stores, s)
+		}
 		rpcContexts = append(rpcContexts, rpcCtx)
 		listeners = append(listeners, l)
 		cfgs = append(cfgs, cfg)
-		stores = append(stores, s)
 		servers = append(servers, server)
 	}
-	return stores, func() {
-		var wg sync.WaitGroup
-		wg.Add(3)
-		for i := range cfgs {
-			go func(i int) {
-				cfgs[i].Stopper.Stop(ctx)
-				wg.Done()
-			}(i)
-		}
-		wg.Wait()
-		for i := range cfgs {
-			cfgs[i].Engine.Close()
-		}
+	return &testCluster{
+		stores: stores,
+		cfgs:   cfgs,
+	}
+}
+
+type testCluster struct {
+	stores []*kvtoy.Store
+	cfgs   []kvtoy.Config
+}
+
+func (tc *testCluster) cleanup() {
+	var wg sync.WaitGroup
+	wg.Add(len(tc.cfgs))
+	for i := range tc.cfgs {
+		go func(i int) {
+			tc.cfgs[i].Stopper.Stop(context.TODO())
+			wg.Done()
+		}(i)
+	}
+	wg.Wait()
+	for i := range tc.cfgs {
+		tc.cfgs[i].Engine.Close()
 	}
 }

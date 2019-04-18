@@ -210,6 +210,8 @@ func (pf *Factory) processRequestQueue(ctx context.Context, id GroupID) bool {
 
 	// TODO(ajwerner): deal with error handling
 	// TODO(ajwerner): deal with life cycle weirdness
+	p.raftMu.Lock()
+	defer p.raftMu.Unlock()
 	for _, msg := range msgs {
 		if err := p.withRaftGroup(false, func(raftGroup *raft.RawNode) (bool, error) {
 			// We're processing a message from another replica which means that the
@@ -372,7 +374,7 @@ func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
 		storage:            f.cfg.Storage,
 		raftMessageFactory: cfg.RaftMessageFactory,
 		processCommand:     cfg.ProcessCommand,
-		processConfChange:  cfg.ProcessConfChanged,
+		processConfChange:  cfg.ProcessConfChange,
 	}
 	p.onUnquiesce = func() { f.onUnquiesce(groupID) }
 	p.onRaftReady = func() { f.scheduler.EnqueueRaftReady(groupID) }

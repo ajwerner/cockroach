@@ -79,8 +79,8 @@ type PeerConfig struct {
 	Peers   []PeerID
 
 	// Lifecycle functions for proposals.
-	ProcessCommand     ProcessCommandFunc
-	ProcessConfChanged ProcessConfChangeFunc
+	ProcessCommand    ProcessCommandFunc
+	ProcessConfChange ProcessConfChangeFunc
 
 	// Is this a good idea? We really want there to be a buffer and then we can
 	// clear that buffer.
@@ -255,7 +255,13 @@ func (p *Peer) handleRaftReady(ctx context.Context) (handleRaftReadyStats, strin
 	//     If we don't release quota back at the end of
 	//     handleRaftReadyRaftMuLocked, the next write will get blocked.
 	// TODO(ajwerner): move proposal quota out of here!
-	defer p.updateProposalQuota(ctx, lastLeaderID)
+	defer func() {
+		if r := recover(); r == nil {
+			p.updateProposalQuota(ctx, lastLeaderID)
+		} else {
+			panic(r)
+		}
+	}()
 	err := p.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
 		if hasReady = raftGroup.HasReady(); hasReady {
 			rd = raftGroup.Ready()
@@ -666,7 +672,17 @@ func (p *Peer) processRaftConfChange(
 	if exists {
 		command = prop.msg.(ConfChangeMessage)
 	}
-	return p.processConfChange(ctx, term, raftIndex, id, command)
+	changeRepl = p.processConfChange(ctx, term, raftIndex, id, command)
+	// TODO(ajwerner): consider if we can avoid this lock if !exists
+	p.mu.Lock()
+	prop, exists = p.mu.proposals[id]
+	if exists {
+		delete(p.mu.proposals, id)
+		prop.pc.done = true
+		defer prop.pc.cond.Signal()
+	}
+	p.mu.Unlock()
+	return changeRepl
 }
 
 // TODO(ajwerner): add feedback for failed message sends
@@ -830,11 +846,12 @@ func (p *Peer) submitProposalLocked(prop *proposal) error {
 			// We're proposing a command here so there is no need to wake the
 			// leader if we were quiesced.
 			// p.unquiesceLocked()
+			encoded := EncodeRaftCommandV1(msg.ID(), msg.Encoded())
 			return false, /* unquiesceAndWakeLeader */
 				raftGroup.ProposeConfChange(raftpb.ConfChange{
 					Type:    msg.ChangeType(),
 					NodeID:  uint64(msg.PeerID()),
-					Context: []byte(msg.Encoded()),
+					Context: []byte(encoded),
 				})
 		})
 	case ProposalMessage:
