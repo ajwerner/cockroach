@@ -17,7 +17,6 @@ package replication
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -91,6 +90,7 @@ type RaftMessage interface {
 	GetRaftMessage() raftpb.Message
 }
 
+// TestingKnobs are used for testing.
 type TestingKnobs struct {
 	// DisableRefreshReasonNewLeader disables refreshing pending commands when a new
 	// leader is discovered.
@@ -350,35 +350,6 @@ type RaftTransport interface {
 
 // Okay so we define a peer conn which
 
-// PeerConfig is used to create a new Peer.
-type PeerConfig struct {
-	log.AmbientContext
-
-	// Static configuration for the peer at initialization time
-	// Perhaps this should be hidden behind and func or interface.
-	// In fact, maybe we pull this off of the RaftStorage.
-	GroupID GroupID
-	PeerID  PeerID
-	Peers   []PeerID
-
-	// Lifecycle functions for proposals.
-	ProcessCommand     ProcessCommandFunc
-	ProcessConfChanged ProcessConfChangeFunc
-
-	// Is this a good idea? We really want there to be a buffer and then we can
-	// clear that buffer.
-
-	// RaftMessageFactory should return a RaftMessage which can be sent on the
-	// Factory's underlying RaftTransport.
-	// Should the PeerConfig have a transport to send on and receive from? Should
-	// we change the transport set up to
-
-	// The question is how are we going to have the grpc connection call back in to
-	// this to tell us about the message. I guess we can then have this
-	RaftMessageFactory func(raftpb.Message) RaftMessage
-	RaftStorage        RaftStorage
-}
-
 // NewPeer creates a new peer.
 // It assumes that there is a peer ID and awareness of all of the other peers.
 func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
@@ -416,117 +387,10 @@ func (f *Factory) NewPeer(cfg PeerConfig) (*Peer, error) {
 	return p, nil
 }
 
-var _ peerIface = (*Peer)(nil)
-
-// peerIface exists merely to clarify the peer's interface and is not expected
-// to be used in any way.
-type peerIface interface {
-	NewClient(sync.Locker) *PeerClient
-	// MarkUnreachable(PeerID)
-	Progress() Progress
-	// Snapshot()      // ???
-	// ApplySnapshot() // ???
-}
-
-// PeerClient is a connect.Conn that implements proposals.
-type PeerClient struct {
-
-	// Callbacks are hooks into the proposal lifecycle.
-	// Expect one callback per message send.
-	// TODO(ajwerner): Is it the case that they'll be called in order of the
-	// messages which are sent? Is there enforcement that a client only ever
-	// sends one message? Do we need to decorate the signatures?
-	Callbacks struct {
-
-		// ShouldRepropose takes a reason and erturns an error that gets send back.
-		ShouldRepropose func(ReproposalReason) error
-
-		// DoCommit is a callback which occurs to allow the command to validate that
-		// a commit can proceed given the current state. If an error is returned it
-		// propagate back to the client through a message send. An error prevents
-		// application of the command.
-		Commit func() error
-
-		// DoApply is a callback which the client can set to do the work of applying a
-		// command. An error from DoApply is fatal.
-		Apply func(engine.Writer) error
-
-		// OnApplied is called when the application of the command has been written
-		// to storage.
-		Applied func()
-	}
-
-	done bool
-	err  error
-	cond sync.Cond
-	syn  sync.Locker
-	peer *Peer
-}
-
-// Send accepts ProposalMessages.
-func (pc *PeerClient) Send(ctx context.Context, msg connect.Message) {
-	m, ok := msg.(ProposalMessage)
-	if !ok {
-		panic(fmt.Errorf("got %T, expected %T", msg, (ProposalMessage)(nil)))
-	}
-	pc.syn.Unlock()
-	defer pc.syn.Lock()
-	pc.peer.addProposal(&proposal{
-		ctx: ctx,
-		syn: pc.syn,
-		msg: m,
-		pc:  pc,
-	})
-}
-
-// TODO(ajwerner): consider cancelling the proposal if possible.
-func (pc *PeerClient) Close(ctx context.Context, drain bool) {
-	panic("not implemented")
-}
-
-// CommittedMessage is send when a proposal has been comitted.
-type CommittedMessage struct {
-}
-
-// ErrorMessage is send when a proposal has not been comitted.
-type ErrorMessage struct {
-	Err error
-}
-
-// Recv will return a CommittedMessage or an ErrorMessage
-func (pc *PeerClient) Recv() connect.Message {
-	for !pc.done {
-		pc.cond.Wait()
-	}
-	if pc.err != nil {
-		return &ErrorMessage{Err: pc.err}
-	}
-	return CommittedMessage{}
-}
-
-func (pc *PeerClient) finishWithError(err error) {
-	pc.syn.Lock()
-	defer pc.cond.Signal()
-	defer pc.syn.Unlock()
-	if pc.done {
-		panic("double finish on peer client")
-	}
-	pc.err = err
-	pc.done = true
-}
-
-var _ connect.Conn = (*PeerClient)(nil)
-
-type proposal struct {
-	ctx             context.Context
-	syn             sync.Locker
-	pc              *PeerClient
-	msg             ProposalMessage
-	proposedAtTicks int
-}
-
 // Progress represents the local view of state of replication for the replica
 // group.
 type Progress interface {
 	AppliedIndex() uint64
+	// TODO(ajwerner): something about log position
+	// this is going to be needed to drive the proposal quota.
 }

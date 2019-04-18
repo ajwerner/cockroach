@@ -67,6 +67,35 @@ var MaxCommandSize = settings.RegisterValidatedByteSizeSetting(
 	},
 )
 
+// PeerConfig is used to create a new Peer.
+type PeerConfig struct {
+	log.AmbientContext
+
+	// Static configuration for the peer at initialization time
+	// Perhaps this should be hidden behind and func or interface.
+	// In fact, maybe we pull this off of the RaftStorage.
+	GroupID GroupID
+	PeerID  PeerID
+	Peers   []PeerID
+
+	// Lifecycle functions for proposals.
+	ProcessCommand     ProcessCommandFunc
+	ProcessConfChanged ProcessConfChangeFunc
+
+	// Is this a good idea? We really want there to be a buffer and then we can
+	// clear that buffer.
+
+	// RaftMessageFactory should return a RaftMessage which can be sent on the
+	// Factory's underlying RaftTransport.
+	// Should the PeerConfig have a transport to send on and receive from? Should
+	// we change the transport set up to
+
+	// The question is how are we going to have the grpc connection call back in to
+	// this to tell us about the message. I guess we can then have this
+	RaftMessageFactory func(raftpb.Message) RaftMessage
+	RaftStorage        RaftStorage
+}
+
 // Peer represents local replication state for a replica group.
 type Peer struct {
 	log.AmbientContext
