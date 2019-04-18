@@ -25,11 +25,55 @@ import (
 	"google.golang.org/grpc"
 )
 
+func TestReplication(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
+	const numNodes = 3
+	stores, cleanup := setUpToyStoresWithRealRPCs(ctx, t, numNodes)
+	defer cleanup()
+	s1 := stores[0]
+	s2 := stores[1]
+
+	resp, err := s1.Batch(ctx, put(roachpb.Key("asdf"), 1))
+	require.Nil(t, err)
+	resp, err = s1.Batch(ctx, get(roachpb.Key("asdf")))
+	assert.Nil(t, err)
+	respVal, err := resp.Responses[0].GetGet().Value.GetFloat()
+	assert.Nil(t, err)
+	assert.Equal(t, respVal, 1.0)
+	resp, err = s2.Batch(ctx, put(roachpb.Key("asdf"), 2))
+	assert.Nil(t, err)
+	resp, err = s2.Batch(ctx, get(roachpb.Key("asdf")))
+	assert.Nil(t, err)
+	respVal, err = resp.Responses[0].GetGet().Value.GetFloat()
+	assert.Nil(t, err)
+	assert.Equal(t, respVal, 2.0)
+	resp, err = s2.Batch(ctx, cput(roachpb.Key("asdf"), 2.0, 3.0))
+	assert.Nil(t, err)
+	resp, err = s2.Batch(ctx, get(roachpb.Key("asdf")))
+	assert.Nil(t, err)
+	respVal, err = resp.Responses[0].GetGet().Value.GetFloat()
+	assert.Nil(t, err)
+	assert.Equal(t, respVal, 3.0)
+}
+
 func put(key roachpb.Key, value float64) *roachpb.BatchRequest {
 	var br roachpb.BatchRequest
 	pr := roachpb.PutRequest{}
 	pr.Key = key
 	pr.Value.SetFloat(value)
+	br.Add(&pr)
+	return &br
+}
+
+func cput(key roachpb.Key, exp, value float64) *roachpb.BatchRequest {
+	var br roachpb.BatchRequest
+	pr := roachpb.ConditionalPutRequest{}
+	pr.Key = key
+	pr.Value.SetFloat(value)
+	var expValue roachpb.Value
+	expValue.SetFloat(exp)
+	pr.ExpValue = &expValue
 	br.Add(&pr)
 	return &br
 }
@@ -109,10 +153,7 @@ func (rt *raftTransport) HandleSnapshot(
 	panic("not implemented")
 }
 
-// TODO(ajwerner): finish this to replace the in-memory network with grpc.
-// Still need to map the raft transport abstraction on to the connect.Conn
-// abstraction.
-func setUpToyStoresWithRealRPCs(
+func setUpToyStores(
 	ctx context.Context, t *testing.T, numNodes int,
 ) (stores []*kvtoy.Store, cleanup func()) {
 
@@ -183,29 +224,4 @@ func setUpToyStoresWithRealRPCs(
 			cfgs[i].Engine.Close()
 		}
 	}
-}
-
-func TestReplication(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	ctx := context.Background()
-	const numNodes = 3
-	stores, cleanup := setUpToyStoresWithRealRPCs(ctx, t, numNodes)
-	defer cleanup()
-	s1 := stores[0]
-	s2 := stores[1]
-
-	resp, err := s1.Batch(ctx, put(roachpb.Key("asdf"), 1))
-	require.Nil(t, err)
-	resp, err = s1.Batch(ctx, get(roachpb.Key("asdf")))
-	assert.Nil(t, err)
-	respVal, err := resp.Responses[0].GetGet().Value.GetFloat()
-	assert.Nil(t, err)
-	assert.Equal(t, respVal, 1.0)
-	resp, err = s2.Batch(ctx, put(roachpb.Key("asdf"), 2))
-	assert.Nil(t, err)
-	resp, err = s2.Batch(ctx, get(roachpb.Key("asdf")))
-	assert.Nil(t, err)
-	respVal, err = resp.Responses[0].GetGet().Value.GetFloat()
-	assert.Nil(t, err)
-	assert.Equal(t, respVal, 2.0)
 }

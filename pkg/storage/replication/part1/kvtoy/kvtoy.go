@@ -514,7 +514,10 @@ func (s *Store) handleConditionalPut(
 	if err != nil {
 		return nil, err
 	}
-	if !val.Equal(req.Value) {
+	if val != nil && req.ExpValue == nil {
+		return nil, errors.Errorf("conditional put: expectation failed for key %v, expected missing",
+			req.Key, val)
+	} else if !val.Equal(req.ExpValue) {
 		return nil, errors.Errorf("conditional put: expectation failed for key %v: %v != %v",
 			req.Key, val, req.Value)
 	}
