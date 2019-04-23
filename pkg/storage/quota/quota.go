@@ -64,6 +64,47 @@ var (
 		Measurement: "Nanoseconds spend queueing",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
+	metaAvgAggBytesPerSec = metric.Metadata{
+		Name:        "quota.avg_agg_bytes_per_sec",
+		Help:        "Aggregate bytes per second served by the entire system",
+		Measurement: "Bytes/s flowing out of the system",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaAvgPerReqBytesPerSec = metric.Metadata{
+		Name:        "quota.avg_per_req_bytes_per_sec",
+		Help:        "Per request bytes per second served by the entire system",
+		Measurement: "Bytes/s flowing out of the system",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaAvgPerReqBytesPerRec = metric.Metadata{
+		Name:        "quota.avg_per_req_bytes",
+		Help:        "Per request bytes served by the entire system",
+		Measurement: "Bytes/s flowing out of the system",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaAvgTimePerRead = metric.Metadata{
+		Name:        "quota.avg_time_per_read",
+		Help:        "Average time per read",
+		Measurement: "Bytes/s flowing out of the system",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
+	metaQPSRateExperiment = metric.Metadata{
+		Name:        "quota.qps_rate_experiment",
+		Help:        "QPS estimated through a rate",
+		Measurement: "QPS",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
+	metaQuotaBackoffFactor = metric.Metadata{
+		Name:        "quota.backoff_factor",
+		Help:        "Ratio between aggregate throughput and per-req throughput",
+		Measurement: "ration",
+		Unit:        metric.Unit_PERCENT,
+	}
+	metaInside = metric.Metadata{
+		Name:        "quota.inside",
+		Measurement: "count",
+		Unit:        metric.Unit_COUNT,
+	}
 )
 
 // QuotaSize is the follower reads closed timestamp update target duration.
@@ -73,28 +114,44 @@ var QuotaSize = settings.RegisterIntSetting(
 	1<<28,
 )
 
-func newMetrics() Metrics {
+func makeMetrics() Metrics {
 	return Metrics{
-		ResponseEstimate: metric.NewGauge(metaResponseEstimate),
-		TargetEstimate:   metric.NewGauge(metaTargetEstimate),
-		InUse:            metric.NewGauge(metaInUse),
-		Queued:           metric.NewGauge(metaQueued),
-		QPS:              metric.NewGaugeFloat64(metaQPS),
-		TotalQueued:      metric.NewCounter(metaTotalQueued),
-		TotalTimeQueued:  metric.NewCounter(metaTotalTimeQueued),
-		Rejected:         metric.NewCounter(metaRejected),
+		ResponseEstimate:  metric.NewGauge(metaResponseEstimate),
+		TargetEstimate:    metric.NewGauge(metaTargetEstimate),
+		InUse:             metric.NewGauge(metaInUse),
+		Queued:            metric.NewGauge(metaQueued),
+		QPS:               metric.NewGaugeFloat64(metaQPS),
+		TotalQueued:       metric.NewCounter(metaTotalQueued),
+		TotalTimeQueued:   metric.NewCounter(metaTotalTimeQueued),
+		Rejected:          metric.NewCounter(metaRejected),
+		AggBytesPerSec:    metric.NewGaugeFloat64(metaAvgAggBytesPerSec),
+		PerReqBytesPerSec: metric.NewGaugeFloat64(metaAvgPerReqBytesPerSec),
+		AvgTimePerRead:    metric.NewGaugeFloat64(metaAvgTimePerRead),
+		QPSRate:           metric.NewRate(10 * time.Second),
+		QPSRateGauge:      metric.NewGaugeFloat64(metaQPSRateExperiment),
+		PerReqBytes:       metric.NewGaugeFloat64(metaAvgPerReqBytesPerRec),
+		BackoffFactor:     metric.NewGaugeFloat64(metaQuotaBackoffFactor),
+		Inside:            metric.NewGaugeFloat64(metaInside),
 	}
 }
 
 type Metrics struct {
-	ResponseEstimate *metric.Gauge
-	TargetEstimate   *metric.Gauge
-	InUse            *metric.Gauge
-	Queued           *metric.Gauge
-	QPS              *metric.GaugeFloat64
-	TotalQueued      *metric.Counter
-	TotalTimeQueued  *metric.Counter
-	Rejected         *metric.Counter
+	ResponseEstimate  *metric.Gauge
+	TargetEstimate    *metric.Gauge
+	InUse             *metric.Gauge
+	Queued            *metric.Gauge
+	QPS               *metric.GaugeFloat64
+	TotalQueued       *metric.Counter
+	TotalTimeQueued   *metric.Counter
+	Rejected          *metric.Counter
+	AggBytesPerSec    *metric.GaugeFloat64
+	PerReqBytesPerSec *metric.GaugeFloat64
+	PerReqBytes       *metric.GaugeFloat64
+	AvgTimePerRead    *metric.GaugeFloat64
+	QPSRate           *metric.Rate
+	QPSRateGauge      *metric.GaugeFloat64
+	BackoffFactor     *metric.GaugeFloat64
+	Inside            *metric.GaugeFloat64
 }
 
 // TODO(ajwerner): there's a lot we could do to make this more sophisticated.
@@ -133,7 +190,7 @@ type Config struct {
 }
 
 const (
-	defaultQuotaSize       = 1 << 30 // 1 GB
+	defaultQuotaSize       = 1 << 40 // 1 GB
 	defaultQueueMax        = 1024
 	defaultQueueThreshold  = 512
 	defaultMaxEstimate     = 64 * 1 << 20 // 64 MB
@@ -171,8 +228,10 @@ func (c *Config) setDefaults() {
 }
 
 type Quota struct {
+	start    time.Time
 	acquired uint32
 	used     uint32
+	took     time.Duration
 }
 
 func NewReadQuota(ctx context.Context, stopper *stop.Stopper, cfg Config) *QuotaPool {
@@ -180,7 +239,7 @@ func NewReadQuota(ctx context.Context, stopper *stop.Stopper, cfg Config) *Quota
 	// channels.
 	rq := &QuotaPool{
 		cfg:     cfg,
-		metrics: newMetrics(),
+		metrics: makeMetrics(),
 		stopper: stopper,
 		chanPool: sync.Pool{
 			New: func() interface{} { return make(chan Quota) },
@@ -210,8 +269,14 @@ func (rq *QuotaPool) Metrics() *Metrics { return &rq.metrics }
 
 var ErrNoQuota = errors.New("queue full")
 
-func (rq *QuotaPool) Release(q Quota, used uint32) {
+const usedMin = 4096
+
+func (rq *QuotaPool) Release(q Quota, used uint32, took time.Duration) {
+	q.took = took
 	q.used = used
+	if q.used < usedMin {
+		q.used = usedMin
+	}
 	select {
 	case rq.releasing <- q:
 	case <-rq.stopper.ShouldQuiesce():
@@ -267,20 +332,44 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 		// okay so we have an approximation of QPS and we use that to know how much
 		// to move in our linear approximation of the current request sizes
 
-		estimate      = float64(rq.cfg.InitialEstimate)
-		trailingAvg   = estimate
-		step          float64
-		queries       int
-		totalQueries  float64
-		lastQPS       float64
-		inUse         uint64
-		last          time.Time
-		updateMetrics = func() {
+		estimate     = float64(rq.cfg.InitialEstimate)
+		trailingAvg  = estimate
+		step         float64
+		queries      int
+		totalQueries float64
+		lastQPS      float64
+		inUse        uint64
+		last         time.Time
+		lastRel      time.Time
+		//rateHistogram     = hdrhistogram.NewWindowed(50, 0, 128000000, 2)
+		totalBytes        float64
+		totalTime         float64
+		totalRate         float64
+		totalReleased     int
+		aggBytesPerSec    float64
+		aggBytesPerReq    float64
+		perReqBytesPerSec float64
+		timePerReq        float64
+		updateMetrics     = func() {
 			rq.metrics.QPS.Update(lastQPS)
 			rq.metrics.Queued.Update(int64(len(queue)))
 			rq.metrics.InUse.Update(int64(inUse))
 			rq.metrics.TargetEstimate.Update(int64(trailingAvg))
 			rq.metrics.ResponseEstimate.Update(int64(estimate))
+			rq.metrics.AvgTimePerRead.Update(timePerReq)
+			// If we know the average QPS and we know the average time per request then we know the average amount of stuff in the system
+			// If we use that for an interval * time time of the interval that gives us
+			//m := rateHistogram.Merge()
+			rq.metrics.AggBytesPerSec.Update(aggBytesPerSec)
+			rq.metrics.PerReqBytes.Update(aggBytesPerReq)
+			rq.metrics.PerReqBytesPerSec.Update(perReqBytesPerSec)
+			//rateHistogram.Rotate()
+			qps := rq.metrics.QPSRate.Value()
+			rq.metrics.QPSRateGauge.Update(qps)
+			if perReqBytesPerSec > 0 {
+				rq.metrics.BackoffFactor.Update(aggBytesPerSec / perReqBytesPerSec)
+			}
+			rq.metrics.Inside.Update(qps * timePerReq)
 		}
 		send = func(qr quotaRequest, q Quota) bool {
 			select {
@@ -291,7 +380,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			}
 		}
 		updateEstimate = func(q Quota) {
-			if q.acquired < q.used {
+			if q.acquired < uint32(estimate)+1 {
 				estimate *= rq.cfg.BackoffFactor
 				if uint32(estimate) > rq.cfg.MaxEstimate {
 					estimate = float64(rq.cfg.MaxEstimate)
@@ -303,7 +392,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 				} else if totalQueries < 1024 {
 					trailingAvg = float64(q.used) * (1 / totalQueries)
 				} else {
-					trailingDecay := 2 / (lastQPS + 1)
+					trailingDecay := float64(2 / (lastQPS + 1))
 					trailingAvg = float64(q.used)*trailingDecay + float64(q.used)*(1-trailingDecay)
 				}
 				if len(queue) < rq.cfg.QueueThreshold {
@@ -313,11 +402,40 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 						estimate = trailingAvg
 					}
 				}
-				//log.Infof(ctx, "decreasing estimate by %v to %v %v", step, estimate, len(queue))
+
+			}
+			rq.metrics.QPSRate.Add(1)
+			// log.Infof(ctx, "release %v %v %v", float64(q.used), q.took.Seconds(), float64(q.used)/q.took.Seconds())
+			if q.took > 0 {
+				totalBytes += float64(q.used)
+				totalTime += float64(q.took.Nanoseconds())
+				totalRate += (float64(q.used) * float64(q.used)) / q.took.Seconds()
+				// rateHistogram.Current.RecordValue(int64(totalRate))
+				totalReleased++
 			}
 		}
 		tick = func(now time.Time) {
 			defer updateMetrics()
+			const decay = .98
+			const alpha = (1 - decay)
+			if totalReleased != 0 {
+				aggBytesPerSec = decay*aggBytesPerSec + (alpha * (totalBytes / now.Sub(lastRel).Seconds()))
+
+				aggBytesPerReq = decay*aggBytesPerReq + (alpha * (totalBytes / float64(totalReleased)))
+				timePerReq = decay*timePerReq + (alpha * (totalTime / float64(totalReleased)))
+
+				perReqBytesPerSec = decay*perReqBytesPerSec + (alpha * (totalRate / totalBytes))
+			} else {
+				timePerReq = decay * timePerReq
+				perReqBytesPerSec = decay * perReqBytesPerSec
+				perReqBytesPerSec = decay * perReqBytesPerSec
+				aggBytesPerSec = decay * aggBytesPerSec
+			}
+			lastRel = now
+			totalBytes = 0
+			totalTime = 0
+			totalRate = 0
+			totalReleased = 0
 			if queries == 0 {
 				return
 			}
@@ -352,7 +470,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			tick(t)
 			ticker.Reset(rq.cfg.TickInterval)
 		case qr := <-rq.acquiring:
-			if est := uint64(estimate); est+inUse > rq.cfg.QuotaSize {
+			if est := uint64(estimate); false {
 				lq := len(queue)
 				if (lq > rq.cfg.QueueMax) ||
 					(!qr.isRetry && rand.Float64() < (float64(lq)/float64(rq.cfg.QueueMax))) {
@@ -364,7 +482,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 					queue = append(queue, qr)
 				}
 			} else {
-				if send(qr, Quota{acquired: uint32(est)}) {
+				if send(qr, Quota{acquired: uint32(est), start: time.Now()}) {
 					queries++
 					inUse += est
 				}
@@ -374,7 +492,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			inUse -= uint64(q.acquired)
 			est := uint64(estimate)
 			for len(queue) > 0 && inUse+est < rq.cfg.QuotaSize {
-				if send(queue[0], Quota{acquired: uint32(est)}) {
+				if send(queue[0], Quota{acquired: uint32(est), start: time.Now()}) {
 					rq.metrics.TotalTimeQueued.Inc(time.Since(queue[0].entered).Nanoseconds())
 					queries++
 					inUse += est

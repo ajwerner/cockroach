@@ -1021,6 +1021,7 @@ type endCmds struct {
 	repl *Replica
 	lg   *spanlatch.Guard
 	ba   roachpb.BatchRequest
+	took time.Duration
 }
 
 // done releases the latches acquired by the command and updates
@@ -1095,6 +1096,7 @@ func (r *Replica) beginCmds(
 ) (*endCmds, error) {
 	// Only acquire latches for consistent operations.
 	var lg *spanlatch.Guard
+	var dur time.Duration
 	if ba.ReadConsistency == roachpb.CONSISTENT {
 		// Check for context cancellation before acquiring latches.
 		if err := ctx.Err(); err != nil {
@@ -1103,9 +1105,9 @@ func (r *Replica) beginCmds(
 		}
 
 		var beforeLatch time.Time
-		if log.ExpensiveLogEnabled(ctx, 2) {
-			beforeLatch = timeutil.Now()
-		}
+		//if log.ExpensiveLogEnabled(ctx, 2) {
+		beforeLatch = timeutil.Now()
+		//		}
 
 		// Acquire latches for all the request's declared spans to ensure
 		// protected access and to avoid interacting requests from operating at
@@ -1117,7 +1119,7 @@ func (r *Replica) beginCmds(
 		}
 
 		if !beforeLatch.IsZero() {
-			dur := timeutil.Since(beforeLatch)
+			dur = timeutil.Since(beforeLatch)
 			log.VEventf(ctx, 2, "waited %s to acquire latches", dur)
 		}
 
@@ -1197,6 +1199,7 @@ func (r *Replica) beginCmds(
 		repl: r,
 		lg:   lg,
 		ba:   *ba,
+		took: dur,
 	}
 	return ec, nil
 }

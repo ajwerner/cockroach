@@ -8,7 +8,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -166,7 +165,7 @@ func (rk *RateKeeper) loop(ctx context.Context) {
 		largeQueue        []acquireRequest
 
 		handleRelease = func(rr releaseRequest) {
-			log.Infof(ctx, "got release %v %v %v", rr.cost, rr.took, rr.isLarge)
+			//			log.Infof(ctx, "got release %v %v %v", rr.cost, rr.took, rr.isLarge)
 			totalCost += rr.cost
 			if !rr.isLarge {
 				inFlight -= rr.cost

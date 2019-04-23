@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 // executeReadOnlyBatch updates the read timestamp cache and waits for any
@@ -36,6 +37,7 @@ func (r *Replica) executeReadOnlyBatch(
 	// If the read is not inconsistent, the read requires the range lease or
 	// permission to serve via follower reads.
 	var status storagepb.LeaseStatus
+	start := timeutil.Now()
 	if ba.ReadConsistency.RequiresReadLease() {
 		if status, pErr = r.redirectOnOrAcquireLease(ctx); pErr != nil {
 			if nErr := r.canServeFollowerRead(ctx, ba, pErr); nErr != nil {
@@ -53,6 +55,7 @@ func (r *Replica) executeReadOnlyBatch(
 		}
 		return false
 	}
+	var endCmds *endCmds
 	if !isSystem() {
 		q, err := r.store.readQuota.Acquire(ctx, ba.BackpressureRetry)
 		if err != nil {
@@ -67,7 +70,16 @@ func (r *Replica) executeReadOnlyBatch(
 			if pErr != nil {
 				size += uint32(pErr.Size())
 			}
-			r.store.readQuota.Release(q, size)
+
+			took := timeutil.Since(start)
+			if endCmds != nil {
+				if log.V(2) {
+					log.Infof(ctx, "took %v, contention %v", took, endCmds.took)
+				}
+				took -= endCmds.took
+			}
+
+			r.store.readQuota.Release(q, size, took)
 		}()
 	}
 	spans, err := r.collectSpans(&ba)
@@ -78,11 +90,10 @@ func (r *Replica) executeReadOnlyBatch(
 	// Acquire latches to prevent overlapping commands from executing
 	// until this command completes.
 	log.Event(ctx, "acquire latches")
-	endCmds, err := r.beginCmds(ctx, &ba, spans)
+	endCmds, err = r.beginCmds(ctx, &ba, spans)
 	if err != nil {
 		return nil, roachpb.NewError(err)
 	}
-
 	log.Event(ctx, "waiting for read lock")
 	r.readOnlyCmdMu.RLock()
 	defer r.readOnlyCmdMu.RUnlock()
@@ -108,7 +119,6 @@ func (r *Replica) executeReadOnlyBatch(
 	if err := r.requestCanProceed(rSpan, ba.Timestamp); err != nil {
 		return nil, roachpb.NewError(err)
 	}
-
 	// Evaluate read-only batch command. It checks for matching key range; note
 	// that holding readOnlyCmdMu throughout is important to avoid reads from the
 	// "wrong" key range being served after the range has been split.
@@ -120,7 +130,6 @@ func (r *Replica) executeReadOnlyBatch(
 	}
 	defer readOnly.Close()
 	br, result, pErr = evaluateBatch(ctx, storagebase.CmdIDKey(""), readOnly, rec, nil, ba, true /* readOnly */)
-
 	// A merge is (likely) about to be carried out, and this replica
 	// needs to block all traffic until the merge either commits or
 	// aborts. See docs/tech-notes/range-merges.md.
@@ -150,6 +159,5 @@ func (r *Replica) executeReadOnlyBatch(
 	} else {
 		log.Event(ctx, "read completed")
 	}
-	br.Size()
 	return br, pErr
 }
