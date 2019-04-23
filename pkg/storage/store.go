@@ -1322,7 +1322,7 @@ func (s *Store) Start(ctx context.Context, stopper *stop.Stopper) error {
 
 	s.metrics.registry.AddMetricStruct(s.intentResolver.Metrics)
 
-	s.readQuota = quota.NewReadQuota(ctx, stopper, quota.Config{Settings: s.cfg.Settings})
+	s.readQuota = quota.NewReadQuota(ctx, stopper, quota.Config{Settings: s.cfg.Settings, NodeID: s.nodeDesc.NodeID})
 	s.metrics.registry.AddMetricStruct(s.readQuota.Metrics())
 
 	s.rangeIDAlloc = idAlloc

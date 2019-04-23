@@ -2,17 +2,21 @@ package quota
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math/rand"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"golang.org/x/time/rate"
 )
 
 var (
@@ -114,6 +118,20 @@ var QuotaSize = settings.RegisterIntSetting(
 	1<<28,
 )
 
+// RateLimit is the current rate limit for reads in the system
+var RateLimit = settings.RegisterFloatSetting(
+	"kv.rate_limit.read_qps",
+	"reads allowed per second",
+	10000,
+)
+
+// RateLimitJSON is the current rate limit for reads in the system
+var RateLimitJSON = settings.RegisterStringSetting(
+	"kv.rate_limit.read_qps_per_node",
+	"reads allowed per second",
+	"{}",
+)
+
 func makeMetrics() Metrics {
 	return Metrics{
 		ResponseEstimate:  metric.NewGauge(metaResponseEstimate),
@@ -158,6 +176,7 @@ type Metrics struct {
 // One idea that seems interesting from the foundationdb folks is to put
 
 type Config struct {
+	NodeID   roachpb.NodeID
 	Settings *cluster.Settings
 
 	// QuotaSize is the number of bytes which can be used for read requests.
@@ -228,10 +247,10 @@ func (c *Config) setDefaults() {
 }
 
 type Quota struct {
-	start    time.Time
 	acquired uint32
 	used     uint32
 	took     time.Duration
+	res      *rate.Reservation
 }
 
 func NewReadQuota(ctx context.Context, stopper *stop.Stopper, cfg Config) *QuotaPool {
@@ -244,9 +263,10 @@ func NewReadQuota(ctx context.Context, stopper *stop.Stopper, cfg Config) *Quota
 		chanPool: sync.Pool{
 			New: func() interface{} { return make(chan Quota) },
 		},
-		acquiring: make(chan quotaRequest, 1024),
+		l:         rate.NewLimiter(rate.Limit(RateLimit.Get(&cfg.Settings.SV)), 10),
+		acquiring: make(chan quotaRequest, 4096),
 		//		canceling: make(chan chan Quota),
-		releasing: make(chan Quota, 1024),
+		releasing: make(chan Quota, 4096),
 	}
 	rq.cfg.setDefaults()
 	stopper.RunAsyncTask(ctx, "quota.loop", rq.loop)
@@ -259,6 +279,7 @@ type QuotaPool struct {
 	metrics  Metrics
 	stopper  *stop.Stopper
 	chanPool sync.Pool
+	l        *rate.Limiter
 
 	acquiring chan quotaRequest
 	// canceling chan chan Quota
@@ -272,7 +293,7 @@ var ErrNoQuota = errors.New("queue full")
 const usedMin = 4096
 
 func (rq *QuotaPool) Release(q Quota, used uint32, took time.Duration) {
-	q.took = took
+	q.took = took - q.took
 	q.used = used
 	if q.used < usedMin {
 		q.used = usedMin
@@ -284,6 +305,7 @@ func (rq *QuotaPool) Release(q Quota, used uint32, took time.Duration) {
 }
 
 func (rq *QuotaPool) Acquire(ctx context.Context, isRetry bool) (Quota, error) {
+	start := time.Now()
 	c := rq.chanPool.Get().(chan Quota)
 	select {
 	case rq.acquiring <- quotaRequest{
@@ -303,6 +325,15 @@ func (rq *QuotaPool) Acquire(ctx context.Context, isRetry bool) (Quota, error) {
 		if q.acquired == 0 {
 			return q, &roachpb.ScanBackpressureError{}
 		}
+		delay := q.res.Delay()
+		if delay != 0 {
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return Quota{}, ctx.Err()
+			}
+		}
+		q.took = time.Since(start)
 		return q, nil
 	case <-ctx.Done():
 		return Quota{}, ctx.Err()
@@ -349,6 +380,9 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 		aggBytesPerSec    float64
 		aggBytesPerReq    float64
 		perReqBytesPerSec float64
+		l                 = RateLimit.Get(&rq.cfg.Settings.SV)
+		haveLJSON         = false
+		lJSON             = RateLimitJSON.Get(&rq.cfg.Settings.SV)
 		timePerReq        float64
 		updateMetrics     = func() {
 			rq.metrics.QPS.Update(lastQPS)
@@ -367,9 +401,9 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			qps := rq.metrics.QPSRate.Value()
 			rq.metrics.QPSRateGauge.Update(qps)
 			if perReqBytesPerSec > 0 {
-				rq.metrics.BackoffFactor.Update(aggBytesPerSec / perReqBytesPerSec)
+				rq.metrics.BackoffFactor.Update(aggBytesPerSec / (perReqBytesPerSec / (qps * timePerReq / 1e9)))
 			}
-			rq.metrics.Inside.Update(qps * timePerReq)
+			rq.metrics.Inside.Update(qps * timePerReq / 1e9)
 		}
 		send = func(qr quotaRequest, q Quota) bool {
 			select {
@@ -415,6 +449,24 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			}
 		}
 		tick = func(now time.Time) {
+			if newL := RateLimit.Get(&rq.cfg.Settings.SV); newL != l && !haveLJSON {
+				l = newL
+				rq.l.SetLimit(rate.Limit(newL))
+			}
+			if jsStr := RateLimitJSON.Get(&rq.cfg.Settings.SV); jsStr != lJSON {
+				lJSON = jsStr
+				var m map[string]float64
+				log.Infof(ctx, "node id %v %v %q %q %v", rq.cfg.NodeID, m, jsStr, lJSON, jsStr == lJSON)
+				if err := json.Unmarshal([]byte(jsStr), &m); err == nil {
+					if r, ok := m[strconv.Itoa(int(rq.cfg.NodeID))]; ok {
+						haveLJSON = true
+						log.Infof(ctx, "node id %v %v %v", rq.cfg.NodeID, m, r)
+						rq.l.SetLimit(rate.Limit(r))
+					}
+				} else {
+					rq.l.SetLimit(rate.Limit(l))
+				}
+			}
 			defer updateMetrics()
 			const decay = .98
 			const alpha = (1 - decay)
@@ -482,7 +534,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 					queue = append(queue, qr)
 				}
 			} else {
-				if send(qr, Quota{acquired: uint32(est), start: time.Now()}) {
+				if send(qr, Quota{acquired: uint32(est), res: rq.l.Reserve()}) {
 					queries++
 					inUse += est
 				}
@@ -492,7 +544,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			inUse -= uint64(q.acquired)
 			est := uint64(estimate)
 			for len(queue) > 0 && inUse+est < rq.cfg.QuotaSize {
-				if send(queue[0], Quota{acquired: uint32(est), start: time.Now()}) {
+				if send(queue[0], Quota{acquired: uint32(est), res: rq.l.Reserve()}) {
 					rq.metrics.TotalTimeQueued.Inc(time.Since(queue[0].entered).Nanoseconds())
 					queries++
 					inUse += est
