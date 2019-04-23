@@ -26,10 +26,6 @@ leaf service is generally not a good idea.
 That being said, the leaf services generally have the best ability to account
 for overload.
 
-# Guide-level
-
-# Quota Pools
-
 # Admission Control using a two layer approach
 
 CockroachDB can be throught of as having several layers of execution.
@@ -70,7 +66,6 @@ KV BatchRequests
 
 But that's a wrinkle that we'll add later.
 
-
 We look at these as two domains for quota and rejection. At each layer we'll
 independently manage quota but information will propagate asynchronously from
 the KV layer to the SQL layer. These coupled systems will then dynamically tune
@@ -94,9 +89,10 @@ DAGOR with its two level priority space
 
 Open question: how big should this space be?
 
-([SYSTEM][USER 1-127][BACKGROUND], [SESS)
+([SYSTEM][USER 1-127][BACKGROUND], [SESSION])
 
 In order to have this discussion we need to define successful operation and
+excessive delay.
 
 Another challenge over traditional admission control systems is that single
 queries can represent over an incredible range of costs. It might be the case
@@ -114,7 +110,10 @@ for too long but we also don't want requests to fail.
 
 Queue size is an open question. 
 
-Randomly rejecting requests is a bad idea. Instead we want to reject based on a
+ * Randomly rejecting requests is a bad idea.
+ * Long-lasting queuing is a bad idea
+
+Instead we want to reject based on a
 current admission control status which uses the DAGOR model.
 
 The other big question is how the system decides to allow a request to pulled
@@ -157,7 +156,7 @@ type RateKeeper interface {
 }
 ```
 
-TYpe rate keeper state:
+rate keeper state:
      RateKeeper
 
      # All requests are treated the same
@@ -189,7 +188,8 @@ TYpe rate keeper state:
      #                       Total quota size we'll do based on a combination of changes in the request-observed throughput
      #                             and the absolute request-observed throughput
      #                       Per-request guess we'll do based on a combination of tracking historical and we could accept estimates to improve the system.
-
+                             Could also keep a histogram of the requests and then sample it uniformly - pretty easy
+                             
      
         Tick(time.Time)
         Report(Report)
@@ -200,11 +200,51 @@ TYpe rate keeper state:
         Interacts with priority
         QueueSize - should this change dynamically?
         QueuePolicy
-        
+
+Some additional challenges are
+     It's not enough to know that performance is degrading relative to what it was
+          Maybe that's just a changing workload
+     There has to be a notion of absolute performance
+     Things which we may want to consider
+            Per request observed throughput vs disk observed throughput
+            If requests are incurring a large overhead relative to doing the actual
+               read then something is probably not happy 
+            The problem with this of course is that another activity could be responsible
+               for the degration such as a large amount of writes or some other crazy disk scenario
+               Log commit latency seems likely to be important
+               Also we should check out the existing quota pool and try to track it.
+            Writes are going to need a (perhaps shared?) quota mechanism
+     
+     Perhaps the right thing to do is to model the distribution of requests and keep both a quota in terms of outstanding size
+     and a request rate limit?
+
+If the focus is rate keeping then maybe there's a way to make a dynamic token bucket. The question is how do we decide what the rate should be and what the burst should be?
+
+We need a nice target that converges to something good
+   A property we want is that we should increase the rate so long as it increases the system throughput and does not increase the per-request latency (too much). There should be some tradeoff.
+   We can observe the time it takes a request and thus the throughput it sees (if only we could see the network)
+   We can measure the total observed throughput of the system
+   And we can compute the average time spent in the system by requests and we can then see what is the average per-request throughput in the system 
+   This may be not exactly what we want because it's a byte oriented throughput and maybe we want to weight requests individually more than we want to weigh the bytes they pull out
+   That's probably okay we can pick some minimum size like 4096 and just go with it.
+   There's other fancy factors we could shove in later.
+   We want some way to know where we are on the throughput latency curve
+   We want to stay in a flat-ish regime.
+   
+The system has two failure modes, one worse than the other
+    1) It fails to properly drop traffic in the face of overload
+    2) It drops traffic which could be handled in a timely manner
+       - This one is harder to reason about.
+   
+Having global information seems critical to the success of the system.
+In order to be effective, the system must slow work entering the system.
+The shared-nothing cockroach architecture makes deciding what work should
+enter from where especially complex. Hopefully we cna make smart decision
+by looking at physical plans and exploiting lower level admission control
+criteria.
+
+   
 Inside we have logic to add other information:
-              
-
-
 
 
 
