@@ -1,60 +1,171 @@
 
-# Motivation
 
-
-## Fluff
+## Motivation/Fluff
 
 In order to build trust in our customers CockroachDB needs to be reliable.
 Sometimes databases experience workloads which demand more resources than are
-available. This state is called overload. 
-
-It is imperative that CRDB not crash during overload. Furthmore it is preferable
-to continue servicing some requests at an accepable latency than to service no
-requests or requests only at an extreme latency. 
-
+available. This state is called overload.
+It is imperative that CRDB remain basically available in the face of overload.
+Furthmore it is preferable to continue servicing some requests at an accepable
+latency than to service no requests or requests only at an extreme latency. 
 In order to cope with overload the system must regulate the amount of work that
 is accepted in to the system such that overload is mitigated.
 
 Admission control and overload detection is a relatively deep field that very
 quickly gets in to areas of theory often outside the realm of computer science.
-
 The reason for this is the primary unit of work are driven to and from the leaf
 services yet the admission control decisions must be made at the gateways to be
 effective.
-
 This is trivially true because once work begins on some accepted query it is
 wasteful to not complete that query. Thus aborting a query once it has reached a
 leaf service is generally not a good idea.
-
 That being said, the leaf services generally have the best ability to account
-for overload. Or at least the most uniform workload.
+for overload. This is due to the fact that their requests are lowest level and
+map closest to hardware operations and thus can be modeled more simply for 
+detecting overload.
 
 ### Goals
 
-1) Administrative requests are not starved.
-1) Graceful degradation in the face of increased load.
-1) When receiving overloaded quantities of traffic, prefer to reject closest to the client
-1) Drop traffic when overloaded in a predictable and controlable way
+1) Servers stay available and responsive to administrative commands regardless
+   of client load
+1) System performance degrades gracefully in the face of overload
+   - Requests don't get stuck in the system for "too long"
+   - Rejection rates increase rather than latencies when the system cannot
+     process incoming load
+1) Traffic is dropped in a predictable and controllable way
+1) Admission control decisions are observable, understandable, and explainable
+   - There are layers to the understandability, the proposed DAGOR-like
+     architecture makes it easy to know why a request was rejected but doesn't
+     give clear insight in to why requests are not being processed fast enough.
+   - The behavior will be driven by dynamics of coupled systems with feedback
+     which means they will be hard to understand directly.
+   - Simulation of the system is a design requirement.
+1) System is robust in the face of bursty traffic (i.e. not brittle or overresponsive)
+   - System doesn't reject requests too quickly in the face of increased load
+     which ultimately it can handle
+   - Rejected requests are painful for users and should actually relate to
+     an overload condition. Traffic shape over short timescales should not
+     lead to rejection, such a system would be overreactive
+   - This point implies some amount of queueing
+   - System provides simple control which over the trade off between latency
+     and throughput (maybe this is a better statement of the goal but it
+     doesn't capture all of the nuance)
+1) System does not adversely affect latency in normal conditions.
 
+#### Non-goals
 
-## Plan of Attack
+1) Transport level priorities
+1) Strict resource isolation or accounting
+1) Generalized OOM protection
+1) Admission control for mutations
 
-Separate the problem in to layers:
+## Guide Level Description
+
+This document proposes separating CockroachDB into three layers, each of which
+operates its an admission control subsystem which collaborate loosely to
+form a complete system. The basic system is modeled after the WeChat
+DAGOR architecture, where priority is represented as a tuple value with
+the first entry relating to the semantic content of the request and the
+second entry relating to some per-user (or in our case per-session)
+indentifier. The design divides the priority space beyond just user defined
+priority as it is better to continuously provide bad unavailability to a small
+percent of users than it is to provide intermittent unreliability to a large
+percent of users. The exact determinants of priority will be discussed later.
+
+Unlike DAGOR where there is an arbitrary, unknown service graph, CRDB's shared-
+nothing architecture has somewhat different challenges. That being said, the
+basic approach of attaching a current priority level to each subsystem and
+making rejection decisions based on incoming request priority leads to a
+system that is easy to reason about and easily extensible in the future.
+Furthermore, the architecture is especially amenable to the collaborative
+admission control suggested in the DAGOR paper because a top-level planned
+query roughly knows its entire downstream communication graph.
+
+This proposal divides CockroachDB into three distinct subsystems which each
+perform admission control. The three layers are the SQL statement, the distsql
+flows, and the KV requests.
+
+```
+SQL statements
+--------------
+DistSQL Flows
+--------------
+KV BatchRequests
+```
+
+(aside)
+Unlike in a micro-service architecture, these systems in CockroachDB are not
+isolated and changes in the behavior at a higher level can negatively impact
+performance at the lower level. These interactions can certainly complicate cost
+models, but for now this design chooses to ignore the direct interactions and
+proposes that these interactions get detected indirectly.
+RCTE can do some pretty gnarly things and it'd be good to slow them down as
+they impede KV requests but we also don't support them so it's potentially
+okay.
+
+This design splits the implementation of admission control into two layers,
+a generic admission controller and a sub-system specific rate keeper.
+The admission controller is heavily influenced by (read clone of) the DAGOR
+design. Each admission controller maintains a current admission control state
+which is a priority level, all requests which arrive below that level are
+rejected, all requests above that level are then either run immediately if the
+rate keeper permits or enqueued into a queue maintained by the admission
+controller.
+
+The rate keeper controls the rate at which requests are removed from the
+queue for processing. The specific details of rate keeping will be unique
+at each layer.
 
 AdmissionControler
-        Priority based rejection levels
-        Downstream rejections (plan inspection)
+
+- Priority based rejection levels
+- Downstream rejections (plan inspection)
+- Simple, easy to reason about, powerful, just one knob, driven by 
+  queueing/ratekeeping layer
+
+Each admission controller keeps a current state
+
+```
+[0 1 2 3][0 1 2 3]
+       ^        ^
+       |        |
+```
+
+```
+[0 1 2 3][0 1 2 3]
+            ^
+            |
+```
 
 Queueing
-        When work is accepted it goes in to the queue
-        Work gets pulled off of queues based on the RateLimiting
 
-RateLimiting
-        Controls when things can be popped from queues
+- When work is admitted it goes in to the queue
+- Work gets pulled off of queues based on the RateLimiter
+- If work sits in the queue for too long, what do we do with it?
+  - We could imagine pulling it out of the queue
+  - Could imagine running it anyway but marking it as failed?
+  - Open questions about what to do exactly when things are slow
+
+RateKeeper
+
+- Controls when things can be popped from queues
+- This is where the domain specific knowledge come in to play
+- Lots of different techniques here
+   - Rate limiting using a token bucket
+   - Fixed quota / concurrency limit
+- Dynamic tuning is valuable
+- Changes to this algorithm does not require changes to the above queueing and admission control logic
+
+Then we additionally separate our stack in to layers.
+Each of these layers can have different and evolving rate-keeping mechanisms but
+will utilize uniform admission control infrastructure.
 
 Simulation is *critical*.
 
-# Admission Control using a two layer approach
+
+----
+
+### Admission Control using a two layer approach
 
 CockroachDB can be throught of as having several layers of execution.
 
@@ -64,9 +175,7 @@ to prune load at the inbound client connection level.
 (Footnote) We can certainly imagine adversarial scenarios where floods of client
 connections harm the system but let's not primarily concern ourselves
 with that situation. A simple knob on # of conns is probably
-sufficieint. Maybe a rate limiter on connection creation.
-What we want to do is delay and reject queries at the gateway after parsing
-and planning before execution.
+sufficient. Maybe a rate limiter on connection creation.
 
 A challenge is that CRDB is a complex distributed system with a dynamic
 topology. It is critical that the mechanisms proposed here protect local
@@ -76,12 +185,6 @@ global information on longer timescales. The system should successfully detect
 overload and shed load even without up-to-date global information.
 
 In order to make progress on this topic we split CRDB into two layers:
-
-```
-SQL statements 
---------------
-KV BatchRequests
-```
 
 Ultimately it's likely to make more sense to split CRDB in to three layers
 ```
