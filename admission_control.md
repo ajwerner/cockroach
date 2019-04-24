@@ -1,6 +1,9 @@
 
 # Motivation
 
+
+## Fluff
+
 In order to build trust in our customers CockroachDB needs to be reliable.
 Sometimes databases experience workloads which demand more resources than are
 available. This state is called overload. 
@@ -24,7 +27,32 @@ wasteful to not complete that query. Thus aborting a query once it has reached a
 leaf service is generally not a good idea.
 
 That being said, the leaf services generally have the best ability to account
-for overload.
+for overload. Or at least the most uniform workload.
+
+### Goals
+
+1) Administrative requests are not starved.
+1) Graceful degradation in the face of increased load.
+1) When receiving overloaded quantities of traffic, prefer to reject closest to the client
+1) Drop traffic when overloaded in a predictable and controlable way
+
+
+## Plan of Attack
+
+Separate the problem in to layers:
+
+AdmissionControler
+        Priority based rejection levels
+        Downstream rejections (plan inspection)
+
+Queueing
+        When work is accepted it goes in to the queue
+        Work gets pulled off of queues based on the RateLimiting
+
+RateLimiting
+        Controls when things can be popped from queues
+
+Simulation is *critical*.
 
 # Admission Control using a two layer approach
 
