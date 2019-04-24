@@ -1,6 +1,4 @@
 
-# Motivation
-
 
 ## Fluff
 
@@ -31,26 +29,117 @@ for overload. Or at least the most uniform workload.
 
 ### Goals
 
-1) Administrative requests are not starved.
-1) Graceful degradation in the face of increased load.
-1) When receiving overloaded quantities of traffic, prefer to reject closest to the client
-1) Drop traffic when overloaded in a predictable and controlable way
+1) Servers stay available and responsive to administrative commands regardless
+   of client load
+1) System performance degrades gracefully in the face of overload
+   1) Requests don't get stuck in the system for "too long"
+   1) Rejection rates increase rather than latencies when the system cannot
+      process incoming load
+1) Traffic is dropped in a predictable and controllable way
+1) Admission control decisions are observable, understandable, and explainable
+1) System is robust in the face of bursty traffic
+   1) System doesn't reject requests too quickly in the face of increased load
+      which ultimately it can handle
+   1) Rejected requests are painful for users and should actually relate to
+      an overload condition. Traffic shape over short timescales should not
+      lead to rejection, such a system would be overreactive
+   1) This point implies some amount of queueing
+   1) System provides simple control which over the trade off between latency
+      and throughput (maybe this is a better statement of the goal but it
+      doesn't capture all of the nuance)
+
+#### Non-goals
+
+1) Transport level priorities
+1) Strict resource isolation or accounting
+1) Generalized OOM protection
+
+## Guide Level Description
+
+This RFC proposes separating CockroachDB into three layers, each of which
+operates its an admission control subsystem which collaborate loosely to
+form a complete system. The basic system is modeled after the WeChat
+DAGOR architecture, where priority is represented as a tuple value with
+the first entry relating to the semantic content of the request and the
+second entry relating to some per-user (or in our case per-session)
+indentifier. The design divides the priority space beyond just user defined
+priority as it is better to continuously provide bad unavailability to a small
+percent of users than it is to provide intermittent unreliability to a large
+percent of users. The exact determinants of priority will be discussed later.
+
+Unlike DAGOR where there is an arbitrary, unknown service graph, CRDB's shared-
+nothing architecture has somewhat different challenges. That being said, the
+basic approach of attaching a current priority level to each subsystem and
+making rejection decisions based on incoming request priority leads to a
+system that is easy to reason about and easily extensible in the future.
+Furthermore, the architecture is especially amenable to the collaborative
+admission control suggested in the DAGOR paper because a top-level planned
+query roughly knows its entire downstream communication graph.
+
+This proposal divides CockroachDB into three distinct subsystems which each
+perform admission control. The three layers are the SQL statement, the distsql
+flows, and the KV requests.
+
+(aside)
+Unlike in a micro-service architecture, these systems in CockroachDB are not
+isolated and changes in the behavior at a higher level can negatively impact
+performance at the lower level. These interactions can certainly complicate cost
+models, but for now this design chooses to ignore the direct interactions and
+proposes that these interactions get detected indirectly.
+RCTE can do some pretty gnarly things and it'd be good to slow them down as
+they impede KV requests but we also don't support them so it's potentially
+okay.
+
+Furthermore we split the problem of admission control into two layers,
+an admission controller and a rate keeper. The admission controller is heavilty
+influenced (read clone) of the DAGOR design. Each admission controller maintains
+a current admission control state which is a priority level, all requests which
+arrive below that level are rejected, all requests above that level are then
+either run immediately if the rate keeper permits or enqueued.
+
+```
+   SQL statements
+   --------------
+   DistSQL Flows
+   --------------
+   KV BatchRequests
+```
 
 
-## Plan of Attack
+The rate keeper controls the rate at which requests are removed from the
+queue for processing. The specific details of the 
 
-Separate the problem in to layers:
+This layer can be thought of as a direct rip-off of the DAGOR design.
+A subsystem maintains the following pieces of 
+
+The top-most layer is the actual admission
 
 AdmissionControler
         Priority based rejection levels
         Downstream rejections (plan inspection)
+        Simple, easy to reason about, powerful, just one knob, driven by queueing layer
 
 Queueing
-        When work is accepted it goes in to the queue
-        Work gets pulled off of queues based on the RateLimiting
+        When work is admitted it goes in to the queue
+        Work gets pulled off of queues based on the RateLimiter
+        If work sits in the queue for too long, what do we do with it?
+           We could imagine pulling it out of the queue
+           Could imagine 
 
-RateLimiting
+RateKeeper
         Controls when things can be popped from queues
+        This is where the domain specific knowledge come in to play
+        Lots of different techniques here
+             Rate limiting using a token bucket
+             Fixed quota / concurrency limit
+        Dynamic tuning is valuable
+        Changes to this algorithm does not require changes to the above queueing and admission control logic
+
+Then we additionally separate our stack in to layers:
+
+
+Each of these layers can have different and evolving rate-keeping mechanisms but
+will utilize uniform admission control infrastructure.
 
 Simulation is *critical*.
 
@@ -76,12 +165,6 @@ global information on longer timescales. The system should successfully detect
 overload and shed load even without up-to-date global information.
 
 In order to make progress on this topic we split CRDB into two layers:
-
-```
-SQL statements 
---------------
-KV BatchRequests
-```
 
 Ultimately it's likely to make more sense to split CRDB in to three layers
 ```
