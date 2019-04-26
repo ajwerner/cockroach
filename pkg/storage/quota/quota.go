@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
+	tdigest "github.com/ajwerner/tdigestc/go"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -109,6 +109,41 @@ var (
 		Measurement: "count",
 		Unit:        metric.Unit_COUNT,
 	}
+	metaTD001 = metric.Metadata{
+		Name:        "latency.td.001",
+		Measurement: "time",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaTD01 = metric.Metadata{
+		Name:        "latency.td.01",
+		Measurement: "time",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaTD10 = metric.Metadata{
+		Name:        "latency.td.10",
+		Measurement: "time",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaTD50 = metric.Metadata{
+		Name:        "latency.td.50",
+		Measurement: "time",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaTD90 = metric.Metadata{
+		Name:        "latency.td.90",
+		Measurement: "time",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaTD99 = metric.Metadata{
+		Name:        "latency.td.99",
+		Measurement: "time",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaTD999 = metric.Metadata{
+		Name:        "latency.td.999",
+		Measurement: "time",
+		Unit:        metric.Unit_COUNT,
+	}
 )
 
 // QuotaSize is the follower reads closed timestamp update target duration.
@@ -150,6 +185,13 @@ func makeMetrics() Metrics {
 		PerReqBytes:       metric.NewGaugeFloat64(metaAvgPerReqBytesPerRec),
 		BackoffFactor:     metric.NewGaugeFloat64(metaQuotaBackoffFactor),
 		Inside:            metric.NewGaugeFloat64(metaInside),
+		TD001:             metric.NewGaugeFloat64(metaTD001),
+		TD01:              metric.NewGaugeFloat64(metaTD01),
+		TD10:              metric.NewGaugeFloat64(metaTD10),
+		TD50:              metric.NewGaugeFloat64(metaTD50),
+		TD90:              metric.NewGaugeFloat64(metaTD90),
+		TD99:              metric.NewGaugeFloat64(metaTD99),
+		TD999:             metric.NewGaugeFloat64(metaTD999),
 	}
 }
 
@@ -170,6 +212,13 @@ type Metrics struct {
 	QPSRateGauge      *metric.GaugeFloat64
 	BackoffFactor     *metric.GaugeFloat64
 	Inside            *metric.GaugeFloat64
+	TD001             *metric.GaugeFloat64
+	TD01              *metric.GaugeFloat64
+	TD10              *metric.GaugeFloat64
+	TD50              *metric.GaugeFloat64
+	TD90              *metric.GaugeFloat64
+	TD99              *metric.GaugeFloat64
+	TD999             *metric.GaugeFloat64
 }
 
 // TODO(ajwerner): there's a lot we could do to make this more sophisticated.
@@ -384,6 +433,8 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 		haveLJSON         = false
 		lJSON             = RateLimitJSON.Get(&rq.cfg.Settings.SV)
 		timePerReq        float64
+		td                = tdigest.New(128)
+		agg               = tdigest.New(128)
 		updateMetrics     = func() {
 			rq.metrics.QPS.Update(lastQPS)
 			rq.metrics.Queued.Update(int64(len(queue)))
@@ -400,6 +451,13 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			//rateHistogram.Rotate()
 			qps := rq.metrics.QPSRate.Value()
 			rq.metrics.QPSRateGauge.Update(qps)
+			rq.metrics.TD001.Update(agg.ValueAt(.001))
+			rq.metrics.TD01.Update(agg.ValueAt(.01))
+			rq.metrics.TD10.Update(agg.ValueAt(.1))
+			rq.metrics.TD50.Update(agg.ValueAt(.5))
+			rq.metrics.TD90.Update(agg.ValueAt(.9))
+			rq.metrics.TD99.Update(agg.ValueAt(.99))
+			rq.metrics.TD999.Update(agg.ValueAt(.999))
 			if perReqBytesPerSec > 0 {
 				rq.metrics.BackoffFactor.Update(aggBytesPerSec / (perReqBytesPerSec / (qps * timePerReq / 1e9)))
 			}
@@ -419,7 +477,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 				if uint32(estimate) > rq.cfg.MaxEstimate {
 					estimate = float64(rq.cfg.MaxEstimate)
 				}
-				// log.Infof(ctx, "increasing estimate to %v", estimate)
+
 			} else if q.used > rq.cfg.ResponseMin {
 				if totalQueries == 0 {
 					trailingAvg = float64(q.used)
@@ -438,8 +496,9 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 				}
 
 			}
+
+			td.Record(float64(q.took))
 			rq.metrics.QPSRate.Add(1)
-			// log.Infof(ctx, "release %v %v %v", float64(q.used), q.took.Seconds(), float64(q.used)/q.took.Seconds())
 			if q.took > 0 {
 				totalBytes += float64(q.used)
 				totalTime += float64(q.took.Nanoseconds())
@@ -456,11 +515,9 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			if jsStr := RateLimitJSON.Get(&rq.cfg.Settings.SV); jsStr != lJSON {
 				lJSON = jsStr
 				var m map[string]float64
-				log.Infof(ctx, "node id %v %v %q %q %v", rq.cfg.NodeID, m, jsStr, lJSON, jsStr == lJSON)
 				if err := json.Unmarshal([]byte(jsStr), &m); err == nil {
 					if r, ok := m[strconv.Itoa(int(rq.cfg.NodeID))]; ok {
 						haveLJSON = true
-						log.Infof(ctx, "node id %v %v %v", rq.cfg.NodeID, m, r)
 						rq.l.SetLimit(rate.Limit(r))
 					}
 				} else {
@@ -470,6 +527,9 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			defer updateMetrics()
 			const decay = .98
 			const alpha = (1 - decay)
+			agg.Decay(decay)
+			agg.Merge(td)
+			td.Reset()
 			if totalReleased != 0 {
 				aggBytesPerSec = decay*aggBytesPerSec + (alpha * (totalBytes / now.Sub(lastRel).Seconds()))
 
