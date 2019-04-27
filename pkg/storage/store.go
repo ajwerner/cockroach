@@ -4336,7 +4336,7 @@ func (s *Store) ManuallyEnqueue(
 	var queue queueImpl
 	var needsLease bool
 	for _, replicaQueue := range s.scanner.queues {
-		if strings.ToLower(replicaQueue.Name()) == strings.ToLower(queueName) {
+		if strings.EqualFold(replicaQueue.Name(), queueName) {
 			queue = replicaQueue.(queueImpl)
 			needsLease = replicaQueue.NeedsLease()
 		}
