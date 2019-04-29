@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -854,23 +855,23 @@ func (ex *connExecutor) execWithDistSQLEngine(
 	distribute bool,
 ) error {
 	evalCtx := planner.ExtendedEvalContext()
-	// if !ex.isInternal {
-	// 	var cost float64
-	// 	if planner.stmt.Prepared != nil {
-	// 		if re, ok := planner.stmt.Prepared.Memo.RootExpr().(memo.RelExpr); ok {
-	// 			cost = float64(re.Cost())
-	// 		}
-	// 	}
-	// 	q, err := evalCtx.ExecCfg.RateKeeper.Acquire(ctx, cost)
-	// 	if err != nil {
-	// 		res.SetError(err)
-	// 		return nil
-	// 	}
-	// 	start := time.Now()
-	// 	defer func() {
-	// 		evalCtx.ExecCfg.RateKeeper.Release(ctx, q, time.Since(start), res.Err())
-	// 	}()
-	// }
+	if !ex.isInternal {
+		var cost float64
+		if planner.stmt.Prepared != nil {
+			if re, ok := planner.stmt.Prepared.Memo.RootExpr().(memo.RelExpr); ok {
+				cost = float64(re.Cost())
+			}
+		}
+		q, err := evalCtx.ExecCfg.RateKeeper.Acquire(ctx, cost)
+		if err != nil {
+			res.SetError(err)
+			return nil
+		}
+		start := time.Now()
+		defer func() {
+			evalCtx.ExecCfg.RateKeeper.Release(ctx, q, time.Since(start), res.Err())
+		}()
+	}
 	recv := MakeDistSQLReceiver(
 		ctx, res, stmtType,
 		ex.server.cfg.RangeDescriptorCache, ex.server.cfg.LeaseHolderCache,

@@ -497,7 +497,7 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 
 			}
 
-			td.Record(float64(q.took))
+			td.Record(float64(q.used))
 			rq.metrics.QPSRate.Add(1)
 			if q.took > 0 {
 				totalBytes += float64(q.used)
@@ -582,7 +582,10 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 			tick(t)
 			ticker.Reset(rq.cfg.TickInterval)
 		case qr := <-rq.acquiring:
-			if est := uint64(estimate); false {
+			r := rand.Float64()
+			r += (1.0 - r) * rand.Float64()
+			est := uint64(agg.ValueAt(r))
+			if inUse+est > rq.cfg.QuotaSize {
 				lq := len(queue)
 				if (lq > rq.cfg.QueueMax) ||
 					(!qr.isRetry && rand.Float64() < (float64(lq)/float64(rq.cfg.QueueMax))) {
