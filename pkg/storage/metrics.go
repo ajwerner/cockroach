@@ -974,7 +974,7 @@ var (
 		Measurement: "Bytes * nanoseconds",
 		Unit:        metric.Unit_BYTES,
 	}
-	metaTimeSpendReading = metric.Metadata{
+	metaTimeSpentReading = metric.Metadata{
 		Name:        "store.time_spent_reading",
 		Help:        "Nanoseconds spent reading",
 		Measurement: "Time",
@@ -1404,7 +1404,7 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		ClosedTimestampMaxBehindNanos: metric.NewGauge(metaClosedTimestampMaxBehindNanos),
 
 		BytesRead:        metric.NewCounter(metaBytesRead),
-		TimeSpentReading: metric.NewCounter(metaBytesRead),
+		TimeSpentReading: metric.NewCounter(metaTimeSpentReading),
 		BytesReadByTime:  metric.NewCounter(metaBytesReadByTimeTook),
 	}
 
