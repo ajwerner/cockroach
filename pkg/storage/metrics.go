@@ -1430,8 +1430,8 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		BytesReadByTime:  metric.NewCounter(metaBytesReadByTimeTook),
 
 		ReadThroughput10s: metric.NewRate(metaThroughput10s, 10*time.Second),
-		ReadThroughput1m:  metric.NewRate(metaThroughput10s, time.Minute),
-		ReadThroughput10m: metric.NewRate(metaThroughput10s, 10*time.Minute),
+		ReadThroughput1m:  metric.NewRate(metaThroughput1m, time.Minute),
+		ReadThroughput10m: metric.NewRate(metaThroughput10m, 10*time.Minute),
 	}
 
 	sm.raftRcvdMessages[raftpb.MsgProp] = sm.RaftRcvdMsgProp
