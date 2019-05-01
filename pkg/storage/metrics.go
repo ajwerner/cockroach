@@ -980,6 +980,24 @@ var (
 		Measurement: "Time",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
+	metaThroughput10s = metric.Metadata{
+		Name:        "store.read_throughput.trailing_10s",
+		Help:        "Trailing read throughput over the last 10 seconds",
+		Measurement: "Bytes/s",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaThroughput1m = metric.Metadata{
+		Name:        "store.read_throughput.trailing_1m",
+		Help:        "Trailing read throughput over the last 1 minute",
+		Measurement: "Bytes/s",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaThroughput10m = metric.Metadata{
+		Name:        "store.read_throughput.trailing_10m",
+		Help:        "Trailing read throughput over the last 10 minute",
+		Measurement: "Bytes/s",
+		Unit:        metric.Unit_BYTES,
+	}
 )
 
 // StoreMetrics is the set of metrics for a given store.
@@ -1198,6 +1216,10 @@ type StoreMetrics struct {
 	// long it took to read those bytes.
 	BytesReadByTime *metric.Counter
 
+	ReadThroughput10s *metric.Rate
+	ReadThroughput1m  *metric.Rate
+	ReadThroughput10m *metric.Rate
+
 	// Stats for efficient merges.
 	mu struct {
 		syncutil.Mutex
@@ -1406,6 +1428,10 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		BytesRead:        metric.NewCounter(metaBytesRead),
 		TimeSpentReading: metric.NewCounter(metaTimeSpentReading),
 		BytesReadByTime:  metric.NewCounter(metaBytesReadByTimeTook),
+
+		ReadThroughput10s: metric.NewRate(metaThroughput10s, 10*time.Second),
+		ReadThroughput1m:  metric.NewRate(metaThroughput10s, time.Minute),
+		ReadThroughput10m: metric.NewRate(metaThroughput10s, 10*time.Minute),
 	}
 
 	sm.raftRcvdMessages[raftpb.MsgProp] = sm.RaftRcvdMsgProp

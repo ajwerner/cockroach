@@ -104,6 +104,9 @@ func (r *Replica) executeReadOnlyBatch(
 		took := timeutil.Since(start) - latchTook
 		bytesRead := br.Size()
 		r.store.metrics.BytesRead.Inc(int64(bytesRead))
+		r.store.metrics.ReadThroughput10s.Add(float64(bytesRead))
+		r.store.metrics.ReadThroughput1m.Add(float64(bytesRead))
+		r.store.metrics.ReadThroughput10m.Add(float64(bytesRead))
 		r.store.metrics.BytesReadByTime.Inc(int64(bytesRead) * took.Nanoseconds())
 		r.store.metrics.TimeSpentReading.Inc(took.Nanoseconds())
 	}
