@@ -960,6 +960,26 @@ var (
 		Measurement: "Nanoseconds",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
+
+	// Bytes returned in batch responses for read batches.
+	metaBytesRead = metric.Metadata{
+		Name:        "store.bytes_read",
+		Help:        "Aggregate number of bytes read in read-only batch requests",
+		Measurement: "Bytes",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaBytesReadByTimeTook = metric.Metadata{
+		Name:        "store.bytes_read_by_time",
+		Help:        "Sort of weird metric that's the sum of bytes*time per request that then later we can take a rate on",
+		Measurement: "Bytes * nanoseconds",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaTimeSpendReading = metric.Metadata{
+		Name:        "store.time_spent_reading",
+		Help:        "Nanoseconds spent reading",
+		Measurement: "Time",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
 )
 
 // StoreMetrics is the set of metrics for a given store.
@@ -1168,6 +1188,16 @@ type StoreMetrics struct {
 	// Closed timestamp metrics.
 	ClosedTimestampMaxBehindNanos *metric.Gauge
 
+	// BytesRead is the number of bytes read in read batches.
+	BytesRead *metric.Counter
+
+	// TimeSpentReading is the number of nanosecond spent reading in read batched.
+	TimeSpentReading *metric.Counter
+
+	// BytesReadByTime is a counter of the number of bytes read multiplied by how
+	// long it took to read those bytes.
+	BytesReadByTime *metric.Counter
+
 	// Stats for efficient merges.
 	mu struct {
 		syncutil.Mutex
@@ -1372,6 +1402,10 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 
 		// Closed timestamp metrics.
 		ClosedTimestampMaxBehindNanos: metric.NewGauge(metaClosedTimestampMaxBehindNanos),
+
+		BytesRead:        metric.NewCounter(metaBytesRead),
+		TimeSpentReading: metric.NewCounter(metaBytesRead),
+		BytesReadByTime:  metric.NewCounter(metaBytesReadByTimeTook),
 	}
 
 	sm.raftRcvdMessages[raftpb.MsgProp] = sm.RaftRcvdMsgProp
