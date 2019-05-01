@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	tdigest "github.com/ajwerner/tdigestc/go"
+	"github.com/ajwerner/tdigest"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -433,8 +433,8 @@ func (rq *QuotaPool) loop(ctx context.Context) {
 		haveLJSON         = false
 		lJSON             = RateLimitJSON.Get(&rq.cfg.Settings.SV)
 		timePerReq        float64
-		td                = tdigest.New(128)
-		agg               = tdigest.New(128)
+		td                = tdigest.New(tdigest.Compression(128))
+		agg               = tdigest.New(tdigest.Compression(128))
 		updateMetrics     = func() {
 			rq.metrics.QPS.Update(lastQPS)
 			rq.metrics.Queued.Update(int64(len(queue)))
