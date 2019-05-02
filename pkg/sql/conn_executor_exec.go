@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -857,6 +858,24 @@ func (ex *connExecutor) execWithDistSQLEngine(
 	res RestrictedCommandResult,
 	distribute bool,
 ) error {
+	defer func() {
+		if planner.stmt.Prepared == nil {
+			return
+		}
+		re, ok := planner.stmt.Prepared.Memo.RootExpr().(memo.RelExpr)
+		if !ok {
+			return
+		}
+		cost := float64(re.Cost())
+		if res.Err() == nil {
+			ex.metrics.EngineMetrics.SuccessCostThroughput1m.Add(cost)
+			ex.metrics.EngineMetrics.SuccessCostThroughput10m.Add(cost)
+		} else {
+			ex.metrics.EngineMetrics.FailureCostThroughput1m.Add(cost)
+			ex.metrics.EngineMetrics.FailureCostThroughput10m.Add(cost)
+		}
+	}()
+
 	recv := MakeDistSQLReceiver(
 		ctx, res, stmtType,
 		ex.server.cfg.RangeDescriptorCache, ex.server.cfg.LeaseHolderCache,
@@ -878,7 +897,6 @@ func (ex *connExecutor) execWithDistSQLEngine(
 	planCtx.isLocal = !distribute
 	planCtx.planner = planner
 	planCtx.stmtType = recv.stmtType
-
 	if len(planner.curPlan.subqueryPlans) != 0 {
 		var evalCtx extendedEvalContext
 		ex.initEvalCtx(ctx, &evalCtx, planner)

@@ -88,6 +88,11 @@ type EngineMetrics struct {
 	// FailureCount counts non-retriable errors in open transactions.
 	FailureCount *metric.Counter
 	SuccessCount *metric.Counter
+
+	SuccessCostThroughput1m  *metric.Rate
+	SuccessCostThroughput10m *metric.Rate
+	FailureCostThroughput1m  *metric.Rate
+	FailureCostThroughput10m *metric.Rate
 }
 
 // EngineMetrics implements the metric.Struct interface
