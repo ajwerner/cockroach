@@ -869,8 +869,8 @@ func (ex *connExecutor) execWithDistSQLEngine(
 		cost := float64(re.Cost())
 		// defaultCost is arbitrarily picked to be 8
 		// What is a cost anyway?
-		const defaultCost = 8
-		if cost == 0 {
+		const defaultCost = 16
+		if cost < defaultCost {
 			cost = defaultCost
 		}
 		if res.Err() == nil {
