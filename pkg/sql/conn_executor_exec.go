@@ -134,7 +134,11 @@ func (ex *connExecutor) recordFailure() {
 func (ex *connExecutor) execStmtInOpenState(
 	ctx context.Context, stmt Statement, pinfo *tree.PlaceholderInfo, res RestrictedCommandResult,
 ) (retEv fsm.Event, retPayload fsm.EventPayload, retErr error) {
-	ex.incrementStmtCounter(stmt)
+	defer func() {
+		if _, payloadHasErr := retPayload.(payloadWithError); !payloadHasErr && retErr == nil {
+			ex.incrementStmtCounter(stmt)
+		}
+	}()
 	os := ex.machine.CurState().(stateOpen)
 
 	var timeoutTicker *time.Timer
