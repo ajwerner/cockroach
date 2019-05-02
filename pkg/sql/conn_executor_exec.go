@@ -867,6 +867,12 @@ func (ex *connExecutor) execWithDistSQLEngine(
 			return
 		}
 		cost := float64(re.Cost())
+		// defaultCost is arbitrarily picked to be 8
+		// What is a cost anyway?
+		const defaultCost = 8
+		if cost == 0 {
+			cost = defaultCost
+		}
 		if res.Err() == nil {
 			ex.metrics.EngineMetrics.SuccessCostThroughput1m.Add(cost)
 			ex.metrics.EngineMetrics.SuccessCostThroughput10m.Add(cost)
