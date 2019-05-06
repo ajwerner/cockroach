@@ -958,6 +958,13 @@ var (
 		Measurement: "Nanoseconds",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
+
+	metaReadResponseSizeSummary5m = metric.Metadata{
+		Name:        "kv.read_response.size_distribution.5m",
+		Help:        "Trailing 5 minute distribution on read response sizes",
+		Measurement: "Bytes",
+		Unit:        metric.Unit_BYTES,
+	}
 )
 
 // StoreMetrics is the set of metrics for a given store.
@@ -1166,6 +1173,9 @@ type StoreMetrics struct {
 	// Closed timestamp metrics.
 	ClosedTimestampMaxBehindNanos *metric.Gauge
 
+	// ReadResponseSizeSummary5m
+	ReadResponseSizeSummary5m *metric.Summary
+
 	// Stats for efficient merges.
 	mu struct {
 		syncutil.Mutex
@@ -1370,6 +1380,8 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 
 		// Closed timestamp metrics.
 		ClosedTimestampMaxBehindNanos: metric.NewGauge(metaClosedTimestampMaxBehindNanos),
+
+		ReadResponseSizeSummary5m: metric.NewSummary(metaReadResponseSizeSummary5m, 5*time.Minute),
 	}
 
 	sm.raftRcvdMessages[raftpb.MsgProp] = sm.RaftRcvdMsgProp
