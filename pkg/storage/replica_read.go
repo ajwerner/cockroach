@@ -27,6 +27,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
+// TODO(ajwerner): expand this to other criteria, like is an internal request
+func requiresReadQuota(r *Replica, ba *roachpb.BatchRequest) bool {
+	if ba.Txn != nil && ba.Txn.Key != nil {
+		return false
+	}
+	return true
+}
+
 // executeReadOnlyBatch updates the read timestamp cache and waits for any
 // overlapping writes currently processing through Raft ahead of us to
 // clear via the latches.
@@ -44,6 +52,21 @@ func (r *Replica) executeReadOnlyBatch(
 			r.store.metrics.FollowerReadsCount.Inc(1)
 		}
 	}
+	respSize := -1
+	if requiresReadQuota(r, &ba) {
+		acquired, err := r.store.readQuota.Acquire(ctx)
+		if err != nil {
+			return nil, roachpb.NewError(err)
+		}
+		defer func() {
+			r.store.readQuota.Add(acquired)
+			if respSize > 0 {
+				r.store.metrics.ReadQuotaBytesGuessed.Inc(acquired)
+				r.store.metrics.ReadQuotaBytesRead.Inc(int64(respSize))
+			}
+		}()
+	}
+
 	r.limitTxnMaxTimestamp(ctx, &ba, status)
 
 	spans, err := r.collectSpans(&ba)
@@ -125,7 +148,8 @@ func (r *Replica) executeReadOnlyBatch(
 		log.VErrEvent(ctx, 3, pErr.String())
 	} else {
 		log.Event(ctx, "read completed")
-		r.store.metrics.ReadResponseSizeSummary5m.Add(float64(br.Size()))
+		respSize = br.Size()
+		r.store.metrics.ReadResponseSizeSummary5m.Add(float64(respSize))
 	}
 	return br, pErr
 }
