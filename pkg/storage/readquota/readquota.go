@@ -6,6 +6,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 // NewPool creates a new ProposalQuota with a maximum number of bytes.
@@ -19,6 +20,7 @@ func NewPool(max int64, quotaRequired func() int64) *Pool {
 		requestSyncPool: sync.Pool{
 			New: func() interface{} { return &request{} },
 		},
+		metrics: makeMetrics(),
 	}
 	p.qp = quotapool.New("read", (*pool)(&p))
 	return &p
@@ -26,8 +28,8 @@ func NewPool(max int64, quotaRequired func() int64) *Pool {
 
 // Pool manages dispensing quota to clients.
 type Pool struct {
-	qp *quotapool.QuotaPool
-
+	qp              *quotapool.QuotaPool
+	metrics         Metrics
 	max             quota
 	quotaRequired   func() int64
 	quotaSyncPool   sync.Pool
@@ -36,12 +38,22 @@ type Pool struct {
 
 // Acquire acquires the desired quantity of quota.
 func (p *Pool) Acquire(ctx context.Context) (acquired int64, err error) {
+	start := timeutil.Now()
+	defer func() {
+		took := float64(timeutil.Since(start).Nanoseconds())
+		p.metrics.TimeSpentWaitingRate1m.Add(took)
+		p.metrics.TimeSpentWaitingSummary1m.Add(took)
+	}()
 	r := p.newRequest()
 	defer p.putRequest(r)
 	if err := p.qp.Acquire(ctx, r); err != nil {
 		return 0, err
 	}
 	return int64(*r.Acquired().(*quota)), nil
+}
+
+func (p *Pool) Metrics() *Metrics {
+	return &p.metrics
 }
 
 // Add returns quota to the pool.
