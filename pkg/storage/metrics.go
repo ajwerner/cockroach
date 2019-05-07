@@ -959,8 +959,21 @@ var (
 		Unit:        metric.Unit_NANOSECONDS,
 	}
 
+	metaReadQuotaBytesRead = metric.Metadata{
+		Name:        "read_quota.bytes_read",
+		Help:        "Counter for bytes read by requests using the read quota",
+		Measurement: "Bytes",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaReadQuotaBytesGuessed = metric.Metadata{
+		Name:        "read_quota.bytes_guessed",
+		Help:        "Counter for bytes allocated by requests using the read quota",
+		Measurement: "Bytes",
+		Unit:        metric.Unit_BYTES,
+	}
+
 	metaReadResponseSizeSummary5m = metric.Metadata{
-		Name:        "kv.read_response.size_distribution.5m",
+		Name:        "read_response.size_distribution.5m",
 		Help:        "Trailing 5 minute distribution on read response sizes",
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
@@ -1176,6 +1189,9 @@ type StoreMetrics struct {
 	// ReadResponseSizeSummary5m
 	ReadResponseSizeSummary5m *metric.Summary
 
+	ReadQuotaBytesRead    *metric.Counter
+	ReadQuotaBytesGuessed *metric.Counter
+
 	// Stats for efficient merges.
 	mu struct {
 		syncutil.Mutex
@@ -1382,6 +1398,8 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		ClosedTimestampMaxBehindNanos: metric.NewGauge(metaClosedTimestampMaxBehindNanos),
 
 		ReadResponseSizeSummary5m: metric.NewSummary(metaReadResponseSizeSummary5m, 5*time.Minute),
+		ReadQuotaBytesRead:        metric.NewCounter(metaReadQuotaBytesRead),
+		ReadQuotaBytesGuessed:     metric.NewCounter(metaReadQuotaBytesGuessed),
 	}
 
 	sm.raftRcvdMessages[raftpb.MsgProp] = sm.RaftRcvdMsgProp

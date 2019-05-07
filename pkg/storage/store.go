@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/rand"
 	"runtime"
 	"sort"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/ajwerner/tdigest"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
@@ -46,6 +48,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/idalloc"
 	"github.com/cockroachdb/cockroach/pkg/storage/intentresolver"
 	"github.com/cockroachdb/cockroach/pkg/storage/raftentry"
+	"github.com/cockroachdb/cockroach/pkg/storage/readquota"
 	"github.com/cockroachdb/cockroach/pkg/storage/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/storage/tscache"
 	"github.com/cockroachdb/cockroach/pkg/storage/txnrecovery"
@@ -607,6 +610,8 @@ type Store struct {
 	}
 
 	computeInitialMetrics sync.Once
+
+	readQuota *readquota.Pool
 }
 
 var _ client.Sender = &Store{}
@@ -711,6 +716,11 @@ type StoreConfig struct {
 	// gossiped store capacity values which need be exceeded before the store will
 	// gossip immediately without waiting for the periodic gossip interval.
 	GossipWhenCapacityDeltaExceedsFraction float64
+
+	// ReadQuota is the permitted number of bytes that can be used for read
+	// requests.
+	// TODO(ajwerner): hook this up to memory-monitor tracked memory.
+	ReadQuota int64
 }
 
 // ConsistencyTestingKnobs is a BatchEvalTestingKnobs struct used to control the
@@ -927,7 +937,13 @@ func NewStore(
 			s.scanner.AddQueues(s.tsMaintenanceQueue)
 		}
 	}
-
+	guessReadSize := func() (guess int64) {
+		s.metrics.ReadResponseSizeSummary5m.Read(func(r tdigest.Reader) {
+			guess = int64(r.ValueAt(rand.Float64())) + 1
+		})
+		return guess
+	}
+	s.readQuota = readquota.NewPool(int64(512*1<<20), guessReadSize)
 	if cfg.TestingKnobs.DisableGCQueue {
 		s.setGCQueueActive(false)
 	}

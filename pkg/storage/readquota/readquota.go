@@ -11,7 +11,8 @@ import (
 // NewPool creates a new ProposalQuota with a maximum number of bytes.
 func NewPool(max int64, quotaRequired func() int64) *Pool {
 	p := Pool{
-		max: quota(max),
+		max:           quota(max),
+		quotaRequired: quotaRequired,
 		quotaSyncPool: sync.Pool{
 			New: func() interface{} { q := quota(0); return &q },
 		},
