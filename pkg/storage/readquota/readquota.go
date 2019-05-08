@@ -3,6 +3,7 @@ package readquota
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
@@ -38,12 +39,10 @@ type Pool struct {
 
 // Acquire acquires the desired quantity of quota.
 func (p *Pool) Acquire(ctx context.Context) (acquired int64, err error) {
-	start := timeutil.Now()
 	defer func() {
-		took := float64(timeutil.Since(start).Nanoseconds())
-		p.metrics.TimeSpentWaitingRate1m.Add(took)
-		p.metrics.TimeSpentWaitingSummary1m.Add(took)
-		p.metrics.Acquisitions.Inc(1)
+		if err == nil {
+			p.metrics.Acquisitions.Inc(1)
+		}
 	}()
 	r := p.newRequest()
 	defer p.putRequest(r)
@@ -135,9 +134,18 @@ func (q *quota) String() string {
 	return humanizeutil.IBytes(int64(*q))
 }
 
+func (r *request) Waited(p quotapool.Pool, took time.Duration) {
+	pp := p.(*pool)
+	pp.metrics.TimeSpentWaitingRate1m.Add(float64(took.Nanoseconds()))
+	pp.metrics.TimeSpentWaitingSummary1m.Add(float64(took.Nanoseconds()))
+}
+
 func (r *request) Acquire(p quotapool.Pool, v quotapool.Quota) (extra quotapool.Quota) {
 	if r.want < 0 {
-		r.want = quota(p.(*pool).quotaRequired())
+		pp := p.(*pool)
+		start := timeutil.Now()
+		r.want = quota(pp.quotaRequired())
+		pp.metrics.RequiredTook.Inc(timeutil.Since(start).Nanoseconds())
 	}
 	vq := v.(*quota)
 	*r.got += *vq
