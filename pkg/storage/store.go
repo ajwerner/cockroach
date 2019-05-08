@@ -939,7 +939,9 @@ func NewStore(
 	}
 	guessReadSize := func() (guess int64) {
 		s.metrics.ReadResponseSizeSummary5m.Read(func(r tdigest.Reader) {
-			guess = int64(r.ValueAt(rand.Float64())) + 1
+			q := .5 * rand.Float64()
+			q += (1 - q) * rand.Float64()
+			guess = int64(r.ValueAt(q)) + 1
 		})
 		return guess
 	}
