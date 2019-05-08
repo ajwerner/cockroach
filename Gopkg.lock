@@ -151,11 +151,11 @@
 
 [[projects]]
   branch = "master"
-  digest = "1:96670a7a5ed372862c668ffa47c859d0384d9696ece6dc845e177ef4c248fb5e"
+  digest = "1:501b0ce1f8f7f469fab47610152910d4e16f712620c8e06328466b428fcdd2aa"
   name = "github.com/ajwerner/tdigest"
   packages = ["."]
   pruneopts = "UT"
-  revision = "e530829c34c8d168133b77a220d2eba419f76a50"
+  revision = "1d4d36c470e53d218ef2a8c1022ff53b28026d75"
 
 [[projects]]
   branch = "master"
