@@ -663,6 +663,12 @@ func (e *Summary) Read(f func(r tdigest.Reader)) {
 	e.sketch.Read(f)
 }
 
+// ReadStale provides read access to the underlying tdigest without ticking or
+// locking.
+func (e *Summary) ReadStale(f func(r tdigest.Reader)) {
+	e.sketch.ReadStale(f)
+}
+
 func (e *Summary) maybeTick() {
 	e.mu.RLock()
 	maybeTick((*periodicSummary)(e))
