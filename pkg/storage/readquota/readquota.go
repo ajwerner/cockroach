@@ -43,6 +43,7 @@ func (p *Pool) Acquire(ctx context.Context) (acquired int64, err error) {
 		took := float64(timeutil.Since(start).Nanoseconds())
 		p.metrics.TimeSpentWaitingRate1m.Add(took)
 		p.metrics.TimeSpentWaitingSummary1m.Add(took)
+		p.metrics.Acquisitions.Inc(1)
 	}()
 	r := p.newRequest()
 	defer p.putRequest(r)
@@ -52,6 +53,7 @@ func (p *Pool) Acquire(ctx context.Context) (acquired int64, err error) {
 	return int64(*r.Acquired().(*quota)), nil
 }
 
+// Metrics returns the pools metrics struct.
 func (p *Pool) Metrics() *Metrics {
 	return &p.metrics
 }
