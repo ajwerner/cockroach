@@ -78,6 +78,10 @@ type Request interface {
 	Fulfilled() bool
 }
 
+type QueueWaitTracker interface {
+	Waited(Pool, time.Duration)
+}
+
 // New returns a new quota pool initialized with a given quota. The quota
 // is capped at this amount, meaning that callers may return more quota than they
 // acquired without ever making more than the quota capacity available.
@@ -136,7 +140,8 @@ func (qp *QuotaPool) Acquire(ctx context.Context, r Request) error {
 	qp.mu.Lock()
 	qp.mu.queue = append(qp.mu.queue, notifyCh)
 	// If we're first in line, we notify ourself immediately.
-	if len(qp.mu.queue) == 1 {
+	isFront := len(qp.mu.queue) == 1
+	if isFront {
 		notifyCh <- struct{}{}
 	}
 	qp.mu.Unlock()
@@ -186,6 +191,13 @@ func (qp *QuotaPool) Acquire(ctx context.Context, r Request) error {
 		break
 	}
 
+	if wt, ok := r.(QueueWaitTracker); ok {
+		if isFront {
+			wt.Waited(qp.pool, 0)
+		} else {
+			wt.Waited(qp.pool, timeutil.Since(start))
+		}
+	}
 	// We're first in line to receive quota, we keep accumulating quota until
 	// we've acquired enough or determine we no longer need the acquisition.
 	// If we have acquired the quota needed or our context gets canceled,

@@ -39,6 +39,12 @@ var (
 		Measurement: "Nanoseconds",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
+	metaRequiredTook = metric.Metadata{
+		Name:        "readquota.required_took",
+		Help:        "Counter of nanoseconds spent determining how much to read",
+		Measurement: "Nanoseconds",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
 )
 
 // Metrics is a metrics struct for the read quota.
@@ -46,6 +52,7 @@ type Metrics struct {
 	TimeSpentWaitingRate1m    *metric.Rate
 	TimeSpentWaitingSummary1m *metric.Summary
 	Acquisitions              *metric.Counter
+	RequiredTook              *metric.Counter
 }
 
 func makeMetrics() Metrics {
@@ -53,5 +60,6 @@ func makeMetrics() Metrics {
 		TimeSpentWaitingRate1m:    metric.NewRate(metaTimeSpentWaitingRate1m, time.Minute),
 		TimeSpentWaitingSummary1m: metric.NewSummary(metaTimeSpentWaitingSummary1m, time.Minute),
 		Acquisitions:              metric.NewCounter(metaAcquisitions),
+		RequiredTook:              metric.NewCounter(metaRequiredTook),
 	}
 }
