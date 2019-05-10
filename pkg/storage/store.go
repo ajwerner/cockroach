@@ -948,7 +948,7 @@ func NewStore(
 		})
 		return guess
 	}
-	s.readQuota = readquota.NewPool(int64(512*(1<<20)), guessReadSize)
+	s.readQuota = readquota.NewPool(int64(2048*(1<<20)), guessReadSize)
 	s.metrics.registry.AddMetricStruct(s.readQuota.Metrics())
 	if cfg.TestingKnobs.DisableGCQueue {
 		s.setGCQueueActive(false)
