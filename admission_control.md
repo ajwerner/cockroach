@@ -184,15 +184,19 @@ Each admission controller keeps a current state
 
 ```
 [0 1 2 3][0 1 2 3]
-       ^        ^
-       |        |
+       ↑        ↑
 ```
 
 ```
 [0 1 2 3][0 1 2 3]
-            ^
-            |
+       ↑    ↑
 ```
+
+```
+[0 1 2 3][0 1 2 3]
+     ↑          ↑
+```
+
 
 Queueing
 
