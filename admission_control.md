@@ -1,38 +1,62 @@
-
-
-## Motivation/Fluff
+## 
 
 In order to build trust in our customers CockroachDB needs to be reliable.
 Sometimes databases experience workloads which demand more resources than are
-available. This state is called overload.
-It is imperative that CRDB remain basically available in the face of overload.
-Furthmore it is preferable to continue servicing some requests at an accepable
-latency than to service no requests or requests only at an extreme latency. 
-In order to cope with overload the system must regulate the amount of work that
-is accepted in to the system such that overload is mitigated.
+available. Increases in workload can happen for a vareity of reasons:
 
-Admission control and overload detection is a relatively deep field that very
-quickly gets in to areas of theory often outside the realm of computer science.
-The reason for this is the primary unit of work are driven to and from the leaf
-services yet the admission control decisions must be made at the gateways to be
-effective.
-This is trivially true because once work begins on some accepted query it is
-wasteful to not complete that query. Thus aborting a query once it has reached a
-leaf service is generally not a good idea.
-That being said, the leaf services generally have the best ability to account
-for overload. This is due to the fact that their requests are lowest level and
-map closest to hardware operations and thus can be modeled more simply for 
-detecting overload.
+ - Viral internet activity
+ - Product launch
+ - Software bug
+ - Administrative actions
+ - Rare analytics queries
+ - Schema Change?
+ - Database import / restore
+
+Cockroach experiences several particularly painful failure modes for customers
+due to overload:
+
+ - Node liveness failure
+   - Often the case that the machine is totally happen, due to problems getting
+     requests out (probably?) See https://github.com/cockroachdb/cockroach/issues/37195
+   - Has gotten somewhat better?
+   - Definitely the most important problem
+ - OOM / Crash
+ - Variance of throughput
+ - Increased latency (generally uniformly)
+   - Leads to request timeouts which leads to failure rates
+
+Cockroach can be difficult to use because
+
+  - Performance can degrade ungracefully
+    - Aggregate throughput can decrease
+      - TODO: back this up with evidence
+    - This property is very dependent on client timeouts
+  - Users have no control over which queries are affected by degradation.
+
+Sometimes things we think are overload are other things, deadlocks in
+particular.
+
+## Localized degredation
+
+Another related concern which customers have raised is the database's ability
+to adapt in the face of localized degredation.
+
+Localized degredation (confined to a small number of nodes) can happen when
+a node either has some hardware or environment problem which leads it to
+perform worse than other nodes or when a node performs poorly due to overload
+when the rest of the system is not overloaded.
+
+Any design which implements rate limiting due to a signal which can be
+triggered by a single server risks suffocatting a large cluster due to the
+performance of a single node. This communication graph inspection at least
+requires getting to physical planning and in general seems pretty difficult.
+
+I think we may want to mitigate this risk rather than address it correctly.
 
 ### Goals
 
 1) Servers stay available and responsive to administrative commands regardless
    of client load
-1) System performance degrades gracefully in the face of overload
-   - Requests don't get stuck in the system for "too long"
-   - Rejection rates increase rather than latencies when the system cannot
-     process incoming load
-1) Traffic is dropped in a predictable and controllable way
 1) Admission control decisions are observable, understandable, and explainable
    - There are layers to the understandability, the proposed DAGOR-like
      architecture makes it easy to know why a request was rejected but doesn't
@@ -40,6 +64,11 @@ detecting overload.
    - The behavior will be driven by dynamics of coupled systems with feedback
      which means they will be hard to understand directly.
    - Simulation of the system is a design requirement.
+1) System performance degrades gracefully in the face of overload
+   - Requests don't get stuck in the system for "too long"
+   - Rejection rates increase rather than latencies when the system cannot
+     process incoming load
+1) Traffic is dropped in a predictable and controllable way
 1) System is robust in the face of bursty traffic (i.e. not brittle or overresponsive)
    - System doesn't reject requests too quickly in the face of increased load
      which ultimately it can handle
@@ -54,12 +83,40 @@ detecting overload.
 
 #### Non-goals
 
+1) Admission control for mutations.
+   - Once a transaction has laid down an intent, we should not touch it.
 1) Transport level priorities
-1) Strict resource isolation or accounting
-1) Generalized OOM protection
-1) Admission control for mutations
+   - This should be explored, it would be great if system traffic for gossip
+     and node livess ranges were isolated from regular client traffic but
+     that's a generally separate project (except to the extent that it
+     mitigates the need for this project).
+1) Strict resource isolation or accounting.
+   - Improving resource usage and modeling throughputs and cost will be a
+     critical and important part of admission control and its evaluation
+     but get accounting level resource usage on a per-statement basis is
+     well beyond the scope of this project.
+   - Isolation seems very difficult given the current CockroachDB architecture.
 
 ## Guide Level Description
+
+Admission control and overload detection is a relatively deep field that very
+quickly gets in to areas of theory often outside the realm of computer science.
+Admission control 
+
+In distributed admission control you have a variety of layers and servers which
+need to coordinate their dicision making process about whether is too much work
+and what needs to be slowed down. 
+The reason for this is the primary unit of work are driven to and from the leaf
+services yet the admission control decisions must be made at the gateways to be
+effective.
+This is trivially true if you want to maintain throughput you need to not waste
+work. Thus aborting a query once it has reached a leaf service is generally not
+a good idea. It might be a better idea is the query has barely done anything
+but that might be hard to know.
+That being said, the leaf services generally have the best ability to account
+for overload. This is due to the fact that their requests are lowest level and
+map closest to hardware operations and thus can be modeled more simply for 
+detecting overload.
 
 This document proposes separating CockroachDB into three layers, each of which
 operates its an admission control subsystem which collaborate loosely to
