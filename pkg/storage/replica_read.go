@@ -19,6 +19,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage/batcheval/result"
 	"github.com/cockroachdb/cockroach/pkg/storage/spanset"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
@@ -27,12 +28,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
+var disableReadQuota = settings.RegisterBoolSetting(
+	"kv.read_quota.disabled",
+	"set to true to disable the read quota.",
+	false,
+)
+
 // TODO(ajwerner): expand this to other criteria, like is an internal request
 func requiresReadQuota(r *Replica, ba *roachpb.BatchRequest) bool {
 	if ba.Txn != nil && ba.Txn.Key != nil {
 		return false
 	}
-	return true
+	return !disableReadQuota.Get(&r.store.ClusterSettings().SV)
 }
 
 // executeReadOnlyBatch updates the read timestamp cache and waits for any
