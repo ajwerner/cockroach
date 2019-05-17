@@ -16,11 +16,13 @@ package sql
 
 import (
 	"context"
+	"crypto/md5"
 	"fmt"
 	"runtime/pprof"
 	"strings"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -865,13 +867,21 @@ func (ex *connExecutor) execWithDistSQLEngine(
 		&ex.sessionTracing,
 	)
 	defer recv.Release()
-
 	evalCtx := planner.ExtendedEvalContext()
 	var planCtx *PlanningCtx
 	if distribute {
 		planCtx = ex.server.cfg.DistSQLPlanner.NewPlanningCtx(ctx, evalCtx, planner.txn)
 	} else {
 		planCtx = ex.server.cfg.DistSQLPlanner.newLocalPlanningCtx(ctx, evalCtx)
+	}
+	txnID := evalCtx.Txn.ID()
+	priorityShard := md5.Sum(txnID[:])[0]
+	if ex.applicationName.Load().(string) == "foo" {
+		ctx = admission.ContextWithPriority(ctx,
+			admission.MakePriority(admission.MinLevel, priorityShard))
+	} else {
+		ctx = admission.ContextWithPriority(ctx,
+			admission.MakePriority(admission.DefaultLevel, priorityShard))
 	}
 	planCtx.isLocal = !distribute
 	planCtx.planner = planner

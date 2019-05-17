@@ -1,10 +1,34 @@
 package admission
 
-import "math"
+import (
+	"context"
+	"math"
+	"math/rand"
+)
 
 type Priority struct {
 	Level uint8
 	Shard uint8
+}
+
+type contextKey uint8
+
+const (
+	priorityContextKey contextKey = iota
+)
+
+func ContextWithPriority(ctx context.Context, priority Priority) context.Context {
+	return context.WithValue(ctx, priorityContextKey, priority)
+}
+
+func PriorityFromContext(ctx context.Context) Priority {
+	if prio, ok := ctx.Value(priorityContextKey).(Priority); ok {
+		return prio
+	}
+	return Priority{
+		Level: DefaultLevel,
+		Shard: uint8(rand.Intn(math.MaxUint8)),
+	}
 }
 
 func (p Priority) Encode() uint16 {
