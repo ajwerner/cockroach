@@ -29,6 +29,7 @@ import (
 	"unsafe"
 
 	"github.com/ajwerner/tdigest"
+	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
@@ -613,7 +614,8 @@ type Store struct {
 
 	computeInitialMetrics sync.Once
 
-	readQuota *readquota.Pool
+	readQuota           *readquota.Pool
+	admissionController *admission.Controller
 }
 
 var _ client.Sender = &Store{}
@@ -949,6 +951,13 @@ func NewStore(
 		return guess
 	}
 	s.readQuota = readquota.NewPool(int64(2048*(1<<20)), guessReadSize)
+	readQuotaMetrics := s.readQuota.Metrics()
+	s.admissionController = admission.NewController(func() (overloaded bool) {
+		readQuotaMetrics.TimeSpentWaitingSummary1m.Read(func(td tdigest.Reader) {
+			overloaded = time.Duration(td.ValueAt(.5)) > 50*time.Millisecond
+		})
+		return overloaded
+	})
 	s.metrics.registry.AddMetricStruct(s.readQuota.Metrics())
 	if cfg.TestingKnobs.DisableGCQueue {
 		s.setGCQueueActive(false)

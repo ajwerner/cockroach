@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 )
 
@@ -18,6 +19,7 @@ type Controller struct {
 	tickInterval       time.Duration
 	pruneRate          float64
 	overloadSignal     func() bool
+	metrics            Metrics
 
 	// We need some sort of queues
 	// Maybe we just hide those as stack-local state in some processing goroutine.
@@ -31,6 +33,25 @@ type Controller struct {
 		numReqs uint32
 		hist    histogram
 	}
+}
+
+func makeMetrics() Metrics {
+	return Metrics{
+		AdmissionLevel: metric.NewGauge(metaAdmissionLevel),
+	}
+}
+
+var (
+	metaAdmissionLevel = metric.Metadata{
+		Name:        "admission.level",
+		Help:        "Current admission level",
+		Unit:        metric.Unit_COUNT,
+		Measurement: "admission level",
+	}
+)
+
+type Metrics struct {
+	AdmissionLevel *metric.Gauge
 }
 
 func (c *Controller) Level() Priority {
@@ -53,8 +74,13 @@ func NewController(overLoadSignal func() bool) *Controller {
 		pruneRate:          defaultPruneRate,
 		overloadSignal:     overLoadSignal,
 	}
+	c.metrics = makeMetrics()
 	c.mu.cond.L = c.mu.RLocker()
 	return c
+}
+
+func (c *Controller) Metrics() *Metrics {
+	return &c.metrics
 }
 
 func (c *Controller) maybeTickRLocked(now time.Time) {
@@ -65,7 +91,6 @@ func (c *Controller) maybeTickRLocked(now time.Time) {
 	defer c.mu.RLock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	if now.Before(c.mu.nextTick) {
 		return
 	}
@@ -113,6 +138,7 @@ func (c *Controller) tickLocked(now time.Time) {
 		c.mu.curPriority = c.mu.curPriority.dec()
 	}
 	c.mu.hist = histogram{}
+	c.metrics.AdmissionLevel.Update(int64(c.mu.curPriority.Encode()))
 }
 
 var maxPriority = Priority{MaxLevel, maxShard}
