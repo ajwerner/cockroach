@@ -1632,6 +1632,12 @@ message ResponseUnion {
   reserved 15, 23, 25, 27, 28;
 }
 
+
+message AdmissionLevel {
+
+}
+
+
 // A Header is attached to a BatchRequest, encapsulating routing and auxiliary
 // information required for executing it.
 message Header {
@@ -1698,6 +1704,8 @@ message Header {
   // be much more straightforward if all transactional requests were
   // idempotent. We could just re-issue requests. See #26915.
   bool async_consensus = 13;
+
+  uint32 level = 14 [(gogoproto.casttype) = "uint16"];
 }
 
 
