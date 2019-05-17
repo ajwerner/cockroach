@@ -241,7 +241,7 @@ enum TransactionStatus {
   // and can not be assumed to have succeeded. A transaction may
   // transition from the STAGING to the COMMITTED state only if all
   // of its in-flight mutations are confirmed to have succeeded. A
-  // transaction may transition from the STAGING to PENDING or ABORTED
+  // transa ction may transition from the STAGING to PENDING or ABORTED
   // state only if one of its in-flight requests is prevented from ever
   // succeeding.
   STAGING = 3;
