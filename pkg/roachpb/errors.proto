@@ -51,6 +51,9 @@ message NotLeaseHolderError {
   optional string custom_msg = 5 [(gogoproto.nullable) = false];
 }
 
+message ReadRejectedError {
+}
+
 // A NodeUnavailableError indicates that the sending gateway can
 // not process requests at the time, and that the client should
 // retry the request with another peer.
