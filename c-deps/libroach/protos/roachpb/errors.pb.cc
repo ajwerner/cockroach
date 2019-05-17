@@ -69,6 +69,11 @@ class NotLeaseHolderErrorDefaultTypeInternal {
   ::google::protobuf::internal::ExplicitlyConstructed<NotLeaseHolderError>
       _instance;
 } _NotLeaseHolderError_default_instance_;
+class ReadRejectedErrorDefaultTypeInternal {
+ public:
+  ::google::protobuf::internal::ExplicitlyConstructed<ReadRejectedError>
+      _instance;
+} _ReadRejectedError_default_instance_;
 class NodeUnavailableErrorDefaultTypeInternal {
  public:
   ::google::protobuf::internal::ExplicitlyConstructed<NodeUnavailableError>
@@ -282,6 +287,20 @@ static void InitDefaultsNotLeaseHolderError() {
     {{ATOMIC_VAR_INIT(::google::protobuf::internal::SCCInfoBase::kUninitialized), 2, InitDefaultsNotLeaseHolderError}, {
       &protobuf_roachpb_2fmetadata_2eproto::scc_info_ReplicaDescriptor.base,
       &protobuf_roachpb_2fdata_2eproto::scc_info_Lease.base,}};
+
+static void InitDefaultsReadRejectedError() {
+  GOOGLE_PROTOBUF_VERIFY_VERSION;
+
+  {
+    void* ptr = &::cockroach::roachpb::_ReadRejectedError_default_instance_;
+    new (ptr) ::cockroach::roachpb::ReadRejectedError();
+    ::google::protobuf::internal::OnShutdownDestroyMessage(ptr);
+  }
+  ::cockroach::roachpb::ReadRejectedError::InitAsDefaultInstance();
+}
+
+::google::protobuf::internal::SCCInfo<0> scc_info_ReadRejectedError =
+    {{ATOMIC_VAR_INIT(::google::protobuf::internal::SCCInfoBase::kUninitialized), 0, InitDefaultsReadRejectedError}, {}};
 
 static void InitDefaultsNodeUnavailableError() {
   GOOGLE_PROTOBUF_VERIFY_VERSION;
@@ -767,6 +786,7 @@ static void InitDefaultsErrPosition() {
 
 void InitDefaults() {
   ::google::protobuf::internal::InitSCC(&scc_info_NotLeaseHolderError.base);
+  ::google::protobuf::internal::InitSCC(&scc_info_ReadRejectedError.base);
   ::google::protobuf::internal::InitSCC(&scc_info_NodeUnavailableError.base);
   ::google::protobuf::internal::InitSCC(&scc_info_UnsupportedRequestError.base);
   ::google::protobuf::internal::InitSCC(&scc_info_RangeNotFoundError.base);
@@ -1251,6 +1271,151 @@ void NotLeaseHolderError::InternalSwap(NotLeaseHolderError* other) {
 
 ::std::string NotLeaseHolderError::GetTypeName() const {
   return "cockroach.roachpb.NotLeaseHolderError";
+}
+
+
+// ===================================================================
+
+void ReadRejectedError::InitAsDefaultInstance() {
+}
+#if !defined(_MSC_VER) || _MSC_VER >= 1900
+#endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
+
+ReadRejectedError::ReadRejectedError()
+  : ::google::protobuf::MessageLite(), _internal_metadata_(NULL) {
+  ::google::protobuf::internal::InitSCC(
+      &protobuf_roachpb_2ferrors_2eproto::scc_info_ReadRejectedError.base);
+  SharedCtor();
+  // @@protoc_insertion_point(constructor:cockroach.roachpb.ReadRejectedError)
+}
+ReadRejectedError::ReadRejectedError(const ReadRejectedError& from)
+  : ::google::protobuf::MessageLite(),
+      _internal_metadata_(NULL),
+      _has_bits_(from._has_bits_) {
+  _internal_metadata_.MergeFrom(from._internal_metadata_);
+  // @@protoc_insertion_point(copy_constructor:cockroach.roachpb.ReadRejectedError)
+}
+
+void ReadRejectedError::SharedCtor() {
+}
+
+ReadRejectedError::~ReadRejectedError() {
+  // @@protoc_insertion_point(destructor:cockroach.roachpb.ReadRejectedError)
+  SharedDtor();
+}
+
+void ReadRejectedError::SharedDtor() {
+}
+
+void ReadRejectedError::SetCachedSize(int size) const {
+  _cached_size_.Set(size);
+}
+const ReadRejectedError& ReadRejectedError::default_instance() {
+  ::google::protobuf::internal::InitSCC(&protobuf_roachpb_2ferrors_2eproto::scc_info_ReadRejectedError.base);
+  return *internal_default_instance();
+}
+
+
+void ReadRejectedError::Clear() {
+// @@protoc_insertion_point(message_clear_start:cockroach.roachpb.ReadRejectedError)
+  ::google::protobuf::uint32 cached_has_bits = 0;
+  // Prevent compiler warnings about cached_has_bits being unused
+  (void) cached_has_bits;
+
+  _has_bits_.Clear();
+  _internal_metadata_.Clear();
+}
+
+bool ReadRejectedError::MergePartialFromCodedStream(
+    ::google::protobuf::io::CodedInputStream* input) {
+#define DO_(EXPRESSION) if (!GOOGLE_PREDICT_TRUE(EXPRESSION)) goto failure
+  ::google::protobuf::uint32 tag;
+  ::google::protobuf::internal::LiteUnknownFieldSetter unknown_fields_setter(
+      &_internal_metadata_);
+  ::google::protobuf::io::StringOutputStream unknown_fields_output(
+      unknown_fields_setter.buffer());
+  ::google::protobuf::io::CodedOutputStream unknown_fields_stream(
+      &unknown_fields_output, false);
+  // @@protoc_insertion_point(parse_start:cockroach.roachpb.ReadRejectedError)
+  for (;;) {
+    ::std::pair<::google::protobuf::uint32, bool> p = input->ReadTagWithCutoffNoLastTag(127u);
+    tag = p.first;
+    if (!p.second) goto handle_unusual;
+  handle_unusual:
+    if (tag == 0) {
+      goto success;
+    }
+    DO_(::google::protobuf::internal::WireFormatLite::SkipField(
+        input, tag, &unknown_fields_stream));
+  }
+success:
+  // @@protoc_insertion_point(parse_success:cockroach.roachpb.ReadRejectedError)
+  return true;
+failure:
+  // @@protoc_insertion_point(parse_failure:cockroach.roachpb.ReadRejectedError)
+  return false;
+#undef DO_
+}
+
+void ReadRejectedError::SerializeWithCachedSizes(
+    ::google::protobuf::io::CodedOutputStream* output) const {
+  // @@protoc_insertion_point(serialize_start:cockroach.roachpb.ReadRejectedError)
+  ::google::protobuf::uint32 cached_has_bits = 0;
+  (void) cached_has_bits;
+
+  output->WriteRaw(_internal_metadata_.unknown_fields().data(),
+                   static_cast<int>(_internal_metadata_.unknown_fields().size()));
+  // @@protoc_insertion_point(serialize_end:cockroach.roachpb.ReadRejectedError)
+}
+
+size_t ReadRejectedError::ByteSizeLong() const {
+// @@protoc_insertion_point(message_byte_size_start:cockroach.roachpb.ReadRejectedError)
+  size_t total_size = 0;
+
+  total_size += _internal_metadata_.unknown_fields().size();
+
+  int cached_size = ::google::protobuf::internal::ToCachedSize(total_size);
+  SetCachedSize(cached_size);
+  return total_size;
+}
+
+void ReadRejectedError::CheckTypeAndMergeFrom(
+    const ::google::protobuf::MessageLite& from) {
+  MergeFrom(*::google::protobuf::down_cast<const ReadRejectedError*>(&from));
+}
+
+void ReadRejectedError::MergeFrom(const ReadRejectedError& from) {
+// @@protoc_insertion_point(class_specific_merge_from_start:cockroach.roachpb.ReadRejectedError)
+  GOOGLE_DCHECK_NE(&from, this);
+  _internal_metadata_.MergeFrom(from._internal_metadata_);
+  ::google::protobuf::uint32 cached_has_bits = 0;
+  (void) cached_has_bits;
+
+}
+
+void ReadRejectedError::CopyFrom(const ReadRejectedError& from) {
+// @@protoc_insertion_point(class_specific_copy_from_start:cockroach.roachpb.ReadRejectedError)
+  if (&from == this) return;
+  Clear();
+  MergeFrom(from);
+}
+
+bool ReadRejectedError::IsInitialized() const {
+  return true;
+}
+
+void ReadRejectedError::Swap(ReadRejectedError* other) {
+  if (other == this) return;
+  InternalSwap(other);
+}
+void ReadRejectedError::InternalSwap(ReadRejectedError* other) {
+  using std::swap;
+  swap(_has_bits_[0], other->_has_bits_[0]);
+  _internal_metadata_.Swap(&other->_internal_metadata_);
+}
+
+::std::string ReadRejectedError::GetTypeName() const {
+  return "cockroach.roachpb.ReadRejectedError";
 }
 
 
@@ -9971,6 +10136,9 @@ namespace google {
 namespace protobuf {
 template<> GOOGLE_PROTOBUF_ATTRIBUTE_NOINLINE ::cockroach::roachpb::NotLeaseHolderError* Arena::CreateMaybeMessage< ::cockroach::roachpb::NotLeaseHolderError >(Arena* arena) {
   return Arena::CreateInternal< ::cockroach::roachpb::NotLeaseHolderError >(arena);
+}
+template<> GOOGLE_PROTOBUF_ATTRIBUTE_NOINLINE ::cockroach::roachpb::ReadRejectedError* Arena::CreateMaybeMessage< ::cockroach::roachpb::ReadRejectedError >(Arena* arena) {
+  return Arena::CreateInternal< ::cockroach::roachpb::ReadRejectedError >(arena);
 }
 template<> GOOGLE_PROTOBUF_ATTRIBUTE_NOINLINE ::cockroach::roachpb::NodeUnavailableError* Arena::CreateMaybeMessage< ::cockroach::roachpb::NodeUnavailableError >(Arena* arena) {
   return Arena::CreateInternal< ::cockroach::roachpb::NodeUnavailableError >(arena);
