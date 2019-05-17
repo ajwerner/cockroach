@@ -4318,6 +4318,7 @@ class ErrorDetail : public ::google::protobuf::MessageLite /* @@protoc_insertion
     kMergeInProgress = 37,
     kRangefeedRetry = 38,
     kIndeterminateCommit = 39,
+    kReadRejected = 40,
     VALUE_NOT_SET = 0,
   };
 
@@ -4738,6 +4739,18 @@ class ErrorDetail : public ::google::protobuf::MessageLite /* @@protoc_insertion
   ::cockroach::roachpb::IndeterminateCommitError* mutable_indeterminate_commit();
   void set_allocated_indeterminate_commit(::cockroach::roachpb::IndeterminateCommitError* indeterminate_commit);
 
+  // optional .cockroach.roachpb.ReadRejectedError read_rejected = 40;
+  bool has_read_rejected() const;
+  void clear_read_rejected();
+  static const int kReadRejectedFieldNumber = 40;
+  private:
+  const ::cockroach::roachpb::ReadRejectedError& _internal_read_rejected() const;
+  public:
+  const ::cockroach::roachpb::ReadRejectedError& read_rejected() const;
+  ::cockroach::roachpb::ReadRejectedError* release_read_rejected();
+  ::cockroach::roachpb::ReadRejectedError* mutable_read_rejected();
+  void set_allocated_read_rejected(::cockroach::roachpb::ReadRejectedError* read_rejected);
+
   void clear_value();
   ValueCase value_case() const;
   // @@protoc_insertion_point(class_scope:cockroach.roachpb.ErrorDetail)
@@ -4772,6 +4785,7 @@ class ErrorDetail : public ::google::protobuf::MessageLite /* @@protoc_insertion
   void set_has_merge_in_progress();
   void set_has_rangefeed_retry();
   void set_has_indeterminate_commit();
+  void set_has_read_rejected();
 
   inline bool has_value() const;
   inline void clear_has_value();
@@ -4811,6 +4825,7 @@ class ErrorDetail : public ::google::protobuf::MessageLite /* @@protoc_insertion
     ::cockroach::roachpb::MergeInProgressError* merge_in_progress_;
     ::cockroach::roachpb::RangeFeedRetryError* rangefeed_retry_;
     ::cockroach::roachpb::IndeterminateCommitError* indeterminate_commit_;
+    ::cockroach::roachpb::ReadRejectedError* read_rejected_;
   } value_;
   ::google::protobuf::uint32 _oneof_case_[1];
 
@@ -9008,6 +9023,50 @@ inline ::cockroach::roachpb::IndeterminateCommitError* ErrorDetail::mutable_inde
   }
   // @@protoc_insertion_point(field_mutable:cockroach.roachpb.ErrorDetail.indeterminate_commit)
   return value_.indeterminate_commit_;
+}
+
+// optional .cockroach.roachpb.ReadRejectedError read_rejected = 40;
+inline bool ErrorDetail::has_read_rejected() const {
+  return value_case() == kReadRejected;
+}
+inline void ErrorDetail::set_has_read_rejected() {
+  _oneof_case_[0] = kReadRejected;
+}
+inline void ErrorDetail::clear_read_rejected() {
+  if (has_read_rejected()) {
+    delete value_.read_rejected_;
+    clear_has_value();
+  }
+}
+inline const ::cockroach::roachpb::ReadRejectedError& ErrorDetail::_internal_read_rejected() const {
+  return *value_.read_rejected_;
+}
+inline ::cockroach::roachpb::ReadRejectedError* ErrorDetail::release_read_rejected() {
+  // @@protoc_insertion_point(field_release:cockroach.roachpb.ErrorDetail.read_rejected)
+  if (has_read_rejected()) {
+    clear_has_value();
+      ::cockroach::roachpb::ReadRejectedError* temp = value_.read_rejected_;
+    value_.read_rejected_ = NULL;
+    return temp;
+  } else {
+    return NULL;
+  }
+}
+inline const ::cockroach::roachpb::ReadRejectedError& ErrorDetail::read_rejected() const {
+  // @@protoc_insertion_point(field_get:cockroach.roachpb.ErrorDetail.read_rejected)
+  return has_read_rejected()
+      ? *value_.read_rejected_
+      : *reinterpret_cast< ::cockroach::roachpb::ReadRejectedError*>(&::cockroach::roachpb::_ReadRejectedError_default_instance_);
+}
+inline ::cockroach::roachpb::ReadRejectedError* ErrorDetail::mutable_read_rejected() {
+  if (!has_read_rejected()) {
+    clear_value();
+    set_has_read_rejected();
+    value_.read_rejected_ = CreateMaybeMessage< ::cockroach::roachpb::ReadRejectedError >(
+        GetArenaNoVirtual());
+  }
+  // @@protoc_insertion_point(field_mutable:cockroach.roachpb.ErrorDetail.read_rejected)
+  return value_.read_rejected_;
 }
 
 inline bool ErrorDetail::has_value() const {

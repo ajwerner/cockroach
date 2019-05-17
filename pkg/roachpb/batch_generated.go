@@ -72,6 +72,8 @@ func (ru ErrorDetail) GetInner() error {
 		return t.RangefeedRetry
 	case *ErrorDetail_IndeterminateCommit:
 		return t.IndeterminateCommit
+	case *ErrorDetail_ReadRejected:
+		return t.ReadRejected
 	default:
 		return nil
 	}
@@ -327,6 +329,8 @@ func (ru *ErrorDetail) SetInner(r error) bool {
 		union = &ErrorDetail_RangefeedRetry{t}
 	case *IndeterminateCommitError:
 		union = &ErrorDetail_IndeterminateCommit{t}
+	case *ReadRejectedError:
+		union = &ErrorDetail_ReadRejected{t}
 	default:
 		return false
 	}

@@ -15,6 +15,7 @@ package storage
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
@@ -24,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 var disableReadQuota = settings.RegisterBoolSetting(
@@ -48,6 +50,7 @@ func (r *Replica) executeReadOnlyBatch(
 ) (br *roachpb.BatchResponse, pErr *roachpb.Error) {
 	// If the read is not inconsistent, the read requires the range lease or
 	// permission to serve via follower reads.
+	start := timeutil.Now()
 	var status storagepb.LeaseStatus
 	if ba.ReadConsistency.RequiresReadLease() {
 		if status, pErr = r.redirectOnOrAcquireLease(ctx); pErr != nil {
@@ -59,6 +62,11 @@ func (r *Replica) executeReadOnlyBatch(
 	}
 	respSize := -1
 	if requiresReadQuota(r, &ba) {
+		// Let's check on the admission controller level
+		priority := admission.PriorityFromContext(ctx)
+		if !r.store.admissionController.AdmitAt(priority, start) {
+			return nil, roachpb.NewError(&roachpb.ReadRejectedError{})
+		}
 		acquired, err := r.store.readQuota.Acquire(ctx)
 		if err != nil {
 			return nil, roachpb.NewError(err)

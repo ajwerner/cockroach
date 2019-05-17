@@ -49,6 +49,7 @@ message NotLeaseHolderError {
 }
 
 message ReadRejectedError {
+  option (gogoproto.equal) = true;
 }
 
 // A NodeUnavailableError indicates that the sending gateway can
@@ -540,6 +541,7 @@ message ErrorDetail {
     MergeInProgressError merge_in_progress = 37;
     RangeFeedRetryError rangefeed_retry = 38;
     IndeterminateCommitError indeterminate_commit = 39;
+    ReadRejectedError read_rejected = 40;
   }
 }
 

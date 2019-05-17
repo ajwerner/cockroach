@@ -730,6 +730,16 @@ func (e *MergeInProgressError) message(_ *Error) string {
 
 var _ ErrorDetailInterface = &MergeInProgressError{}
 
+func (e *ReadRejectedError) Error() string {
+	return e.message(nil)
+}
+
+func (e *ReadRejectedError) message(_ *Error) string {
+	return "merge in progress"
+}
+
+var _ ErrorDetailInterface = &ReadRejectedError{}
+
 // NewRangeFeedRetryError initializes a new RangeFeedRetryError.
 func NewRangeFeedRetryError(reason RangeFeedRetryError_Reason) *RangeFeedRetryError {
 	return &RangeFeedRetryError{

@@ -32,6 +32,7 @@ extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::prot
 extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::protobuf::internal::SCCInfo<0> scc_info_RaftGroupDeletedError;
 extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::protobuf::internal::SCCInfo<0> scc_info_RangeFeedRetryError;
 extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::protobuf::internal::SCCInfo<0> scc_info_RangeNotFoundError;
+extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::protobuf::internal::SCCInfo<0> scc_info_ReadRejectedError;
 extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::protobuf::internal::SCCInfo<0> scc_info_ReplicaCorruptionError;
 extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::protobuf::internal::SCCInfo<0> scc_info_ReplicaTooOldError;
 extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::protobuf::internal::SCCInfo<0> scc_info_SendError;
@@ -53,7 +54,7 @@ extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::prot
 extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::protobuf::internal::SCCInfo<1> scc_info_WriteTooOldError;
 extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::protobuf::internal::SCCInfo<2> scc_info_NotLeaseHolderError;
 extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::protobuf::internal::SCCInfo<2> scc_info_ReadWithinUncertaintyIntervalError;
-extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::protobuf::internal::SCCInfo<31> scc_info_AmbiguousResultError;
+extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2ferrors_2eproto ::google::protobuf::internal::SCCInfo<32> scc_info_AmbiguousResultError;
 }  // namespace protobuf_roachpb_2ferrors_2eproto
 namespace protobuf_roachpb_2fmetadata_2eproto {
 extern PROTOBUF_INTERNAL_EXPORT_protobuf_roachpb_2fmetadata_2eproto ::google::protobuf::internal::SCCInfo<0> scc_info_ReplicaDescriptor;
@@ -258,6 +259,7 @@ class ErrorDetailDefaultTypeInternal {
   const ::cockroach::roachpb::MergeInProgressError* merge_in_progress_;
   const ::cockroach::roachpb::RangeFeedRetryError* rangefeed_retry_;
   const ::cockroach::roachpb::IndeterminateCommitError* indeterminate_commit_;
+  const ::cockroach::roachpb::ReadRejectedError* read_rejected_;
 } _ErrorDetail_default_instance_;
 class ErrPositionDefaultTypeInternal {
  public:
@@ -549,8 +551,8 @@ static void InitDefaultsAmbiguousResultError() {
   ::cockroach::roachpb::Error::InitAsDefaultInstance();
 }
 
-::google::protobuf::internal::SCCInfo<31> scc_info_AmbiguousResultError =
-    {{ATOMIC_VAR_INIT(::google::protobuf::internal::SCCInfoBase::kUninitialized), 31, InitDefaultsAmbiguousResultError}, {
+::google::protobuf::internal::SCCInfo<32> scc_info_AmbiguousResultError =
+    {{ATOMIC_VAR_INIT(::google::protobuf::internal::SCCInfoBase::kUninitialized), 32, InitDefaultsAmbiguousResultError}, {
       &protobuf_roachpb_2fdata_2eproto::scc_info_Transaction.base,
       &protobuf_roachpb_2ferrors_2eproto::scc_info_ErrPosition.base,
       &protobuf_util_2fhlc_2ftimestamp_2eproto::scc_info_Timestamp.base,
@@ -581,7 +583,8 @@ static void InitDefaultsAmbiguousResultError() {
       &protobuf_roachpb_2ferrors_2eproto::scc_info_IntentMissingError.base,
       &protobuf_roachpb_2ferrors_2eproto::scc_info_MergeInProgressError.base,
       &protobuf_roachpb_2ferrors_2eproto::scc_info_RangeFeedRetryError.base,
-      &protobuf_roachpb_2ferrors_2eproto::scc_info_IndeterminateCommitError.base,}};
+      &protobuf_roachpb_2ferrors_2eproto::scc_info_IndeterminateCommitError.base,
+      &protobuf_roachpb_2ferrors_2eproto::scc_info_ReadRejectedError.base,}};
 
 static void InitDefaultsRaftGroupDeletedError() {
   GOOGLE_PROTOBUF_VERIFY_VERSION;
@@ -8242,6 +8245,20 @@ void ErrorDetail::set_allocated_indeterminate_commit(::cockroach::roachpb::Indet
   }
   // @@protoc_insertion_point(field_set_allocated:cockroach.roachpb.ErrorDetail.indeterminate_commit)
 }
+void ErrorDetail::set_allocated_read_rejected(::cockroach::roachpb::ReadRejectedError* read_rejected) {
+  ::google::protobuf::Arena* message_arena = GetArenaNoVirtual();
+  clear_value();
+  if (read_rejected) {
+    ::google::protobuf::Arena* submessage_arena = NULL;
+    if (message_arena != submessage_arena) {
+      read_rejected = ::google::protobuf::internal::GetOwnedMessage(
+          message_arena, read_rejected, submessage_arena);
+    }
+    set_has_read_rejected();
+    value_.read_rejected_ = read_rejected;
+  }
+  // @@protoc_insertion_point(field_set_allocated:cockroach.roachpb.ErrorDetail.read_rejected)
+}
 #if !defined(_MSC_VER) || _MSC_VER >= 1900
 const int ErrorDetail::kNotLeaseHolderFieldNumber;
 const int ErrorDetail::kRangeNotFoundFieldNumber;
@@ -8273,6 +8290,7 @@ const int ErrorDetail::kIntentMissingFieldNumber;
 const int ErrorDetail::kMergeInProgressFieldNumber;
 const int ErrorDetail::kRangefeedRetryFieldNumber;
 const int ErrorDetail::kIndeterminateCommitFieldNumber;
+const int ErrorDetail::kReadRejectedFieldNumber;
 #endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
 
 ErrorDetail::ErrorDetail()
@@ -8407,6 +8425,10 @@ ErrorDetail::ErrorDetail(const ErrorDetail& from)
     }
     case kIndeterminateCommit: {
       mutable_indeterminate_commit()->::cockroach::roachpb::IndeterminateCommitError::MergeFrom(from.indeterminate_commit());
+      break;
+    }
+    case kReadRejected: {
+      mutable_read_rejected()->::cockroach::roachpb::ReadRejectedError::MergeFrom(from.read_rejected());
       break;
     }
     case VALUE_NOT_SET: {
@@ -8561,6 +8583,10 @@ void ErrorDetail::clear_value() {
     }
     case kIndeterminateCommit: {
       delete value_.indeterminate_commit_;
+      break;
+    }
+    case kReadRejected: {
+      delete value_.read_rejected_;
       break;
     }
     case VALUE_NOT_SET: {
@@ -8958,6 +8984,18 @@ bool ErrorDetail::MergePartialFromCodedStream(
         break;
       }
 
+      // optional .cockroach.roachpb.ReadRejectedError read_rejected = 40;
+      case 40: {
+        if (static_cast< ::google::protobuf::uint8>(tag) ==
+            static_cast< ::google::protobuf::uint8>(66u /* 322 & 0xFF */)) {
+          DO_(::google::protobuf::internal::WireFormatLite::ReadMessage(
+               input, mutable_read_rejected()));
+        } else {
+          goto handle_unusual;
+        }
+        break;
+      }
+
       default: {
       handle_unusual:
         if (tag == 0) {
@@ -9104,6 +9142,10 @@ void ErrorDetail::SerializeWithCachedSizes(
     case kIndeterminateCommit:
       ::google::protobuf::internal::WireFormatLite::WriteMessage(
         39, this->_internal_indeterminate_commit(), output);
+      break;
+    case kReadRejected:
+      ::google::protobuf::internal::WireFormatLite::WriteMessage(
+        40, this->_internal_read_rejected(), output);
       break;
     default: ;
   }
@@ -9329,6 +9371,13 @@ size_t ErrorDetail::ByteSizeLong() const {
           *value_.indeterminate_commit_);
       break;
     }
+    // optional .cockroach.roachpb.ReadRejectedError read_rejected = 40;
+    case kReadRejected: {
+      total_size += 2 +
+        ::google::protobuf::internal::WireFormatLite::MessageSize(
+          *value_.read_rejected_);
+      break;
+    }
     case VALUE_NOT_SET: {
       break;
     }
@@ -9469,6 +9518,10 @@ void ErrorDetail::MergeFrom(const ErrorDetail& from) {
     }
     case kIndeterminateCommit: {
       mutable_indeterminate_commit()->::cockroach::roachpb::IndeterminateCommitError::MergeFrom(from.indeterminate_commit());
+      break;
+    }
+    case kReadRejected: {
+      mutable_read_rejected()->::cockroach::roachpb::ReadRejectedError::MergeFrom(from.read_rejected());
       break;
     }
     case VALUE_NOT_SET: {
