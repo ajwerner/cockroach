@@ -136,8 +136,8 @@ func (q *quota) String() string {
 
 func (r *request) Waited(p quotapool.Pool, took time.Duration) {
 	pp := p.(*pool)
-	pp.metrics.TimeSpentWaitingRate1m.Add(float64(took.Nanoseconds()))
-	pp.metrics.TimeSpentWaitingSummary1m.Add(float64(took.Nanoseconds()))
+	pp.metrics.TimeSpentWaitingRate10s.Add(float64(took.Nanoseconds()))
+	pp.metrics.TimeSpentWaitingSummary10s.Add(float64(took.Nanoseconds()))
 }
 
 func (r *request) Acquire(p quotapool.Pool, v quotapool.Quota) (extra quotapool.Quota) {
