@@ -162,7 +162,8 @@ func (c *Controller) tickLocked(now time.Time) {
 	defer c.mu.cond.Broadcast()
 	c.mu.nextTick = now.Add(c.tickInterval)
 	numReqs := atomic.SwapUint32(&c.mu.numReqs, 0)
-	overloaded := c.overloadSignal()
+	const minNumReqs = 32
+	overloaded := numReqs > minNumReqs && c.overloadSignal()
 	prev := c.mu.curPriority
 	if overloaded {
 		c.mu.curPriority = findNextPriority(c.mu.curPriority, numReqs, c.pruneRate, &c.mu.hist)
