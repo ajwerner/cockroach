@@ -27,14 +27,14 @@ var (
 		Measurement: "Requests",
 		Unit:        metric.Unit_COUNT,
 	}
-	metaTimeSpentWaitingRate1m = metric.Metadata{
-		Name:        "readquota.waiting.rate_1m",
+	metaTimeSpentWaitingRate10s = metric.Metadata{
+		Name:        "readquota.waiting.rate_10s",
 		Help:        "The rate at which requests wait in the quota pool to acquire quota",
 		Measurement: "Nanoseconds/second",
 		Unit:        metric.Unit_NANOSECONDS,
 	}
-	metaTimeSpentWaitingSummary1m = metric.Metadata{
-		Name:        "readquota.waiting.summary_1m",
+	metaTimeSpentWaitingSummary10s = metric.Metadata{
+		Name:        "readquota.waiting.summary_10s",
 		Help:        "The distribution of time requests wait in the quota pool to acquire quota",
 		Measurement: "Nanoseconds",
 		Unit:        metric.Unit_NANOSECONDS,
@@ -49,17 +49,17 @@ var (
 
 // Metrics is a metrics struct for the read quota.
 type Metrics struct {
-	TimeSpentWaitingRate1m    *metric.Rate
-	TimeSpentWaitingSummary1m *metric.Summary
-	Acquisitions              *metric.Counter
-	RequiredTook              *metric.Counter
+	TimeSpentWaitingRate10s    *metric.Rate
+	TimeSpentWaitingSummary10s *metric.Summary
+	Acquisitions               *metric.Counter
+	RequiredTook               *metric.Counter
 }
 
 func makeMetrics() Metrics {
 	return Metrics{
-		TimeSpentWaitingRate1m:    metric.NewRate(metaTimeSpentWaitingRate1m, time.Minute),
-		TimeSpentWaitingSummary1m: metric.NewSummary(metaTimeSpentWaitingSummary1m, time.Minute),
-		Acquisitions:              metric.NewCounter(metaAcquisitions),
-		RequiredTook:              metric.NewCounter(metaRequiredTook),
+		TimeSpentWaitingRate10s:    metric.NewRate(metaTimeSpentWaitingRate10s, 10*time.Second),
+		TimeSpentWaitingSummary10s: metric.NewSummary(metaTimeSpentWaitingSummary10s, 10*time.Second),
+		Acquisitions:               metric.NewCounter(metaAcquisitions),
+		RequiredTook:               metric.NewCounter(metaRequiredTook),
 	}
 }

@@ -948,12 +948,12 @@ func NewStore(
 		})
 		return guess
 	}
-	s.readQuota = readquota.NewPool(int64(2048*(1<<20)), guessReadSize)
+	s.readQuota = readquota.NewPool(int64(1024*(1<<20)), guessReadSize)
 	readQuotaMetrics := s.readQuota.Metrics()
 	s.metrics.registry.AddMetricStruct(readQuotaMetrics)
 	s.admissionController = admission.NewController(func() (overloaded bool) {
 		var wait float64
-		readQuotaMetrics.TimeSpentWaitingSummary1m.ReadStale(func(td tdigest.Reader) {
+		readQuotaMetrics.TimeSpentWaitingSummary10s.ReadStale(func(td tdigest.Reader) {
 			wait = td.ValueAt(.99)
 		})
 		if log.V(1) {
