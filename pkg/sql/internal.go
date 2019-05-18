@@ -182,7 +182,8 @@ func (ie *internalExecutorImpl) initConnEx(
 			stmtBuf,
 			clientComm,
 			ie.memMetrics,
-			&ie.s.InternalMetrics)
+			&ie.s.InternalMetrics,
+			true /* isInternal */)
 	} else {
 		ex, err = ie.s.newConnExecutorWithTxn(
 			ctx,
@@ -193,7 +194,8 @@ func (ie *internalExecutorImpl) initConnEx(
 			ie.memMetrics,
 			&ie.s.InternalMetrics,
 			txn,
-			ie.tcModifier)
+			ie.tcModifier,
+			true /* isInternal */)
 	}
 	if err != nil {
 		return nil, nil, err

@@ -381,7 +381,8 @@ func (s *Server) SetupConn(
 	memMetrics MemoryMetrics,
 ) (ConnectionHandler, error) {
 	sd, sdMut := s.newSessionDataAndMutator(args)
-	ex, err := s.newConnExecutor(ctx, sd, sdMut, stmtBuf, clientComm, memMetrics, &s.Metrics)
+	ex, err := s.newConnExecutor(ctx, sd, sdMut, stmtBuf, clientComm,
+		memMetrics, &s.Metrics, false /* isInternal */)
 	return ConnectionHandler{ex}, err
 }
 
@@ -478,6 +479,7 @@ func (s *Server) newConnExecutor(
 	clientComm ClientComm,
 	memMetrics MemoryMetrics,
 	srvMetrics *Metrics,
+	isInternal bool,
 ) (*connExecutor, error) {
 	// Create the various monitors.
 	// The session monitors are started in activate().
@@ -531,7 +533,8 @@ func (s *Server) newConnExecutor(
 
 		// ctxHolder will be reset at the start of run(). We only define
 		// it here so that an early call to close() doesn't panic.
-		ctxHolder: ctxHolder{connCtx: ctx},
+		ctxHolder:  ctxHolder{connCtx: ctx},
+		isInternal: isInternal,
 	}
 
 	ex.state.txnAbortCount = ex.metrics.EngineMetrics.TxnAbortCount
@@ -614,8 +617,10 @@ func (s *Server) newConnExecutorWithTxn(
 	srvMetrics *Metrics,
 	txn *client.Txn,
 	tcModifier tableCollectionModifier,
+	isInternal bool,
 ) (*connExecutor, error) {
-	ex, err := s.newConnExecutor(ctx, sd, sdMutator, stmtBuf, clientComm, memMetrics, srvMetrics)
+	ex, err := s.newConnExecutor(ctx, sd, sdMutator, stmtBuf, clientComm,
+		memMetrics, srvMetrics, isInternal)
 	if err != nil {
 		return nil, err
 	}
@@ -935,6 +940,9 @@ type connExecutor struct {
 	// draining is set if we've received a DrainRequest. Once this is set, we're
 	// going to find a suitable time to close the connection.
 	draining bool
+
+	// isInternal marks whether this is an internal connExecutor.
+	isInternal bool
 }
 
 // ctxHolder contains a connection's context and, while session tracing is
