@@ -741,7 +741,7 @@ func (e *ReadRejectedError) Error() string {
 }
 
 func (e *ReadRejectedError) message(_ *Error) string {
-	return "merge in progress"
+	return "read rejected"
 }
 
 var _ ErrorDetailInterface = &ReadRejectedError{}

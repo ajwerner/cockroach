@@ -696,6 +696,7 @@ func (pd *periodicSummary) tick() {
 	// Ensure that nobody else concurrently performed the tick while we upgraded
 	// the lock from shared to exclusive.
 	if pd.nextT.Equal(was) {
+		pd.sketch.Add(0, pd.alpha)
 		pd.nextT = pd.nextT.Add(pd.interval)
 		pd.sketch.Decay(1 - pd.alpha)
 	}

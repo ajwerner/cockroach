@@ -164,7 +164,7 @@ func priorityFromClientMetadata(ctx context.Context, md metadata.MD) (admission.
 		// one incoming RPC to an outgoing RPC, so there should be a single
 		// timestamp in the context put there by the interceptor on the clienbt
 		// before calling this RPC.
-		log.Fatalf(ctx, "unexpected multiple timestamps in client metadata: %s", v)
+		log.Fatalf(ctx, "unexpected multiple priorities in client metadata: %s", v)
 	}
 	var buf [2]byte
 	if _, err := hex.NewDecoder(strings.NewReader(v[0])).Read(buf[:]); err != nil {
@@ -713,10 +713,11 @@ func (ctx *Context) GRPCDialOptions() ([]grpc.DialOption, error) {
 	unaryInterceptor = func(
 		goCtx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn,
 		invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-		prio := admission.PriorityFromContext(goCtx)
-		goCtx = metadata.AppendToOutgoingContext(goCtx, clientPriorityKey, encodePriority(prio))
 		// The server is going to put its timestamp in the response header.
-
+		if md, ok := metadata.FromOutgoingContext(goCtx); !ok || len(md.Get(clientPriorityKey)) == 0 {
+			prio := admission.PriorityFromContext(goCtx)
+			goCtx = metadata.AppendToOutgoingContext(goCtx, clientPriorityKey, encodePriority(prio))
+		}
 		var err error
 		if prevUnaryInterceptor != nil {
 			// Chain the previous interceptor.

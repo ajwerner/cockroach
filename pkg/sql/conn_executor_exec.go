@@ -647,6 +647,16 @@ func (ex *connExecutor) dispatchToExecutionEngine(
 	ex.sessionTracing.TracePlanStart(ctx, stmt.AST.StatementTag())
 	planner.statsCollector.PhaseTimes()[plannerStartLogicalPlan] = timeutil.Now()
 
+	txnID := planner.extendedEvalCtx.Txn.ID()
+	priorityShard := md5.Sum(txnID[:])[0]
+	var prio admission.Priority
+	applicationName := ex.applicationName.Load().(string)
+	if applicationName == "foo" {
+		prio = admission.MakePriority(admission.MinLevel, priorityShard)
+	} else {
+		prio = admission.MakePriority(admission.DefaultLevel, priorityShard)
+	}
+	ctx = admission.ContextWithPriority(ctx, prio)
 	// Prepare the plan. Note, the error is processed below. Everything
 	// between here and there needs to happen even if there's an error.
 	err := ex.makeExecPlan(ctx, planner)
@@ -873,15 +883,6 @@ func (ex *connExecutor) execWithDistSQLEngine(
 		planCtx = ex.server.cfg.DistSQLPlanner.NewPlanningCtx(ctx, evalCtx, planner.txn)
 	} else {
 		planCtx = ex.server.cfg.DistSQLPlanner.newLocalPlanningCtx(ctx, evalCtx)
-	}
-	txnID := evalCtx.Txn.ID()
-	priorityShard := md5.Sum(txnID[:])[0]
-	if ex.applicationName.Load().(string) == "foo" {
-		ctx = admission.ContextWithPriority(ctx,
-			admission.MakePriority(admission.MinLevel, priorityShard))
-	} else {
-		ctx = admission.ContextWithPriority(ctx,
-			admission.MakePriority(admission.DefaultLevel, priorityShard))
 	}
 	planCtx.isLocal = !distribute
 	planCtx.planner = planner
