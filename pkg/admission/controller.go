@@ -126,10 +126,12 @@ func (c *Controller) Admit(p Priority) bool {
 }
 
 func (c *Controller) AdmitAt(p Priority, now time.Time) bool {
+	if p.Level == MaxLevel {
+		return true
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	c.maybeTickRLocked(now)
-
 	if p.less(c.mu.curPriority) {
 		return false
 	}
