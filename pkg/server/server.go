@@ -478,7 +478,10 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	roachpb.RegisterInternalServer(s.grpc.Server, s.node)
 	storage.RegisterPerReplicaServer(s.grpc.Server, s.node.perReplicaServer)
 	s.node.storeCfg.ClosedTimestamp.RegisterClosedTimestampServer(s.grpc.Server)
-
+	s.node.stores.VisitStores(func(store *storage.Store) error {
+		s.distSender.AdmissionController = store.AdmissionController()
+		return nil
+	})
 	s.sessionRegistry = sql.NewSessionRegistry()
 	s.jobRegistry = jobs.MakeRegistry(
 		s.cfg.AmbientCtx,

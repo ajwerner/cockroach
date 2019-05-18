@@ -616,6 +616,10 @@ type Store struct {
 	admissionController *admission.Controller
 }
 
+func (s *Store) AdmissionController() *admission.Controller {
+	return s.admissionController
+}
+
 var _ client.Sender = &Store{}
 
 // A StoreConfig encompasses the auxiliary objects and configuration

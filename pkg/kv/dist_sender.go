@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
@@ -32,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/pkg/errors"
@@ -161,6 +163,7 @@ func (f firstRangeMissingError) Error() string {
 // the method invocation.
 type DistSender struct {
 	log.AmbientContext
+	AdmissionController *admission.Controller
 
 	st *cluster.Settings
 	// nodeDescriptor, if set, holds the descriptor of the node the
@@ -653,6 +656,19 @@ func (ds *DistSender) Send(
 	ctx context.Context, ba roachpb.BatchRequest,
 ) (*roachpb.BatchResponse, *roachpb.Error) {
 	ds.metrics.BatchCount.Inc(1)
+	if ds.AdmissionController != nil {
+		prio := admission.PriorityFromContext(ctx)
+		backOff := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
+
+		for !ds.AdmissionController.Admit(prio) {
+			if ok := backOff.Next(); !ok {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, roachpb.NewError(ctxErr)
+				}
+				return nil, roachpb.NewError(stop.ErrUnavailable)
+			}
+		}
+	}
 
 	tracing.AnnotateTrace()
 
