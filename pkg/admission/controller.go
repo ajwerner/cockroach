@@ -86,7 +86,7 @@ func (c *Controller) Level() Priority {
 // TODO(ajwerner): justify these, they're taken from the DAGOR paper.
 const (
 	defaultMaxReqsPerInterval = 2000
-	defaultTickInterval       = 1000 * time.Millisecond
+	defaultTickInterval       = 500 * time.Millisecond
 	defaultPruneRate          = .05
 )
 
