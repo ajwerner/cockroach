@@ -636,6 +636,19 @@ func enhanceErrWithCorrelation(err error, isCorrelated bool) error {
 	return err
 }
 
+func (ex *connExecutor) setPriority(ctx context.Context, planner *planner) context.Context {
+	level := admission.DefaultLevel
+	if ex.isInternal {
+		level = admission.MaxLevel
+	} else if applicationName := ex.applicationName.Load().(string); applicationName == "foo" {
+		level = admission.MinLevel
+	}
+	txnID := planner.extendedEvalCtx.Txn.ID()
+	priorityShard := md5.Sum(txnID[:])[0]
+	priority := admission.MakePriority(level, priorityShard)
+	return admission.ContextWithPriority(ctx, priority)
+}
+
 // dispatchToExecutionEngine executes the statement, writes the result to res
 // and returns an event for the connection's state machine.
 //
@@ -650,16 +663,6 @@ func (ex *connExecutor) dispatchToExecutionEngine(
 	ex.sessionTracing.TracePlanStart(ctx, stmt.AST.StatementTag())
 	planner.statsCollector.PhaseTimes()[plannerStartLogicalPlan] = timeutil.Now()
 
-	txnID := planner.extendedEvalCtx.Txn.ID()
-	priorityShard := md5.Sum(txnID[:])[0]
-	var prio admission.Priority
-	applicationName := ex.applicationName.Load().(string)
-	if applicationName == "foo" {
-		prio = admission.MakePriority(admission.MinLevel, priorityShard)
-	} else {
-		prio = admission.MakePriority(admission.DefaultLevel, priorityShard)
-	}
-	ctx = admission.ContextWithPriority(ctx, prio)
 	// Prepare the plan. Note, the error is processed below. Everything
 	// between here and there needs to happen even if there's an error.
 	err := ex.makeExecPlan(ctx, planner)
