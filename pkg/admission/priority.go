@@ -80,7 +80,7 @@ func init() {
 }
 
 const (
-	numShards = 3
+	numShards = 128
 	shardStep = math.MaxUint8 / (numShards - 1)
 	maxShard  = math.MaxUint8
 	minShard  = math.MaxUint8 - ((numShards - 1) * shardStep)

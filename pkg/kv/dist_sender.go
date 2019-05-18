@@ -1648,11 +1648,14 @@ func (ds *DistSender) sendToReplicas(
 	maxSeenLeaseSequence := roachpb.LeaseSequence(-1)
 	inTransferRetry := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
 	inTransferRetry.Next() // The first call to Next does not block.
+	inAdmissionRetry := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
+	inAdmissionRetry.Next()
 
 	// This loop will retry operations that fail with errors that reflect
 	// per-replica state and may succeed on other replicas.
 	var ambiguousError error
 	for {
+		inAdmissionControlRetry := false
 		if err != nil {
 			// For most connection errors, we cannot tell whether or not
 			// the request may have succeeded on the remote server, so we
@@ -1705,6 +1708,9 @@ func (ds *DistSender) sendToReplicas(
 			case *roachpb.StoreNotFoundError, *roachpb.NodeUnavailableError:
 				// These errors are likely to be unique to the replica that reported
 				// them, so no action is required before the next retry.
+			case *roachpb.ReadRejectedError:
+				inAdmissionControlRetry = true
+				inAdmissionRetry.Next()
 			case *roachpb.RangeNotFoundError:
 				// The store we routed to doesn't have this replica. This can happen when
 				// our descriptor is outright outdated, but it can also be caused by a
@@ -1795,8 +1801,10 @@ func (ds *DistSender) sendToReplicas(
 		}
 
 		ds.metrics.NextReplicaErrCount.Inc(1)
-		curReplica = transport.NextReplica()
-		log.VEventf(ctx, 2, "error: %v %v; trying next peer %s", br, err, curReplica)
+		if !inAdmissionControlRetry {
+			curReplica = transport.NextReplica()
+			log.VEventf(ctx, 2, "error: %v %v; trying next peer %s", br, err, curReplica)
+		}
 		br, err = transport.SendNext(ctx, ba)
 	}
 }

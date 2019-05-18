@@ -1,12 +1,16 @@
 package admission
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 // Controller keeps track of the allowed level for requests.
@@ -35,9 +39,15 @@ type Controller struct {
 	}
 }
 
+type Metrics struct {
+	AdmissionLevel *metric.Gauge
+	NumTicks       *metric.Counter
+}
+
 func makeMetrics() Metrics {
 	return Metrics{
 		AdmissionLevel: metric.NewGauge(metaAdmissionLevel),
+		NumTicks:       metric.NewCounter(metaNumTicks),
 	}
 }
 
@@ -48,10 +58,23 @@ var (
 		Unit:        metric.Unit_COUNT,
 		Measurement: "admission level",
 	}
+	metaNumTicks = metric.Metadata{
+		Name:        "admission.ticks",
+		Help:        "Number of ticks",
+		Unit:        metric.Unit_COUNT,
+		Measurement: "ticks",
+	}
 )
 
-type Metrics struct {
-	AdmissionLevel *metric.Gauge
+func (c *Controller) stringLocked() string {
+	return fmt.Sprintf("Controller{curLevel: %v, numReqs: %d, nextTick: %s (%s), hist: %v}",
+		c.mu.curPriority, c.mu.numReqs, c.mu.nextTick, timeutil.Until(c.mu.nextTick), c.mu.hist)
+}
+
+func (c *Controller) String() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.stringLocked()
 }
 
 func (c *Controller) Level() Priority {
@@ -63,7 +86,7 @@ func (c *Controller) Level() Priority {
 // TODO(ajwerner): justify these, they're taken from the DAGOR paper.
 const (
 	defaultMaxReqsPerInterval = 2000
-	defaultTickInterval       = 500 * time.Millisecond
+	defaultTickInterval       = 1000 * time.Millisecond
 	defaultPruneRate          = .05
 )
 
@@ -76,6 +99,7 @@ func NewController(overLoadSignal func() bool) *Controller {
 	}
 	c.metrics = makeMetrics()
 	c.mu.cond.L = c.mu.RLocker()
+	c.mu.curPriority = minPriority
 	return c
 }
 
@@ -95,6 +119,10 @@ func (c *Controller) maybeTickRLocked(now time.Time) {
 		return
 	}
 	c.tickLocked(now)
+}
+
+func (c *Controller) Admit(p Priority) bool {
+	return c.AdmitAt(p, timeutil.Now())
 }
 
 func (c *Controller) AdmitAt(p Priority, now time.Time) bool {
@@ -132,13 +160,19 @@ func (c *Controller) tickLocked(now time.Time) {
 	defer c.mu.cond.Broadcast()
 	c.mu.nextTick = now.Add(c.tickInterval)
 	numReqs := atomic.SwapUint32(&c.mu.numReqs, 0)
-	if c.overloadSignal() {
+	overloaded := c.overloadSignal()
+	prev := c.mu.curPriority
+	if overloaded {
 		c.mu.curPriority = findNextPriority(c.mu.curPriority, numReqs, c.pruneRate, &c.mu.hist)
 	} else {
 		c.mu.curPriority = c.mu.curPriority.dec()
 	}
+	if log.V(1) {
+		log.Infof(context.TODO(), "tick: overload %v %v prev %v next %v %v", overloaded, numReqs, prev, c.mu.curPriority, c.stringLocked())
+	}
 	c.mu.hist = histogram{}
 	c.metrics.AdmissionLevel.Update(int64(c.mu.curPriority.Encode()))
+	c.metrics.NumTicks.Inc(1)
 }
 
 var maxPriority = Priority{MaxLevel, maxShard}
@@ -156,19 +190,19 @@ func findNextPriority(prev Priority, total uint32, pruneRate float64, h *histogr
 	return maxPriority
 }
 
-func (p Priority) dec() Priority {
+func (p Priority) dec() (r Priority) {
 	if p == minPriority {
 		return p
 	}
-	if p.Shard == maxShard {
+	if p.Shard == minShard {
 		return Priority{
-			Level: levelFromBucket(bucketFromLevel(p.Level) + 1),
-			Shard: minShard,
+			Level: levelFromBucket(bucketFromLevel(p.Level) - 1),
+			Shard: maxShard,
 		}
 	}
 	return Priority{
 		Level: p.Level,
-		Shard: shardFromBucket(bucketFromShard(p.Shard) + 1),
+		Shard: shardFromBucket(bucketFromShard(p.Shard) - 1),
 	}
 }
 
