@@ -31,7 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/opentracing/opentracing-go"
+	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 )
 
@@ -208,12 +208,14 @@ func (gt *grpcTransport) SendNext(
 	if reply != nil && reply.Error != nil {
 		// TODO(spencer): pass the lease expiration when setting the state
 		// to set a more efficient deadline for retrying this replica.
-		if _, ok := reply.Error.GetDetail().(*roachpb.NotLeaseHolderError); ok {
+		detail := reply.Error.GetDetail()
+		if _, ok := detail.(*roachpb.NotLeaseHolderError); ok {
+			retryable = true
+		} else if _, ok = detail.(*roachpb.ReadRejectedError); ok {
 			retryable = true
 		}
 	}
 	gt.setState(client.replica, retryable)
-
 	return reply, err
 }
 

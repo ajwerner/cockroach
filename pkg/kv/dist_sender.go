@@ -1433,6 +1433,7 @@ func (ds *DistSender) sendToReplicas(
 			case *roachpb.ReadRejectedError:
 				inAdmissionControlRetry = true
 				inAdmissionRetry.Next()
+				transport.MoveToFront(curReplica)
 			case *roachpb.RangeNotFoundError:
 				// The store we routed to doesn't have this replica. This can happen when
 				// our descriptor is outright outdated, but it can also be caused by a
@@ -1526,6 +1527,7 @@ func (ds *DistSender) sendToReplicas(
 		if !inAdmissionControlRetry {
 			curReplica = transport.NextReplica()
 			log.VEventf(ctx, 2, "error: %v %v; trying next peer %s", br, err, curReplica)
+		} else {
 		}
 		br, err = transport.SendNext(ctx, ba)
 	}
