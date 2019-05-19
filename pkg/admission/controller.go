@@ -84,12 +84,13 @@ func (c *Controller) Level() Priority {
 	return c.mu.curPriority
 }
 
-// TODO(ajwerner): justify these, they're taken from the DAGOR paper.
+// TODO(ajwerner): justify these, they're taken from the DAGOR paper and cut
+// in half.
 const (
-	defaultMaxReqsPerInterval = 2000
-	defaultTickInterval       = 500 * time.Millisecond
-	defaultPruneRate          = .05
-	defaultGrowRate           = .01
+	defaultMaxReqsPerInterval = 1000
+	defaultTickInterval       = time.Second / 2
+	defaultPruneRate          = .025
+	defaultGrowRate           = .005
 )
 
 func NewController(overLoadSignal func() bool) *Controller {

@@ -36,7 +36,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/pkg/errors"
@@ -665,22 +664,23 @@ func (ds *DistSender) Send(
 	ctx context.Context, ba roachpb.BatchRequest,
 ) (*roachpb.BatchResponse, *roachpb.Error) {
 	ds.metrics.BatchCount.Inc(1)
-	if ds.AdmissionController != nil {
-		prio := admission.PriorityFromContext(ctx)
-		opts := ds.rpcRetryOptions
-		opts.Multiplier = 1.25
-		opts.MaxBackoff = 2 * time.Second
-		backOff := retry.StartWithCtx(ctx, opts)
+	// if ds.AdmissionController != nil {
+	// 	prio := admission.PriorityFromContext(ctx)
+	// 	opts := ds.rpcRetryOptions
+	// 	opts.Multiplier = 1.25
+	// 	opts.InitialBackoff = time.Millisecond
+	// 	opts.MaxBackoff = time.Second
+	// 	backOff := retry.StartWithCtx(ctx, opts)
 
-		for !ds.AdmissionController.Admit(prio) {
-			if ok := backOff.Next(); !ok {
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					return nil, roachpb.NewError(ctxErr)
-				}
-				return nil, roachpb.NewError(stop.ErrUnavailable)
-			}
-		}
-	}
+	// 	for !ds.AdmissionController.Admit(prio) {
+	// 		if ok := backOff.Next(); !ok {
+	// 			if ctxErr := ctx.Err(); ctxErr != nil {
+	// 				return nil, roachpb.NewError(ctxErr)
+	// 			}
+	// 			return nil, roachpb.NewError(stop.ErrUnavailable)
+	// 		}
+	// 	}
+	// }
 
 	tracing.AnnotateTrace()
 
@@ -1391,6 +1391,7 @@ func (ds *DistSender) sendToReplicas(
 	maxSeenLeaseSequence := roachpb.LeaseSequence(-1)
 	inTransferRetryOptions := ds.rpcRetryOptions
 	inTransferRetryOptions.Multiplier = 1.25
+	inTransferRetryOptions.InitialBackoff = time.Millisecond
 	inTransferRetryOptions.MaxBackoff = time.Second
 	inTransferRetry := retry.StartWithCtx(ctx, inTransferRetryOptions)
 	inTransferRetry.Next() // The first call to Next does not block.
