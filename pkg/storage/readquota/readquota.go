@@ -7,6 +7,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
@@ -35,6 +36,24 @@ type Pool struct {
 	quotaRequired   func() int64
 	quotaSyncPool   sync.Pool
 	requestSyncPool sync.Pool
+
+	mu struct {
+		syncutil.Mutex
+		totalWait time.Duration
+		maxWait   time.Duration
+		requests  int64
+	}
+}
+
+func (p *Pool) WaitStats() (avg, max time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	avg = time.Duration(float64(p.mu.totalWait) / float64(p.mu.requests))
+	max = time.Duration(p.mu.maxWait)
+	p.mu.totalWait = 0
+	p.mu.maxWait = 0
+	p.mu.requests = 0
+	return avg, max
 }
 
 // Acquire acquires the desired quantity of quota.
@@ -136,6 +155,13 @@ func (q *quota) String() string {
 
 func (r *request) Waited(p quotapool.Pool, took time.Duration) {
 	pp := p.(*pool)
+	pp.mu.Lock()
+	if took > pp.mu.maxWait {
+		pp.mu.maxWait = took
+	}
+	pp.mu.totalWait += took
+	pp.mu.requests++
+	pp.mu.Unlock()
 	pp.metrics.TimeSpentWaitingRate10s.Add(float64(took.Nanoseconds()))
 	pp.metrics.TimeSpentWaitingSummary10s.Add(float64(took.Nanoseconds()))
 }

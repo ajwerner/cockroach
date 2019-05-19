@@ -956,15 +956,15 @@ func NewStore(
 	readQuotaMetrics := s.readQuota.Metrics()
 	s.metrics.registry.AddMetricStruct(readQuotaMetrics)
 	s.admissionController = admission.NewController(func() (overloaded bool) {
-		var wait float64
-		readQuotaMetrics.TimeSpentWaitingSummary10s.ReadStale(func(td tdigest.Reader) {
-			wait = td.ValueAt(.99)
-		})
-		if log.V(1) {
-			log.Infof(ctx, "is overloaded: %v %v %v", wait, time.Duration(wait), time.Duration(wait) > 50*time.Millisecond)
-		}
-		overloaded = time.Duration(wait) > 50*time.Millisecond
-		return overloaded
+		// var wait float64
+		// readQuotaMetrics.TimeSpentWaitingSummary10s.ReadStale(func(td tdigest.Reader) {
+		// 	wait = td.ValueAt(.99)
+		// })
+		// if log.V(1) {
+		// 	log.Infof(ctx, "is overloaded: %v %v %v", wait, time.Duration(wait), time.Duration(wait) > 50*time.Millisecond)
+		// }
+		avg, max := s.readQuota.WaitStats()
+		return avg > 20*time.Millisecond || max > 100*time.Millisecond
 	})
 	s.metrics.registry.AddMetricStruct(s.admissionController.Metrics())
 	if cfg.TestingKnobs.DisableGCQueue {
