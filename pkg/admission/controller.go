@@ -22,6 +22,7 @@ type Controller struct {
 	maxReqsPerInterval uint32
 	tickInterval       time.Duration
 	pruneRate          float64
+	growRate           float64
 	overloadSignal     func() bool
 	metrics            Metrics
 
@@ -88,6 +89,7 @@ const (
 	defaultMaxReqsPerInterval = 2000
 	defaultTickInterval       = 500 * time.Millisecond
 	defaultPruneRate          = .05
+	defaultGrowRate           = .01
 )
 
 func NewController(overLoadSignal func() bool) *Controller {
@@ -95,6 +97,7 @@ func NewController(overLoadSignal func() bool) *Controller {
 		maxReqsPerInterval: defaultMaxReqsPerInterval,
 		tickInterval:       defaultTickInterval,
 		pruneRate:          defaultPruneRate,
+		growRate:           defaultGrowRate,
 		overloadSignal:     overLoadSignal,
 	}
 	c.metrics = makeMetrics()
@@ -126,13 +129,11 @@ func (c *Controller) Admit(p Priority) bool {
 }
 
 func (c *Controller) AdmitAt(p Priority, now time.Time) bool {
-	if p.Level == MaxLevel {
-		return true
-	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	defer c.mu.hist.record(p)
 	c.maybeTickRLocked(now)
-	if p.less(c.mu.curPriority) {
+	if p.Level != MaxLevel && p.less(c.mu.curPriority) {
 		return false
 	}
 	numReqs := atomic.AddUint32(&c.mu.numReqs, 1)
@@ -145,7 +146,6 @@ func (c *Controller) AdmitAt(p Priority, now time.Time) bool {
 		// c was just ticked so we add ourselves again
 		numReqs = atomic.AddUint32(&c.mu.numReqs, 1)
 	}
-	c.mu.hist.record(p)
 	return true
 }
 
@@ -166,9 +166,9 @@ func (c *Controller) tickLocked(now time.Time) {
 	overloaded := numReqs > minNumReqs && c.overloadSignal()
 	prev := c.mu.curPriority
 	if overloaded {
-		c.mu.curPriority = findNextPriority(c.mu.curPriority, numReqs, c.pruneRate, &c.mu.hist)
+		c.mu.curPriority = findHigherPriority(c.mu.curPriority, numReqs, c.pruneRate, &c.mu.hist)
 	} else {
-		c.mu.curPriority = c.mu.curPriority.dec()
+		c.mu.curPriority = findLowerPriority(c.mu.curPriority, numReqs, c.growRate, &c.mu.hist)
 	}
 	if log.V(1) {
 		log.Infof(context.TODO(), "tick: overload %v %v prev %v next %v %v", overloaded, numReqs, prev, c.mu.curPriority, c.stringLocked())
@@ -181,7 +181,7 @@ func (c *Controller) tickLocked(now time.Time) {
 var maxPriority = Priority{MaxLevel, maxShard}
 var minPriority = Priority{MinLevel, minShard}
 
-func findNextPriority(prev Priority, total uint32, pruneRate float64, h *histogram) Priority {
+func findHigherPriority(prev Priority, total uint32, pruneRate float64, h *histogram) Priority {
 	reqs := total
 	target := uint32(float64(total) * (1 - pruneRate))
 	for cur := prev; cur != maxPriority; cur = cur.inc() {
@@ -191,6 +191,18 @@ func findNextPriority(prev Priority, total uint32, pruneRate float64, h *histogr
 		}
 	}
 	return maxPriority
+}
+
+func findLowerPriority(prev Priority, total uint32, growRate float64, h *histogram) Priority {
+	reqs := total
+	target := uint32(float64(total) * (1 + growRate))
+	for cur := prev.dec(); cur != minPriority; cur = cur.dec() {
+		reqs += h.countAt(cur)
+		if reqs > target {
+			return cur
+		}
+	}
+	return minPriority
 }
 
 func (p Priority) dec() (r Priority) {

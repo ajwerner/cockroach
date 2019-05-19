@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/admission"
@@ -666,7 +667,10 @@ func (ds *DistSender) Send(
 	ds.metrics.BatchCount.Inc(1)
 	if ds.AdmissionController != nil {
 		prio := admission.PriorityFromContext(ctx)
-		backOff := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
+		opts := ds.rpcRetryOptions
+		opts.Multiplier = 1.25
+		opts.MaxBackoff = 2 * time.Second
+		backOff := retry.StartWithCtx(ctx, opts)
 
 		for !ds.AdmissionController.Admit(prio) {
 			if ok := backOff.Next(); !ok {
@@ -1385,7 +1389,10 @@ func (ds *DistSender) sendToReplicas(
 	// the range must be experiencing a least transfer and the client should back
 	// off using inTransferRetry.
 	maxSeenLeaseSequence := roachpb.LeaseSequence(-1)
-	inTransferRetry := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
+	inTransferRetryOptions := ds.rpcRetryOptions
+	inTransferRetryOptions.Multiplier = 1.25
+	inTransferRetryOptions.MaxBackoff = time.Second
+	inTransferRetry := retry.StartWithCtx(ctx, inTransferRetryOptions)
 	inTransferRetry.Next() // The first call to Next does not block.
 	inAdmissionRetry := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
 	inAdmissionRetry.Next()
