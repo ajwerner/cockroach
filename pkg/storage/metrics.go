@@ -972,9 +972,9 @@ var (
 		Unit:        metric.Unit_BYTES,
 	}
 
-	metaReadResponseSizeSummary5m = metric.Metadata{
-		Name:        "read_response.size_distribution.5m",
-		Help:        "Trailing 5 minute distribution on read response sizes",
+	metaReadResponseSizeSummary1m = metric.Metadata{
+		Name:        "read_response.size_distribution.1m",
+		Help:        "Trailing 1 minute distribution on read response sizes",
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
@@ -1186,8 +1186,8 @@ type StoreMetrics struct {
 	// Closed timestamp metrics.
 	ClosedTimestampMaxBehindNanos *metric.Gauge
 
-	// ReadResponseSizeSummary5m
-	ReadResponseSizeSummary5m *metric.Summary
+	// ReadResponseSizeSummary1m
+	ReadResponseSizeSummary1m *metric.Summary
 
 	ReadQuotaBytesRead    *metric.Counter
 	ReadQuotaBytesGuessed *metric.Counter
@@ -1397,7 +1397,7 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		// Closed timestamp metrics.
 		ClosedTimestampMaxBehindNanos: metric.NewGauge(metaClosedTimestampMaxBehindNanos),
 
-		ReadResponseSizeSummary5m: metric.NewSummary(metaReadResponseSizeSummary5m, 5*time.Minute),
+		ReadResponseSizeSummary1m: metric.NewSummary(metaReadResponseSizeSummary1m, time.Minute),
 		ReadQuotaBytesRead:        metric.NewCounter(metaReadQuotaBytesRead),
 		ReadQuotaBytesGuessed:     metric.NewCounter(metaReadQuotaBytesGuessed),
 	}
