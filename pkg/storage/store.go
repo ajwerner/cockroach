@@ -945,9 +945,9 @@ func NewStore(
 			s.scanner.AddQueues(s.tsMaintenanceQueue)
 		}
 	}
-	const bias = .1
+	const bias = .5
 	guessReadSize := func() (guess int64) {
-		s.metrics.ReadResponseSizeSummary5m.ReadStale(func(r tdigest.Reader) {
+		s.metrics.ReadResponseSizeSummary1m.ReadStale(func(r tdigest.Reader) {
 			q := bias * rand.Float64()
 			q += (1 - q) * rand.Float64()
 			guess = int64(r.ValueAt(q)) + 1
@@ -965,6 +965,7 @@ func NewStore(
 		// if log.V(1) {
 		// 	log.Infof(ctx, "is overloaded: %v %v %v", wait, time.Duration(wait), time.Duration(wait) > 50*time.Millisecond)
 		// }
+
 		avg, max := s.readQuota.WaitStats()
 		return avg > 20*time.Millisecond || max > 500*time.Millisecond
 	}, 500*time.Millisecond, 0, 0)

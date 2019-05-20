@@ -269,19 +269,8 @@ func findLowerPriority(prev Priority, total uint32, growRate float64, h *histogr
 	} else {
 		target += minDelta
 	}
-	getCountPerShard := func() uint32 {
-		return (h.countForLevel(prev) / (numShards - uint32(bucketFromShard(prev.Shard)))) + 1
-	}
-	countPerShard := getCountPerShard()
 	for cur := prev.dec(); cur != minPriority; prev, cur = cur, cur.dec() {
-		if cur.Level != prev.Level {
-			countPerShard = getCountPerShard()
-		}
-		if at := h.countAt(cur); at < countPerShard {
-			reqs += at
-		} else {
-			reqs += countPerShard
-		}
+		reqs += h.countAt(cur)
 		if reqs > target {
 			return cur
 		}

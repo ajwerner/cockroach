@@ -162,7 +162,7 @@ func (r *Replica) executeReadOnlyBatch(
 	} else {
 		log.Event(ctx, "read completed")
 		respSize = br.Size()
-		r.store.metrics.ReadResponseSizeSummary5m.Add(float64(respSize))
+		r.store.metrics.ReadResponseSizeSummary1m.Add(float64(respSize))
 	}
 	return br, pErr
 }

@@ -1404,7 +1404,6 @@ func (ds *DistSender) sendToReplicas(
 			ds.RetryFeedback(ctx, waited)
 		}()
 	}
-
 	// This loop will retry operations that fail with errors that reflect
 	// per-replica state and may succeed on other replicas.
 	for {
@@ -1466,6 +1465,9 @@ func (ds *DistSender) sendToReplicas(
 				start := timeutil.Now()
 				inAdmissionRetry.Next()
 				waited += timeutil.Since(start)
+				if ds.RetryFeedback != nil {
+					ds.RetryFeedback(ctx, waited)
+				}
 				transport.MoveToFront(curReplica)
 			case *roachpb.RangeNotFoundError:
 				// The store we routed to doesn't have this replica. This can happen when
