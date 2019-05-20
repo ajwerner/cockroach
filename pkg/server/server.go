@@ -499,16 +499,21 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		}
 		total++
 	}
+	// I guess I sort of want to know how long queries last at a level because I
+	// don't want to open up the flood gate because we didn't see any queries.
+	// Maybe we should track a trailing time^2 and time so that we can compute a
+	// tailing average QPS and use that to determine how rapidly to tick
+	// We want the average trailing QPS and the average trailing latency.
 	sqlAdmissionController := admission.NewController("sql", func(l admission.Priority) bool {
 		waitMu.Lock()
 		defer waitMu.Unlock()
 		if log.V(1) {
 			log.Infof(ctx, "sql tick %v %v", waited, total, curLevel, l)
 		}
-		overloaded := (waited*1000) > total && total > 1
+		overloaded := (waited*100) > total && total > 1
 		waited, total, curLevel = 0, 0, l
 		return overloaded
-	}, 500*time.Millisecond, .05, .01)
+	}, 500*time.Millisecond, .02, .0025)
 	s.distSender.RetryFeedback = recordWait
 	s.node = NewNode(
 		storeCfg, s.recorder, s.registry, s.stopper,

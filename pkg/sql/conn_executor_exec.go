@@ -659,8 +659,10 @@ func (ex *connExecutor) dispatchToExecutionEngine(
 	ctx context.Context, planner *planner, res RestrictedCommandResult,
 ) error {
 	ctx = ex.setPriority(ctx, planner)
-	if err := admission.WaitForAdmitted(ctx, planner.ExecCfg().AdmissionController); err != nil {
-		return err
+	if !ex.isInternal && planner.Txn().Serialize().Key == nil {
+		if err := admission.WaitForAdmitted(ctx, planner.ExecCfg().AdmissionController); err != nil {
+			return err
+		}
 	}
 	stmt := planner.stmt
 	ex.sessionTracing.TracePlanStart(ctx, stmt.AST.StatementTag())

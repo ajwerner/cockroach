@@ -1397,7 +1397,7 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		// Closed timestamp metrics.
 		ClosedTimestampMaxBehindNanos: metric.NewGauge(metaClosedTimestampMaxBehindNanos),
 
-		ReadResponseSizeSummary1m: metric.NewSummary(metaReadResponseSizeSummary1m, time.Minute),
+		ReadResponseSizeSummary1m: metric.NewSummary(metaReadResponseSizeSummary1m, 5*time.Second),
 		ReadQuotaBytesRead:        metric.NewCounter(metaReadQuotaBytesRead),
 		ReadQuotaBytesGuessed:     metric.NewCounter(metaReadQuotaBytesGuessed),
 	}

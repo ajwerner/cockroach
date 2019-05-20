@@ -262,14 +262,10 @@ func findHigherPriority(prev Priority, total uint32, pruneRate float64, h *histo
 
 func findLowerPriority(prev Priority, total uint32, growRate float64, h *histogram) Priority {
 	reqs := total
-	target := total
-	const minDelta = 2
-	if delta := uint32(float64(total)*growRate) + 1; delta > 2 {
-		target += delta
-	} else {
-		target += minDelta
-	}
-	for cur := prev.dec(); cur != minPriority; prev, cur = cur, cur.dec() {
+	cur := prev.dec()
+	delta := uint32(float64(h.countForLevelAbove(cur))*growRate) + 1
+	target := total + delta
+	for ; cur != minPriority; prev, cur = cur, cur.dec() {
 		reqs += h.countAt(cur)
 		if reqs > target {
 			return cur
@@ -314,9 +310,9 @@ type histogram struct {
 	counters [numLevels][numShards]uint32
 }
 
-func (h *histogram) countForLevel(p Priority) (count uint32) {
+func (h *histogram) countForLevelAbove(p Priority) (count uint32) {
 	level := bucketFromLevel(p.Level)
-	for shard := range h.counters[level] {
+	for shard := bucketFromShard(p.Level) + 1; shard < numShards; shard++ {
 		count += atomic.LoadUint32(&h.counters[level][shard])
 	}
 	return count
