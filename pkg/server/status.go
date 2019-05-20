@@ -36,6 +36,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
@@ -192,6 +193,7 @@ func (s *statusServer) RegisterGateway(
 	ctx context.Context, mux *gwruntime.ServeMux, conn *grpc.ClientConn,
 ) error {
 	ctx = s.AnnotateCtx(ctx)
+	ctx = admission.ContextWithPriority(ctx, admission.MakePriority(admission.MaxLevel, 255))
 	return serverpb.RegisterStatusHandler(ctx, mux, conn)
 }
 

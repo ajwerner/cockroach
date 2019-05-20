@@ -21,7 +21,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
@@ -36,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/pkg/errors"
@@ -165,7 +165,7 @@ func (f firstRangeMissingError) Error() string {
 // the method invocation.
 type DistSender struct {
 	log.AmbientContext
-	AdmissionController *admission.Controller
+	RetryFeedback func(ctx context.Context, wait time.Duration)
 
 	st *cluster.Settings
 	// nodeDescriptor, if set, holds the descriptor of the node the
@@ -1389,14 +1389,21 @@ func (ds *DistSender) sendToReplicas(
 	// the range must be experiencing a least transfer and the client should back
 	// off using inTransferRetry.
 	maxSeenLeaseSequence := roachpb.LeaseSequence(-1)
-	inTransferRetryOptions := ds.rpcRetryOptions
-	inTransferRetryOptions.Multiplier = 1.25
-	inTransferRetryOptions.InitialBackoff = time.Millisecond
-	inTransferRetryOptions.MaxBackoff = time.Second
-	inTransferRetry := retry.StartWithCtx(ctx, inTransferRetryOptions)
+
+	inTransferRetry := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
 	inTransferRetry.Next() // The first call to Next does not block.
-	inAdmissionRetry := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
+	inAdmissionRetryOptions := ds.rpcRetryOptions
+	inAdmissionRetryOptions.Multiplier = 1.25
+	inAdmissionRetryOptions.InitialBackoff = time.Millisecond
+	inAdmissionRetryOptions.MaxBackoff = time.Second
+	inAdmissionRetry := retry.StartWithCtx(ctx, inAdmissionRetryOptions)
 	inAdmissionRetry.Next()
+	var waited time.Duration
+	if ds.RetryFeedback != nil {
+		defer func() {
+			ds.RetryFeedback(ctx, waited)
+		}()
+	}
 
 	// This loop will retry operations that fail with errors that reflect
 	// per-replica state and may succeed on other replicas.
@@ -1456,7 +1463,9 @@ func (ds *DistSender) sendToReplicas(
 				// them, so no action is required before the next retry.
 			case *roachpb.ReadRejectedError:
 				inAdmissionControlRetry = true
+				start := timeutil.Now()
 				inAdmissionRetry.Next()
+				waited += timeutil.Since(start)
 				transport.MoveToFront(curReplica)
 			case *roachpb.RangeNotFoundError:
 				// The store we routed to doesn't have this replica. This can happen when

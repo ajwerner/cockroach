@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cmux"
+	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
@@ -473,16 +474,46 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	s.runtime = status.NewRuntimeStatSampler(ctx, s.clock)
 	s.registry.AddMetricStruct(s.runtime)
 
+	// I want to add a thing that captures when queries see backoff and their
+	// priority level and if that priority level is higher than the current
+	// priority level then we will say that we're overloaded.
+
+	// We want to decrease the number of queries in the system by x percent
+	// not the number of queries which happened in that interval because that's
+	// on the wrong timescale. Let's wait until this is a real problem.
+
+	// We want to just tracks queries in an interval and see the number of them
+	// which are above the current level that experience some amount of delay.
+
+	var waitMu syncutil.Mutex
+	var waited, total int64
+	curLevel := admission.MakePriority(admission.MinLevel, 0)
+	recordWait := func(ctx context.Context, wait time.Duration) {
+		p := admission.PriorityFromContext(ctx)
+		waitMu.Lock()
+		defer waitMu.Unlock()
+		if p.Level >= curLevel.Level && p.Shard >= curLevel.Shard && wait > 100*time.Millisecond {
+			waited++
+		}
+		total++
+	}
+	sqlAdmissionController := admission.NewController("sql", func(l admission.Priority) bool {
+		waitMu.Lock()
+		defer waitMu.Unlock()
+		if log.V(1) {
+			log.Infof(ctx, "sql tick %v %v", waited, total, curLevel, l)
+		}
+		overloaded := (waited*1000) > total && total > 3
+		waited, total, curLevel = 0, 0, l
+		return overloaded
+	}, time.Second, .025, .0075)
+	s.distSender.RetryFeedback = recordWait
 	s.node = NewNode(
 		storeCfg, s.recorder, s.registry, s.stopper,
 		txnMetrics, nil /* execCfg */, &s.rpcContext.ClusterID)
 	roachpb.RegisterInternalServer(s.grpc.Server, s.node)
 	storage.RegisterPerReplicaServer(s.grpc.Server, s.node.perReplicaServer)
 	s.node.storeCfg.ClosedTimestamp.RegisterClosedTimestampServer(s.grpc.Server)
-	s.node.stores.VisitStores(func(store *storage.Store) error {
-		s.distSender.AdmissionController = store.AdmissionController()
-		return nil
-	})
 	s.sessionRegistry = sql.NewSessionRegistry()
 	s.jobRegistry = jobs.MakeRegistry(
 		s.cfg.AmbientCtx,
@@ -500,6 +531,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		},
 	)
 	s.registry.AddMetricStruct(s.jobRegistry.MetricsStruct())
+	s.registry.AddMetricStruct(sqlAdmissionController.Metrics())
 
 	distSQLMetrics := distsqlrun.MakeDistSQLMetrics(cfg.HistogramWindowInterval())
 	s.registry.AddMetricStruct(distSQLMetrics)
@@ -631,7 +663,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		RangeDescriptorCache:    s.distSender.RangeDescriptorCache(),
 		LeaseHolderCache:        s.distSender.LeaseHolderCache(),
 		TestingKnobs:            sqlExecutorTestingKnobs,
-
+		AdmissionController:     sqlAdmissionController,
 		DistSQLPlanner: sql.NewDistSQLPlanner(
 			ctx,
 			distsqlrun.Version,
