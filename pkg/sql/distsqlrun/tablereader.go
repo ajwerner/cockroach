@@ -26,7 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/opentracing/opentracing-go"
+	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 )
 
@@ -132,12 +132,8 @@ func newTableReader(
 		tr.spans[i] = s.Span
 	}
 	tr.input = &rowFetcherWrapper{Fetcher: &tr.fetcher}
-
-	if sp := opentracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && tracing.IsRecording(sp) {
-		tr.input = NewInputStatCollector(tr.input)
-		tr.finishTrace = tr.outputStatsToTrace
-	}
-
+	tr.input = NewInputStatCollector(tr.input)
+	tr.finishTrace = tr.outputStatsToTrace
 	return tr, nil
 }
 
