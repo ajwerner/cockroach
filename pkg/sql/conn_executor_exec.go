@@ -643,8 +643,7 @@ func (ex *connExecutor) setPriority(ctx context.Context, planner *planner) conte
 	} else if applicationName := ex.applicationName.Load().(string); applicationName == "foo" {
 		level = admission.MinLevel
 	}
-	txnID := planner.extendedEvalCtx.Txn.ID()
-	priorityShard := md5.Sum(txnID[:])[0]
+	priorityShard := md5.Sum(ex.sessionID.GetBytes())[0]
 	priority := admission.MakePriority(level, priorityShard)
 	return admission.ContextWithPriority(ctx, priority)
 }
@@ -659,6 +658,10 @@ func (ex *connExecutor) setPriority(ctx context.Context, planner *planner) conte
 func (ex *connExecutor) dispatchToExecutionEngine(
 	ctx context.Context, planner *planner, res RestrictedCommandResult,
 ) error {
+	ctx = ex.setPriority(ctx, planner)
+	if err := admission.WaitForAdmitted(ctx, planner.ExecCfg().AdmissionController); err != nil {
+		return err
+	}
 	stmt := planner.stmt
 	ex.sessionTracing.TracePlanStart(ctx, stmt.AST.StatementTag())
 	planner.statsCollector.PhaseTimes()[plannerStartLogicalPlan] = timeutil.Now()

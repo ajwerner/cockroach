@@ -11,14 +11,17 @@ import (
 func TestAdmission(t *testing.T) {
 	var overloaded atomic.Value
 	overloaded.Store(false)
-	c := NewController(func() bool { return overloaded.Load().(bool) })
+	c := NewController(func(Priority) bool { return overloaded.Load().(bool) })
 	assert.Equal(t, minPriority, c.Level())
 	t100 := time.Unix(0, 100e6)
-	p := Priority{MaxLevel, 0}
+	p := Priority{DefaultLevel, 0}
 	assert.True(t, c.AdmitAt(p, t100))
 	overloaded.Store(true)
 	t601 := time.Unix(0, 601e6)
 	assert.False(t, c.AdmitAt(p, t601))
+	p.Level = MaxLevel
+	assert.True(t, c.AdmitAt(p, t601))
+
 	assert.Equal(t, maxPriority, c.Level())
 	overloaded.Store(false)
 	assert.True(t, c.AdmitAt(maxPriority, t601))

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/apd"
+	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
@@ -521,6 +522,8 @@ type ExecutorConfig struct {
 	// Caches updated by DistSQL.
 	RangeDescriptorCache *kv.RangeDescriptorCache
 	LeaseHolderCache     *kv.LeaseHolderCache
+
+	AdmissionController *admission.Controller
 }
 
 // Organization returns the value of cluster.organization.

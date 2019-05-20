@@ -9,6 +9,8 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
@@ -23,7 +25,7 @@ type Controller struct {
 	tickInterval       time.Duration
 	pruneRate          float64
 	growRate           float64
-	overloadSignal     func() bool
+	overloadSignal     func(Priority) bool
 	metrics            Metrics
 
 	// We need some sort of queues
@@ -43,13 +45,49 @@ type Controller struct {
 type Metrics struct {
 	AdmissionLevel *metric.Gauge
 	NumTicks       *metric.Counter
+	Inc            *metric.Counter
+	Dec            *metric.Counter
 }
 
-func makeMetrics() Metrics {
+func makeMeta(md metric.Metadata, name string) metric.Metadata {
+	md.Name = name + "." + md.Name
+	return md
+}
+
+func makeMetrics(name string) Metrics {
 	return Metrics{
-		AdmissionLevel: metric.NewGauge(metaAdmissionLevel),
-		NumTicks:       metric.NewCounter(metaNumTicks),
+		AdmissionLevel: metric.NewGauge(makeMeta(metaAdmissionLevel, name)),
+		NumTicks:       metric.NewCounter(makeMeta(metaNumTicks, name)),
+		Inc:            metric.NewCounter(makeMeta(metaNumInc, name)),
+		Dec:            metric.NewCounter(makeMeta(metaNumDec, name)),
 	}
+}
+
+// WaitForAdmitted waits for the current context to be admitted.
+func WaitForAdmitted(ctx context.Context, c *Controller) error {
+	// Make a retrier
+	// Get the priority
+	// Wait with some backoff
+	// Eventually make this more efficient
+	opts := retry.Options{
+		Multiplier:     1.25,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     time.Second,
+	}
+	prio := PriorityFromContext(ctx)
+	retry := retry.StartWithCtx(ctx, opts)
+	for retry.Next() {
+		now := timeutil.Now()
+		if c.AdmitAt(prio, now) {
+			return nil
+		}
+	}
+	// retry.Next() will only return false if our context is canceled or the
+	// stopper has been stopped.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return stop.ErrUnavailable
 }
 
 var (
@@ -62,6 +100,18 @@ var (
 	metaNumTicks = metric.Metadata{
 		Name:        "admission.ticks",
 		Help:        "Number of ticks",
+		Unit:        metric.Unit_COUNT,
+		Measurement: "ticks",
+	}
+	metaNumDec = metric.Metadata{
+		Name:        "admission.decrease",
+		Help:        "Number of times the tick has decreased the level",
+		Unit:        metric.Unit_COUNT,
+		Measurement: "ticks",
+	}
+	metaNumInc = metric.Metadata{
+		Name:        "admission.increase",
+		Help:        "Number of times the tick has increase the level",
 		Unit:        metric.Unit_COUNT,
 		Measurement: "ticks",
 	}
@@ -87,21 +137,35 @@ func (c *Controller) Level() Priority {
 // TODO(ajwerner): justify these, they're taken from the DAGOR paper and cut
 // in half.
 const (
-	defaultMaxReqsPerInterval = 1000
-	defaultTickInterval       = time.Second / 2
-	defaultPruneRate          = .025
-	defaultGrowRate           = .005
+	defaultMaxReqsPerInterval = 2000
+	defaultTickInterval       = time.Second
+	defaultPruneRate          = .05
+	defaultGrowRate           = .01
 )
 
-func NewController(overLoadSignal func() bool) *Controller {
+func NewController(
+	name string,
+	overLoadSignal func(prev Priority) bool,
+	tickInterval time.Duration,
+	pruneRate, growRate float64,
+) *Controller {
+	if tickInterval <= 0 {
+		tickInterval = defaultTickInterval
+	}
+	if pruneRate <= 0 {
+		pruneRate = defaultPruneRate
+	}
+	if growRate <= 0 {
+		growRate = defaultGrowRate
+	}
 	c := &Controller{
 		maxReqsPerInterval: defaultMaxReqsPerInterval,
-		tickInterval:       defaultTickInterval,
-		pruneRate:          defaultPruneRate,
-		growRate:           defaultGrowRate,
+		tickInterval:       tickInterval,
+		pruneRate:          pruneRate,
+		growRate:           growRate,
 		overloadSignal:     overLoadSignal,
 	}
-	c.metrics = makeMetrics()
+	c.metrics = makeMetrics(name)
 	c.mu.cond.L = c.mu.RLocker()
 	c.mu.curPriority = minPriority
 	return c
@@ -163,12 +227,14 @@ func (c *Controller) tickLocked(now time.Time) {
 	defer c.mu.cond.Broadcast()
 	c.mu.nextTick = now.Add(c.tickInterval)
 	numReqs := atomic.SwapUint32(&c.mu.numReqs, 0)
-	const minNumReqs = 32
-	overloaded := numReqs > minNumReqs && c.overloadSignal()
 	prev := c.mu.curPriority
+	const minNumReqs = 0
+	overloaded := numReqs > minNumReqs && c.overloadSignal(prev)
 	if overloaded {
+		c.metrics.Inc.Inc(1)
 		c.mu.curPriority = findHigherPriority(c.mu.curPriority, numReqs, c.pruneRate, &c.mu.hist)
 	} else {
+		c.metrics.Dec.Inc(1)
 		c.mu.curPriority = findLowerPriority(c.mu.curPriority, numReqs, c.growRate, &c.mu.hist)
 	}
 	if log.V(1) {
@@ -185,20 +251,37 @@ var minPriority = Priority{MinLevel, minShard}
 func findHigherPriority(prev Priority, total uint32, pruneRate float64, h *histogram) Priority {
 	reqs := total
 	target := uint32(float64(total) * (1 - pruneRate))
-	for cur := prev; cur != maxPriority; cur = cur.inc() {
+	for cur := prev; cur.Level != MaxLevel; cur = cur.inc() {
 		reqs -= h.countAt(cur)
 		if reqs < target {
 			return cur
 		}
 	}
-	return maxPriority
+	return Priority{Level: MaxLevel}
 }
 
 func findLowerPriority(prev Priority, total uint32, growRate float64, h *histogram) Priority {
 	reqs := total
-	target := uint32(float64(total) * (1 + growRate))
-	for cur := prev.dec(); cur != minPriority; cur = cur.dec() {
-		reqs += h.countAt(cur)
+	target := total
+	const minDelta = 2
+	if delta := uint32(float64(total)*growRate) + 1; delta > 2 {
+		target += delta
+	} else {
+		target += minDelta
+	}
+	getCountPerShard := func() uint32 {
+		return (h.countForLevel(prev) / (numShards - uint32(bucketFromShard(prev.Shard)))) + 1
+	}
+	countPerShard := getCountPerShard()
+	for cur := prev.dec(); cur != minPriority; prev, cur = cur, cur.dec() {
+		if cur.Level != prev.Level {
+			countPerShard = getCountPerShard()
+		}
+		if at := h.countAt(cur); at < countPerShard {
+			reqs += at
+		} else {
+			reqs += countPerShard
+		}
 		if reqs > target {
 			return cur
 		}
@@ -240,6 +323,14 @@ func (p Priority) inc() Priority {
 
 type histogram struct {
 	counters [numLevels][numShards]uint32
+}
+
+func (h *histogram) countForLevel(p Priority) (count uint32) {
+	level := bucketFromLevel(p.Level)
+	for shard := range h.counters[level] {
+		count += atomic.LoadUint32(&h.counters[level][shard])
+	}
+	return count
 }
 
 func (h *histogram) countAt(p Priority) uint32 {
