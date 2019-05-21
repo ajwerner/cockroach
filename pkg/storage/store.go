@@ -943,7 +943,7 @@ func NewStore(
 			s.scanner.AddQueues(s.tsMaintenanceQueue)
 		}
 	}
-	const bias = .3
+	const bias = .2
 	guessReadSize := func() (guess int64) {
 		s.metrics.ReadResponseSizeSummary1m.ReadStale(func(r tdigest.Reader) {
 			q := bias * rand.Float64()
@@ -952,13 +952,13 @@ func NewStore(
 		})
 		return guess
 	}
-	s.readQuota = readquota.NewPool(int64(1024*(1<<20)), guessReadSize)
+	s.readQuota = readquota.NewPool(int64(2*(1<<30)), guessReadSize)
 	readQuotaMetrics := s.readQuota.Metrics()
 	s.metrics.registry.AddMetricStruct(readQuotaMetrics)
 	s.admissionController = admission.NewController("read", func(admission.Priority) (overloaded bool) {
 		avg, max := s.readQuota.WaitStats()
 		return avg > 20*time.Millisecond || max > 500*time.Millisecond
-	}, 500*time.Millisecond, .02469, 0.00498)
+	}, 250*time.Millisecond, .02469, 0.00498)
 	s.metrics.registry.AddMetricStruct(s.admissionController.Metrics())
 	if cfg.TestingKnobs.DisableGCQueue {
 		s.setGCQueueActive(false)

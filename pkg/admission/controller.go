@@ -249,22 +249,32 @@ var maxPriority = Priority{MaxLevel, maxShard}
 var minPriority = Priority{MinLevel, minShard}
 
 func findHigherPriority(prev Priority, total uint32, pruneRate float64, h *histogram) Priority {
+	if total == 0 || h.countAboveIsEmpty(prev) {
+		return prev
+	}
 	reqs := total
 	target := uint32(float64(total) * (1 - pruneRate))
+	lastWithSome := prev
 	for cur := prev; cur.Level != MaxLevel; cur = cur.inc() {
-		reqs -= h.countAt(cur)
+		if count := h.countAt(cur); count > 0 {
+			reqs -= count
+		}
 		if reqs < target {
 			return cur
 		}
 	}
-	return Priority{Level: MaxLevel}
+	return lastWithSome
 }
 
 func findLowerPriority(prev Priority, total uint32, growRate float64, h *histogram) Priority {
 	reqs := total
 	cur := prev.dec()
-	delta := uint32(float64(h.countForLevelAbove(cur))*growRate) + 1
-	target := total + delta
+	target := total
+	if count := h.countForLevelAbove(cur); count != 0 {
+		target += uint32(float64(count)*growRate) + 1
+	} else {
+		return cur
+	}
 	for ; cur != minPriority; prev, cur = cur, cur.dec() {
 		reqs += h.countAt(cur)
 		if reqs > target {
@@ -316,6 +326,15 @@ func (h *histogram) countForLevelAbove(p Priority) (count uint32) {
 		count += atomic.LoadUint32(&h.counters[level][shard])
 	}
 	return count
+}
+
+func (h *histogram) countAboveIsEmpty(p Priority) bool {
+	for l := p.inc(); l != maxPriority; l = l.inc() {
+		if h.countAt(l) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *histogram) countAt(p Priority) uint32 {

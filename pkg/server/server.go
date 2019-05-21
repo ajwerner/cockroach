@@ -494,7 +494,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		if p.Level < curLevel.Level && p.Shard < curLevel.Shard {
 			return
 		}
-		if wait > 0 {
+		if wait > 100*time.Millisecond {
 			waited++
 		}
 		total++
@@ -510,10 +510,10 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		if log.V(1) {
 			log.Infof(ctx, "sql tick %v %v", waited, total, curLevel, l)
 		}
-		overloaded := (waited*100) > total && total > 1
+		overloaded := (waited*5) > total && total >= 20
 		waited, total, curLevel = 0, 0, l
 		return overloaded
-	}, 500*time.Millisecond, .02, .0025)
+	}, time.Second, .05, .01)
 	s.distSender.RetryFeedback = recordWait
 	s.node = NewNode(
 		storeCfg, s.recorder, s.registry, s.stopper,

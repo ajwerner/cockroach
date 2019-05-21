@@ -19,6 +19,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/storage/proposalquota"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -58,12 +59,12 @@ func (r *Replica) maybeAcquireProposalQuota(ctx context.Context, quota int64) er
 	// Trace if we're running low on available proposal quota; it might explain
 	// why we're taking so long.
 	if log.HasSpanOrEvent(ctx) {
-		if q := quotaPool.approximateQuota(); q < quotaPool.maxQuota()/10 {
+		if q := quotaPool.ApproximateQuota(); q < quotaPool.MaxQuota()/10 {
 			log.Eventf(ctx, "quota running low, currently available ~%d", q)
 		}
 	}
 
-	return quotaPool.acquire(ctx, quota)
+	return quotaPool.Acquire(ctx, quota)
 }
 
 func quotaPoolEnabledForRange(desc roachpb.RangeDescriptor) bool {
@@ -96,7 +97,7 @@ func (r *Replica) updateProposalQuotaRaftMuLocked(
 	// destroyed.
 	if r.mu.destroyStatus.Removed() {
 		if r.mu.proposalQuota != nil {
-			r.mu.proposalQuota.close()
+			r.mu.proposalQuota.Close()
 		}
 		r.mu.proposalQuota = nil
 		r.mu.lastUpdateTimes = nil
@@ -125,7 +126,7 @@ func (r *Replica) updateProposalQuotaRaftMuLocked(
 			// through the code paths where we acquire quota from the pool. To
 			// offset this we reset the quota pool whenever leadership changes
 			// hands.
-			r.mu.proposalQuota = newQuotaPool(r.store.cfg.RaftProposalQuota)
+			r.mu.proposalQuota = proposalquota.NewPool(r.store.cfg.RaftProposalQuota)
 			r.mu.lastUpdateTimes = make(map[roachpb.ReplicaID]time.Time)
 			r.mu.lastUpdateTimes.updateOnBecomeLeader(r.mu.state.Desc.Replicas().Unwrap(), timeutil.Now())
 			r.mu.commandSizes = make(map[storagebase.CmdIDKey]int)
@@ -134,7 +135,7 @@ func (r *Replica) updateProposalQuotaRaftMuLocked(
 
 			// We unblock all ongoing and subsequent quota acquisition
 			// goroutines (if any).
-			r.mu.proposalQuota.close()
+			r.mu.proposalQuota.Close()
 			r.mu.proposalQuota = nil
 			r.mu.lastUpdateTimes = nil
 			r.mu.quotaReleaseQueue = nil
@@ -246,6 +247,6 @@ func (r *Replica) updateProposalQuotaRaftMuLocked(
 		r.mu.proposalQuotaBaseIndex += numReleases
 		r.mu.quotaReleaseQueue = r.mu.quotaReleaseQueue[numReleases:]
 
-		r.mu.proposalQuota.add(int64(sum))
+		r.mu.proposalQuota.Add(int64(sum))
 	}
 }

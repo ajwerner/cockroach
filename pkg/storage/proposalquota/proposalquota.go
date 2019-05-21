@@ -66,6 +66,10 @@ func (p *Pool) Close() {
 	p.qp.Close()
 }
 
+func (p *Pool) MaxQuota() int64 {
+	return int64(p.max)
+}
+
 func (p *Pool) newRequest(v int64) *request {
 	r := p.requestSyncPool.Get().(*request)
 	r.want = quota(v)
