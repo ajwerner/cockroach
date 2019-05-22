@@ -33,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/batcheval/result"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/storage/proposalquota"
 	"github.com/cockroachdb/cockroach/pkg/storage/rditer"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagebase"
 	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
@@ -271,9 +272,9 @@ func (r *Replica) InitQuotaPool(quota int64) {
 
 	r.mu.proposalQuotaBaseIndex = r.mu.lastIndex
 	if r.mu.proposalQuota != nil {
-		r.mu.proposalQuota.close()
+		r.mu.proposalQuota.Close()
 	}
-	r.mu.proposalQuota = newQuotaPool(quota)
+	r.mu.proposalQuota = proposalquota.NewPool(quota)
 	r.mu.quotaReleaseQueue = nil
 	r.mu.commandSizes = make(map[storagebase.CmdIDKey]int)
 }
@@ -283,7 +284,7 @@ func (r *Replica) InitQuotaPool(quota int64) {
 func (r *Replica) QuotaAvailable() int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.mu.proposalQuota.approximateQuota()
+	return r.mu.proposalQuota.ApproximateQuota()
 }
 
 func (r *Replica) QuotaReleaseQueueLen() int {

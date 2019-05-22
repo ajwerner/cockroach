@@ -487,6 +487,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	var waitMu syncutil.Mutex
 	var waited, total int64
 	curLevel := admission.MakePriority(admission.MinLevel, 0)
+
 	recordWait := func(ctx context.Context, wait time.Duration) {
 		p := admission.PriorityFromContext(ctx)
 		waitMu.Lock()
@@ -510,10 +511,10 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		if log.V(1) {
 			log.Infof(ctx, "sql tick %v %v", waited, total, curLevel, l)
 		}
-		overloaded := (waited*5) > total && total >= 20
+		overloaded := (waited*3) > total && total >= 30
 		waited, total, curLevel = 0, 0, l
 		return overloaded
-	}, time.Second, .05, .01)
+	}, time.Second, .001, .002)
 	s.distSender.RetryFeedback = recordWait
 	s.node = NewNode(
 		storeCfg, s.recorder, s.registry, s.stopper,

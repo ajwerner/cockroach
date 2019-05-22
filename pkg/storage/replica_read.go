@@ -72,6 +72,7 @@ func (r *Replica) executeReadOnlyBatch(
 		defer func() {
 			r.store.readQuota.Add(acquired)
 			if respSize > 0 {
+				r.store.admissionController.Report(priority, uint64(respSize))
 				r.store.metrics.ReadQuotaBytesGuessed.Inc(acquired)
 				r.store.metrics.ReadQuotaBytesRead.Inc(int64(respSize))
 			}

@@ -957,8 +957,8 @@ func NewStore(
 	s.metrics.registry.AddMetricStruct(readQuotaMetrics)
 	s.admissionController = admission.NewController("read", func(admission.Priority) (overloaded bool) {
 		avg, max := s.readQuota.WaitStats()
-		return avg > 20*time.Millisecond || max > 500*time.Millisecond
-	}, 250*time.Millisecond, .02469, 0.00498)
+		return avg > 10*time.Millisecond || max > 200*time.Millisecond
+	}, 500*time.Millisecond, .05, 0.01)
 	s.metrics.registry.AddMetricStruct(s.admissionController.Metrics())
 	if cfg.TestingKnobs.DisableGCQueue {
 		s.setGCQueueActive(false)

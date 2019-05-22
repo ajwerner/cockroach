@@ -21,7 +21,7 @@ import (
 // In order to make this decision the controller needs to tick every so often
 //
 type Controller struct {
-	maxReqsPerInterval uint32
+	maxReqsPerInterval uint64
 	tickInterval       time.Duration
 	pruneRate          float64
 	growRate           float64
@@ -37,8 +37,13 @@ type Controller struct {
 		curPriority Priority
 		nextTick    time.Time
 
-		numReqs uint32
+		numReqs uint64
 		hist    histogram
+
+		byteCounts uint64
+		byteHist   histogram
+
+		lastDec int
 	}
 }
 
@@ -118,8 +123,8 @@ var (
 )
 
 func (c *Controller) stringLocked() string {
-	return fmt.Sprintf("Controller{curLevel: %v, numReqs: %d, nextTick: %s (%s), hist: %v}",
-		c.mu.curPriority, c.mu.numReqs, c.mu.nextTick, timeutil.Until(c.mu.nextTick), c.mu.hist)
+	return fmt.Sprintf("Controller{curLevel: %v, numReqs: %d, nextTick: %s (%s), hist: %v, numBytes: %d, histBytes: %v}",
+		c.mu.curPriority, c.mu.numReqs, c.mu.nextTick, timeutil.Until(c.mu.nextTick), c.mu.hist, c.mu.byteCounts, c.mu.byteHist)
 }
 
 func (c *Controller) String() string {
@@ -189,6 +194,13 @@ func (c *Controller) maybeTickRLocked(now time.Time) {
 	c.tickLocked(now)
 }
 
+func (c *Controller) Report(p Priority, size uint64) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	c.mu.byteHist.record(p, size)
+	atomic.AddUint64(&c.mu.byteCounts, size)
+}
+
 func (c *Controller) Admit(p Priority) bool {
 	return c.AdmitAt(p, timeutil.Now())
 }
@@ -196,12 +208,12 @@ func (c *Controller) Admit(p Priority) bool {
 func (c *Controller) AdmitAt(p Priority, now time.Time) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	defer c.mu.hist.record(p)
+	defer c.mu.hist.record(p, 1)
 	c.maybeTickRLocked(now)
 	if p.Level != MaxLevel && p.less(c.mu.curPriority) {
 		return false
 	}
-	numReqs := atomic.AddUint32(&c.mu.numReqs, 1)
+	numReqs := atomic.AddUint64(&c.mu.numReqs, 1)
 	for numReqs > c.maxReqsPerInterval {
 		if numReqs == (c.maxReqsPerInterval + 1) {
 			c.tickRLocked(now)
@@ -209,7 +221,7 @@ func (c *Controller) AdmitAt(p Priority, now time.Time) bool {
 			c.mu.cond.Wait()
 		}
 		// c was just ticked so we add ourselves again
-		numReqs = atomic.AddUint32(&c.mu.numReqs, 1)
+		numReqs = atomic.AddUint64(&c.mu.numReqs, 1)
 	}
 	return true
 }
@@ -226,21 +238,31 @@ func (c *Controller) tickRLocked(now time.Time) {
 func (c *Controller) tickLocked(now time.Time) {
 	defer c.mu.cond.Broadcast()
 	c.mu.nextTick = now.Add(c.tickInterval)
-	numReqs := atomic.SwapUint32(&c.mu.numReqs, 0)
+	numReqs := atomic.SwapUint64(&c.mu.numReqs, 0)
+	numBytes := atomic.SwapUint64(&c.mu.byteCounts, 0)
+	n, hist := numReqs, &c.mu.hist
+	if numBytes > 0 {
+		n, hist = numBytes, &c.mu.byteHist
+	}
 	prev := c.mu.curPriority
 	const minNumReqs = 0
 	overloaded := numReqs > minNumReqs && c.overloadSignal(prev)
 	if overloaded {
+		c.mu.lastDec = 0
 		c.metrics.Inc.Inc(1)
-		c.mu.curPriority = findHigherPriority(c.mu.curPriority, numReqs, c.pruneRate, &c.mu.hist)
+		c.mu.curPriority = findHigherPriority(c.mu.curPriority, n, c.pruneRate, hist)
+	} else if c.mu.lastDec < 2 {
+		c.mu.lastDec++
 	} else {
+		c.mu.lastDec = 0
 		c.metrics.Dec.Inc(1)
-		c.mu.curPriority = findLowerPriority(c.mu.curPriority, numReqs, c.growRate, &c.mu.hist)
+		c.mu.curPriority = findLowerPriority(c.mu.curPriority, n, c.growRate, hist)
 	}
 	if log.V(1) {
-		log.Infof(context.TODO(), "tick: overload %v %v prev %v next %v %v", overloaded, numReqs, prev, c.mu.curPriority, c.stringLocked())
+		log.Infof(context.TODO(), "tick: overload %v (%v, %v count, bytes) prev %v next %v %v", overloaded, numReqs, numBytes, prev, c.mu.curPriority, c.stringLocked())
 	}
 	c.mu.hist = histogram{}
+	c.mu.byteHist = histogram{}
 	c.metrics.AdmissionLevel.Update(int64(c.mu.curPriority.Encode()))
 	c.metrics.NumTicks.Inc(1)
 }
@@ -248,12 +270,12 @@ func (c *Controller) tickLocked(now time.Time) {
 var maxPriority = Priority{MaxLevel, maxShard}
 var minPriority = Priority{MinLevel, minShard}
 
-func findHigherPriority(prev Priority, total uint32, pruneRate float64, h *histogram) Priority {
+func findHigherPriority(prev Priority, total uint64, pruneRate float64, h *histogram) Priority {
 	if total == 0 || h.countAboveIsEmpty(prev) {
 		return prev
 	}
 	reqs := total
-	target := uint32(float64(total) * (1 - pruneRate))
+	target := uint64(float64(total) * (1 - pruneRate))
 	lastWithSome := prev
 	for cur := prev; cur.Level != MaxLevel; cur = cur.inc() {
 		if count := h.countAt(cur); count > 0 {
@@ -266,12 +288,12 @@ func findHigherPriority(prev Priority, total uint32, pruneRate float64, h *histo
 	return lastWithSome
 }
 
-func findLowerPriority(prev Priority, total uint32, growRate float64, h *histogram) Priority {
+func findLowerPriority(prev Priority, total uint64, growRate float64, h *histogram) Priority {
 	reqs := total
 	cur := prev.dec()
 	target := total
 	if count := h.countForLevelAbove(cur); count != 0 {
-		target += uint32(float64(count)*growRate) + 1
+		target += uint64(float64(count)*growRate) + 1
 	} else {
 		return cur
 	}
@@ -317,13 +339,13 @@ func (p Priority) inc() Priority {
 }
 
 type histogram struct {
-	counters [numLevels][numShards]uint32
+	counters [numLevels][numShards]uint64
 }
 
-func (h *histogram) countForLevelAbove(p Priority) (count uint32) {
+func (h *histogram) countForLevelAbove(p Priority) (count uint64) {
 	level := bucketFromLevel(p.Level)
 	for shard := bucketFromShard(p.Level) + 1; shard < numShards; shard++ {
-		count += atomic.LoadUint32(&h.counters[level][shard])
+		count += atomic.LoadUint64(&h.counters[level][shard])
 	}
 	return count
 }
@@ -337,12 +359,12 @@ func (h *histogram) countAboveIsEmpty(p Priority) bool {
 	return true
 }
 
-func (h *histogram) countAt(p Priority) uint32 {
+func (h *histogram) countAt(p Priority) uint64 {
 	level, shard := bucketFromLevel(p.Level), bucketFromShard(p.Shard)
-	return atomic.LoadUint32(&h.counters[level][shard])
+	return atomic.LoadUint64(&h.counters[level][shard])
 }
 
-func (h *histogram) record(p Priority) {
+func (h *histogram) record(p Priority, c uint64) {
 	level, shard := bucketFromLevel(p.Level), bucketFromShard(p.Shard)
-	atomic.AddUint32(&h.counters[level][shard], 1)
+	atomic.AddUint64(&h.counters[level][shard], c)
 }
