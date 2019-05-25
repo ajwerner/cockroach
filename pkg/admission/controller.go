@@ -280,6 +280,7 @@ func findHigherPriority(prev Priority, total uint64, pruneRate float64, h *histo
 	for cur := prev; cur.Level != MaxLevel; cur = cur.inc() {
 		if count := h.countAt(cur); count > 0 {
 			reqs -= count
+			lastWithSome = cur
 		}
 		if reqs < target {
 			return cur
