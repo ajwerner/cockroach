@@ -942,6 +942,7 @@ func NewStore(
 	}
 
 	// TODO(ajwerner): clean this up.
+	s.initializeReadQuota()
 	s.admissionController = admission.NewController("read", func(admission.Priority) (overloaded bool) {
 		avg, max := s.readQuota.WaitStats()
 		return avg > 10*time.Millisecond || max > 200*time.Millisecond

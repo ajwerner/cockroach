@@ -71,6 +71,9 @@ func (r *Replica) executeReadOnlyBatch(
 		}
 		defer func() {
 			if respSize > 0 {
+				if log.V(1) {
+					log.Infof(ctx, "acquired %v, used %v", respSize, alloc.Acquired())
+				}
 				r.store.admissionController.Report(priority, uint64(respSize))
 				r.store.metrics.ReadQuotaBytesGuessed.Inc(alloc.Acquired())
 				r.store.metrics.ReadQuotaBytesRead.Inc(int64(respSize))

@@ -15,7 +15,7 @@ type readQuota struct {
 	qp *quotapool.IntPool
 	s  *Store
 	mu struct {
-		syncutil.RWMutex
+		syncutil.Mutex
 		totalWait time.Duration
 		maxWait   time.Duration
 		requests  int64
@@ -60,13 +60,13 @@ func (s *Store) initializeReadQuota() {
 		qp: quotapool.NewIntPool("read quota", int64(2*(1<<30)),
 			quotapool.LogSlowAcquisition,
 			quotapool.OnAcquisition(s.readQuota.onAcquisition)),
+		s: s,
 	}
 }
 
 func (rq *readQuota) acquireFunc(ctx context.Context, quota int64) (fulfilled bool, took int64) {
-	guess := rq.guessReadSize()
-	if guess <= quota {
-		return true, quota - guess
+	if guess := rq.guessReadSize(); guess <= quota {
+		return true, guess
 	}
 	return false, 0
 }

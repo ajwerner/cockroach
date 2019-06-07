@@ -173,6 +173,14 @@ func (qp *QuotaPool) addLocked(r Resource) {
 //
 // Safe for concurrent use.
 func (qp *QuotaPool) Acquire(ctx context.Context, r Request) (err error) {
+	start := timeutil.Now()
+	if qp.config.onAcquisition != nil {
+		defer func() {
+			if err != nil {
+				qp.config.onAcquisition(ctx, qp.name, r, start)
+			}
+		}()
+	}
 	notifyCh := qp.chanSyncPool.Get().(chan struct{})
 	qp.mu.Lock()
 	var closeErr error
@@ -192,9 +200,7 @@ func (qp *QuotaPool) Acquire(ctx context.Context, r Request) (err error) {
 	// Set up the infrastructure to report slow requests.
 	var slowTimer *timeutil.Timer
 	var slowTimerC <-chan time.Time
-	var start time.Time
 	if qp.onSlowAcquisition != nil {
-		start = timeutil.Now()
 		slowTimer = timeutil.NewTimer()
 		defer slowTimer.Stop()
 		// Intentionally reset only once, for we care more about the select duration in
