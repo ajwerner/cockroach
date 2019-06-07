@@ -17,7 +17,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"math/rand"
 	"runtime"
 	"sort"
 	"strings"
@@ -26,7 +25,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/ajwerner/tdigest"
 	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/config"
@@ -49,7 +47,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/idalloc"
 	"github.com/cockroachdb/cockroach/pkg/storage/intentresolver"
 	"github.com/cockroachdb/cockroach/pkg/storage/raftentry"
-	"github.com/cockroachdb/cockroach/pkg/storage/readquota"
 	"github.com/cockroachdb/cockroach/pkg/storage/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/storage/tscache"
 	"github.com/cockroachdb/cockroach/pkg/storage/txnrecovery"
@@ -612,7 +609,7 @@ type Store struct {
 
 	computeInitialMetrics sync.Once
 
-	readQuota           *readquota.Pool
+	readQuota           readQuota
 	admissionController *admission.Controller
 }
 
@@ -943,18 +940,8 @@ func NewStore(
 			s.scanner.AddQueues(s.tsMaintenanceQueue)
 		}
 	}
-	const bias = .2
-	guessReadSize := func() (guess int64) {
-		s.metrics.ReadResponseSizeSummary1m.ReadStale(func(r tdigest.Reader) {
-			q := bias * rand.Float64()
-			q += (1 - q) * rand.Float64()
-			guess = int64(r.ValueAt(q)) + 1
-		})
-		return guess
-	}
-	s.readQuota = readquota.NewPool(int64(2*(1<<30)), guessReadSize)
-	readQuotaMetrics := s.readQuota.Metrics()
-	s.metrics.registry.AddMetricStruct(readQuotaMetrics)
+
+	// TODO(ajwerner): clean this up.
 	s.admissionController = admission.NewController("read", func(admission.Priority) (overloaded bool) {
 		avg, max := s.readQuota.WaitStats()
 		return avg > 10*time.Millisecond || max > 200*time.Millisecond

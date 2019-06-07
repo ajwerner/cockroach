@@ -65,17 +65,17 @@ func (r *Replica) executeReadOnlyBatch(
 		if !r.store.admissionController.Admit(priority) {
 			return nil, roachpb.NewError(&roachpb.ReadRejectedError{})
 		}
-		acquired, err := r.store.readQuota.Acquire(ctx)
+		alloc, err := r.store.readQuota.acquire(ctx)
 		if err != nil {
 			return nil, roachpb.NewError(err)
 		}
 		defer func() {
-			r.store.readQuota.Add(acquired)
 			if respSize > 0 {
 				r.store.admissionController.Report(priority, uint64(respSize))
-				r.store.metrics.ReadQuotaBytesGuessed.Inc(acquired)
+				r.store.metrics.ReadQuotaBytesGuessed.Inc(alloc.Acquired())
 				r.store.metrics.ReadQuotaBytesRead.Inc(int64(respSize))
 			}
+			alloc.Release()
 		}()
 	}
 

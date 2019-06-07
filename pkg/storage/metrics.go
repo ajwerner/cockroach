@@ -959,6 +959,30 @@ var (
 		Unit:        metric.Unit_NANOSECONDS,
 	}
 
+	metaReadQuotaAcquisitions = metric.Metadata{
+		Name:        "readquota.acquisitions",
+		Help:        "Counter of read quota acquisitions",
+		Measurement: "Requests",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaReadQuotaTimeSpentWaitingRate10s = metric.Metadata{
+		Name:        "readquota.waiting.rate_10s",
+		Help:        "The rate at which requests wait in the quota pool to acquire quota",
+		Measurement: "Nanoseconds/second",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
+	metaReadQuotaTimeSpentWaitingSummary10s = metric.Metadata{
+		Name:        "readquota.waiting.summary_10s",
+		Help:        "The distribution of time requests wait in the quota pool to acquire quota",
+		Measurement: "Nanoseconds",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
+	metaReadQuotaRequiredTook = metric.Metadata{
+		Name:        "readquota.required_took",
+		Help:        "Counter of nanoseconds spent determining how much to read",
+		Measurement: "Nanoseconds",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
 	metaReadQuotaBytesRead = metric.Metadata{
 		Name:        "read_quota.bytes_read",
 		Help:        "Counter for bytes read by requests using the read quota",
@@ -1189,8 +1213,12 @@ type StoreMetrics struct {
 	// ReadResponseSizeSummary1m
 	ReadResponseSizeSummary1m *metric.Summary
 
-	ReadQuotaBytesRead    *metric.Counter
-	ReadQuotaBytesGuessed *metric.Counter
+	ReadQuotaAcquisitions               *metric.Counter
+	ReadQuotaTimeSpentWaitingRate10s    *metric.Rate
+	ReadQuotaTimeSpentWaitingSummary10s *metric.Summary
+	ReadQuotaRequiredTook               *metric.Counter
+	ReadQuotaBytesRead                  *metric.Counter
+	ReadQuotaBytesGuessed               *metric.Counter
 
 	// Stats for efficient merges.
 	mu struct {
@@ -1397,9 +1425,13 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		// Closed timestamp metrics.
 		ClosedTimestampMaxBehindNanos: metric.NewGauge(metaClosedTimestampMaxBehindNanos),
 
-		ReadResponseSizeSummary1m: metric.NewSummary(metaReadResponseSizeSummary1m, 5*time.Second),
-		ReadQuotaBytesRead:        metric.NewCounter(metaReadQuotaBytesRead),
-		ReadQuotaBytesGuessed:     metric.NewCounter(metaReadQuotaBytesGuessed),
+		ReadQuotaAcquisitions:               metric.NewCounter(metaReadQuotaAcquisitions),
+		ReadQuotaTimeSpentWaitingRate10s:    metric.NewRate(metaReadQuotaTimeSpentWaitingRate10s, 10*time.Second),
+		ReadQuotaTimeSpentWaitingSummary10s: metric.NewSummary(metaReadQuotaTimeSpentWaitingSummary10s, 10*time.Second),
+		ReadQuotaRequiredTook:               metric.NewCounter(metaReadQuotaRequiredTook),
+		ReadQuotaBytesRead:                  metric.NewCounter(metaReadQuotaBytesRead),
+		ReadQuotaBytesGuessed:               metric.NewCounter(metaReadQuotaBytesGuessed),
+		ReadResponseSizeSummary1m:           metric.NewSummary(metaReadResponseSizeSummary1m, 5*time.Second),
 	}
 
 	sm.raftRcvdMessages[raftpb.MsgProp] = sm.RaftRcvdMsgProp

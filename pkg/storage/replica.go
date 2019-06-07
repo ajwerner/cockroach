@@ -33,7 +33,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine"
 	"github.com/cockroachdb/cockroach/pkg/storage/engine/enginepb"
-	"github.com/cockroachdb/cockroach/pkg/storage/proposalquota"
 	"github.com/cockroachdb/cockroach/pkg/storage/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/storage/spanlatch"
 	"github.com/cockroachdb/cockroach/pkg/storage/spanset"
@@ -395,7 +394,7 @@ type Replica struct {
 		// until quota is made available to the pool.
 		// Acquired quota for a given command is only released when all the
 		// replicas have persisted the corresponding entry into their logs.
-		proposalQuota *proposalquota.Pool
+		proposalQuota *quotaPool
 
 		proposalQuotaBaseIndex uint64
 
@@ -590,7 +589,7 @@ func (r *Replica) cleanupFailedProposalLocked(p *ProposalData) {
 	// duplicated. To counter this our quota pool is capped at the initial
 	// quota size.
 	if cmdSize, ok := r.mu.commandSizes[p.idKey]; ok {
-		r.mu.proposalQuota.Add(int64(cmdSize))
+		r.mu.proposalQuota.add(int64(cmdSize))
 		delete(r.mu.commandSizes, p.idKey)
 	}
 }
@@ -906,7 +905,7 @@ func (r *Replica) State() storagepb.RangeInfo {
 	ri.RaftLogSizeTrusted = r.mu.raftLogSizeTrusted
 	ri.NumDropped = uint64(r.mu.droppedMessages)
 	if r.mu.proposalQuota != nil {
-		ri.ApproximateProposalQuota = r.mu.proposalQuota.ApproximateQuota()
+		ri.ApproximateProposalQuota = r.mu.proposalQuota.approximateQuota()
 	}
 	ri.RangeMaxBytes = *r.mu.zone.RangeMaxBytes
 	if desc := ri.ReplicaState.Desc; desc != nil {
