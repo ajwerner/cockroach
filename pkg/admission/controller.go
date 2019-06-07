@@ -9,8 +9,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
-	"github.com/cockroachdb/cockroach/pkg/util/retry"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
@@ -28,14 +26,18 @@ type Controller struct {
 	overloadSignal     func(Priority) bool
 	metrics            Metrics
 
+	wq waitQueue
+
 	// We need some sort of queues
 	// Maybe we just hide those as stack-local state in some processing goroutine.
 	mu struct {
 		syncutil.RWMutex
 		cond sync.Cond
 
-		curPriority Priority
-		nextTick    time.Time
+		nextTick time.Time
+
+		admissionLevel Priority
+		rejectionLevel Priority
 
 		numReqs uint64
 		hist    histogram
@@ -68,32 +70,32 @@ func makeMetrics(name string) Metrics {
 	}
 }
 
-// WaitForAdmitted waits for the current context to be admitted.
-func WaitForAdmitted(ctx context.Context, c *Controller) error {
-	// Make a retrier
-	// Get the priority
-	// Wait with some backoff
-	// Eventually make this more efficient
-	opts := retry.Options{
-		Multiplier:     1.25,
-		InitialBackoff: time.Millisecond,
-		MaxBackoff:     time.Second,
-	}
-	prio := PriorityFromContext(ctx)
-	retry := retry.StartWithCtx(ctx, opts)
-	for retry.Next() {
-		now := timeutil.Now()
-		if c.AdmitAt(prio, now) {
-			return nil
-		}
-	}
-	// retry.Next() will only return false if our context is canceled or the
-	// stopper has been stopped.
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-	return stop.ErrUnavailable
-}
+// // WaitForAdmitted waits for the current context to be admitted.
+// func WaitForAdmitted(ctx context.Context, c *Controller) error {
+// 	// Make a retrier
+// 	// Get the priority
+// 	// Wait with some backoff
+// 	// Eventually make this more efficient
+// 	opts := retry.Options{
+// 		Multiplier:     1.25,
+// 		InitialBackoff: time.Millisecond,
+// 		MaxBackoff:     time.Second,
+// 	}
+// 	prio := PriorityFromContext(ctx)
+// 	retry := retry.StartWithCtx(ctx, opts)
+// 	for retry.Next() {
+// 		now := timeutil.Now()
+// 		if c.AdmitAt(prio, now) {
+// 			return nil
+// 		}
+// 	}
+// 	// retry.Next() will only return false if our context is canceled or the
+// 	// stopper has been stopped.
+// 	if ctxErr := ctx.Err(); ctxErr != nil {
+// 		return ctxErr
+// 	}
+// 	return stop.ErrUnavailable
+// }
 
 var (
 	metaAdmissionLevel = metric.Metadata{
@@ -124,7 +126,7 @@ var (
 
 func (c *Controller) stringLocked() string {
 	return fmt.Sprintf("Controller{curLevel: %v, numReqs: %d, nextTick: %s (%s), hist: %v, numBytes: %d, histBytes: %v}",
-		c.mu.curPriority, c.mu.numReqs, c.mu.nextTick, timeutil.Until(c.mu.nextTick), c.mu.hist, c.mu.byteCounts, c.mu.byteHist)
+		c.mu.admissionLevel, c.mu.numReqs, c.mu.nextTick, timeutil.Until(c.mu.nextTick), c.mu.hist, c.mu.byteCounts, c.mu.byteHist)
 }
 
 func (c *Controller) String() string {
@@ -136,7 +138,7 @@ func (c *Controller) String() string {
 func (c *Controller) Level() Priority {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.mu.curPriority
+	return c.mu.admissionLevel
 }
 
 // TODO(ajwerner): justify these, they're taken from the DAGOR paper and cut
@@ -172,7 +174,8 @@ func NewController(
 	}
 	c.metrics = makeMetrics(name)
 	c.mu.cond.L = c.mu.RLocker()
-	c.mu.curPriority = minPriority
+	c.mu.admissionLevel = minPriority
+	c.mu.rejectionLevel = minPriority
 	return c
 }
 
@@ -201,18 +204,22 @@ func (c *Controller) Report(p Priority, size uint64) {
 	atomic.AddUint64(&c.mu.byteCounts, size)
 }
 
-func (c *Controller) Admit(p Priority) bool {
-	return c.AdmitAt(p, timeutil.Now())
+func (c *Controller) Admit(ctx context.Context, p Priority) error {
+	return c.AdmitAt(ctx, p, timeutil.Now())
 }
 
-func (c *Controller) AdmitAt(p Priority, now time.Time) bool {
+func (c *Controller) AdmitAt(ctx context.Context, p Priority, now time.Time) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	defer c.mu.hist.record(p, 1)
 	c.maybeTickRLocked(now)
-	if p.Level != MaxLevel && p.less(c.mu.curPriority) {
-		return false
+	if p.Level != MaxLevel {
+		for p.less(c.mu.admissionLevel) {
+			if err := c.wq.wait(ctx, p); err != nil {
+				return err
+			}
+		}
 	}
+	defer c.mu.hist.record(p, 1)
 	numReqs := atomic.AddUint64(&c.mu.numReqs, 1)
 	for numReqs > c.maxReqsPerInterval {
 		if numReqs == (c.maxReqsPerInterval + 1) {
@@ -223,7 +230,7 @@ func (c *Controller) AdmitAt(p Priority, now time.Time) bool {
 		// c was just ticked so we add ourselves again
 		numReqs = atomic.AddUint64(&c.mu.numReqs, 1)
 	}
-	return true
+	return nil
 }
 
 func (c *Controller) tickRLocked(now time.Time) {
@@ -244,26 +251,26 @@ func (c *Controller) tickLocked(now time.Time) {
 	if numBytes > 0 {
 		n, hist = numBytes, &c.mu.byteHist
 	}
-	prev := c.mu.curPriority
+	prev := c.mu.admissionLevel
 	const minNumReqs = 0
 	overloaded := numReqs > minNumReqs && c.overloadSignal(prev)
 	if overloaded {
 		c.mu.lastDec = 0
 		c.metrics.Inc.Inc(1)
-		c.mu.curPriority = findHigherPriority(c.mu.curPriority, n, c.pruneRate, hist)
+		c.mu.admissionLevel = findHigherPriority(c.mu.admissionLevel, n, c.pruneRate, hist)
 	} else if c.mu.lastDec < 2 {
 		c.mu.lastDec++
 	} else {
 		c.mu.lastDec = 0
 		c.metrics.Dec.Inc(1)
-		c.mu.curPriority = findLowerPriority(c.mu.curPriority, n, c.growRate, hist)
+		c.mu.admissionLevel = findLowerPriority(c.mu.admissionLevel, n, c.growRate, hist)
 	}
 	if log.V(1) {
-		log.Infof(context.TODO(), "tick: overload %v (%v, %v count, bytes) prev %v next %v %v", overloaded, numReqs, numBytes, prev, c.mu.curPriority, c.stringLocked())
+		log.Infof(context.TODO(), "tick: overload %v (%v, %v count, bytes) prev %v next %v %v", overloaded, numReqs, numBytes, prev, c.mu.admissionLevel, c.stringLocked())
 	}
 	c.mu.hist = histogram{}
 	c.mu.byteHist = histogram{}
-	c.metrics.AdmissionLevel.Update(int64(c.mu.curPriority.Encode()))
+	c.metrics.AdmissionLevel.Update(int64(c.mu.admissionLevel.Encode()))
 	c.metrics.NumTicks.Inc(1)
 }
 
