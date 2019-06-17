@@ -514,7 +514,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		overloaded := (waited*3) > total && total >= 30
 		waited, total, curLevel = 0, 0, l
 		return overloaded
-	}, time.Second, .001, .002)
+	}, 200*time.Millisecond, 100, .001, .002)
 	s.distSender.RetryFeedback = recordWait
 	s.node = NewNode(
 		storeCfg, s.recorder, s.registry, s.stopper,

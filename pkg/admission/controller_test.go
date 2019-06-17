@@ -50,7 +50,7 @@ func ExampleController() {
 	overloaded.Store(false)
 	c := NewController("test",
 		func(Priority) bool { return overloaded.Load().(bool) },
-		100*time.Millisecond, 1000, .05, .01)
+		100*time.Millisecond, 1000, .2, .1)
 	fmt.Println("The controller begins at the lowest level.")
 	fmt.Println(c)
 	t100 := time.Unix(0, 100e6)
@@ -82,9 +82,9 @@ func ExampleController() {
 	<-errCh
 	fmt.Println(c)
 	pMin := Priority{DefaultLevel, shardFromBucket(1)}
-	pMax := Priority{DefaultLevel, shardFromBucket(100)}
+	pMax := Priority{DefaultLevel, shardFromBucket(10)}
 	const reqsToAdd = 1000
-	const reqsPerPriority = reqsToAdd / 100
+	const reqsPerPriority = reqsToAdd / 10
 	fmt.Println("Add", reqsToAdd, "requests uniformly between", pMin, "and", pMax, "to test adjustment")
 	for p := pMin; !pMax.less(p); p = p.inc() {
 		for i := 0; i < reqsPerPriority; i++ {
@@ -100,7 +100,7 @@ func ExampleController() {
 	if err := c.AdmitAt(ctx, p127, t300); err != nil {
 		fmt.Println("Got an error", err)
 	}
-	fmt.Println("Notice that the admission level has risen to def:6.")
+	fmt.Println("Notice that the admission level has risen to def:3.")
 	fmt.Println(c)
 	fmt.Println("Now, once again add the same load as before and wait until all requests are either admitted or blocked.")
 	fmt.Println("9951 should be admitted and 50 should be blocked.")
@@ -114,30 +114,45 @@ func ExampleController() {
 			}
 		}
 	}
-	for c.numBlocked() < 50 {
+	for c.numBlocked() < 200 {
 		time.Sleep(time.Millisecond)
 	}
+	for c.numBlocked() < 200 || c.numReqs() < 801 {
+		time.Sleep(time.Millisecond)
+	}
+	fmt.Println(c)
 	fmt.Println()
 	fmt.Println("Now a new request comes in at 0.4 leading to a tick which does not move the admission level")
 	t400 := time.Unix(0, 400e6)
 	c.AdmitAt(ctx, p127, t400)
-	for c.numBlocked() < 50 || c.numReqs() < 1 {
-		time.Sleep(time.Millisecond)
-	}
-	fmt.Println("Now another request at  comes in at 0.5 leading to a tick moving the admission level to def:5.")
-	t500 := time.Unix(0, 500e6)
-	c.AdmitAt(ctx, p127, t500)
-	for c.numReqs() < 11 {
+	for c.numBlocked() < 200 || c.numReqs() < 1 {
 		time.Sleep(time.Millisecond)
 	}
 	fmt.Println(c)
-	fmt.Println(c.numBlocked())
-	fmt.Println("Add more requests than can fit in the waitQueue")
-	pMin.Level, pMax.Level = MinLevel, MinLevel
+	fmt.Println("Now another request at 0.5 ticks the admission level to def:2.")
+	t500 := time.Unix(0, 500e6)
+	c.AdmitAt(ctx, p127, t500)
+	for c.numReqs() < 101 {
+		time.Sleep(time.Millisecond)
+	}
 
-	for p := pMax; !p.less(pMin); p = p.dec() {
+	fmt.Println("Simultaneously more requests than can fit in the waitQueue arrive at 0.5.")
+	fmt.Println("The requests are added in shard order waiting until we know all requests")
+	fmt.Println("at the previous are blocked by the time we add the next level")
+	fmt.Println("in order to ensure test determinism")
+	fmt.Println(c)
+	expectedNumBlocked := int64(c.numBlocked())
+	pMin.Level, pMax.Level = MinLevel, MinLevel
+	for p := pMin; !pMax.less(p); p = p.inc() {
 		for i := 0; i < reqsPerPriority; i++ {
 			go func(p Priority) { errCh <- c.AdmitAt(ctx, p, t500) }(p)
+			expectedNumBlocked++
+		}
+		for c.numBlocked() < expectedNumBlocked {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if expectedNumBlocked == c.maxBlocked {
+			expectedNumBlocked -= reqsPerPriority
 		}
 	}
 	for i := 0; i < 40; i++ {
@@ -146,7 +161,7 @@ func ExampleController() {
 		}
 	}
 	time.Sleep(time.Second)
-	fmt.Println(c.numBlocked(), c)
+	fmt.Println(c)
 	// Output:
 	// The controller begins at the lowest level.
 	// S  |  max |  def |  min |
@@ -189,12 +204,12 @@ func (c *Controller) numReqs() int {
 	return int(atomic.LoadInt64(&c.mu.numReqs))
 }
 
-func (c *Controller) numBlocked() (blocked int) {
+func (c *Controller) numBlocked() (blocked int64) {
 	c.wq.mu.Lock()
 	defer c.wq.mu.Unlock()
 	for lb := 0; lb < numLevels; lb++ {
 		for sb := 0; sb < numShards; sb++ {
-			blocked += c.wq.q[lb][sb].len()
+			blocked += int64(c.wq.q[lb][sb].len())
 		}
 	}
 	return blocked

@@ -636,7 +636,9 @@ func enhanceErrWithCorrelation(err error, isCorrelated bool) error {
 	return err
 }
 
-func (ex *connExecutor) setPriority(ctx context.Context, planner *planner) context.Context {
+func (ex *connExecutor) setPriority(
+	ctx context.Context, planner *planner,
+) (context.Context, admission.Priority) {
 	level := admission.DefaultLevel
 	if ex.isInternal {
 		level = admission.MaxLevel
@@ -645,7 +647,7 @@ func (ex *connExecutor) setPriority(ctx context.Context, planner *planner) conte
 	}
 	priorityShard := md5.Sum(ex.sessionID.GetBytes())[0]
 	priority := admission.MakePriority(level, priorityShard)
-	return admission.ContextWithPriority(ctx, priority)
+	return admission.ContextWithPriority(ctx, priority), priority
 }
 
 // dispatchToExecutionEngine executes the statement, writes the result to res
@@ -658,9 +660,9 @@ func (ex *connExecutor) setPriority(ctx context.Context, planner *planner) conte
 func (ex *connExecutor) dispatchToExecutionEngine(
 	ctx context.Context, planner *planner, res RestrictedCommandResult,
 ) error {
-	ctx = ex.setPriority(ctx, planner)
+	ctx, priority := ex.setPriority(ctx, planner)
 	if !ex.isInternal && planner.Txn().Serialize().Key == nil {
-		if err := admission.WaitForAdmitted(ctx, planner.ExecCfg().AdmissionController); err != nil {
+		if err := planner.ExecCfg().AdmissionController.Admit(ctx, priority); err != nil {
 			return err
 		}
 	}

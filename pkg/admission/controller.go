@@ -42,10 +42,12 @@ type Controller struct {
 
 		admissionLevel Priority
 		rejectionLevel Priority
+		rejectionOn    bool
 
-		numReqs    int64
-		numBlocked int64
-		hist       histogram
+		numReqs         int64
+		numBlocked      int64
+		numBlockWaiting int64
+		hist            histogram
 
 		lastDec int
 	}
@@ -164,14 +166,14 @@ func (c *Controller) stringLocked() string {
 			pad := "  "
 			if c.mu.admissionLevel == p {
 				pad = "\u27a1 "
-			} else if p != minPriority && c.mu.rejectionLevel == p {
+			} else if c.mu.rejectionOn && c.mu.rejectionLevel == p {
 				pad = "\u21e8 "
 			}
 			var v float64
 			switch {
 			case !p.less(c.mu.admissionLevel):
 				v = float64(atomic.LoadUint64(&c.mu.hist.counters[lb][sb]))
-			case c.mu.rejectionLevel.less(p):
+			case !p.less(c.mu.rejectionLevel):
 				pq := c.wq.pq(p)
 				v = float64(pq.len())
 			}
@@ -186,6 +188,7 @@ func (c *Controller) stringLocked() string {
 			break
 		}
 	}
+	fmt.Fprintf(&b, "\nreqs: %d; blocked: %d\n", atomic.LoadInt64(&c.mu.numReqs), atomic.LoadInt64(&c.mu.numBlocked))
 	return b.String()
 }
 
@@ -199,6 +202,12 @@ func (c *Controller) AdmissionLevel() Priority {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.mu.admissionLevel
+}
+
+func (c *Controller) RejectionLevel() Priority {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.mu.rejectionLevel
 }
 
 // TODO(ajwerner): justify these, they're taken from the DAGOR paper and cut
@@ -280,18 +289,23 @@ func (c *Controller) raiseRejectionLevelRLocked(p Priority) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	r := c.mu.rejectionLevel
-	if p.less(r) {
-		return
-	}
-	c.wq.mu.Lock()
-	defer c.wq.mu.Unlock()
 	blocked := atomic.LoadInt64(&c.mu.numBlocked)
-	for blocked >= c.maxBlocked {
+	blockWaiting := atomic.LoadInt64(&c.mu.numBlockWaiting)
+	blocked -= blockWaiting
+	c.wq.mu.Lock()
+	for blocked > c.maxBlocked {
+		if !c.mu.rejectionOn {
+			c.mu.rejectionOn = true
+		} else {
+			r = r.inc()
+		}
 		blocked -= int64(c.wq.releasePriorityLocked(r, -1))
-		r = r.inc()
 		c.mu.rejectionLevel = r
 	}
+	c.wq.mu.Unlock()
+	blocked-- // count this one
 	atomic.StoreInt64(&c.mu.numBlocked, blocked)
+	atomic.StoreInt64(&c.mu.numBlockWaiting, 0)
 }
 
 func (c *Controller) AdmitAt(ctx context.Context, p Priority, now time.Time) error {
@@ -299,20 +313,29 @@ func (c *Controller) AdmitAt(ctx context.Context, p Priority, now time.Time) err
 	c.maybeTickRLocked(now)
 	if p.Level != MaxLevel {
 		for p.less(c.mu.admissionLevel) {
-			if c.mu.rejectionLevel != minPriority && p.less(c.mu.rejectionLevel) {
+			// Reject requests which are at or below the current rejection level.
+			if c.mu.rejectionLevel != minPriority && !c.mu.rejectionLevel.less(p) {
 				// TODO(ajwerner): increment rejected histogram
 				c.mu.RUnlock()
 				return ErrRejected
 			}
-			if numBlocked := atomic.AddInt64(&c.mu.numBlocked, 1); numBlocked == c.maxBlocked {
+			if numBlocked := atomic.AddInt64(&c.mu.numBlocked, 1); numBlocked == c.maxBlocked+1 {
 				c.raiseRejectionLevelRLocked(p)
 				continue
 			} else if numBlocked > c.maxBlocked {
+				atomic.AddInt64(&c.mu.numBlockWaiting, 1)
 				c.mu.blockCond.Wait()
 				continue
 			}
 			c.mu.RUnlock()
 			if err := c.wq.wait(ctx, p); err != nil {
+				// Context cancelations require exclusive locking in order to ensure
+				// that the book-keeping for number of requests are tallied properly.
+				// TODO(ajwerner): move this to a separate counter which is then merged
+				// at the right time.
+				c.mu.Lock()
+				atomic.AddInt64(&c.mu.numBlocked, -1)
+				c.mu.Unlock()
 				return err
 			}
 			c.mu.RLock()
@@ -359,7 +382,13 @@ func (c *Controller) tickLocked(now time.Time) {
 	} else {
 		c.mu.lastDec = 0
 		c.metrics.Dec.Inc(1)
-		c.mu.admissionLevel = findLowerPriority(c.mu.admissionLevel, n, c.growRate, hist, &c.wq)
+		var freed int
+		c.mu.admissionLevel, freed = findLowerPriority(c.mu.admissionLevel, n, c.growRate, hist, &c.wq)
+		numBlocked := atomic.AddInt64(&c.mu.numBlocked, -1*int64(freed))
+		if numBlocked < c.maxBlocked/2 {
+			c.mu.rejectionLevel = minPriority
+			c.mu.rejectionOn = false
+		}
 	}
 	if log.V(1) {
 		log.Infof(context.TODO(), "tick: overload %v (%d) prev %v next %v %v", overloaded, numReqs, prev, c.mu.admissionLevel, c.stringLocked())
@@ -394,7 +423,7 @@ func findHigherPriority(prev Priority, total int64, pruneRate float64, h *histog
 // TODO(ajwerner): incorporate rejected histogram.
 func findLowerPriority(
 	prev Priority, total int64, growRate float64, h *histogram, wq *waitQueue,
-) Priority {
+) (newAdmissiongLevel Priority, freed int) {
 	reqs := uint64(total)
 	cur := prev.dec()
 	target := uint64(total)
@@ -402,19 +431,18 @@ func findLowerPriority(
 	if count := h.countForLevelAbove(cur); count != 0 {
 		toFree = uint64(float64(count)*growRate) + 1
 	} else {
-		fmt.Println("count")
-		return cur
+		return cur, 0
 	}
 	target += toFree
-	fmt.Println(target, toFree, reqs)
 	for ; cur != minPriority; prev, cur = cur, cur.dec() {
 		released := uint64(wq.releasePriority(cur, -1))
+		freed += int(released)
 		reqs += released
 		if reqs >= target {
-			return cur
+			return cur, freed
 		}
 	}
-	return minPriority
+	return minPriority, freed
 }
 
 type histogram struct {
