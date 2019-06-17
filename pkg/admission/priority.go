@@ -2,6 +2,7 @@ package admission
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"math/rand"
 )
@@ -42,6 +43,38 @@ func Decode(p uint16) Priority {
 	}
 }
 
+func (p Priority) dec() (r Priority) {
+	if p == minPriority {
+		return p
+	}
+	if p.Shard == minShard {
+		return Priority{
+			Level: levelFromBucket(bucketFromLevel(p.Level) - 1),
+			Shard: maxShard,
+		}
+	}
+	return Priority{
+		Level: p.Level,
+		Shard: shardFromBucket(bucketFromShard(p.Shard) - 1),
+	}
+}
+
+func (p Priority) inc() Priority {
+	if p == maxPriority {
+		return p
+	}
+	if p.Shard == maxShard {
+		return Priority{
+			Level: levelFromBucket(bucketFromLevel(p.Level) + 1),
+			Shard: minShard,
+		}
+	}
+	return Priority{
+		Level: p.Level,
+		Shard: shardFromBucket(bucketFromShard(p.Shard) + 1),
+	}
+}
+
 // MakePriority constructs a Priority with a provided level and shard.
 func MakePriority(level uint8, shard uint8) Priority {
 	return Priority{
@@ -73,6 +106,18 @@ const (
 	verifyNumLevels = iota
 )
 
+var levelStrings = map[uint8]string{
+	MaxLevel:     "max",
+	DefaultLevel: "def",
+	MinLevel:     "min",
+}
+
+func (p Priority) String() string {
+	return fmt.Sprintf("%s:%d",
+		levelStrings[levelFromBucket(bucketFromLevel(p.Level))],
+		bucketFromShard(p.Shard))
+}
+
 func init() {
 	if numLevels != verifyNumLevels {
 		panic("PriorityLevel definitions are messed up")
@@ -85,6 +130,26 @@ const (
 	maxShard  = math.MaxUint8
 	minShard  = math.MaxUint8 - ((numShards - 1) * shardStep)
 )
+
+var levels = func() (levels [numLevels]uint8) {
+	for i, l := 0, uint8(MaxLevel); i < numLevels; i++ {
+		levels[i] = l
+		l -= levelStep
+	}
+	return levels
+}()
+
+var shards = func() (shards [numShards]uint8) {
+	for i, l := 0, uint8(maxShard); i < numShards; i++ {
+		shards[i] = l
+		l -= shardStep
+	}
+	return shards
+}()
+
+func init() {
+
+}
 
 func levelFromBucket(bucket int) uint8 {
 	if bucket > numLevels {

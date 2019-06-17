@@ -3,6 +3,7 @@ package admission
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"golang.org/x/perf/benchstat"
 )
 
 // Controller keeps track of the allowed level for requests.
@@ -19,7 +21,8 @@ import (
 // In order to make this decision the controller needs to tick every so often
 //
 type Controller struct {
-	maxReqsPerInterval uint64
+	maxReqsPerInterval int64
+	maxBlocked         int64
 	tickInterval       time.Duration
 	pruneRate          float64
 	growRate           float64
@@ -32,18 +35,17 @@ type Controller struct {
 	// Maybe we just hide those as stack-local state in some processing goroutine.
 	mu struct {
 		syncutil.RWMutex
-		cond sync.Cond
+		tickCond  sync.Cond
+		blockCond sync.Cond
 
 		nextTick time.Time
 
 		admissionLevel Priority
 		rejectionLevel Priority
 
-		numReqs uint64
-		hist    histogram
-
-		byteCounts uint64
-		byteHist   histogram
+		numReqs    int64
+		numBlocked int64
+		hist       histogram
 
 		lastDec int
 	}
@@ -125,8 +127,66 @@ var (
 )
 
 func (c *Controller) stringLocked() string {
-	return fmt.Sprintf("Controller{curLevel: %v, numReqs: %d, nextTick: %s (%s), hist: %v, numBytes: %d, histBytes: %v}",
-		c.mu.admissionLevel, c.mu.numReqs, c.mu.nextTick, timeutil.Until(c.mu.nextTick), c.mu.hist, c.mu.byteCounts, c.mu.byteHist)
+	var b strings.Builder
+	b.WriteString("S  ")
+	for lb := numLevels - 1; true; lb-- {
+		b.WriteString("|  ")
+		if levelString, ok := levelStrings[levelFromBucket(lb)]; ok {
+			b.WriteString(levelString)
+		} else {
+			b.WriteString("   ")
+		}
+		b.WriteString(" ")
+		if lb == 0 {
+			b.WriteString("|\n")
+			break
+		}
+	}
+	//b.WriteString("-------------------------\n")
+	var skipped bool
+	for i, s := range shards {
+		sb := numShards - i - 1
+		if sb < numShards-1 && sb > 0 &&
+			c.mu.admissionLevel.Shard != s &&
+			c.mu.rejectionLevel.Shard != s &&
+			c.mu.hist.emptyAtShard(s) &&
+			c.wq.emptyAtShard(s) {
+			skipped = true
+			continue
+		} else if skipped {
+			skipped = false
+			b.WriteString("...\n")
+		}
+		fmt.Fprintf(&b, "%-3d|", sb)
+		for j, l := range levels {
+			lb := numLevels - j - 1
+			p := Priority{l, s}
+			pad := "  "
+			if c.mu.admissionLevel == p {
+				pad = "\u27a1 "
+			} else if p != minPriority && c.mu.rejectionLevel == p {
+				pad = "\u21e8 "
+			}
+			var v float64
+			switch {
+			case !p.less(c.mu.admissionLevel):
+				v = float64(atomic.LoadUint64(&c.mu.hist.counters[lb][sb]))
+			case c.mu.rejectionLevel.less(p):
+				pq := c.wq.pq(p)
+				v = float64(pq.len())
+			}
+			fmt.Fprintf(&b, "%s%-4v|", pad, benchstat.NewScaler(v, "")(v))
+			if lb == 0 {
+				break
+			}
+		}
+		if sb > 0 {
+			b.WriteString("\n")
+		} else {
+			break
+		}
+	}
+	return b.String()
 }
 
 func (c *Controller) String() string {
@@ -135,9 +195,9 @@ func (c *Controller) String() string {
 	return c.stringLocked()
 }
 
-func (c *Controller) Level() Priority {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *Controller) AdmissionLevel() Priority {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.mu.admissionLevel
 }
 
@@ -148,12 +208,14 @@ const (
 	defaultTickInterval       = time.Second
 	defaultPruneRate          = .05
 	defaultGrowRate           = .01
+	defaultMaxBlocked         = 1000
 )
 
 func NewController(
 	name string,
 	overLoadSignal func(prev Priority) bool,
 	tickInterval time.Duration,
+	maxBlocked int64,
 	pruneRate, growRate float64,
 ) *Controller {
 	if tickInterval <= 0 {
@@ -165,17 +227,23 @@ func NewController(
 	if growRate <= 0 {
 		growRate = defaultGrowRate
 	}
+	if maxBlocked <= 0 {
+		maxBlocked = defaultMaxBlocked
+	}
 	c := &Controller{
 		maxReqsPerInterval: defaultMaxReqsPerInterval,
 		tickInterval:       tickInterval,
 		pruneRate:          pruneRate,
 		growRate:           growRate,
 		overloadSignal:     overLoadSignal,
+		maxBlocked:         maxBlocked,
 	}
 	c.metrics = makeMetrics(name)
-	c.mu.cond.L = c.mu.RLocker()
+	c.mu.tickCond.L = c.mu.RLocker()
+	c.mu.blockCond.L = c.mu.RLocker()
 	c.mu.admissionLevel = minPriority
 	c.mu.rejectionLevel = minPriority
+	initWaitQueue(&c.wq)
 	return c
 }
 
@@ -198,37 +266,69 @@ func (c *Controller) maybeTickRLocked(now time.Time) {
 }
 
 func (c *Controller) Report(p Priority, size uint64) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	c.mu.byteHist.record(p, size)
-	atomic.AddUint64(&c.mu.byteCounts, size)
+	// TODO(ajwerner): remove
 }
 
 func (c *Controller) Admit(ctx context.Context, p Priority) error {
 	return c.AdmitAt(ctx, p, timeutil.Now())
 }
 
+func (c *Controller) raiseRejectionLevelRLocked(p Priority) {
+	defer c.mu.blockCond.Broadcast()
+	c.mu.RUnlock()
+	defer c.mu.RLock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	r := c.mu.rejectionLevel
+	if p.less(r) {
+		return
+	}
+	c.wq.mu.Lock()
+	defer c.wq.mu.Unlock()
+	blocked := atomic.LoadInt64(&c.mu.numBlocked)
+	for blocked >= c.maxBlocked {
+		blocked -= int64(c.wq.releasePriorityLocked(r, -1))
+		r = r.inc()
+		c.mu.rejectionLevel = r
+	}
+	atomic.StoreInt64(&c.mu.numBlocked, blocked)
+}
+
 func (c *Controller) AdmitAt(ctx context.Context, p Priority, now time.Time) error {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 	c.maybeTickRLocked(now)
 	if p.Level != MaxLevel {
 		for p.less(c.mu.admissionLevel) {
+			if c.mu.rejectionLevel != minPriority && p.less(c.mu.rejectionLevel) {
+				// TODO(ajwerner): increment rejected histogram
+				c.mu.RUnlock()
+				return ErrRejected
+			}
+			if numBlocked := atomic.AddInt64(&c.mu.numBlocked, 1); numBlocked == c.maxBlocked {
+				c.raiseRejectionLevelRLocked(p)
+				continue
+			} else if numBlocked > c.maxBlocked {
+				c.mu.blockCond.Wait()
+				continue
+			}
+			c.mu.RUnlock()
 			if err := c.wq.wait(ctx, p); err != nil {
 				return err
 			}
+			c.mu.RLock()
 		}
 	}
+	defer c.mu.RUnlock()
 	defer c.mu.hist.record(p, 1)
-	numReqs := atomic.AddUint64(&c.mu.numReqs, 1)
+	numReqs := atomic.AddInt64(&c.mu.numReqs, 1)
 	for numReqs > c.maxReqsPerInterval {
 		if numReqs == (c.maxReqsPerInterval + 1) {
 			c.tickRLocked(now)
 		} else {
-			c.mu.cond.Wait()
+			c.mu.tickCond.Wait()
 		}
 		// c was just ticked so we add ourselves again
-		numReqs = atomic.AddUint64(&c.mu.numReqs, 1)
+		numReqs = atomic.AddInt64(&c.mu.numReqs, 1)
 	}
 	return nil
 }
@@ -243,14 +343,10 @@ func (c *Controller) tickRLocked(now time.Time) {
 }
 
 func (c *Controller) tickLocked(now time.Time) {
-	defer c.mu.cond.Broadcast()
+	defer c.mu.tickCond.Broadcast()
 	c.mu.nextTick = now.Add(c.tickInterval)
-	numReqs := atomic.SwapUint64(&c.mu.numReqs, 0)
-	numBytes := atomic.SwapUint64(&c.mu.byteCounts, 0)
+	numReqs := atomic.SwapInt64(&c.mu.numReqs, 0)
 	n, hist := numReqs, &c.mu.hist
-	if numBytes > 0 {
-		n, hist = numBytes, &c.mu.byteHist
-	}
 	prev := c.mu.admissionLevel
 	const minNumReqs = 0
 	overloaded := numReqs > minNumReqs && c.overloadSignal(prev)
@@ -258,18 +354,17 @@ func (c *Controller) tickLocked(now time.Time) {
 		c.mu.lastDec = 0
 		c.metrics.Inc.Inc(1)
 		c.mu.admissionLevel = findHigherPriority(c.mu.admissionLevel, n, c.pruneRate, hist)
-	} else if c.mu.lastDec < 2 {
+	} else if c.mu.lastDec < 1 {
 		c.mu.lastDec++
 	} else {
 		c.mu.lastDec = 0
 		c.metrics.Dec.Inc(1)
-		c.mu.admissionLevel = findLowerPriority(c.mu.admissionLevel, n, c.growRate, hist)
+		c.mu.admissionLevel = findLowerPriority(c.mu.admissionLevel, n, c.growRate, hist, &c.wq)
 	}
 	if log.V(1) {
-		log.Infof(context.TODO(), "tick: overload %v (%v, %v count, bytes) prev %v next %v %v", overloaded, numReqs, numBytes, prev, c.mu.admissionLevel, c.stringLocked())
+		log.Infof(context.TODO(), "tick: overload %v (%d) prev %v next %v %v", overloaded, numReqs, prev, c.mu.admissionLevel, c.stringLocked())
 	}
 	c.mu.hist = histogram{}
-	c.mu.byteHist = histogram{}
 	c.metrics.AdmissionLevel.Update(int64(c.mu.admissionLevel.Encode()))
 	c.metrics.NumTicks.Inc(1)
 }
@@ -277,77 +372,63 @@ func (c *Controller) tickLocked(now time.Time) {
 var maxPriority = Priority{MaxLevel, maxShard}
 var minPriority = Priority{MinLevel, minShard}
 
-func findHigherPriority(prev Priority, total uint64, pruneRate float64, h *histogram) Priority {
+func findHigherPriority(prev Priority, total int64, pruneRate float64, h *histogram) Priority {
 	if total == 0 || h.countAboveIsEmpty(prev) {
 		return prev
 	}
-	reqs := total
+	reqs := uint64(total)
 	target := uint64(float64(total) * (1 - pruneRate))
 	lastWithSome := prev
 	for cur := prev; cur.Level != MaxLevel; cur = cur.inc() {
+		if reqs <= target {
+			return cur
+		}
 		if count := h.countAt(cur); count > 0 {
 			reqs -= count
 			lastWithSome = cur
-		}
-		if reqs < target {
-			return cur
 		}
 	}
 	return lastWithSome
 }
 
-func findLowerPriority(prev Priority, total uint64, growRate float64, h *histogram) Priority {
-	reqs := total
+// TODO(ajwerner): incorporate rejected histogram.
+func findLowerPriority(
+	prev Priority, total int64, growRate float64, h *histogram, wq *waitQueue,
+) Priority {
+	reqs := uint64(total)
 	cur := prev.dec()
-	target := total
+	target := uint64(total)
+	var toFree uint64
 	if count := h.countForLevelAbove(cur); count != 0 {
-		target += uint64(float64(count)*growRate) + 1
+		toFree = uint64(float64(count)*growRate) + 1
 	} else {
+		fmt.Println("count")
 		return cur
 	}
+	target += toFree
+	fmt.Println(target, toFree, reqs)
 	for ; cur != minPriority; prev, cur = cur, cur.dec() {
-		reqs += h.countAt(cur)
-		if reqs > target {
+		released := uint64(wq.releasePriority(cur, -1))
+		reqs += released
+		if reqs >= target {
 			return cur
 		}
 	}
 	return minPriority
 }
 
-func (p Priority) dec() (r Priority) {
-	if p == minPriority {
-		return p
-	}
-	if p.Shard == minShard {
-		return Priority{
-			Level: levelFromBucket(bucketFromLevel(p.Level) - 1),
-			Shard: maxShard,
-		}
-	}
-	return Priority{
-		Level: p.Level,
-		Shard: shardFromBucket(bucketFromShard(p.Shard) - 1),
-	}
-}
-
-func (p Priority) inc() Priority {
-	if p == maxPriority {
-		return p
-	}
-	if p.Shard == maxShard {
-		return Priority{
-			Level: levelFromBucket(bucketFromLevel(p.Level) + 1),
-			Shard: minShard,
-		}
-	}
-	return Priority{
-		Level: p.Level,
-		Shard: shardFromBucket(bucketFromShard(p.Shard) + 1),
-	}
-}
-
 type histogram struct {
 	counters [numLevels][numShards]uint64
+}
+
+func (h *histogram) emptyAtShard(s uint8) bool {
+	sb := bucketFromShard(s)
+	for lb := 0; lb < numLevels; lb++ {
+		if atomic.LoadUint64(&h.counters[lb][sb]) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *histogram) countForLevelAbove(p Priority) (count uint64) {
