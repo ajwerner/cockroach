@@ -65,9 +65,8 @@ func (r *Replica) executeReadOnlyBatch(
 		if err := r.store.admissionController.Admit(ctx, priority); err != nil {
 			if err == admission.ErrRejected {
 				return nil, roachpb.NewError(&roachpb.ReadRejectedError{})
-			} else {
-				return nil, roachpb.NewError(err)
 			}
+			return nil, roachpb.NewError(err)
 		}
 		alloc, err := r.store.readQuota.acquire(ctx)
 		if err != nil {

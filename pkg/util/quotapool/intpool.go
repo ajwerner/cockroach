@@ -150,6 +150,10 @@ func (p *IntPool) ApproximateQuota() (q int64) {
 	return q
 }
 
+func (p *IntPool) Len() int {
+	return p.qp.Len()
+}
+
 // Close signals to all ongoing and subsequent acquisitions that the pool is
 // closed and that an error should be returned.
 //

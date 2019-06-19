@@ -943,11 +943,6 @@ func NewStore(
 
 	// TODO(ajwerner): clean this up.
 	s.initializeReadQuota()
-	s.admissionController = admission.NewController("read", func(admission.Priority) (overloaded bool) {
-		avg, max := s.readQuota.WaitStats()
-		return avg > 10*time.Millisecond || max > 200*time.Millisecond
-	}, 500*time.Millisecond, 1000, .05, 0.01)
-	s.metrics.registry.AddMetricStruct(s.admissionController.Metrics())
 	if cfg.TestingKnobs.DisableGCQueue {
 		s.setGCQueueActive(false)
 	}
@@ -1283,6 +1278,14 @@ func ReadStoreIdent(ctx context.Context, eng engine.Engine) (roachpb.StoreIdent,
 // Start the engine, set the GC and read the StoreIdent.
 func (s *Store) Start(ctx context.Context, stopper *stop.Stopper) error {
 	s.stopper = stopper
+
+	s.admissionController = admission.NewController(ctx, "read", s.stopper,
+		func(admission.Priority) (overloaded bool) {
+			_, min, _, qLen, requests := s.readQuota.WaitStats()
+			return min > 20*time.Millisecond && qLen > requests/5 && qLen > 10
+		},
+		200*time.Millisecond, 1000, .025, 0.005)
+	s.metrics.registry.AddMetricStruct(s.admissionController.Metrics())
 
 	// Populate the store ident. If not bootstrapped, ReadStoreIntent will
 	// return an error.

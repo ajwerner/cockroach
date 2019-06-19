@@ -3,6 +3,7 @@ package admission
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"golang.org/x/perf/benchstat"
@@ -28,6 +30,7 @@ type Controller struct {
 	growRate           float64
 	overloadSignal     func(Priority) bool
 	metrics            Metrics
+	wiggle             func(time.Duration) time.Duration
 
 	wq waitQueue
 
@@ -47,14 +50,22 @@ type Controller struct {
 		numReqs         int64
 		numBlocked      int64
 		numBlockWaiting int64
-		hist            histogram
+		numCanceled     int64
+
+		hist histogram
 
 		lastDec int
 	}
 }
 
+func wiggle(d time.Duration) time.Duration {
+	return time.Duration((1 + (rand.Float64()*.3 - .15)) * float64(d))
+}
+
 type Metrics struct {
 	AdmissionLevel *metric.Gauge
+	RejectionLevel *metric.Gauge
+	NumBlocked     *metric.Gauge
 	NumTicks       *metric.Counter
 	Inc            *metric.Counter
 	Dec            *metric.Counter
@@ -68,38 +79,13 @@ func makeMeta(md metric.Metadata, name string) metric.Metadata {
 func makeMetrics(name string) Metrics {
 	return Metrics{
 		AdmissionLevel: metric.NewGauge(makeMeta(metaAdmissionLevel, name)),
+		RejectionLevel: metric.NewGauge(makeMeta(metaRejectionLevel, name)),
+		NumBlocked:     metric.NewGauge(makeMeta(metaNumBlocked, name)),
 		NumTicks:       metric.NewCounter(makeMeta(metaNumTicks, name)),
 		Inc:            metric.NewCounter(makeMeta(metaNumInc, name)),
 		Dec:            metric.NewCounter(makeMeta(metaNumDec, name)),
 	}
 }
-
-// // WaitForAdmitted waits for the current context to be admitted.
-// func WaitForAdmitted(ctx context.Context, c *Controller) error {
-// 	// Make a retrier
-// 	// Get the priority
-// 	// Wait with some backoff
-// 	// Eventually make this more efficient
-// 	opts := retry.Options{
-// 		Multiplier:     1.25,
-// 		InitialBackoff: time.Millisecond,
-// 		MaxBackoff:     time.Second,
-// 	}
-// 	prio := PriorityFromContext(ctx)
-// 	retry := retry.StartWithCtx(ctx, opts)
-// 	for retry.Next() {
-// 		now := timeutil.Now()
-// 		if c.AdmitAt(prio, now) {
-// 			return nil
-// 		}
-// 	}
-// 	// retry.Next() will only return false if our context is canceled or the
-// 	// stopper has been stopped.
-// 	if ctxErr := ctx.Err(); ctxErr != nil {
-// 		return ctxErr
-// 	}
-// 	return stop.ErrUnavailable
-// }
 
 var (
 	metaAdmissionLevel = metric.Metadata{
@@ -107,6 +93,12 @@ var (
 		Help:        "Current admission level",
 		Unit:        metric.Unit_COUNT,
 		Measurement: "admission level",
+	}
+	metaRejectionLevel = metric.Metadata{
+		Name:        "rejection.level",
+		Help:        "Current rejection level",
+		Unit:        metric.Unit_COUNT,
+		Measurement: "rejection level",
 	}
 	metaNumTicks = metric.Metadata{
 		Name:        "admission.ticks",
@@ -126,9 +118,15 @@ var (
 		Unit:        metric.Unit_COUNT,
 		Measurement: "ticks",
 	}
+	metaNumBlocked = metric.Metadata{
+		Name:        "admission.num_blocked",
+		Help:        "Gauge of currently blocked requests",
+		Unit:        metric.Unit_COUNT,
+		Measurement: "requests",
+	}
 )
 
-func (c *Controller) stringLocked() string {
+func (c *Controller) stringRLocked() string {
 	var b strings.Builder
 	b.WriteString("S  ")
 	for lb := numLevels - 1; true; lb-- {
@@ -144,7 +142,6 @@ func (c *Controller) stringLocked() string {
 			break
 		}
 	}
-	//b.WriteString("-------------------------\n")
 	var skipped bool
 	for i, s := range shards {
 		sb := numShards - i - 1
@@ -195,7 +192,7 @@ func (c *Controller) stringLocked() string {
 func (c *Controller) String() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.stringLocked()
+	return c.stringRLocked()
 }
 
 func (c *Controller) AdmissionLevel() Priority {
@@ -221,7 +218,9 @@ const (
 )
 
 func NewController(
+	ctx context.Context,
 	name string,
+	stopper *stop.Stopper,
 	overLoadSignal func(prev Priority) bool,
 	tickInterval time.Duration,
 	maxBlocked int64,
@@ -247,12 +246,32 @@ func NewController(
 		overloadSignal:     overLoadSignal,
 		maxBlocked:         maxBlocked,
 	}
+	c.wiggle = wiggle
 	c.metrics = makeMetrics(name)
 	c.mu.tickCond.L = c.mu.RLocker()
 	c.mu.blockCond.L = c.mu.RLocker()
 	c.mu.admissionLevel = minPriority
 	c.mu.rejectionLevel = minPriority
 	initWaitQueue(&c.wq)
+	if stopper != nil {
+		if err := stopper.RunAsyncTask(ctx, name+"admission.controller.ticker", func(ctx context.Context) {
+			t := timeutil.NewTimer()
+			for {
+				t.Reset(c.tickInterval)
+				select {
+				case <-stopper.ShouldQuiesce():
+					return
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					t.Read = true
+					_ = c.Admit(ctx, maxPriority)
+				}
+			}
+		}); err != nil {
+			panic(err)
+		}
+	}
 	return c
 }
 
@@ -291,7 +310,9 @@ func (c *Controller) raiseRejectionLevelRLocked(p Priority) {
 	r := c.mu.rejectionLevel
 	blocked := atomic.LoadInt64(&c.mu.numBlocked)
 	blockWaiting := atomic.LoadInt64(&c.mu.numBlockWaiting)
+	canceled := atomic.SwapInt64(&c.mu.numCanceled, 0)
 	blocked -= blockWaiting
+	blocked -= canceled
 	c.wq.mu.Lock()
 	for blocked > c.maxBlocked {
 		if !c.mu.rejectionOn {
@@ -329,13 +350,7 @@ func (c *Controller) AdmitAt(ctx context.Context, p Priority, now time.Time) err
 			}
 			c.mu.RUnlock()
 			if err := c.wq.wait(ctx, p); err != nil {
-				// Context cancelations require exclusive locking in order to ensure
-				// that the book-keeping for number of requests are tallied properly.
-				// TODO(ajwerner): move this to a separate counter which is then merged
-				// at the right time.
-				c.mu.Lock()
-				atomic.AddInt64(&c.mu.numBlocked, -1)
-				c.mu.Unlock()
+				atomic.AddInt64(&c.mu.numCanceled, 1)
 				return err
 			}
 			c.mu.RLock()
@@ -367,34 +382,43 @@ func (c *Controller) tickRLocked(now time.Time) {
 
 func (c *Controller) tickLocked(now time.Time) {
 	defer c.mu.tickCond.Broadcast()
-	c.mu.nextTick = now.Add(c.tickInterval)
+	c.mu.nextTick = now.Add(c.wiggle(c.tickInterval))
 	numReqs := atomic.SwapInt64(&c.mu.numReqs, 0)
 	n, hist := numReqs, &c.mu.hist
 	prev := c.mu.admissionLevel
 	const minNumReqs = 0
 	overloaded := numReqs > minNumReqs && c.overloadSignal(prev)
 	if overloaded {
-		c.mu.lastDec = 0
+		//c.mu.lastDec = 0
 		c.metrics.Inc.Inc(1)
 		c.mu.admissionLevel = findHigherPriority(c.mu.admissionLevel, n, c.pruneRate, hist)
-	} else if c.mu.lastDec < 1 {
-		c.mu.lastDec++
-	} else {
-		c.mu.lastDec = 0
+		//	} //else if c.mu.lastDec < 1 {
+		//		c.mu.lastDec++
+	} else if c.mu.admissionLevel != minPriority {
+		//	c.mu.lastDec = 0
 		c.metrics.Dec.Inc(1)
 		var freed int
 		c.mu.admissionLevel, freed = findLowerPriority(c.mu.admissionLevel, n, c.growRate, hist, &c.wq)
-		numBlocked := atomic.AddInt64(&c.mu.numBlocked, -1*int64(freed))
+		numCanceled := atomic.SwapInt64(&c.mu.numCanceled, 0)
+		unblocked := int64(freed) + numCanceled
+		numBlocked := atomic.AddInt64(&c.mu.numBlocked, -1*unblocked)
 		if numBlocked < c.maxBlocked/2 {
 			c.mu.rejectionLevel = minPriority
 			c.mu.rejectionOn = false
 		}
+		c.metrics.NumBlocked.Update(numBlocked)
 	}
 	if log.V(1) {
-		log.Infof(context.TODO(), "tick: overload %v (%d) prev %v next %v %v", overloaded, numReqs, prev, c.mu.admissionLevel, c.stringLocked())
+		log.Infof(context.TODO(), "tick: overload %v (%d) prev %v next %v %v",
+			overloaded, numReqs, prev, c.mu.admissionLevel, c.stringRLocked())
 	}
 	c.mu.hist = histogram{}
 	c.metrics.AdmissionLevel.Update(int64(c.mu.admissionLevel.Encode()))
+	if c.mu.rejectionOn {
+		c.metrics.RejectionLevel.Update(int64(c.mu.rejectionLevel.Encode()))
+	} else {
+		c.metrics.RejectionLevel.Update(0)
+	}
 	c.metrics.NumTicks.Inc(1)
 }
 
@@ -424,16 +448,10 @@ func findHigherPriority(prev Priority, total int64, pruneRate float64, h *histog
 func findLowerPriority(
 	prev Priority, total int64, growRate float64, h *histogram, wq *waitQueue,
 ) (newAdmissiongLevel Priority, freed int) {
-	reqs := uint64(total)
 	cur := prev.dec()
-	target := uint64(total)
-	var toFree uint64
-	if count := h.countForLevelAbove(cur); count != 0 {
-		toFree = uint64(float64(count)*growRate) + 1
-	} else {
-		return cur, 0
-	}
-	target += toFree
+	reqs := uint64(total)
+	toFree := float64(h.countForLevelAbove(cur))*growRate + 1
+	target := reqs + uint64(toFree)
 	for ; cur != minPriority; prev, cur = cur, cur.dec() {
 		released := uint64(wq.releasePriority(cur, -1))
 		freed += int(released)

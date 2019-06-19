@@ -16,6 +16,7 @@ import (
 	"context"
 	"math"
 
+	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
@@ -171,6 +172,7 @@ func (s *Server) Query(
 	if len(request.Queries) == 0 {
 		return nil, status.Errorf(codes.InvalidArgument, "Queries cannot be empty")
 	}
+	ctx = admission.ContextWithPriority(ctx, admission.Priority{admission.MaxLevel, 255})
 
 	// If not set, sampleNanos should default to ten second resolution.
 	sampleNanos := request.SampleNanos

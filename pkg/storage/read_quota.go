@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ajwerner/tdigest"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -17,20 +18,24 @@ type readQuota struct {
 	mu struct {
 		syncutil.Mutex
 		totalWait time.Duration
+		minWait   time.Duration
 		maxWait   time.Duration
 		requests  int64
 	}
 }
 
-func (rq *readQuota) WaitStats() (avg, max time.Duration) {
+func (rq *readQuota) WaitStats() (avg, min, max time.Duration, len, requests int64) {
 	rq.mu.Lock()
-	defer rq.mu.Unlock()
 	avg = time.Duration(float64(rq.mu.totalWait) / float64(rq.mu.requests))
-	max = time.Duration(rq.mu.maxWait)
+	min = rq.mu.minWait
+	max = rq.mu.maxWait
+	requests = rq.mu.requests
 	rq.mu.totalWait = 0
 	rq.mu.maxWait = 0
+	rq.mu.minWait = 0
 	rq.mu.requests = 0
-	return avg, max
+	rq.mu.Unlock()
+	return avg, min, max, int64(rq.qp.Len()), requests
 }
 
 func (rq *readQuota) acquire(ctx context.Context) (*quotapool.IntAlloc, error) {
@@ -38,12 +43,18 @@ func (rq *readQuota) acquire(ctx context.Context) (*quotapool.IntAlloc, error) {
 }
 
 func (rq *readQuota) onAcquisition(
-	ctx context.Context, poolName string, _ quotapool.Request, start time.Time,
+	ctx context.Context, poolName string, r quotapool.Request, start time.Time,
 ) {
 	took := timeutil.Since(start)
+	if log.V(1) {
+		log.Infof(ctx, "acquire took %v for %v", took, r)
+	}
 	rq.mu.Lock()
 	if took > rq.mu.maxWait {
 		rq.mu.maxWait = took
+	}
+	if rq.mu.minWait == 0 || took < rq.mu.minWait {
+		rq.mu.minWait = took
 	}
 	rq.mu.totalWait += took
 	rq.mu.requests++
@@ -57,7 +68,7 @@ const bias = .2
 
 func (s *Store) initializeReadQuota() {
 	s.readQuota = readQuota{
-		qp: quotapool.NewIntPool("read quota", int64(2*(1<<30)),
+		qp: quotapool.NewIntPool("read quota", int64(1<<30),
 			quotapool.LogSlowAcquisition,
 			quotapool.OnAcquisition(s.readQuota.onAcquisition)),
 		s: s,
@@ -65,7 +76,11 @@ func (s *Store) initializeReadQuota() {
 }
 
 func (rq *readQuota) acquireFunc(ctx context.Context, quota int64) (fulfilled bool, took int64) {
-	if guess := rq.guessReadSize(); guess <= quota {
+	guess := rq.guessReadSize()
+	if log.V(1) {
+		log.Infof(ctx, "attempting to acquire %v %v", guess, quota)
+	}
+	if guess <= quota {
 		return true, guess
 	}
 	return false, 0

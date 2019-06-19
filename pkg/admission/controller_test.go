@@ -13,12 +13,12 @@ import (
 func TestAdmissionController(t *testing.T) {
 	var overloaded atomic.Value
 	overloaded.Store(false)
-	c := NewController("test",
+	ctx := context.Background()
+	c := NewController(ctx, "test", nil,
 		func(Priority) bool { return overloaded.Load().(bool) },
 		100*time.Millisecond, 10, .05, .01)
 	assert.Equal(t, minPriority, c.AdmissionLevel())
 	t100 := time.Unix(0, 100e6)
-	ctx := context.Background()
 	p := Priority{DefaultLevel, 0}
 	assert.Nil(t, c.AdmitAt(ctx, p, t100))
 	assert.Nil(t, c.AdmitAt(ctx, Priority{DefaultLevel, maxShard}, t100))
@@ -48,13 +48,13 @@ func TestAdmissionController(t *testing.T) {
 func ExampleController() {
 	var overloaded atomic.Value
 	overloaded.Store(false)
-	c := NewController("test",
+	ctx := context.Background()
+	c := NewController(ctx, "test", nil,
 		func(Priority) bool { return overloaded.Load().(bool) },
 		100*time.Millisecond, 1000, .2, .1)
 	fmt.Println("The controller begins at the lowest level.")
 	fmt.Println(c)
 	t100 := time.Unix(0, 100e6)
-	ctx := context.Background()
 	p0 := Priority{DefaultLevel, 0}
 	fmt.Println()
 	fmt.Printf("AdmitAt(%v, %s) = %v.\n", p0, t100.Format("0.0"), c.AdmitAt(ctx, p0, t100))

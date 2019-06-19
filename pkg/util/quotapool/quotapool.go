@@ -127,6 +127,12 @@ type QuotaPool struct {
 	}
 }
 
+func (qp *QuotaPool) Len() int {
+	qp.mu.Lock()
+	defer qp.mu.Unlock()
+	return qp.mu.q.Len()
+}
+
 // New returns a new quota pool initialized with a given quota. The quota
 // is capped at this amount, meaning that callers may return more quota than they
 // acquired without ever making more than the quota capacity available.
@@ -173,14 +179,6 @@ func (qp *QuotaPool) addLocked(r Resource) {
 //
 // Safe for concurrent use.
 func (qp *QuotaPool) Acquire(ctx context.Context, r Request) (err error) {
-	start := timeutil.Now()
-	if qp.config.onAcquisition != nil {
-		defer func() {
-			if err != nil {
-				qp.config.onAcquisition(ctx, qp.name, r, start)
-			}
-		}()
-	}
 	notifyCh := qp.chanSyncPool.Get().(chan struct{})
 	qp.mu.Lock()
 	var closeErr error
@@ -196,6 +194,14 @@ func (qp *QuotaPool) Acquire(ctx context.Context, r Request) (err error) {
 	qp.mu.Unlock()
 	if closeErr != nil {
 		return closeErr
+	}
+	start := timeutil.Now()
+	if qp.config.onAcquisition != nil {
+		defer func() {
+			if err == nil {
+				qp.config.onAcquisition(ctx, qp.name, r, start)
+			}
+		}()
 	}
 	// Set up the infrastructure to report slow requests.
 	var slowTimer *timeutil.Timer

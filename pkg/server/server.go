@@ -484,36 +484,39 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	// We want to just tracks queries in an interval and see the number of them
 	// which are above the current level that experience some amount of delay.
 
-	var waitMu syncutil.Mutex
-	var waited, total int64
-	curLevel := admission.MakePriority(admission.MinLevel, 0)
+	// var waitMu syncutil.Mutex
+	// var waited, total int64
+	// curLevel := admission.MakePriority(admission.MinLevel, 0)
 
 	recordWait := func(ctx context.Context, wait time.Duration) {
-		p := admission.PriorityFromContext(ctx)
-		waitMu.Lock()
-		defer waitMu.Unlock()
-		if p.Level < curLevel.Level && p.Shard < curLevel.Shard {
-			return
-		}
-		if wait > 100*time.Millisecond {
-			waited++
-		}
-		total++
+
+		// p := admission.PriorityFromContext(ctx)
+		// waitMu.Lock()
+		// defer waitMu.Unlock()
+		// if p.Level < curLevel.Level && p.Shard < curLevel.Shard {
+		// 	return
+		// }
+		// if wait > 100*time.Millisecond {
+		// 	waited++
+		// }
+		// total++
 	}
 	// I guess I sort of want to know how long queries last at a level because I
 	// don't want to open up the flood gate because we didn't see any queries.
 	// Maybe we should track a trailing time^2 and time so that we can compute a
 	// tailing average QPS and use that to determine how rapidly to tick
 	// We want the average trailing QPS and the average trailing latency.
-	sqlAdmissionController := admission.NewController("sql", func(l admission.Priority) bool {
-		waitMu.Lock()
-		defer waitMu.Unlock()
-		if log.V(1) {
-			log.Infof(ctx, "sql tick %v %v", waited, total, curLevel, l)
-		}
-		overloaded := (waited*3) > total && total >= 30
-		waited, total, curLevel = 0, 0, l
-		return overloaded
+	var sqlAdmissionController *admission.Controller
+	sqlAdmissionController = admission.NewController(ctx, "sql", s.stopper, func(l admission.Priority) bool {
+		return false
+		// waitMu.Lock()
+		// defer waitMu.Unlock()
+		// if log.V(1) {
+		// 	log.Infof(ctx, "sql tick %v %v", l, sqlAdmissionController)
+		// }
+		// overloaded := (waited*3) > total && total >= 30
+		// waited, total, curLevel = 0, 0, l
+		// return overloaded
 	}, 200*time.Millisecond, 100, .001, .002)
 	s.distSender.RetryFeedback = recordWait
 	s.node = NewNode(
