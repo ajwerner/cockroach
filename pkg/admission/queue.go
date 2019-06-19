@@ -70,22 +70,21 @@ func (q *waitQueue) wait(ctx context.Context, p Priority) error {
 	}
 }
 
-func (q *waitQueue) releasePriority(p Priority, maxToFree int) (freed int) {
+func (q *waitQueue) releasePriority(p Priority) (freed int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.releasePriorityLocked(p, maxToFree)
+	return q.releasePriorityLocked(p)
 }
 
-// releasePriority releases up to maxToFree elements from the queue.
-// If maxToFree is less than or equal to zero it frees all of the elements.
-func (q *waitQueue) releasePriorityLocked(p Priority, maxToFree int) (freed int) {
+// TODO(ajwerner): if we're going to free all of the requests in a level
+// at the same time then there's not a good reason to have a queue here.
+
+func (q *waitQueue) releasePriorityLocked(p Priority) (freed int) {
 	for pq := q.pq(p); pq.Len() > 0; {
 		ch := pq.Dequeue()
 		select {
 		case ch <- struct{}{}:
-			if freed++; maxToFree > 0 && freed > maxToFree {
-				return freed
-			}
+			freed++
 		default:
 			<-ch
 			pq.canceled--
@@ -95,14 +94,14 @@ func (q *waitQueue) releasePriorityLocked(p Priority, maxToFree int) (freed int)
 	return freed
 }
 
-func (q *waitQueue) release(to Priority, maxToFree int) (freed int) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for p := maxPriority; freed < maxToFree && !p.less(to); p = p.dec() {
-		freed += q.releasePriorityLocked(p, maxToFree-freed)
-	}
-	return freed
-}
+// // func (q *waitQueue) release(to Priority, maxToFree int) (freed int) {
+// // 	q.mu.Lock()
+// // 	defer q.mu.Unlock()
+// // 	for p := maxPriority; freed < maxToFree && !p.less(to); p = p.dec() {
+// // 		freed += q.releasePriorityLocked(p, maxToFree-freed)
+// // 	}
+// // 	return freed
+// // }
 
 func (q *waitQueue) consolidate(pq *notifyQueue) {
 	l := pq.Len()

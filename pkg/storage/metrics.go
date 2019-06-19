@@ -1002,6 +1002,26 @@ var (
 		Measurement: "Bytes",
 		Unit:        metric.Unit_BYTES,
 	}
+
+	metaReadResponseSizeMaxLevel = metric.Metadata{
+		Name:        "read_response.size_distribution.max",
+		Help:        "Trailing read size distribution on max level read response sizes",
+		Measurement: "Bytes",
+		Unit:        metric.Unit_BYTES,
+	}
+
+	metaReadResponseSizeDefLevel = metric.Metadata{
+		Name:        "read_response.size_distribution.def",
+		Help:        "Trailing read size distribution on def level read response sizes",
+		Measurement: "Bytes",
+		Unit:        metric.Unit_BYTES,
+	}
+	metaReadResponseSizeMinLevel = metric.Metadata{
+		Name:        "read_response.size_distribution.min",
+		Help:        "Trailing read size distribution on min level read response sizes",
+		Measurement: "Bytes",
+		Unit:        metric.Unit_BYTES,
+	}
 )
 
 // StoreMetrics is the set of metrics for a given store.
@@ -1212,6 +1232,10 @@ type StoreMetrics struct {
 
 	// ReadResponseSizeSummary1m
 	ReadResponseSizeSummary1m *metric.Summary
+
+	ReadResponseSizeMaxLevel *metric.Summary
+	ReadResponseSizeDefLevel *metric.Summary
+	ReadResponseSizeMinLevel *metric.Summary
 
 	ReadQuotaAcquisitions               *metric.Counter
 	ReadQuotaTimeSpentWaitingRate10s    *metric.Rate
@@ -1432,6 +1456,9 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		ReadQuotaBytesRead:                  metric.NewCounter(metaReadQuotaBytesRead),
 		ReadQuotaBytesGuessed:               metric.NewCounter(metaReadQuotaBytesGuessed),
 		ReadResponseSizeSummary1m:           metric.NewSummary(metaReadResponseSizeSummary1m, 5*time.Second),
+		ReadResponseSizeMaxLevel:            metric.NewSummary(metaReadResponseSizeMaxLevel, 5*time.Second),
+		ReadResponseSizeDefLevel:            metric.NewSummary(metaReadResponseSizeDefLevel, 5*time.Second),
+		ReadResponseSizeMinLevel:            metric.NewSummary(metaReadResponseSizeMinLevel, 5*time.Second),
 	}
 
 	sm.raftRcvdMessages[raftpb.MsgProp] = sm.RaftRcvdMsgProp

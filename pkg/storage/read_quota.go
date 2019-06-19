@@ -3,9 +3,11 @@ package storage
 import (
 	"context"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/ajwerner/tdigest"
+	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -22,6 +24,20 @@ type readQuota struct {
 		maxWait   time.Duration
 		requests  int64
 	}
+	acquisitionPool sync.Pool
+}
+
+func (rq *readQuota) putAcquisition(a *acquisition) {
+	rq.acquisitionPool.Put(a)
+}
+
+func (rq *readQuota) getAcquisition(p admission.Priority) *acquisition {
+	a := rq.acquisitionPool.Get().(*acquisition)
+	*a = acquisition{
+		rq: rq,
+		p:  p,
+	}
+	return a
 }
 
 func (rq *readQuota) WaitStats() (avg, min, max time.Duration, len, requests int64) {
@@ -38,8 +54,33 @@ func (rq *readQuota) WaitStats() (avg, min, max time.Duration, len, requests int
 	return avg, min, max, int64(rq.qp.Len()), requests
 }
 
-func (rq *readQuota) acquire(ctx context.Context) (*quotapool.IntAlloc, error) {
-	return rq.qp.AcquireFunc(ctx, rq.acquireFunc)
+// acquisition exists to avoid having to allocate a closure around the priority
+// value to use quotapool.IntPool.AcquireFunc.
+type acquisition struct {
+	rq    *readQuota
+	p     admission.Priority
+	guess int64
+}
+
+func (a *acquisition) acquireFunc(ctx context.Context, quota int64) (fulfilled bool, took int64) {
+	if a.guess == 0 {
+		a.guess = a.rq.guessReadSize(a.p.Level)
+	}
+	if log.V(1) {
+		log.Infof(ctx, "attempting to acquire %v %v", a.guess, quota)
+	}
+	if a.guess <= quota {
+		return true, a.guess
+	}
+	return false, 0
+}
+
+func (rq *readQuota) acquire(
+	ctx context.Context, p admission.Priority,
+) (*quotapool.IntAlloc, error) {
+	a := rq.getAcquisition(p)
+	defer rq.putAcquisition(a)
+	return rq.qp.AcquireFunc(ctx, a.acquireFunc)
 }
 
 func (rq *readQuota) onAcquisition(
@@ -72,25 +113,31 @@ func (s *Store) initializeReadQuota() {
 			quotapool.LogSlowAcquisition,
 			quotapool.OnAcquisition(s.readQuota.onAcquisition)),
 		s: s,
+		acquisitionPool: sync.Pool{
+			New: func() interface{} {
+				return new(acquisition)
+			},
+		},
 	}
 }
 
-func (rq *readQuota) acquireFunc(ctx context.Context, quota int64) (fulfilled bool, took int64) {
-	guess := rq.guessReadSize()
-	if log.V(1) {
-		log.Infof(ctx, "attempting to acquire %v %v", guess, quota)
-	}
-	if guess <= quota {
-		return true, guess
-	}
-	return false, 0
+type guesser int64
+
+func (g *guesser) guess(r tdigest.Reader) {
+	q := bias * rand.Float64()
+	q += (1 - q) * rand.Float64()
+	*g = guesser(r.ValueAt(q)) + 1
 }
 
-func (rq *readQuota) guessReadSize() (guess int64) {
-	rq.s.metrics.ReadResponseSizeSummary1m.ReadStale(func(r tdigest.Reader) {
-		q := bias * rand.Float64()
-		q += (1 - q) * rand.Float64()
-		guess = int64(r.ValueAt(q)) + 1
-	})
-	return guess
+func (rq *readQuota) guessReadSize(level uint8) (guess int64) {
+	var g guesser
+	switch level {
+	case admission.MaxLevel:
+		rq.s.metrics.ReadResponseSizeMaxLevel.ReadStale(g.guess)
+	case admission.DefaultLevel:
+		rq.s.metrics.ReadResponseSizeDefLevel.ReadStale(g.guess)
+	case admission.MinLevel:
+		rq.s.metrics.ReadResponseSizeMinLevel.ReadStale(g.guess)
+	}
+	return int64(g)
 }

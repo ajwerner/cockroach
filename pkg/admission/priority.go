@@ -147,8 +147,8 @@ var shards = func() (shards [numShards]uint8) {
 	return shards
 }()
 
-func init() {
-
+func (p Priority) buckets() (levelBucket, shardBucket int) {
+	return bucketFromLevel(p.Level), bucketFromShard(p.Shard)
 }
 
 func levelFromBucket(bucket int) uint8 {

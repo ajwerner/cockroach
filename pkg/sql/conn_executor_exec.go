@@ -661,8 +661,9 @@ func (ex *connExecutor) dispatchToExecutionEngine(
 	ctx context.Context, planner *planner, res RestrictedCommandResult,
 ) error {
 	ctx, priority := ex.setPriority(ctx, planner)
-	if !ex.isInternal && planner.Txn().Serialize().Key == nil {
-		if err := planner.ExecCfg().AdmissionController.Admit(ctx, priority); err != nil {
+	controller := planner.ExecCfg().AdmissionController
+	if controller != nil && !ex.isInternal && planner.Txn().Serialize().Key == nil {
+		if err := controller.Admit(ctx, priority); err != nil {
 			return err
 		}
 	}

@@ -31,7 +31,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cmux"
-	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
@@ -488,37 +487,37 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	// var waited, total int64
 	// curLevel := admission.MakePriority(admission.MinLevel, 0)
 
-	recordWait := func(ctx context.Context, wait time.Duration) {
+	// recordWait := func(ctx context.Context, wait time.Duration) {
 
-		// p := admission.PriorityFromContext(ctx)
-		// waitMu.Lock()
-		// defer waitMu.Unlock()
-		// if p.Level < curLevel.Level && p.Shard < curLevel.Shard {
-		// 	return
-		// }
-		// if wait > 100*time.Millisecond {
-		// 	waited++
-		// }
-		// total++
-	}
-	// I guess I sort of want to know how long queries last at a level because I
-	// don't want to open up the flood gate because we didn't see any queries.
-	// Maybe we should track a trailing time^2 and time so that we can compute a
-	// tailing average QPS and use that to determine how rapidly to tick
-	// We want the average trailing QPS and the average trailing latency.
-	var sqlAdmissionController *admission.Controller
-	sqlAdmissionController = admission.NewController(ctx, "sql", s.stopper, func(l admission.Priority) bool {
-		return false
-		// waitMu.Lock()
-		// defer waitMu.Unlock()
-		// if log.V(1) {
-		// 	log.Infof(ctx, "sql tick %v %v", l, sqlAdmissionController)
-		// }
-		// overloaded := (waited*3) > total && total >= 30
-		// waited, total, curLevel = 0, 0, l
-		// return overloaded
-	}, 200*time.Millisecond, 100, .001, .002)
-	s.distSender.RetryFeedback = recordWait
+	// 	// p := admission.PriorityFromContext(ctx)
+	// 	// waitMu.Lock()
+	// 	// defer waitMu.Unlock()
+	// 	// if p.Level < curLevel.Level && p.Shard < curLevel.Shard {
+	// 	// 	return
+	// 	// }
+	// 	// if wait > 100*time.Millisecond {
+	// 	// 	waited++
+	// 	// }
+	// 	// total++
+	// }
+	// // I guess I sort of want to know how long queries last at a level because I
+	// // don't want to open up the flood gate because we didn't see any queries.
+	// // Maybe we should track a trailing time^2 and time so that we can compute a
+	// // tailing average QPS and use that to determine how rapidly to tick
+	// // We want the average trailing QPS and the average trailing latency.
+	// var sqlAdmissionController *admission.Controller
+	// sqlAdmissionController = admission.NewController(ctx, "sql", s.stopper, func(l admission.Priority) bool {
+	// 	return false
+	// 	// waitMu.Lock()
+	// 	// defer waitMu.Unlock()
+	// 	// if log.V(1) {
+	// 	// 	log.Infof(ctx, "sql tick %v %v", l, sqlAdmissionController)
+	// 	// }
+	// 	// overloaded := (waited*3) > total && total >= 30
+	// 	// waited, total, curLevel = 0, 0, l
+	// 	// return overloaded
+	// }, nil, 200*time.Millisecond, 100, .001, .002)
+	// s.distSender.RetryFeedback = recordWait
 	s.node = NewNode(
 		storeCfg, s.recorder, s.registry, s.stopper,
 		txnMetrics, nil /* execCfg */, &s.rpcContext.ClusterID)
@@ -542,7 +541,6 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		},
 	)
 	s.registry.AddMetricStruct(s.jobRegistry.MetricsStruct())
-	s.registry.AddMetricStruct(sqlAdmissionController.Metrics())
 
 	distSQLMetrics := distsqlrun.MakeDistSQLMetrics(cfg.HistogramWindowInterval())
 	s.registry.AddMetricStruct(distSQLMetrics)
@@ -674,7 +672,6 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		RangeDescriptorCache:    s.distSender.RangeDescriptorCache(),
 		LeaseHolderCache:        s.distSender.LeaseHolderCache(),
 		TestingKnobs:            sqlExecutorTestingKnobs,
-		AdmissionController:     sqlAdmissionController,
 		DistSQLPlanner: sql.NewDistSQLPlanner(
 			ctx,
 			distsqlrun.Version,

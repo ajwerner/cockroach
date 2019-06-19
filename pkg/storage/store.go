@@ -1278,13 +1278,21 @@ func ReadStoreIdent(ctx context.Context, eng engine.Engine) (roachpb.StoreIdent,
 // Start the engine, set the GC and read the StoreIdent.
 func (s *Store) Start(ctx context.Context, stopper *stop.Stopper) error {
 	s.stopper = stopper
-
-	s.admissionController = admission.NewController(ctx, "read", s.stopper,
-		func(admission.Priority) (overloaded bool) {
+	// TODO(ajwerner): properly plumb admission control configuration.
+	admissionCfg := admission.Config{
+		Name:         "read",
+		TickInterval: 200 * time.Millisecond,
+		OverloadSignal: func(admission.Priority) (overloaded bool, max admission.Priority) {
 			_, min, _, qLen, requests := s.readQuota.WaitStats()
-			return min > 20*time.Millisecond && qLen > requests/5 && qLen > 10
+			return min > 40*time.Millisecond && qLen > requests/5 && qLen > 10,
+				admission.Priority{admission.MaxLevel, 0}
 		},
-		200*time.Millisecond, 1000, .025, 0.005)
+		ScaleFactor: s.readQuota.guessReadSize,
+		PruneRate:   .025,
+		GrowRate:    .005,
+		MaxBlocked:  1000,
+	}
+	s.admissionController = admission.NewController(ctx, s.stopper, admissionCfg)
 	s.metrics.registry.AddMetricStruct(s.admissionController.Metrics())
 
 	// Populate the store ident. If not bootstrapped, ReadStoreIntent will

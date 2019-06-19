@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -20,17 +19,10 @@ import (
 // Controller keeps track of the allowed level for requests.
 // It stores a current admission level and decides whether requests can be
 // admitted.
-// In order to make this decision the controller needs to tick every so often
-//
+// In order to make this decision the controller needs to tick every so often.
 type Controller struct {
-	maxReqsPerInterval int64
-	maxBlocked         int64
-	tickInterval       time.Duration
-	pruneRate          float64
-	growRate           float64
-	overloadSignal     func(Priority) bool
-	metrics            Metrics
-	wiggle             func(time.Duration) time.Duration
+	cfg     Config
+	metrics Metrics
 
 	wq waitQueue
 
@@ -42,6 +34,7 @@ type Controller struct {
 		blockCond sync.Cond
 
 		nextTick time.Time
+		ticks    int
 
 		admissionLevel Priority
 		rejectionLevel Priority
@@ -52,83 +45,33 @@ type Controller struct {
 		numBlockWaiting int64
 		numCanceled     int64
 
+		// We can keep a histogram of a trailing average of bytes read for each
+		// bucket (or just level? can I just use the average of the summary if I
+		// have one for each level?)
+		//
+		// We can also keep a histogram of ages of blocked entries
+		// - actually should this just be kept in the blocking queue?
+		// - we can do this by keeping track of the age when a thing is added
+		//   vs the next tick time.
+		// - then on the tick we add the time of new stuff added (if we tick before
+		//   the scheduled tick then we can subtract the delta times the num added.
+		// - Then we increment by the time since the last tick times the previous
+		//   number stored to have to total age.
+		// - When something is removed, we remove its lifetime from the queue
+		//   relative to the last tick and add it to the removed time.
+		// - We should ideally also track some sort of sizes on a per-level basis
+		//   and unblock based on the sizes
+
+		// If we know the average age and we know the number then it's easy to estimate
+		// the load increase due to that
+
 		hist histogram
-
-		lastDec int
 	}
 }
-
-func wiggle(d time.Duration) time.Duration {
-	return time.Duration((1 + (rand.Float64()*.3 - .15)) * float64(d))
-}
-
-type Metrics struct {
-	AdmissionLevel *metric.Gauge
-	RejectionLevel *metric.Gauge
-	NumBlocked     *metric.Gauge
-	NumTicks       *metric.Counter
-	Inc            *metric.Counter
-	Dec            *metric.Counter
-}
-
-func makeMeta(md metric.Metadata, name string) metric.Metadata {
-	md.Name = name + "." + md.Name
-	return md
-}
-
-func makeMetrics(name string) Metrics {
-	return Metrics{
-		AdmissionLevel: metric.NewGauge(makeMeta(metaAdmissionLevel, name)),
-		RejectionLevel: metric.NewGauge(makeMeta(metaRejectionLevel, name)),
-		NumBlocked:     metric.NewGauge(makeMeta(metaNumBlocked, name)),
-		NumTicks:       metric.NewCounter(makeMeta(metaNumTicks, name)),
-		Inc:            metric.NewCounter(makeMeta(metaNumInc, name)),
-		Dec:            metric.NewCounter(makeMeta(metaNumDec, name)),
-	}
-}
-
-var (
-	metaAdmissionLevel = metric.Metadata{
-		Name:        "admission.level",
-		Help:        "Current admission level",
-		Unit:        metric.Unit_COUNT,
-		Measurement: "admission level",
-	}
-	metaRejectionLevel = metric.Metadata{
-		Name:        "rejection.level",
-		Help:        "Current rejection level",
-		Unit:        metric.Unit_COUNT,
-		Measurement: "rejection level",
-	}
-	metaNumTicks = metric.Metadata{
-		Name:        "admission.ticks",
-		Help:        "Number of ticks",
-		Unit:        metric.Unit_COUNT,
-		Measurement: "ticks",
-	}
-	metaNumDec = metric.Metadata{
-		Name:        "admission.decrease",
-		Help:        "Number of times the tick has decreased the level",
-		Unit:        metric.Unit_COUNT,
-		Measurement: "ticks",
-	}
-	metaNumInc = metric.Metadata{
-		Name:        "admission.increase",
-		Help:        "Number of times the tick has increase the level",
-		Unit:        metric.Unit_COUNT,
-		Measurement: "ticks",
-	}
-	metaNumBlocked = metric.Metadata{
-		Name:        "admission.num_blocked",
-		Help:        "Gauge of currently blocked requests",
-		Unit:        metric.Unit_COUNT,
-		Measurement: "requests",
-	}
-)
 
 func (c *Controller) stringRLocked() string {
 	var b strings.Builder
-	b.WriteString("S  ")
+	b.WriteString("---")
 	for lb := numLevels - 1; true; lb-- {
 		b.WriteString("|  ")
 		if levelString, ok := levelStrings[levelFromBucket(lb)]; ok {
@@ -185,7 +128,10 @@ func (c *Controller) stringRLocked() string {
 			break
 		}
 	}
-	fmt.Fprintf(&b, "\nreqs: %d; blocked: %d\n", atomic.LoadInt64(&c.mu.numReqs), atomic.LoadInt64(&c.mu.numBlocked))
+	fmt.Fprintf(&b, "\nint: %d; ad: %d; bl: %d",
+		c.mu.ticks,
+		atomic.LoadInt64(&c.mu.numReqs),
+		atomic.LoadInt64(&c.mu.numBlocked)-atomic.LoadInt64(&c.mu.numCanceled))
 	return b.String()
 }
 
@@ -217,47 +163,90 @@ const (
 	defaultMaxBlocked         = 1000
 )
 
-func NewController(
-	ctx context.Context,
-	name string,
-	stopper *stop.Stopper,
-	overLoadSignal func(prev Priority) bool,
-	tickInterval time.Duration,
-	maxBlocked int64,
-	pruneRate, growRate float64,
-) *Controller {
-	if tickInterval <= 0 {
-		tickInterval = defaultTickInterval
+type Config struct {
+
+	// Name is used to generate metrics and for logging.
+	Name string
+
+	// MaxReqsPerInterval is the maximum number of requests which can occur in
+	// an interval. If this number is exceeded a tick will occur.
+	MaxReqsPerInterval int
+
+	// TickInterval is the maximum amount of time between ticks.
+	// Ticks may also occur if the maximum number of requests per interval
+	// is exceeded.
+	TickInterval time.Duration
+
+	// RandomizationFactor controls the percent by which TickInterval should be
+	// purturbed. The true time interval will be
+	//
+	//   TickInterval*(1 +- RandomizationFactor)
+	//
+	RandomizationFactor float64
+
+	// OverloadSignal is used during ticks to determine whether the admission
+	// level should rise or fall. To keep the level the same return (true, cur).
+	OverloadSignal func(cur Priority) (overloaded bool, max Priority)
+
+	// ScaleFactor is used weigh requests at a given level.
+	ScaleFactor func(level uint8) int64
+
+	// MaxBlocked determines the maximum number of requests which may be blocked.
+	// If a request would lead to more than this number of requests being blocked
+	// the rejection level will increase.
+	MaxBlocked int64
+
+	// The PruneRate and GrowRate work by examining the traffic which occurred
+	// in the previous interval scaled by the scale factor and then moving the
+	// admission level up or down to match the new target.
+
+	// PruneRate determines the rate at which traffic will be pruned when the
+	// system is overloaded.
+	PruneRate float64
+
+	// PruneRate determines the rate at which traffic will add when the system
+	// is not overloaded.
+	GrowRate float64
+}
+
+func defaultSizeFactor(level uint8) int64 { return 1 }
+
+func (cfg *Config) setDefaults() {
+	if cfg.TickInterval <= 0 {
+		cfg.TickInterval = defaultTickInterval
 	}
-	if pruneRate <= 0 {
-		pruneRate = defaultPruneRate
+	if cfg.PruneRate <= 0 {
+		cfg.PruneRate = defaultPruneRate
 	}
-	if growRate <= 0 {
-		growRate = defaultGrowRate
+	if cfg.GrowRate <= 0 {
+		cfg.GrowRate = defaultGrowRate
 	}
-	if maxBlocked <= 0 {
-		maxBlocked = defaultMaxBlocked
+	if cfg.MaxBlocked <= 0 {
+		cfg.MaxBlocked = defaultMaxBlocked
 	}
-	c := &Controller{
-		maxReqsPerInterval: defaultMaxReqsPerInterval,
-		tickInterval:       tickInterval,
-		pruneRate:          pruneRate,
-		growRate:           growRate,
-		overloadSignal:     overLoadSignal,
-		maxBlocked:         maxBlocked,
+	if cfg.MaxReqsPerInterval <= 0 {
+		cfg.MaxReqsPerInterval = defaultMaxReqsPerInterval
 	}
-	c.wiggle = wiggle
-	c.metrics = makeMetrics(name)
+	if cfg.ScaleFactor == nil {
+		cfg.ScaleFactor = defaultSizeFactor
+	}
+}
+
+func NewController(ctx context.Context, stopper *stop.Stopper, cfg Config) *Controller {
+	cfg.setDefaults()
+
+	c := &Controller{cfg: cfg}
+	c.metrics = makeMetrics(cfg.Name)
 	c.mu.tickCond.L = c.mu.RLocker()
 	c.mu.blockCond.L = c.mu.RLocker()
 	c.mu.admissionLevel = minPriority
 	c.mu.rejectionLevel = minPriority
 	initWaitQueue(&c.wq)
 	if stopper != nil {
-		if err := stopper.RunAsyncTask(ctx, name+"admission.controller.ticker", func(ctx context.Context) {
+		if err := stopper.RunAsyncTask(ctx, cfg.Name+"admission.controller.ticker", func(ctx context.Context) {
 			t := timeutil.NewTimer()
 			for {
-				t.Reset(c.tickInterval)
+				t.Reset(c.cfg.TickInterval)
 				select {
 				case <-stopper.ShouldQuiesce():
 					return
@@ -314,13 +303,13 @@ func (c *Controller) raiseRejectionLevelRLocked(p Priority) {
 	blocked -= blockWaiting
 	blocked -= canceled
 	c.wq.mu.Lock()
-	for blocked > c.maxBlocked {
+	for blocked > c.cfg.MaxBlocked {
 		if !c.mu.rejectionOn {
 			c.mu.rejectionOn = true
 		} else {
 			r = r.inc()
 		}
-		blocked -= int64(c.wq.releasePriorityLocked(r, -1))
+		blocked -= int64(c.wq.releasePriorityLocked(r))
 		c.mu.rejectionLevel = r
 	}
 	c.wq.mu.Unlock()
@@ -331,6 +320,9 @@ func (c *Controller) raiseRejectionLevelRLocked(p Priority) {
 
 func (c *Controller) AdmitAt(ctx context.Context, p Priority, now time.Time) error {
 	c.mu.RLock()
+	if log.V(3) {
+		log.Infof(ctx, "attempting to admit %d@%s: %v %v", p, now.Format("00.0"), c.mu.admissionLevel, c.mu.nextTick.Sub(now))
+	}
 	c.maybeTickRLocked(now)
 	if p.Level != MaxLevel {
 		for p.less(c.mu.admissionLevel) {
@@ -340,18 +332,21 @@ func (c *Controller) AdmitAt(ctx context.Context, p Priority, now time.Time) err
 				c.mu.RUnlock()
 				return ErrRejected
 			}
-			if numBlocked := atomic.AddInt64(&c.mu.numBlocked, 1); numBlocked == c.maxBlocked+1 {
+			if numBlocked := atomic.AddInt64(&c.mu.numBlocked, 1); numBlocked == c.cfg.MaxBlocked+1 {
 				c.raiseRejectionLevelRLocked(p)
 				continue
-			} else if numBlocked > c.maxBlocked {
+			} else if numBlocked > c.cfg.MaxBlocked {
 				atomic.AddInt64(&c.mu.numBlockWaiting, 1)
 				c.mu.blockCond.Wait()
 				continue
 			}
 			c.mu.RUnlock()
-			if err := c.wq.wait(ctx, p); err != nil {
+			c.metrics.NumBlocked.Inc(1)
+			waitErr := c.wq.wait(ctx, p)
+			c.metrics.NumUnblocked.Inc(1)
+			if waitErr != nil {
 				atomic.AddInt64(&c.mu.numCanceled, 1)
-				return err
+				return waitErr
 			}
 			c.mu.RLock()
 		}
@@ -359,8 +354,8 @@ func (c *Controller) AdmitAt(ctx context.Context, p Priority, now time.Time) err
 	defer c.mu.RUnlock()
 	defer c.mu.hist.record(p, 1)
 	numReqs := atomic.AddInt64(&c.mu.numReqs, 1)
-	for numReqs > c.maxReqsPerInterval {
-		if numReqs == (c.maxReqsPerInterval + 1) {
+	for numReqs > int64(c.cfg.MaxReqsPerInterval) {
+		if numReqs == (int64(c.cfg.MaxReqsPerInterval) + 1) {
 			c.tickRLocked(now)
 		} else {
 			c.mu.tickCond.Wait()
@@ -380,37 +375,39 @@ func (c *Controller) tickRLocked(now time.Time) {
 	c.tickLocked(now)
 }
 
+func randomizeInterval(d time.Duration, factor float64) time.Duration {
+	r := (2*rand.Float64() - 1) * factor
+	dd := time.Duration(float64(d) * (1 + r))
+	log.Infof(context.TODO(), "asdf %v %v", d, dd)
+	return dd
+}
+
 func (c *Controller) tickLocked(now time.Time) {
 	defer c.mu.tickCond.Broadcast()
-	c.mu.nextTick = now.Add(c.wiggle(c.tickInterval))
+	c.mu.ticks++
+	interval := randomizeInterval(c.cfg.TickInterval, c.cfg.RandomizationFactor)
+	c.mu.nextTick = now.Add(interval)
 	numReqs := atomic.SwapInt64(&c.mu.numReqs, 0)
-	n, hist := numReqs, &c.mu.hist
 	prev := c.mu.admissionLevel
-	const minNumReqs = 0
-	overloaded := numReqs > minNumReqs && c.overloadSignal(prev)
+	overloaded, max := c.cfg.OverloadSignal(prev)
 	if overloaded {
-		//c.mu.lastDec = 0
 		c.metrics.Inc.Inc(1)
-		c.mu.admissionLevel = findHigherPriority(c.mu.admissionLevel, n, c.pruneRate, hist)
-		//	} //else if c.mu.lastDec < 1 {
-		//		c.mu.lastDec++
+		c.raiseAdmissionLevelLocked(max)
 	} else if c.mu.admissionLevel != minPriority {
-		//	c.mu.lastDec = 0
 		c.metrics.Dec.Inc(1)
-		var freed int
-		c.mu.admissionLevel, freed = findLowerPriority(c.mu.admissionLevel, n, c.growRate, hist, &c.wq)
+		freed := c.lowerAdmissionLevelLocked()
 		numCanceled := atomic.SwapInt64(&c.mu.numCanceled, 0)
 		unblocked := int64(freed) + numCanceled
 		numBlocked := atomic.AddInt64(&c.mu.numBlocked, -1*unblocked)
-		if numBlocked < c.maxBlocked/2 {
+		if numBlocked < c.cfg.MaxBlocked/2 {
 			c.mu.rejectionLevel = minPriority
 			c.mu.rejectionOn = false
 		}
-		c.metrics.NumBlocked.Update(numBlocked)
+		c.metrics.CurNumBlocked.Update(numBlocked)
 	}
 	if log.V(1) {
-		log.Infof(context.TODO(), "tick: overload %v (%d) prev %v next %v %v",
-			overloaded, numReqs, prev, c.mu.admissionLevel, c.stringRLocked())
+		log.Infof(context.TODO(), "tick %v: overload %v (%d) prev %v next %v %v",
+			now.Format("00.0"), overloaded, numReqs, prev, c.mu.admissionLevel, c.stringRLocked())
 	}
 	c.mu.hist = histogram{}
 	c.metrics.AdmissionLevel.Update(int64(c.mu.admissionLevel.Encode()))
@@ -425,42 +422,63 @@ func (c *Controller) tickLocked(now time.Time) {
 var maxPriority = Priority{MaxLevel, maxShard}
 var minPriority = Priority{MinLevel, minShard}
 
-func findHigherPriority(prev Priority, total int64, pruneRate float64, h *histogram) Priority {
-	if total == 0 || h.countAboveIsEmpty(prev) {
-		return prev
+func (c *Controller) raiseAdmissionLevelLocked(max Priority) {
+	if c.mu.admissionLevel == max {
+		return
 	}
-	reqs := uint64(total)
-	target := uint64(float64(total) * (1 - pruneRate))
-	lastWithSome := prev
-	for cur := prev; cur.Level != MaxLevel; cur = cur.inc() {
-		if reqs <= target {
-			return cur
+	cur := c.mu.admissionLevel
+	sizeFactor, total := admittedAbove(cur, &c.mu.hist, c.cfg.ScaleFactor)
+	target := int64(float64(total) * (1 - c.cfg.PruneRate))
+	prev, cur := cur, cur.inc()
+	for ; cur.less(max) && cur.Level != MaxLevel; prev, cur = cur, cur.inc() {
+		if cur.Level != prev.Level {
+			sizeFactor = c.cfg.ScaleFactor(cur.Level)
 		}
-		if count := h.countAt(cur); count > 0 {
-			reqs -= count
-			lastWithSome = cur
+		total -= int64(c.mu.hist.countAt(cur)) * sizeFactor
+		if total <= target {
+			break
 		}
 	}
-	return lastWithSome
+	c.mu.admissionLevel = cur
 }
 
-// TODO(ajwerner): incorporate rejected histogram.
-func findLowerPriority(
-	prev Priority, total int64, growRate float64, h *histogram, wq *waitQueue,
-) (newAdmissiongLevel Priority, freed int) {
+// findLowerPriorityLocked computes the new priority for the Controller
+// given the activity of the last interval. It does not modify c other
+// than by calling into the waitQueue.
+func (c *Controller) lowerAdmissionLevelLocked() (freed int) {
+	prev := c.mu.admissionLevel
 	cur := prev.dec()
-	reqs := uint64(total)
-	toFree := float64(h.countForLevelAbove(cur))*growRate + 1
-	target := reqs + uint64(toFree)
+	sizeFactor, total := admittedAbove(cur, &c.mu.hist, c.cfg.ScaleFactor)
+	target := int64(float64(total)*(1+c.cfg.GrowRate)) + 1
 	for ; cur != minPriority; prev, cur = cur, cur.dec() {
-		released := uint64(wq.releasePriority(cur, -1))
-		freed += int(released)
-		reqs += released
-		if reqs >= target {
-			return cur, freed
+		if cur.Level != prev.Level {
+			sizeFactor = c.cfg.ScaleFactor(cur.Level)
+		}
+		released := c.wq.releasePriority(cur)
+		freed += released
+		if released == 0 {
+			released++
+		}
+		if total += int64(released) * sizeFactor; total >= target {
+			break
 		}
 	}
-	return minPriority, freed
+	c.mu.admissionLevel = cur
+	return freed
+}
+
+func admittedAbove(
+	l Priority, h *histogram, sizeFactor func(level uint8) int64,
+) (factor, count int64) {
+	prev, cur, factor := maxPriority, maxPriority, sizeFactor(MaxLevel)
+	for ; l.less(cur); cur, prev = cur.dec(), cur {
+		if cur.Level != prev.Level {
+			factor = sizeFactor(cur.Level)
+		}
+		lb, sb := cur.buckets()
+		count += factor * int64(atomic.LoadUint64(&h.counters[lb][sb]))
+	}
+	return factor, count
 }
 
 type histogram struct {

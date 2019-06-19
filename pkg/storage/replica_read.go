@@ -68,7 +68,7 @@ func (r *Replica) executeReadOnlyBatch(
 			}
 			return nil, roachpb.NewError(err)
 		}
-		alloc, err := r.store.readQuota.acquire(ctx)
+		alloc, err := r.store.readQuota.acquire(ctx, priority)
 		if err != nil {
 			return nil, roachpb.NewError(err)
 		}
@@ -79,6 +79,14 @@ func (r *Replica) executeReadOnlyBatch(
 				}
 				r.store.metrics.ReadQuotaBytesGuessed.Inc(alloc.Acquired())
 				r.store.metrics.ReadQuotaBytesRead.Inc(int64(respSize))
+				switch priority.Level {
+				case admission.MaxLevel:
+					r.store.metrics.ReadResponseSizeMaxLevel.Add(float64(respSize))
+				case admission.DefaultLevel:
+					r.store.metrics.ReadResponseSizeDefLevel.Add(float64(respSize))
+				case admission.MinLevel:
+					r.store.metrics.ReadResponseSizeMinLevel.Add(float64(respSize))
+				}
 			}
 			alloc.Release()
 		}()
