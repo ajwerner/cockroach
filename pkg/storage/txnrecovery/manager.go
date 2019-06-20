@@ -17,6 +17,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
@@ -136,6 +137,7 @@ func (m *manager) resolveIndeterminateCommitForTxn(
 
 	// TODO(nvanbenschoten): Set up tracing.
 	ctx := m.AnnotateCtx(context.Background())
+	ctx = admission.ContextWithPriority(ctx, admission.Priority{admission.MaxLevel, 255})
 
 	// Launch the recovery task.
 	resErr = m.stopper.RunTaskWithErr(ctx,

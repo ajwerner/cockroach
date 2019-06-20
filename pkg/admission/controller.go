@@ -378,7 +378,6 @@ func (c *Controller) tickRLocked(now time.Time) {
 func randomizeInterval(d time.Duration, factor float64) time.Duration {
 	r := (2*rand.Float64() - 1) * factor
 	dd := time.Duration(float64(d) * (1 + r))
-	log.Infof(context.TODO(), "asdf %v %v", d, dd)
 	return dd
 }
 

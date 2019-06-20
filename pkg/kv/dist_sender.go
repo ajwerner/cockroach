@@ -233,12 +233,12 @@ func (ds *DistSender) isOverloaded(
 			ds.rejectionMu.errorsSeen,
 			ds.rejectionMu.maxSeen)
 	}
-	if ds.rejectionMu.errorsSeen > 0 {
+	if ds.rejectionMu.errorsSeen > 32 && cur.Less(ds.rejectionMu.maxSeen) {
 		limit = ds.rejectionMu.maxSeen
-		ds.rejectionMu.maxSeen = admission.Priority{}
-		ds.rejectionMu.errorsSeen = 0
 		overloaded = true
 	}
+	ds.rejectionMu.maxSeen = admission.Priority{}
+	ds.rejectionMu.errorsSeen = 0
 	return overloaded, limit
 }
 
@@ -319,9 +319,10 @@ func NewDistSender(cfg DistSenderConfig, g *gossip.Gossip) *DistSender {
 
 	admissionCfg := admission.Config{
 		Name:                "DistSender",
-		TickInterval:        200 * time.Millisecond,
+		TickInterval:        500 * time.Millisecond,
 		RandomizationFactor: .1,
 		OverloadSignal:      ds.isOverloaded,
+		MaxBlocked:          5000,
 		GrowRate:            .01,
 		PruneRate:           .05,
 	}
@@ -1538,6 +1539,12 @@ func (ds *DistSender) sendPartialBatch(
 			log.VEventf(ctx, 1, "likely split; resending batch to span: %s", tErr)
 			reply, pErr = ds.divideAndSendBatchToRanges(ctx, ba, rs, withCommit, batchIdx)
 			return response{reply: reply, positions: positions, pErr: pErr}
+		case *roachpb.ReadRejectedError:
+			prio := admission.PriorityFromContext(ctx)
+			if err := ds.admissionController.Admit(ctx, prio); err != nil {
+				return response{pErr: roachpb.NewError(&roachpb.ReadRejectedError{})}
+			}
+			continue
 		}
 		break
 	}
