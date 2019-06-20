@@ -19,6 +19,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
@@ -33,7 +34,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
-	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/pkg/errors"
@@ -163,7 +164,6 @@ func (f firstRangeMissingError) Error() string {
 // the method invocation.
 type DistSender struct {
 	log.AmbientContext
-	RetryFeedback func(ctx context.Context, wait time.Duration)
 
 	st *cluster.Settings
 	// nodeDescriptor, if set, holds the descriptor of the node the
@@ -201,6 +201,45 @@ type DistSender struct {
 	// disableParallelBatches instructs DistSender to never parallelize
 	// the transmission of partial batch requests across ranges.
 	disableParallelBatches bool
+
+	admissionController *admission.Controller
+
+	rejectionMu struct {
+		syncutil.Mutex
+
+		maxSeen    admission.Priority
+		errorsSeen int
+	}
+}
+
+func (ds *DistSender) recordReadRejectedError(ctx context.Context) {
+	prio := admission.PriorityFromContext(ctx)
+	ds.rejectionMu.Lock()
+	defer ds.rejectionMu.Unlock()
+	if ds.rejectionMu.maxSeen.Less(prio) {
+		ds.rejectionMu.maxSeen = prio
+	}
+	ds.rejectionMu.errorsSeen++
+}
+
+func (ds *DistSender) isOverloaded(
+	cur admission.Priority,
+) (overloaded bool, limit admission.Priority) {
+	ds.rejectionMu.Lock()
+	defer ds.rejectionMu.Unlock()
+	if log.V(1) {
+		log.Infof(context.TODO(), "dist-sender overloaded: %v %v %v",
+			cur,
+			ds.rejectionMu.errorsSeen,
+			ds.rejectionMu.maxSeen)
+	}
+	if ds.rejectionMu.errorsSeen > 0 {
+		limit = ds.rejectionMu.maxSeen
+		ds.rejectionMu.maxSeen = admission.Priority{}
+		ds.rejectionMu.errorsSeen = 0
+		overloaded = true
+	}
+	return overloaded, limit
 }
 
 var _ client.Sender = &DistSender{}
@@ -277,6 +316,18 @@ func NewDistSender(cfg DistSenderConfig, g *gossip.Gossip) *DistSender {
 	ds.clusterID = &cfg.RPCContext.ClusterID
 	ds.nodeDialer = cfg.NodeDialer
 	ds.asyncSenderSem = make(chan struct{}, defaultSenderConcurrency)
+
+	admissionCfg := admission.Config{
+		Name:                "DistSender",
+		TickInterval:        200 * time.Millisecond,
+		RandomizationFactor: .1,
+		OverloadSignal:      ds.isOverloaded,
+		GrowRate:            .01,
+		PruneRate:           .05,
+	}
+	ctx := ds.AnnotateCtx(context.Background())
+	ds.admissionController = admission.NewController(
+		ctx, ds.rpcContext.Stopper, admissionCfg)
 
 	if g != nil {
 		ctx := ds.AnnotateCtx(context.Background())
@@ -656,23 +707,12 @@ func (ds *DistSender) Send(
 	ctx context.Context, ba roachpb.BatchRequest,
 ) (*roachpb.BatchResponse, *roachpb.Error) {
 	ds.metrics.BatchCount.Inc(1)
-	// if ds.AdmissionController != nil {
-	// 	prio := admission.PriorityFromContext(ctx)
-	// 	opts := ds.rpcRetryOptions
-	// 	opts.Multiplier = 1.25
-	// 	opts.InitialBackoff = time.Millisecond
-	// 	opts.MaxBackoff = time.Second
-	// 	backOff := retry.StartWithCtx(ctx, opts)
-
-	// 	for !ds.AdmissionController.Admit(prio) {
-	// 		if ok := backOff.Next(); !ok {
-	// 			if ctxErr := ctx.Err(); ctxErr != nil {
-	// 				return nil, roachpb.NewError(ctxErr)
-	// 			}
-	// 			return nil, roachpb.NewError(stop.ErrUnavailable)
-	// 		}
-	// 	}
-	// }
+	if ds.admissionController != nil {
+		prio := admission.PriorityFromContext(ctx)
+		if err := ds.admissionController.Admit(ctx, prio); err != nil {
+			return nil, roachpb.NewError(err)
+		}
+	}
 
 	tracing.AnnotateTrace()
 
@@ -1669,23 +1709,10 @@ func (ds *DistSender) sendToReplicas(
 
 	inTransferRetry := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
 	inTransferRetry.Next() // The first call to Next does not block.
-	inAdmissionRetryOptions := ds.rpcRetryOptions
-	inAdmissionRetryOptions.Multiplier = 1.25
-	inAdmissionRetryOptions.InitialBackoff = time.Millisecond
-	inAdmissionRetryOptions.MaxBackoff = time.Second
-	inAdmissionRetry := retry.StartWithCtx(ctx, inAdmissionRetryOptions)
-	inAdmissionRetry.Next()
-	var waited time.Duration
-	if ds.RetryFeedback != nil {
-		defer func() {
-			ds.RetryFeedback(ctx, waited)
-		}()
-	}
 	// This loop will retry operations that fail with errors that reflect
 	// per-replica state and may succeed on other replicas.
 	var ambiguousError error
 	for {
-		inAdmissionControlRetry := false
 		if err != nil {
 			// For most connection errors, we cannot tell whether or not
 			// the request may have succeeded on the remote server, so we
@@ -1739,14 +1766,11 @@ func (ds *DistSender) sendToReplicas(
 				// These errors are likely to be unique to the replica that reported
 				// them, so no action is required before the next retry.
 			case *roachpb.ReadRejectedError:
-				inAdmissionControlRetry = true
-				start := timeutil.Now()
-				inAdmissionRetry.Next()
-				waited += timeutil.Since(start)
-				if ds.RetryFeedback != nil {
-					ds.RetryFeedback(ctx, waited)
-				}
-				transport.MoveToFront(curReplica)
+				// These errors are unfortunate and imply that the downstream server is
+				// severely overloaded. This request should fail and the overload signal
+				// should be set to true for this level.
+				ds.recordReadRejectedError(ctx)
+				propagateError = true
 			case *roachpb.RangeNotFoundError:
 				// The store we routed to doesn't have this replica. This can happen when
 				// our descriptor is outright outdated, but it can also be caused by a
@@ -1837,11 +1861,6 @@ func (ds *DistSender) sendToReplicas(
 		}
 
 		ds.metrics.NextReplicaErrCount.Inc(1)
-		if !inAdmissionControlRetry {
-			curReplica = transport.NextReplica()
-			log.VEventf(ctx, 2, "error: %v %v; trying next peer %s", br, err, curReplica)
-		} else {
-		}
 		br, err = transport.SendNext(ctx, ba)
 	}
 }

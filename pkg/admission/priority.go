@@ -83,7 +83,7 @@ func MakePriority(level uint8, shard uint8) Priority {
 	}
 }
 
-func (p Priority) less(other Priority) bool {
+func (p Priority) Less(other Priority) bool {
 	pl, ol := bucketFromLevel(p.Level), bucketFromLevel(other.Level)
 	if pl < ol {
 		return true

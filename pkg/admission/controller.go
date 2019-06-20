@@ -111,9 +111,9 @@ func (c *Controller) stringRLocked() string {
 			}
 			var v float64
 			switch {
-			case !p.less(c.mu.admissionLevel):
+			case !p.Less(c.mu.admissionLevel):
 				v = float64(atomic.LoadUint64(&c.mu.hist.counters[lb][sb]))
-			case !p.less(c.mu.rejectionLevel):
+			case !p.Less(c.mu.rejectionLevel):
 				pq := c.wq.pq(p)
 				v = float64(pq.len())
 			}
@@ -325,9 +325,9 @@ func (c *Controller) AdmitAt(ctx context.Context, p Priority, now time.Time) err
 	}
 	c.maybeTickRLocked(now)
 	if p.Level != MaxLevel {
-		for p.less(c.mu.admissionLevel) {
+		for p.Less(c.mu.admissionLevel) {
 			// Reject requests which are at or below the current rejection level.
-			if c.mu.rejectionLevel != minPriority && !c.mu.rejectionLevel.less(p) {
+			if c.mu.rejectionLevel != minPriority && !c.mu.rejectionLevel.Less(p) {
 				// TODO(ajwerner): increment rejected histogram
 				c.mu.RUnlock()
 				return ErrRejected
@@ -430,7 +430,7 @@ func (c *Controller) raiseAdmissionLevelLocked(max Priority) {
 	sizeFactor, total := admittedAbove(cur, &c.mu.hist, c.cfg.ScaleFactor)
 	target := int64(float64(total) * (1 - c.cfg.PruneRate))
 	prev, cur := cur, cur.inc()
-	for ; cur.less(max) && cur.Level != MaxLevel; prev, cur = cur, cur.inc() {
+	for ; cur.Less(max) && cur.Level != MaxLevel; prev, cur = cur, cur.inc() {
 		if cur.Level != prev.Level {
 			sizeFactor = c.cfg.ScaleFactor(cur.Level)
 		}
@@ -471,7 +471,7 @@ func admittedAbove(
 	l Priority, h *histogram, sizeFactor func(level uint8) int64,
 ) (factor, count int64) {
 	prev, cur, factor := maxPriority, maxPriority, sizeFactor(MaxLevel)
-	for ; l.less(cur); cur, prev = cur.dec(), cur {
+	for ; l.Less(cur); cur, prev = cur.dec(), cur {
 		if cur.Level != prev.Level {
 			factor = sizeFactor(cur.Level)
 		}

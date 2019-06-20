@@ -97,7 +97,7 @@ func (q *waitQueue) releasePriorityLocked(p Priority) (freed int) {
 // // func (q *waitQueue) release(to Priority, maxToFree int) (freed int) {
 // // 	q.mu.Lock()
 // // 	defer q.mu.Unlock()
-// // 	for p := maxPriority; freed < maxToFree && !p.less(to); p = p.dec() {
+// // 	for p := maxPriority; freed < maxToFree && !p.Less(to); p = p.dec() {
 // // 		freed += q.releasePriorityLocked(p, maxToFree-freed)
 // // 	}
 // // 	return freed
