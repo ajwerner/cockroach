@@ -151,11 +151,11 @@
 
 [[projects]]
   branch = "master"
-  digest = "1:501b0ce1f8f7f469fab47610152910d4e16f712620c8e06328466b428fcdd2aa"
+  digest = "1:7fd39d9d824b0feb2d33613ca52a164d6f5cdaf760768d5d2e4a55e68be6eee4"
   name = "github.com/ajwerner/tdigest"
   packages = ["."]
   pruneopts = "UT"
-  revision = "1d4d36c470e53d218ef2a8c1022ff53b28026d75"
+  revision = "9c40207ce70accf8e252e20e5ddbb831faeaedb1"
 
 [[projects]]
   branch = "master"
@@ -1981,6 +1981,7 @@
     "golang.org/x/net/trace",
     "golang.org/x/oauth2",
     "golang.org/x/oauth2/google",
+    "golang.org/x/perf/benchstat",
     "golang.org/x/perf/cmd/benchstat",
     "golang.org/x/perf/storage",
     "golang.org/x/sync/errgroup",
