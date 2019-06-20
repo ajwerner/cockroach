@@ -105,11 +105,14 @@ func (rq *readQuota) onAcquisition(
 	rq.s.metrics.ReadQuotaTimeSpentWaitingSummary10s.Add(float64(took.Nanoseconds()))
 }
 
-const bias = .2
+const (
+	bias    = .2
+	maxSize = 1 << 28
+)
 
 func (s *Store) initializeReadQuota() {
 	s.readQuota = readQuota{
-		qp: quotapool.NewIntPool("read quota", int64(1<<30),
+		qp: quotapool.NewIntPool("read quota", 1<<28,
 			quotapool.LogSlowAcquisition,
 			quotapool.OnAcquisition(s.readQuota.onAcquisition)),
 		s: s,
@@ -121,23 +124,29 @@ func (s *Store) initializeReadQuota() {
 	}
 }
 
-type guesser int64
+func queryReadResponseSizes(s *StoreMetrics, level uint8, f func(tdigest.Reader)) {
+	switch level {
+	case admission.MaxLevel:
+		s.ReadResponseSizeMaxLevel.ReadStale(f)
+	case admission.DefaultLevel:
+		s.ReadResponseSizeDefLevel.ReadStale(f)
+	case admission.MinLevel:
+		s.ReadResponseSizeMinLevel.ReadStale(f)
+	}
+}
 
-func (g *guesser) guess(r tdigest.Reader) {
-	q := bias * rand.Float64()
-	q += (1 - q) * rand.Float64()
-	*g = guesser(r.ValueAt(q)) + 1
+func (rq *readQuota) avgReadSize(level uint8) (avg int64) {
+	queryReadResponseSizes(rq.s.metrics, level, func(td tdigest.Reader) {
+		avg = int64(td.TotalSum() / td.TotalCount())
+	})
+	return avg
 }
 
 func (rq *readQuota) guessReadSize(level uint8) (guess int64) {
-	var g guesser
-	switch level {
-	case admission.MaxLevel:
-		rq.s.metrics.ReadResponseSizeMaxLevel.ReadStale(g.guess)
-	case admission.DefaultLevel:
-		rq.s.metrics.ReadResponseSizeDefLevel.ReadStale(g.guess)
-	case admission.MinLevel:
-		rq.s.metrics.ReadResponseSizeMinLevel.ReadStale(g.guess)
-	}
-	return int64(g)
+	queryReadResponseSizes(rq.s.metrics, level, func(td tdigest.Reader) {
+		q := bias * rand.Float64()
+		q += (1 - q) * rand.Float64()
+		guess = int64(td.ValueAt(q)) + 1
+	})
+	return guess
 }

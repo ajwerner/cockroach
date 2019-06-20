@@ -1282,9 +1282,13 @@ func (s *Store) Start(ctx context.Context, stopper *stop.Stopper) error {
 	admissionCfg := admission.Config{
 		Name:         "read",
 		TickInterval: 200 * time.Millisecond,
-		OverloadSignal: func(admission.Priority) (overloaded bool, max admission.Priority) {
-			_, min, _, qLen, requests := s.readQuota.WaitStats()
-			return min > 40*time.Millisecond && qLen > requests/5 && qLen > 10,
+		OverloadSignal: func(admission.Priority) (overloaded bool, lim admission.Priority) {
+			avg, min, max, qLen, requests := s.readQuota.WaitStats()
+			if log.V(2) {
+				log.Infof(ctx, "overload signal: avg %v, min %v, max %v, qLen %v, reqs %v",
+					avg, min, max, qLen, requests)
+			}
+			return min > 40*time.Millisecond && qLen > requests/2 && qLen > 32,
 				admission.Priority{admission.MaxLevel, 0}
 		},
 		ScaleFactor: s.readQuota.guessReadSize,

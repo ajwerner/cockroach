@@ -33,12 +33,22 @@ var disableReadQuota = settings.RegisterBoolSetting(
 	false,
 )
 
-// TODO(ajwerner): expand this to other criteria, like is an internal request
+// TODO(ajwerner): explore other cases where read only requests should not be
+// blocked. Internal requests should already receive a high priority.
 func requiresReadQuota(r *Replica, ba *roachpb.BatchRequest) bool {
 	if ba.Txn != nil && ba.Txn.Key != nil {
 		return false
 	}
-	return !disableReadQuota.Get(&r.store.ClusterSettings().SV)
+	if disableReadQuota.Get(&r.store.ClusterSettings().SV) {
+		return false
+	}
+	if _, isQueryTxnRequest := ba.GetArg(roachpb.QueryTxn); isQueryTxnRequest {
+		return false
+	}
+	if _, isQueryIntent := ba.GetArg(roachpb.QueryIntent); isQueryIntent {
+		return false
+	}
+	return true
 }
 
 // executeReadOnlyBatch updates the read timestamp cache and waits for any
