@@ -13,7 +13,7 @@ type waitQueue struct {
 	mu         syncutil.Mutex
 	nextToFree Priority
 	chanPool   sync.Pool
-	q          [numLevels][numShards]notifyQueue
+	q          [NumLevels][NumShards]notifyQueue
 }
 
 type notifyQueue struct {
@@ -33,8 +33,8 @@ func initWaitQueue(q *waitQueue) {
 			},
 		},
 	}
-	for i := 0; i < numLevels; i++ {
-		for j := 0; j < numShards; j++ {
+	for i := 0; i < NumLevels; i++ {
+		for j := 0; j < NumShards; j++ {
 			notifyqueue.Initialize(&q.q[i][j].NotifyQueue)
 		}
 	}
@@ -94,15 +94,6 @@ func (q *waitQueue) releasePriorityLocked(p Priority) (freed int) {
 	return freed
 }
 
-// // func (q *waitQueue) release(to Priority, maxToFree int) (freed int) {
-// // 	q.mu.Lock()
-// // 	defer q.mu.Unlock()
-// // 	for p := maxPriority; freed < maxToFree && !p.Less(to); p = p.dec() {
-// // 		freed += q.releasePriorityLocked(p, maxToFree-freed)
-// // 	}
-// // 	return freed
-// // }
-
 func (q *waitQueue) consolidate(pq *notifyQueue) {
 	l := pq.Len()
 	if l == 0 {
@@ -124,10 +115,10 @@ func (q *waitQueue) consolidate(pq *notifyQueue) {
 }
 
 func (q *waitQueue) pq(p Priority) *notifyQueue {
-	return &q.q[bucketFromLevel(p.Level)][bucketFromShard(p.Shard)]
+	return &q.q[p.Level][p.Shard]
 }
 
-func (q *waitQueue) emptyAtShard(s uint8) bool {
+func (q *waitQueue) emptyAtShard(s Shard) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, l := range levels {

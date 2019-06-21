@@ -1,174 +1,159 @@
 package admission
 
 import (
-	"context"
 	"fmt"
 	"math"
-	"math/rand"
+	"strconv"
 )
 
+// TODO(ajwerner): Consider renaming from Priority to Level and
+// Level to Class.
+
+// Priority represents a logical priority level.
+// While its fields are uint8, the values are dense in the number of shards and
+// levels rather than being spread out over the uint8 space as is the case for
+// EncodedPriority values.
 type Priority struct {
-	Level uint8
-	Shard uint8
+	// Level indicates the level associated with this priority.
+	// For a valid Priority its value lies in (NumLevels, 0].
+	Level Level
+	// Shard indicates the priority shard within this level.
+	// For a valid Priority its value lies in (NumShards, 0].
+	Shard Shard
 }
 
-type contextKey uint8
+// Level indicates traffic of a certain quality.
+type Level uint8
+
+// Shard indicates a shard within a Level.
+type Shard uint8
+
+// IsValid return true if p has a valid value.
+func (p Priority) IsValid() bool {
+	return p.Level.IsValid() && p.Shard.IsValid()
+}
+
+func (l Level) IsValid() bool {
+	return l < NumLevels
+}
+
+func (s Shard) IsValid() bool {
+	return s < NumShards
+}
 
 const (
-	priorityContextKey contextKey = iota
+	levelMask = 0x0000FF00
+	shardMask = 0x000000FF
 )
 
-func ContextWithPriority(ctx context.Context, priority Priority) context.Context {
-	return context.WithValue(ctx, priorityContextKey, priority)
+func encodeLevel(l Level) uint32 {
+	if !l.IsValid() {
+		panic(fmt.Errorf("cannot encode invalid level %d", l))
+	}
+	return uint32(255-((NumLevels-1-l)*levelStep)) << 8
 }
 
-func PriorityFromContext(ctx context.Context) Priority {
-	if prio, ok := ctx.Value(priorityContextKey).(Priority); ok {
-		return prio
+func encodeShard(s Shard) uint32 {
+	if !s.IsValid() {
+		panic(fmt.Errorf("cannot encode invalid shard %d", s))
 	}
+	return uint32(255 - ((NumShards - 1 - s) * shardStep))
+}
+
+func (p Priority) Encode() uint32 {
+	return encodeLevel(p.Level) | encodeShard(p.Shard)
+}
+
+func decodeShard(e uint32) Shard {
+	return Shard(e) / shardStep
+}
+
+func decodeLevel(e uint32) Level {
+	return Level(e>>8) / levelStep
+}
+
+func Decode(p uint32) Priority {
 	return Priority{
-		Level: DefaultLevel,
-		Shard: uint8(rand.Intn(math.MaxUint8)),
+		Level: decodeLevel(p),
+		Shard: decodeShard(p),
 	}
 }
 
-func (p Priority) Encode() uint16 {
-	return uint16(p.Level)<<8 | uint16(p.Shard)
+func (p Priority) Dec() Priority {
+	if p.Shard > 0 {
+		p.Shard--
+	} else if p.Level > 0 {
+		p.Level--
+		p.Shard = NumShards - 1
+	}
+	return p
 }
 
-func Decode(p uint16) Priority {
-	return Priority{
-		Level: uint8(p >> 8),
-		Shard: uint8(p),
+func (p Priority) Inc() Priority {
+	if p.Shard < NumShards-1 {
+		p.Shard++
+	} else if p.Level < NumLevels-1 {
+		p.Level++
+		p.Shard = 0
 	}
-}
-
-func (p Priority) dec() (r Priority) {
-	if p == minPriority {
-		return p
-	}
-	if p.Shard == minShard {
-		return Priority{
-			Level: levelFromBucket(bucketFromLevel(p.Level) - 1),
-			Shard: maxShard,
-		}
-	}
-	return Priority{
-		Level: p.Level,
-		Shard: shardFromBucket(bucketFromShard(p.Shard) - 1),
-	}
-}
-
-func (p Priority) inc() Priority {
-	if p == maxPriority {
-		return p
-	}
-	if p.Shard == maxShard {
-		return Priority{
-			Level: levelFromBucket(bucketFromLevel(p.Level) + 1),
-			Shard: minShard,
-		}
-	}
-	return Priority{
-		Level: p.Level,
-		Shard: shardFromBucket(bucketFromShard(p.Shard) + 1),
-	}
-}
-
-// MakePriority constructs a Priority with a provided level and shard.
-func MakePriority(level uint8, shard uint8) Priority {
-	return Priority{
-		Level: level,
-		Shard: shard,
-	}
+	return p
 }
 
 func (p Priority) Less(other Priority) bool {
-	pl, ol := bucketFromLevel(p.Level), bucketFromLevel(other.Level)
-	if pl < ol {
+	if p.Level < other.Level {
 		return true
-	} else if pl > ol {
-		return false
 	}
-	ps, os := bucketFromShard(p.Shard), bucketFromShard(other.Shard)
-	return ps < os
+	return p.Shard < other.Shard
 }
 
 const (
-	numLevels = 3
-	levelStep = math.MaxUint8 / (numLevels - 1)
+	NumLevels = 3
+	NumShards = 128
+	levelStep = math.MaxUint8 / (NumLevels - 1)
+	shardStep = math.MaxUint8 / (NumShards - 1)
 )
 
 const (
-	MaxLevel uint8 = math.MaxUint8 - (iota * levelStep)
+	MaxLevel Level = NumLevels - 1 - iota
 	DefaultLevel
 	MinLevel
-	verifyNumLevels = iota
 )
 
-var levelStrings = map[uint8]string{
+var levelStrings = [NumLevels]string{
 	MaxLevel:     "max",
 	DefaultLevel: "def",
 	MinLevel:     "min",
 }
 
 func (p Priority) String() string {
-	return fmt.Sprintf("%s:%d",
-		levelStrings[levelFromBucket(bucketFromLevel(p.Level))],
-		bucketFromShard(p.Shard))
+	p = p.makeValid()
+	return levelStrings[p.Level] + ":" + strconv.Itoa(int(p.Shard))
 }
 
-func init() {
-	if numLevels != verifyNumLevels {
-		panic("PriorityLevel definitions are messed up")
+func (p Priority) makeValid() Priority {
+	if p.Level >= NumLevels {
+		p.Level = NumLevels - 1
 	}
+	if p.Shard >= NumShards {
+		p.Shard = NumShards - 1
+	}
+	return p
 }
 
-const (
-	numShards = 128
-	shardStep = math.MaxUint8 / (numShards - 1)
-	maxShard  = math.MaxUint8
-	minShard  = math.MaxUint8 - ((numShards - 1) * shardStep)
+// These arrays contain all of the levels and shards in reserve order
+// where the highest value is the 0th element.
+// These are for loops because it's confusing to check equality when iterating
+// a uint8 in reverse.
+var (
+	levels [NumLevels]Level
+	shards [NumShards]Shard
 )
 
-var levels = func() (levels [numLevels]uint8) {
-	for i, l := 0, uint8(MaxLevel); i < numLevels; i++ {
-		levels[i] = l
-		l -= levelStep
+func init() {
+	for i := 0; i < NumLevels; i++ {
+		levels[i] = NumLevels - 1 - Level(i)
 	}
-	return levels
-}()
-
-var shards = func() (shards [numShards]uint8) {
-	for i, l := 0, uint8(maxShard); i < numShards; i++ {
-		shards[i] = l
-		l -= shardStep
+	for i := 0; i < NumShards; i++ {
+		shards[i] = NumShards - 1 - Shard(i)
 	}
-	return shards
-}()
-
-func (p Priority) buckets() (levelBucket, shardBucket int) {
-	return bucketFromLevel(p.Level), bucketFromShard(p.Shard)
-}
-
-func levelFromBucket(bucket int) uint8 {
-	if bucket > numLevels {
-		return MaxLevel
-	}
-	return uint8(levelStep*bucket) + MinLevel
-}
-
-func bucketFromLevel(level uint8) int {
-	return int(level / levelStep)
-}
-
-func shardFromBucket(bucket int) uint8 {
-	if bucket > numShards {
-		return math.MaxUint8
-	}
-	return uint8(shardStep*bucket) + minShard
-}
-
-func bucketFromShard(shard uint8) int {
-	return int(shard / shardStep)
 }

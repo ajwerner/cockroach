@@ -15,9 +15,11 @@ package jobs
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"strings"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/admission"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
@@ -185,7 +187,9 @@ func (r *Registry) lenientNow() hlc.Timestamp {
 // makeCtx returns a new context from r's ambient context and an associated
 // cancel func.
 func (r *Registry) makeCtx() (context.Context, func()) {
-	return context.WithCancel(r.ac.AnnotateCtx(context.Background()))
+	priority := admission.Priority{admission.MinLevel, uint8(rand.Intn(256))}
+	ctx := admission.ContextWithPriority(context.Background(), priority)
+	return context.WithCancel(r.ac.AnnotateCtx(ctx))
 }
 
 func (r *Registry) makeJobID() int64 {

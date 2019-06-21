@@ -88,7 +88,6 @@ func (r *Replica) executeReadOnlyBatch(
 					log.Infof(ctx, "acquired %v, used %v", respSize, alloc.Acquired())
 				}
 				r.store.metrics.ReadQuotaBytesGuessed.Inc(alloc.Acquired())
-				r.store.metrics.ReadQuotaBytesRead.Inc(int64(respSize))
 				switch priority.Level {
 				case admission.MaxLevel:
 					r.store.metrics.ReadResponseSizeMaxLevel.Add(float64(respSize))
@@ -184,6 +183,7 @@ func (r *Replica) executeReadOnlyBatch(
 	} else {
 		log.Event(ctx, "read completed")
 		respSize = br.Size()
+		r.store.metrics.ReadQuotaBytesRead.Inc(int64(respSize))
 		r.store.metrics.ReadResponseSizeSummary1m.Add(float64(respSize))
 	}
 	return br, pErr

@@ -373,6 +373,12 @@ func (ds *DistSender) Metrics() DistSenderMetrics {
 	return ds.metrics
 }
 
+// AdmissionControllerMetrics returns a struct which contains metrics related
+// to the distributed sender's admission controller.
+func (ds *DistSender) AdmissionControllerMetrics() *admission.Metrics {
+	return ds.admissionController.Metrics()
+}
+
 // RangeDescriptorCache gives access to the DistSender's range cache.
 func (ds *DistSender) RangeDescriptorCache() *RangeDescriptorCache {
 	return ds.rangeCache
@@ -689,6 +695,22 @@ func splitBatchAndCheckForRefreshSpans(
 	return parts
 }
 
+func canUseAdmissionController(ba *roachpb.BatchRequest) bool {
+	if ba.Txn != nil && ba.Txn.Key != nil {
+		return false
+	}
+	if !ba.IsReadOnly() {
+		return false
+	}
+	if _, isQueryTxnRequest := ba.GetArg(roachpb.QueryTxn); isQueryTxnRequest {
+		return false
+	}
+	if _, isQueryIntent := ba.GetArg(roachpb.QueryIntent); isQueryIntent {
+		return false
+	}
+	return true
+}
+
 // Send implements the batch.Sender interface. It subdivides the Batch
 // into batches admissible for sending (preventing certain illegal
 // mixtures of requests), executes each individual part (which may
@@ -708,7 +730,7 @@ func (ds *DistSender) Send(
 	ctx context.Context, ba roachpb.BatchRequest,
 ) (*roachpb.BatchResponse, *roachpb.Error) {
 	ds.metrics.BatchCount.Inc(1)
-	if ds.admissionController != nil {
+	if ds.admissionController != nil && canUseAdmissionController(&ba) {
 		prio := admission.PriorityFromContext(ctx)
 		if err := ds.admissionController.Admit(ctx, prio); err != nil {
 			return nil, roachpb.NewError(err)
@@ -1540,6 +1562,8 @@ func (ds *DistSender) sendPartialBatch(
 			reply, pErr = ds.divideAndSendBatchToRanges(ctx, ba, rs, withCommit, batchIdx)
 			return response{reply: reply, positions: positions, pErr: pErr}
 		case *roachpb.ReadRejectedError:
+			// NB: If we got ReadRejectedError then this request can use the admission
+			// controller.
 			prio := admission.PriorityFromContext(ctx)
 			if err := ds.admissionController.Admit(ctx, prio); err != nil {
 				return response{pErr: roachpb.NewError(&roachpb.ReadRejectedError{})}

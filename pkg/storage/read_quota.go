@@ -24,15 +24,17 @@ type readQuota struct {
 		maxWait   time.Duration
 		requests  int64
 	}
-	acquisitionPool sync.Pool
+	acquisitionSyncPool sync.Pool
 }
 
 func (rq *readQuota) putAcquisition(a *acquisition) {
-	rq.acquisitionPool.Put(a)
+	// Could omit clearing this but feels like premature optimization.
+	*a = acquisition{}
+	rq.acquisitionSyncPool.Put(a)
 }
 
 func (rq *readQuota) getAcquisition(p admission.Priority) *acquisition {
-	a := rq.acquisitionPool.Get().(*acquisition)
+	a := rq.acquisitionSyncPool.Get().(*acquisition)
 	*a = acquisition{
 		rq: rq,
 		p:  p,
@@ -40,9 +42,11 @@ func (rq *readQuota) getAcquisition(p admission.Priority) *acquisition {
 	return a
 }
 
-func (rq *readQuota) WaitStats() (avg, min, max time.Duration, len, requests int64) {
+func (rq *readQuota) WaitStats() (avg, min, max time.Duration, qLen, requests int64) {
 	rq.mu.Lock()
-	avg = time.Duration(float64(rq.mu.totalWait) / float64(rq.mu.requests))
+	if rq.mu.requests > 0 {
+		avg = time.Duration(float64(rq.mu.totalWait) / float64(rq.mu.requests))
+	}
 	min = rq.mu.minWait
 	max = rq.mu.maxWait
 	requests = rq.mu.requests
@@ -105,6 +109,13 @@ func (rq *readQuota) onAcquisition(
 	rq.s.metrics.ReadQuotaTimeSpentWaitingSummary10s.Add(float64(took.Nanoseconds()))
 }
 
+// TODO(ajwerner): Tune biasing. Bias in the distribution should dynamically
+// adjust based on how well the current estimate is working. Over time as the
+// bias is high the change in traffic pattern will get into the distribution.
+// Before tuning this it's important to ensure that the read quota actually
+// does anything. Recent evidence suggests that the quota itself is literally
+// never exhausted but instead that scheduling delays lead to queueing.
+
 const (
 	bias    = .2
 	maxSize = 1 << 28
@@ -116,10 +127,8 @@ func (s *Store) initializeReadQuota() {
 			quotapool.LogSlowAcquisition,
 			quotapool.OnAcquisition(s.readQuota.onAcquisition)),
 		s: s,
-		acquisitionPool: sync.Pool{
-			New: func() interface{} {
-				return new(acquisition)
-			},
+		acquisitionSyncPool: sync.Pool{
+			New: func() interface{} { return new(acquisition) },
 		},
 	}
 }

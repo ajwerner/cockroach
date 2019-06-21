@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -18,6 +19,14 @@ var testConfig = Config{
 	PruneRate:    .01,
 }
 
+var (
+	t0 = time.Unix(0, 0)
+	t1 = time.Unix(1, 0)
+	t2 = time.Unix(2, 0)
+	t3 = time.Unix(3, 0)
+	t4 = time.Unix(4, 0)
+)
+
 func TestAdmissionController(t *testing.T) {
 	var overloaded atomic.Value
 	overloaded.Store(false)
@@ -28,13 +37,11 @@ func TestAdmissionController(t *testing.T) {
 	}
 	c := NewController(ctx, nil, cfg)
 	assert.Equal(t, minPriority, c.AdmissionLevel())
-	t100 := time.Unix(0, 100e6)
 	p := Priority{DefaultLevel, 0}
-	assert.Nil(t, c.AdmitAt(ctx, p, t100))
-	assert.Nil(t, c.AdmitAt(ctx, Priority{DefaultLevel, maxShard}, t100))
+	assert.Nil(t, c.AdmitAt(ctx, p, t1))
+	assert.Nil(t, c.AdmitAt(ctx, Priority{DefaultLevel, NumShards - 1}, t1))
+	log.Infof(ctx, "aasdf")
 	overloaded.Store(true)
-	t200 := time.Unix(0, 200e6)
-
 	assertBlocks := func(ctx context.Context, p Priority, ts time.Time) {
 		const waitForError = 5 * time.Millisecond
 		errCh := make(chan error)
@@ -43,16 +50,17 @@ func TestAdmissionController(t *testing.T) {
 		time.AfterFunc(waitForError, cancel)
 		assert.Equal(t, context.Canceled, <-errCh)
 	}
-	assertBlocks(ctx, p, t200)
+	pBlocks := Priority{MinLevel, 127}
+	assertBlocks(ctx, pBlocks, t2)
 	p.Level = MaxLevel
-	assert.Nil(t, c.AdmitAt(ctx, p, t200))
+	assert.Nil(t, c.AdmitAt(ctx, p, t2))
 
-	// Ensure that the maximum admission level never gets blocked.
-	assert.Equal(t, Priority{DefaultLevel, maxShard}, c.AdmissionLevel())
+	assert.Equal(t, Priority{DefaultLevel, 0}, c.AdmissionLevel())
 	overloaded.Store(false)
-	assert.Nil(t, c.AdmitAt(ctx, maxPriority, t200))
-	t1101 := time.Unix(0, 1101e6)
-	assert.Nil(t, c.AdmitAt(ctx, maxPriority.dec(), t1101))
+	// Ensure that the maximum admission level never gets blocked.
+	assert.Nil(t, c.AdmitAt(ctx, maxPriority, t2))
+	t3 := time.Unix(3, 0)
+	assert.Nil(t, c.AdmitAt(ctx, maxPriority.Dec(), t3))
 }
 
 func ExampleController_cancel_blocked() {
@@ -71,7 +79,7 @@ func ExampleController_cancel_blocked() {
 	fmt.Println()
 	fmt.Println("Two admission requests come in and succeed in the current interval.")
 	fmt.Printf("AdmitAt(%v, %s) = %v.\n", p0, t0.Format("0.0"), c.AdmitAt(ctx, p0, t0))
-	p127 := Priority{DefaultLevel, shardFromBucket(127)}
+	p127 := Priority{DefaultLevel, 127}
 	fmt.Printf("AdmitAt(%v, %s) = %v.\n", p127, t0.Format("0.0"), c.AdmitAt(ctx, p127, t0))
 	fmt.Println(c)
 	fmt.Println()
@@ -99,26 +107,20 @@ func ExampleController_waiting() {
 	var overloaded atomic.Value
 	overloaded.Store(false)
 	cfg := testConfig
+	cfg.MaxReqsPerInterval = 1000000
 	cfg.OverloadSignal = func(Priority) (bool, Priority) {
 		return overloaded.Load().(bool), maxPriority
 	}
 	ctx := context.Background()
 	c := NewController(ctx, nil, cfg)
-	pMin := Priority{DefaultLevel, shardFromBucket(1)}
-	pMax := Priority{DefaultLevel, shardFromBucket(10)}
+	pMin := Priority{DefaultLevel, 1}
+	pMax := Priority{DefaultLevel, 10}
 	const reqsToAdd = 1000
 	const reqsPerPriority = reqsToAdd / 10
-	var (
-		t0 = time.Unix(0, 0)
-		t1 = time.Unix(0, 1)
-		t2 = time.Unix(0, 2)
-		t3 = time.Unix(0, 3)
-		t4 = time.Unix(0, 4)
-	)
 	fmt.Printf("AdmitAt(%v, %s) = %v.\n", pMin, t0.Format("0.0"), c.AdmitAt(ctx, pMin, t0))
-	p127 := Priority{DefaultLevel, shardFromBucket(127)}
+	p127 := Priority{DefaultLevel, 127}
 	fmt.Println("Add", reqsToAdd, "requests uniformly between", pMin, "and", pMax, "to test adjustment.")
-	for p := pMin; !pMax.less(p); p = p.inc() {
+	for p := pMin; !pMax.Less(p); p = p.Inc() {
 		for i := 0; i < reqsPerPriority; i++ {
 			if err := c.AdmitAt(ctx, p, t1); err != nil {
 				fmt.Println("Got an error", err)
@@ -137,9 +139,9 @@ func ExampleController_waiting() {
 	fmt.Println("Now, once again add the same load as before and wait until all requests are either admitted or blocked.")
 	fmt.Println("9951 should be admitted and 50 should be blocked.")
 	overloaded.Store(false)
-	for p := pMin; !pMax.less(p); p = p.inc() {
+	for p := pMin; !pMax.Less(p); p = p.Inc() {
 		for i := 0; i < reqsPerPriority; i++ {
-			if !p.less(c.AdmissionLevel()) {
+			if !p.Less(c.AdmissionLevel()) {
 				c.AdmitAt(ctx, p, t2)
 			} else {
 				go c.AdmitAt(ctx, p, t2)
@@ -177,7 +179,7 @@ func ExampleController_waiting() {
 	}
 	addAtPriority(Priority{DefaultLevel, 0})
 	pMin.Level, pMax.Level = MinLevel, MinLevel
-	for p := pMin; !pMax.less(p); p = p.inc() {
+	for p := pMin; !pMax.Less(p); p = p.Inc() {
 		addAtPriority(p)
 	}
 	for i := 0; i < 100; i++ {
@@ -245,8 +247,8 @@ func (c *Controller) numReqs() int {
 func (c *Controller) numBlocked() (blocked int) {
 	c.wq.mu.Lock()
 	defer c.wq.mu.Unlock()
-	for lb := 0; lb < numLevels; lb++ {
-		for sb := 0; sb < numShards; sb++ {
+	for lb := 0; lb < NumLevels; lb++ {
+		for sb := 0; sb < NumShards; sb++ {
 			blocked += c.wq.q[lb][sb].len()
 		}
 	}
