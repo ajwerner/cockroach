@@ -67,6 +67,7 @@ const (
 	defaultWindowSize     = 65535
 	initialWindowSize     = defaultWindowSize * 32 // for an RPC
 	initialConnWindowSize = initialWindowSize * 16 // for a connection
+	clientQosLevelKey     = "c_qos"
 )
 
 // sourceAddr is the environment-provided local address for outgoing
@@ -265,7 +266,7 @@ func NewServerWithInterceptor(
 			return handler(srv, stream)
 		}
 	}
-
+	unaryInterceptor = qosServerInterceptor(unaryInterceptor)
 	if unaryInterceptor != nil {
 		opts = append(opts, grpc.UnaryInterceptor(unaryInterceptor))
 	}
@@ -706,6 +707,7 @@ func (ctx *Context) grpcDialOptions(
 			unaryInterceptors = append(unaryInterceptors, testingUnaryInterceptor)
 		}
 	}
+	unaryInterceptors = append(unaryInterceptors, qosClientInterceptor)
 	dialOpts = append(dialOpts, grpc.WithChainUnaryInterceptor(unaryInterceptors...))
 	if ctx.testingKnobs.StreamClientInterceptor != nil {
 		testingStreamInterceptor := ctx.testingKnobs.StreamClientInterceptor(target, class)
