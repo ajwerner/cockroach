@@ -166,6 +166,7 @@ func (l Level) Less(other Level) bool {
 const (
 	// NumClasses is the total number of levels.
 	NumClasses = 3
+
 	// NumShards is the total number of logical shards.
 	NumShards = 128
 
@@ -182,7 +183,7 @@ const (
 	ClassLow
 )
 
-var levelStrings = [NumClasses]string{
+var classStrings = [NumClasses]string{
 	ClassHigh:    "h",
 	ClassDefault: "d",
 	ClassLow:     "l",
@@ -219,13 +220,43 @@ func levelToText(l Level) [textLen]byte {
 	return out
 }
 
+var (
+	classes = [NumClasses]Class{ClassHigh, ClassDefault, ClassLow}
+	shards  = func() (shards [NumShards]Shard) {
+		for i := 0; i < NumShards; i++ {
+			shards[NumShards-1-i] = Shard(i)
+		}
+		return shards
+	}()
+)
+
+// Classes returns an array of classes ordered from highest to lowest.
+// This function exists to ease code which iterates over classes in descending
+// order.
+func Classes() [NumClasses]Class {
+	return classes
+}
+
+// Shards return an array of Shard values ordered from highest (NumShards-1) to
+// lowest (0). This function exists to ease code which iterates over classes in
+// descending order.
+func Shards() [NumShards]Shard {
+	return shards
+}
+
+// String returns a shorthand string for the Class if it is valid or a decimal
+// integer representation if it is not.
+func (c Class) String() string {
+	if c.IsValid() {
+		return classStrings[c]
+	}
+	return strconv.Itoa(int(c))
+}
+
 // String returns a string formatted as Class:Shard where Shard is always an
 // integer and Class uses a shorthand string if it is valid or an intger if not.
 func (l Level) String() string {
-	if l.Class >= NumClasses {
-		return strconv.Itoa(int(l.Class)) + ":" + strconv.Itoa(int(l.Shard))
-	}
-	return levelStrings[l.Class] + ":" + strconv.Itoa(int(l.Shard))
+	return l.Class.String() + ":" + strconv.Itoa(int(l.Shard))
 }
 
 // MarshalText implements encoding.TextMarshaler.
