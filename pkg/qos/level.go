@@ -49,6 +49,15 @@ func (l Class) IsValid() bool {
 	return l < NumClasses
 }
 
+// String returns a shorthand string for the Class if it is valid or a decimal
+// integer representation if it is not.
+func (c Class) String() string {
+	if c.IsValid() {
+		return classStrings[c]
+	}
+	return strconv.Itoa(int(c))
+}
+
 // Shard indicates a shard within a Class.
 //
 // A shard subdivides a class generally based on a constant property of the
@@ -305,4 +314,28 @@ func levelToText(l Level) [textLen]byte {
 		panic(fmt.Errorf("expected to encode %d bytes, got %d", n, len(out)))
 	}
 	return out
+}
+
+var (
+	classes = [NumClasses]Class{ClassHigh, ClassDefault, ClassLow}
+	shards  = func() (shards [NumShards]Shard) {
+		for i := 0; i < NumShards; i++ {
+			shards[NumShards-1-i] = Shard(i)
+		}
+		return shards
+	}()
+)
+
+// Classes returns an array of classes ordered from highest to lowest.
+// This function exists to ease code which iterates over classes in descending
+// order.
+func Classes() [NumClasses]Class {
+	return classes
+}
+
+// Shards return an array of Shard values ordered from highest (NumShards-1) to
+// lowest (0). This function exists to ease code which iterates over classes in
+// descending order.
+func Shards() [NumShards]Shard {
+	return shards
 }
