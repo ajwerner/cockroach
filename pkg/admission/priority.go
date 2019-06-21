@@ -14,9 +14,11 @@ import (
 // levels rather than being spread out over the uint8 space as is the case for
 // EncodedPriority values.
 type Priority struct {
+
 	// Level indicates the level associated with this priority.
 	// For a valid Priority its value lies in (NumLevels, 0].
 	Level Level
+
 	// Shard indicates the priority shard within this level.
 	// For a valid Priority its value lies in (NumShards, 0].
 	Shard Shard
@@ -28,17 +30,34 @@ type Level uint8
 // Shard indicates a shard within a Level.
 type Shard uint8
 
+// Decode decodes a priority from a uint32.
+// The high 16 bits are ignored.
+func Decode(p uint32) Priority {
+	return Priority{
+		Level: decodeLevel(p),
+		Shard: decodeShard(p),
+	}
+}
+
 // IsValid return true if p has a valid value.
 func (p Priority) IsValid() bool {
 	return p.Level.IsValid() && p.Shard.IsValid()
 }
 
+// IsValid is true if Level is in (NumLevels, 0].
 func (l Level) IsValid() bool {
 	return l < NumLevels
 }
 
+// IsValid is true if Shard is in (NumShards, 0].
 func (s Shard) IsValid() bool {
 	return s < NumShards
+}
+
+// Encode encodes a priority to a uint32.
+// Encoded priorities can be compared using normal comparison operators.
+func (p Priority) Encode() uint32 {
+	return encodeLevel(p.Level) | encodeShard(p.Shard)
 }
 
 const (
@@ -60,10 +79,6 @@ func encodeShard(s Shard) uint32 {
 	return uint32(255 - ((NumShards - 1 - s) * shardStep))
 }
 
-func (p Priority) Encode() uint32 {
-	return encodeLevel(p.Level) | encodeShard(p.Shard)
-}
-
 func decodeShard(e uint32) Shard {
 	return Shard(e) / shardStep
 }
@@ -72,13 +87,8 @@ func decodeLevel(e uint32) Level {
 	return Level(e>>8) / levelStep
 }
 
-func Decode(p uint32) Priority {
-	return Priority{
-		Level: decodeLevel(p),
-		Shard: decodeShard(p),
-	}
-}
-
+// Dec returns the next lower priority value unless p is the minimum value
+// in which case p is returned.
 func (p Priority) Dec() Priority {
 	if p.Shard > 0 {
 		p.Shard--
@@ -89,6 +99,8 @@ func (p Priority) Dec() Priority {
 	return p
 }
 
+// Inc returns the next higher priority value unless p is the maximum value
+// in which case p is returned.
 func (p Priority) Inc() Priority {
 	if p.Shard < NumShards-1 {
 		p.Shard++
@@ -99,6 +111,7 @@ func (p Priority) Inc() Priority {
 	return p
 }
 
+// Less returns true if p is less than other.
 func (p Priority) Less(other Priority) bool {
 	if p.Level < other.Level {
 		return true
@@ -107,8 +120,11 @@ func (p Priority) Less(other Priority) bool {
 }
 
 const (
+	// NumLevels is the total number of levels.
 	NumLevels = 3
+	// NumShards is tje total number of logical shards.
 	NumShards = 128
+
 	levelStep = math.MaxUint8 / (NumLevels - 1)
 	shardStep = math.MaxUint8 / (NumShards - 1)
 )
