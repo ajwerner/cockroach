@@ -44,6 +44,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/idalloc"
 	"github.com/cockroachdb/cockroach/pkg/storage/intentresolver"
 	"github.com/cockroachdb/cockroach/pkg/storage/raftentry"
+	"github.com/cockroachdb/cockroach/pkg/storage/readcontrol"
 	"github.com/cockroachdb/cockroach/pkg/storage/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/storage/tscache"
 	"github.com/cockroachdb/cockroach/pkg/storage/txnrecovery"
@@ -610,6 +611,8 @@ type Store struct {
 	}
 
 	computeInitialMetrics sync.Once
+
+	readControl readcontrol.Controller
 }
 
 var _ client.Sender = &Store{}
@@ -810,6 +813,9 @@ func NewStore(
 
 	s.raftEntryCache = raftentry.NewCache(cfg.RaftEntryCacheSize)
 	s.metrics.registry.AddMetricStruct(s.raftEntryCache.Metrics())
+
+	s.readcontrol.Initialize(ctx, cfg.Settings)
+	s.metrics.registry.AddMetricStruct(s.readControl.AdmissionMetrics())
 
 	s.coalescedMu.Lock()
 	s.coalescedMu.heartbeats = map[roachpb.StoreIdent][]RaftHeartbeat{}
@@ -1270,6 +1276,7 @@ func ReadStoreIdent(ctx context.Context, eng engine.Engine) (roachpb.StoreIdent,
 
 // Start the engine, set the GC and read the StoreIdent.
 func (s *Store) Start(ctx context.Context, stopper *stop.Stopper) error {
+	s.readControl.Start(ctx, stopper)
 	s.stopper = stopper
 
 	// Populate the store ident. If not bootstrapped, ReadStoreIntent will

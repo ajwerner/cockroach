@@ -58,6 +58,14 @@ func (r *Replica) executeReadOnlyBatch(
 			r.store.metrics.FollowerReadsCount.Inc(1)
 		}
 	}
+
+	respSize := 0
+	acq, err := r.store.readControl.Admit(ctx, &ba)
+	if err != nil {
+		return nil, roachpb.NewError(err)
+	}
+	defer func() { acq.Release(ctx, respSize) }()
+
 	r.limitTxnMaxTimestamp(ctx, ba, status)
 
 	spans, err := r.collectSpans(ba)
