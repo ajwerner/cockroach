@@ -60,11 +60,14 @@ type Controller struct {
 		numCanceled     int64
 		numRejected     int64
 
-		admitHist  histogram
+		admitHists admitHists
+
 		wq         waitQueue
 		rejectHist histogram
 	}
 }
+
+const numAdmitHists = 4
 
 // TODO(ajwerner): justify these, they're taken from the DAGOR paper and cut
 // in half.
@@ -272,7 +275,7 @@ func (c *Controller) stringRLocked() string {
 			s > 0 &&
 			c.mu.admissionLevel.Shard != s &&
 			c.mu.rejectionLevel.Shard != s &&
-			c.mu.admitHist.emptyAtShard(s) &&
+			c.mu.admitHists.hists[c.mu.admitHists.cur].emptyAtShard(s) &&
 			c.mu.wq.emptyAtShard(s) {
 			skipped = true
 			continue
@@ -292,7 +295,7 @@ func (c *Controller) stringRLocked() string {
 			var v float64
 			switch {
 			case !p.Less(c.mu.admissionLevel):
-				v = float64(atomic.LoadUint64(&c.mu.admitHist.counters[cl][s]))
+				v = float64(atomic.LoadUint64(&c.mu.admitHists.hists[c.mu.admitHists.cur].counters[cl][s]))
 			case !c.mu.rejectionOn || c.mu.rejectionLevel.Less(p):
 				lq := c.mu.wq.lq(p)
 				v = float64(lq.len())
@@ -366,7 +369,7 @@ func (c *Controller) AdmitAt(ctx context.Context, l qos.Level, now time.Time) er
 			}
 		}
 	}
-	defer c.mu.admitHist.record(l, 1)
+	defer c.mu.admitHists.record(l, 1)
 	numAdmitted := atomic.AddInt64(&c.mu.numAdmitted, 1)
 	for numAdmitted > int64(c.cfg.MaxReqsPerInterval) {
 		if numAdmitted == (int64(c.cfg.MaxReqsPerInterval) + 1) {
@@ -424,7 +427,7 @@ func (c *Controller) tickLocked(now time.Time) {
 		log.Infof(context.TODO(), "tick %v: overload %v (%d) prev %v next %v\n%v",
 			now.Unix(), overloaded, numAdmitted, prev, c.mu.admissionLevel, before)
 	}
-	c.mu.admitHist = histogram{}
+	c.mu.admitHists.rotate()
 	c.mu.rejectHist = histogram{}
 	c.metrics.AdmissionLevel.Update(levelMetric(c.mu.admissionLevel))
 	if c.mu.rejectionOn {
@@ -443,7 +446,7 @@ func (c *Controller) raiseAdmissionLevelLocked(max qos.Level) {
 		return
 	}
 	cur := c.mu.admissionLevel
-	sizeFactor, total := admittedAbove(cur, &c.mu.admitHist, c.cfg.ScaleFactor)
+	sizeFactor, total := admittedAbove(cur, &c.mu.admitHists, c.cfg.ScaleFactor)
 	target := int64(float64(total) * (1 - c.cfg.PruneRate))
 	prev, cur := cur, cur.Inc()
 	for ; cur.Less(max) && cur.Class != qos.ClassHigh; prev, cur = cur, cur.Inc() {
@@ -456,9 +459,33 @@ func (c *Controller) raiseAdmissionLevelLocked(max qos.Level) {
 		if cur.Class != prev.Class {
 			sizeFactor = c.cfg.ScaleFactor(cur.Class)
 		}
-		total -= int64(c.mu.admitHist.countAt(cur)) * sizeFactor
+		total -= int64((c.mu.admitHists.countAt(cur)/numAdmitHists)+1) * sizeFactor
 	}
 	c.mu.admissionLevel = cur
+}
+
+type admitHists struct {
+	cur   int
+	hists [numAdmitHists]histogram
+}
+
+func (h *admitHists) record(l qos.Level, c uint64) {
+	h.hists[h.cur].record(l, c)
+}
+
+func (h *admitHists) rotate() {
+	h.cur++
+	if h.cur == numAdmitHists {
+		h.cur = 0
+	}
+	h.hists[h.cur] = histogram{}
+}
+
+func (h *admitHists) countAt(l qos.Level) (c uint64) {
+	for i := 0; i < numAdmitHists; i++ {
+		c += atomic.LoadUint64(&h.hists[i].counters[l.Class][l.Shard])
+	}
+	return c
 }
 
 // findLowerLevelLocked computes the new level for the Controller
@@ -469,7 +496,7 @@ func (c *Controller) raiseAdmissionLevelLocked(max qos.Level) {
 func (c *Controller) lowerAdmissionLevelLocked() (freed int) {
 	prev := c.mu.admissionLevel
 	cur := prev.Dec()
-	sizeFactor, total := admittedAbove(cur, &c.mu.admitHist, c.cfg.ScaleFactor)
+	sizeFactor, total := admittedAbove(cur, &c.mu.admitHists, c.cfg.ScaleFactor)
 	target := int64(float64(total)*(1+c.cfg.GrowRate)) + 1
 	for ; cur != minLevel; prev, cur = cur, cur.Dec() {
 		if cur.Class != prev.Class {
@@ -551,14 +578,15 @@ func (c *Controller) releaseLevelLocked(l qos.Level) (freed int) {
 }
 
 func admittedAbove(
-	l qos.Level, h *histogram, sizeFactor func(qos.Class) int64,
+	l qos.Level, h *admitHists, sizeFactor func(qos.Class) int64,
 ) (factor, count int64) {
 	prev, cur, factor := maxLevel, maxLevel, sizeFactor(qos.ClassHigh)
 	for ; l.Less(cur); cur, prev = cur.Dec(), cur {
 		if cur.Class != prev.Class {
 			factor = sizeFactor(cur.Class)
 		}
-		count += factor * int64(atomic.LoadUint64(&h.counters[cur.Class][cur.Shard]))
+		count += factor * int64((h.countAt(cur)/numAdmitHists)+1)
+		//		count += factor * int64(atomic.LoadUint64(&h.counters[cur.Class][cur.Shard]))
 	}
 	return factor, count
 }
