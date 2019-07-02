@@ -12,6 +12,8 @@ package sql
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/binary"
 	"fmt"
 	"runtime/pprof"
 	"strings"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
+	"github.com/cockroachdb/cockroach/pkg/qos"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -597,6 +600,28 @@ func (ex *connExecutor) rollbackSQLTransaction(ctx context.Context) (fsm.Event, 
 	return eventTxnFinish{}, eventTxnFinishPayload{commit: false}
 }
 
+func (ex *connExecutor) setQosLevel(
+	ctx context.Context, planner *planner,
+) (_ context.Context, l qos.Level) {
+	class := qos.ClassDefault
+	applicationName := ex.applicationName.Load().(string)
+	if applicationName == "foo" {
+		class = qos.ClassLow
+	}
+	var buf [16]byte
+	defer func() {
+		if log.V(1) {
+			log.Infof(ctx, "set qosLevel to %v %v %v", applicationName, buf, l)
+		}
+	}()
+	// TODO(ajwerner): cache this shard
+	binary.BigEndian.PutUint64(buf[:8], ex.sessionID.Hi)
+	binary.BigEndian.PutUint64(buf[8:], ex.sessionID.Lo)
+	shard := qos.Shard(md5.Sum(buf[:])[0]) % qos.NumShards
+	l = qos.Level{Class: class, Shard: shard}
+	return qos.ContextWithLevel(ctx, l), l
+}
+
 // dispatchToExecutionEngine executes the statement, writes the result to res
 // and returns an event for the connection's state machine.
 //
@@ -607,6 +632,7 @@ func (ex *connExecutor) rollbackSQLTransaction(ctx context.Context) (fsm.Event, 
 func (ex *connExecutor) dispatchToExecutionEngine(
 	ctx context.Context, planner *planner, res RestrictedCommandResult,
 ) error {
+	ctx, _ = ex.setQosLevel(ctx, planner)
 	stmt := planner.stmt
 	ex.sessionTracing.TracePlanStart(ctx, stmt.AST.StatementTag())
 	planner.statsCollector.PhaseTimes()[plannerStartLogicalPlan] = timeutil.Now()

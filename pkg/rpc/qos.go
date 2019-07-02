@@ -62,11 +62,88 @@ func qosServerInterceptor(
 				} else if errMalformedQosLevelEvery.ShouldLog() {
 					log.Errorf(goCtx, "malformed qos level %s header: %v", clientQosLevelKey, err)
 				}
+			} else if log.V(3) {
+				log.Infof(goCtx, "no qos level information found for %v", info)
 			}
 		}
 		if prevUnaryInterceptor != nil {
 			return prevUnaryInterceptor(goCtx, req, info, handler)
 		}
 		return handler(goCtx, req)
+	}
+}
+
+func qosServerStreamInterceptor(
+	prevStreamInterceptor grpc.StreamServerInterceptor,
+) grpc.StreamServerInterceptor {
+	warnTooManyEvery := log.Every(time.Second)
+	errMalformedQosLevelEvery := log.Every(time.Second)
+	return func(
+		srv interface{}, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler,
+	) error {
+		goCtx := stream.Context()
+		if md, ok := metadata.FromIncomingContext(goCtx); ok {
+			if v := md.Get(clientQosLevelKey); len(v) > 0 {
+				// We don't expect more than one item; gRPC does not copy metadata
+				// from one incoming RPC to an outgoing RPC, so there should be a
+				// single qos level in the context put there by the interceptor on the
+				// client before calling this RPC. Nevertheless, having two is only
+				// logged and is not treated as an error.
+				if len(v) > 1 && warnTooManyEvery.ShouldLog() {
+					log.Warningf(goCtx, "unexpected multiple qos levels in client metadata: %s", v)
+				}
+				// If a qos level header exists but is malformed it is ignored but a
+				// message is logged with the corresponding error.
+				// TODO(ajwerner): consider if this behavior should be less lenient for
+				// malformed headers.
+				if l, err := qos.DecodeString(v[0]); err == nil {
+					goCtx = qos.ContextWithLevel(goCtx, l)
+					stream = &wrappedStream{ctx: goCtx, ServerStream: stream}
+				} else if errMalformedQosLevelEvery.ShouldLog() {
+					log.Errorf(goCtx, "malformed qos level %s header: %v", clientQosLevelKey, err)
+				}
+			} else if log.V(3) {
+				log.Infof(goCtx, "no qos level information found for %v", info)
+			}
+		}
+		if prevStreamInterceptor != nil {
+			return prevStreamInterceptor(srv, stream, info, handler)
+		}
+		return handler(srv, stream)
+	}
+}
+
+type wrappedStream struct {
+	ctx context.Context
+	grpc.ServerStream
+}
+
+func (s *wrappedStream) Context() context.Context {
+	return s.ctx
+}
+
+func qosClientStreamInterceptor(
+	prevStreamInterceptor grpc.StreamClientInterceptor,
+) grpc.StreamClientInterceptor {
+	return func(
+		goCtx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string,
+		streamer grpc.Streamer, opts ...grpc.CallOption,
+	) (grpc.ClientStream, error) {
+		// Add a qos level header if the goCtx contains a qos level.
+		if l, haveLevel := qos.LevelFromContext(goCtx); haveLevel {
+			if log.V(1) {
+				log.Infof(goCtx, "found client qos level: %v", l)
+			}
+			goCtx = metadata.AppendToOutgoingContext(goCtx, clientQosLevelKey, l.EncodeString())
+		} else {
+			if log.V(1) {
+				log.Infof(goCtx, "no client qos level found")
+			}
+		}
+		// Chain the previous interceptor if there is one.
+		if prevStreamInterceptor != nil {
+			return prevStreamInterceptor(goCtx, desc, cc, method, streamer, opts...)
+		}
+		return streamer(goCtx, desc, cc, method, opts...)
 	}
 }
