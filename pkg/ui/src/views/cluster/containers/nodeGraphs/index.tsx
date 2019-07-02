@@ -46,6 +46,7 @@ import queuesDashboard from "./dashboards/queues";
 import requestsDashboard from "./dashboards/requests";
 import hardwareDashboard from "./dashboards/hardware";
 import changefeedsDashboard from "./dashboards/changefeeds";
+import admissionDashboard from "./dashboards/admission";
 
 interface GraphDashboard {
   label: string;
@@ -63,6 +64,7 @@ const dashboards: {[key: string]: GraphDashboard} = {
   "queues": { label: "Queues", component: queuesDashboard },
   "requests": { label: "Slow Requests", component: requestsDashboard },
   "changefeeds": { label: "Changefeeds", component: changefeedsDashboard },
+  "admission": { label: "Admission Control", component: admissionDashboard },
 };
 
 const defaultDashboard = "overview";
