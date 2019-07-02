@@ -402,6 +402,7 @@ func (c *Controller) tickLocked(now time.Time) {
 	before := c.stringRLocked()
 	c.mu.nextTick = now.Add(interval)
 	numAdmitted := atomic.SwapInt64(&c.mu.numAdmitted, 0)
+	atomic.SwapInt64(&c.mu.numRejected, 0)
 	prev := c.mu.admissionLevel
 	overloaded, max := c.cfg.OverloadSignal(prev)
 	if overloaded {
@@ -424,6 +425,7 @@ func (c *Controller) tickLocked(now time.Time) {
 			now.Unix(), overloaded, numAdmitted, prev, c.mu.admissionLevel, before)
 	}
 	c.mu.admitHist = histogram{}
+	c.mu.rejectHist = histogram{}
 	c.metrics.AdmissionLevel.Update(levelMetric(c.mu.admissionLevel))
 	if c.mu.rejectionOn {
 		c.metrics.RejectionLevel.Update(levelMetric(c.mu.rejectionLevel))
