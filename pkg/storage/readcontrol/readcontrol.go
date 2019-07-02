@@ -45,7 +45,7 @@ func (c *Controller) Initialize(ctx context.Context, settings *cluster.Settings)
 	}
 	admissionCfg := admission.Config{
 		Name:         "read",
-		TickInterval: 500 * time.Millisecond,
+		TickInterval: 250 * time.Millisecond,
 		OverloadSignal: func(cur qos.Level) (overloaded bool, lim qos.Level) {
 			requests, avg, min, max := c.quotaStats.WaitStats(true)
 			qLen := int64(c.readQuota.Len())
@@ -53,7 +53,7 @@ func (c *Controller) Initialize(ctx context.Context, settings *cluster.Settings)
 				log.Infof(context.TODO(), "overload signal %v: avg %v, min %v, max %v, qLen %v, reqs %v",
 					cur, avg, min, max, qLen, requests)
 			}
-			return (min > 20*time.Millisecond || avg > 50*time.Millisecond) && qLen > requests/10,
+			return (min > 10*time.Millisecond || avg > 50*time.Millisecond) && qLen > requests/10,
 				qos.Level{Class: qos.ClassHigh, Shard: 0}
 		},
 		PruneRate:  .05,

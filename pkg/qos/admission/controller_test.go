@@ -63,7 +63,7 @@ func TestAdmissionController(t *testing.T) {
 	cfg.OverloadSignal = func(qos.Level) (bool, qos.Level) {
 		return overloaded.Load().(bool), lh127
 	}
-	c := NewController(ctx, nil, cfg)
+	c := NewController(cfg)
 	assert.Equal(t, minLevel, c.AdmissionLevel())
 	assert.Nil(t, c.AdmitAt(ctx, ld0, t1))
 	assert.Nil(t, c.AdmitAt(ctx, ld127, t1))
@@ -99,7 +99,7 @@ func ExampleController_cancel() {
 		return overloaded.Load().(bool), maxLevel
 	}
 	ctx := context.Background()
-	c := NewController(ctx, nil, cfg)
+	c := NewController(cfg)
 	fmt.Println("The controller begins at the lowest level.")
 	fmt.Println(c)
 	t0 := time.Unix(0, 0)
@@ -172,7 +172,7 @@ func ExampleController_waiting() {
 		return overloaded.Load().(bool), maxLevel
 	}
 	ctx := context.Background()
-	c := NewController(ctx, nil, cfg)
+	c := NewController(cfg)
 	const reqsToAdd = 1000
 	const reqsPerLevel = reqsToAdd / 10
 	fmt.Println("Admit", reqsToAdd, "requests uniformly between", ld1, "and", ld10, " at t1.")
