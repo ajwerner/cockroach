@@ -39,7 +39,7 @@ func (c *Controller) Initialize(ctx context.Context, settings *cluster.Settings)
 				return new(Acquisition)
 			},
 		},
-		readQuota: quotapool.NewIntPool("read quota", 1000000,
+		readQuota: quotapool.NewIntPool("read quota", 1024,
 			quotapool.LogSlowAcquisition,
 			quotapool.OnAcquisition(c.onAcquisition)),
 	}
@@ -53,7 +53,7 @@ func (c *Controller) Initialize(ctx context.Context, settings *cluster.Settings)
 				log.Infof(context.TODO(), "overload signal %v: avg %v, min %v, max %v, qLen %v, reqs %v",
 					cur, avg, min, max, qLen, requests)
 			}
-			return (min > 10*time.Millisecond || avg > 50*time.Millisecond) && qLen > requests/10,
+			return (min > 5*time.Millisecond || avg > 10*time.Millisecond) && qLen > requests/10,
 				qos.Level{Class: qos.ClassHigh, Shard: 0}
 		},
 		PruneRate:  .05,
@@ -178,18 +178,20 @@ type Acquisition struct {
 	alloc      *quotapool.IntAlloc
 }
 
-func (a *Acquisition) acquireFunc(ctx context.Context, quota int64) (fulfilled bool, took int64) {
+func (a *Acquisition) acquireFunc(
+	ctx context.Context, p quotapool.PoolInfo,
+) (took uint64, err error) {
 	// if a.guess == 0 {
 	// 	a.guess = a.rq.guessReadSize(a.l.Class)
 	// }
 	if log.V(3) {
-		log.Infof(ctx, "attempting to acquire %v %v", a.guess, quota)
+		log.Infof(ctx, "attempting to acquire %v %v", a.guess, p)
 	}
 	const guess = 1
-	if guess <= quota {
-		return true, 1
+	if guess <= p.Available {
+		return 1, nil
 	}
-	return false, 0
+	return 0, quotapool.ErrNotEnoughQuota
 }
 
 func (a *Acquisition) admit(ctx context.Context) (err error) {
