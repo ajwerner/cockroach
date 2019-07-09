@@ -53,12 +53,12 @@ func (c *Controller) Initialize(ctx context.Context, settings *cluster.Settings)
 				log.Infof(context.TODO(), "overload signal %v: avg %v, min %v, max %v, qLen %v, reqs %v",
 					cur, avg, min, max, qLen, requests)
 			}
-			return (min > 5*time.Millisecond || avg > 10*time.Millisecond) && qLen > requests/10,
+			return (min > 20*time.Millisecond || avg > 50*time.Millisecond) && qLen > requests/5,
 				qos.Level{Class: qos.ClassHigh, Shard: 0}
 		},
-		PruneRate:  .05,
-		GrowRate:   .01,
-		MaxBlocked: 10000,
+		PruneRate:  .025,
+		GrowRate:   .009,
+		MaxBlocked: 100000,
 	}
 	c.admissionController = admission.NewController(admissionCfg)
 }
