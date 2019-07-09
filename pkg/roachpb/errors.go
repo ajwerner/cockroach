@@ -883,3 +883,18 @@ func (e *IndeterminateCommitError) message(pErr *Error) string {
 }
 
 var _ ErrorDetailInterface = &IndeterminateCommitError{}
+
+// NewReadRejectedError returns a new ReadRejectedError.
+func NewReadRejectedError() *ReadRejectedError {
+	return &ReadRejectedError{}
+}
+
+func (e *ReadRejectedError) Error() string {
+	return e.message(nil)
+}
+
+func (e *ReadRejectedError) message(pErr *Error) string {
+	return "read rejected"
+}
+
+var _ ErrorDetailInterface = (*ReadRejectedError)(nil)
