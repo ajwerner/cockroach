@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awsutil"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
+	"github.com/cockroachdb/cockroach/pkg/qos"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
@@ -182,7 +183,6 @@ func (sc *TableStatisticsCache) lookupStatsLocked(
 		return false, nil, nil
 	}
 	e := eUntyped.(*cacheEntry)
-
 	if e.mustWait {
 		// We are in the process of grabbing stats for this table. Wait until
 		// that is complete, at which point e.stats will be populated.
@@ -225,8 +225,9 @@ func (sc *TableStatisticsCache) addCacheEntryLocked(
 	func() {
 		sc.mu.Unlock()
 		defer sc.mu.Lock()
-
-		stats, err = sc.getTableStatsFromDB(ctx, tableID)
+		// TODO(ajwerner): find a more principled place to do this.
+		qosCtx := qos.ContextWithLevel(ctx, qos.Level{Class: qos.ClassHigh, Shard: qos.NumShards - 1})
+		stats, err = sc.getTableStatsFromDB(qosCtx, tableID)
 	}()
 
 	e.mustWait = false
