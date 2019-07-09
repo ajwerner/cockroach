@@ -58,8 +58,7 @@ func (r *Replica) executeReadOnlyBatch(
 			r.store.metrics.FollowerReadsCount.Inc(1)
 		}
 	}
-
-	respSize := 0
+	respSize = 0
 	acq, err := r.store.readControl.Admit(ctx, &ba)
 	if err != nil {
 		return nil, roachpb.NewError(err)

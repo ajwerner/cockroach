@@ -56,9 +56,9 @@ func (c *Controller) Initialize(ctx context.Context, settings *cluster.Settings)
 			return (min > 20*time.Millisecond || avg > 50*time.Millisecond) && qLen > requests/5,
 				qos.Level{Class: qos.ClassHigh, Shard: 0}
 		},
-		PruneRate:  .025,
-		GrowRate:   .009,
-		MaxBlocked: 100000,
+		PruneRate:  .020,
+		GrowRate:   .005,
+		MaxBlocked: 1000,
 	}
 	c.admissionController = admission.NewController(admissionCfg)
 }
@@ -195,7 +195,11 @@ func (a *Acquisition) acquireFunc(
 }
 
 func (a *Acquisition) admit(ctx context.Context) (err error) {
-	return a.controller.admissionController.Admit(ctx, a.l)
+	err = a.controller.admissionController.Admit(ctx, a.l)
+	if err != nil && ctx.Err() == nil {
+		err = roachpb.NewReadRejectedError()
+	}
+	return err
 }
 
 func (a *Acquisition) acquire(ctx context.Context) (err error) {

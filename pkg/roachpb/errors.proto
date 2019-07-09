@@ -494,6 +494,12 @@ message IndeterminateCommitError {
   optional Transaction staging_txn = 1 [(gogoproto.nullable) = false];
 }
 
+// ReadRejectedError indicates that a read-only batch could not be processed
+// because its qos.Level is too low for the current store.
+message ReadRejectedError {
+  option (gogoproto.equal) = true;
+}
+
 // ErrorDetail is a union type containing all available errors.
 message ErrorDetail {
   option (gogoproto.equal) = true;
@@ -535,6 +541,7 @@ message ErrorDetail {
     MergeInProgressError merge_in_progress = 37;
     RangeFeedRetryError rangefeed_retry = 38;
     IndeterminateCommitError indeterminate_commit = 39;
+    ReadRejectedError read_rejected = 40;
   }
 }
 
