@@ -14,12 +14,15 @@ import (
 	"context"
 	"fmt"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/qos"
+	"github.com/cockroachdb/cockroach/pkg/qos/admission"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
@@ -30,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/pkg/errors"
@@ -204,6 +208,51 @@ type DistSender struct {
 	// disableParallelBatches instructs DistSender to never parallelize
 	// the transmission of partial batch requests across ranges.
 	disableParallelBatches bool
+
+	admissionController *admission.Controller
+
+	rejectionMu struct {
+		syncutil.RWMutex
+		maxSeen    qos.Level
+		errorsSeen int64
+	}
+}
+
+func (ds *DistSender) recordReadRejectedError(ctx context.Context) {
+	l, ok := qos.LevelFromContext(ctx)
+	if !ok {
+		return
+	}
+	ds.rejectionMu.RLock()
+	atomic.AddInt64(&ds.rejectionMu.errorsSeen, 1)
+	shouldUpdateMax := ds.rejectionMu.maxSeen.Less(l)
+	ds.rejectionMu.RUnlock()
+	// TODO(ajwerner): could use atomics here too.
+	if shouldUpdateMax {
+		ds.rejectionMu.Lock()
+		if ds.rejectionMu.maxSeen.Less(l) {
+			ds.rejectionMu.maxSeen = l
+		}
+		ds.rejectionMu.Unlock()
+	}
+}
+
+func (ds *DistSender) isOverloaded(cur qos.Level) (overloaded bool, limit qos.Level) {
+	ds.rejectionMu.Lock()
+	seen := atomic.LoadInt64(&ds.rejectionMu.errorsSeen)
+	maxRejectedLevel := ds.rejectionMu.maxSeen
+	ds.rejectionMu.maxSeen = qos.Level{}
+	atomic.StoreInt64(&ds.rejectionMu.errorsSeen, 0)
+	ds.rejectionMu.Unlock()
+	if log.V(1) {
+		log.Infof(context.TODO(), "dist-sender overloaded: %v %v %v",
+			cur, seen, maxRejectedLevel)
+	}
+	if seen > 32 && cur.Less(maxRejectedLevel) {
+		limit = maxRejectedLevel
+		overloaded = true
+	}
+	return overloaded, limit
 }
 
 var _ client.Sender = &DistSender{}
@@ -280,9 +329,19 @@ func NewDistSender(cfg DistSenderConfig, g *gossip.Gossip) *DistSender {
 	ds.clusterID = &cfg.RPCContext.ClusterID
 	ds.nodeDialer = cfg.NodeDialer
 	ds.asyncSenderSem = make(chan struct{}, defaultSenderConcurrency)
-
+	admissionCfg := admission.Config{
+		Name:                "DistSender",
+		TickInterval:        500 * time.Millisecond,
+		RandomizationFactor: .1,
+		OverloadSignal:      ds.isOverloaded,
+		MaxBlocked:          50000,
+		GrowRate:            .01,
+		PruneRate:           .05,
+	}
+	ds.admissionController = admission.NewController(admissionCfg)
+	ctx := ds.AnnotateCtx(context.Background())
+	ds.admissionController.RunTicker(ctx, ds.rpcContext.Stopper)
 	if g != nil {
-		ctx := ds.AnnotateCtx(context.Background())
 		g.RegisterCallback(gossip.KeyFirstRangeDescriptor,
 			func(_ string, value roachpb.Value) {
 				if atomic.LoadInt32(&ds.disableFirstRangeUpdates) == 1 {
@@ -305,6 +364,23 @@ func NewDistSender(cfg DistSenderConfig, g *gossip.Gossip) *DistSender {
 	return ds
 }
 
+// TODO(ajwerner): consider centralizing this logic.
+func canUseAdmissionController(ba *roachpb.BatchRequest) bool {
+	if ba.Txn != nil && ba.Txn.Key != nil {
+		return false
+	}
+	if !ba.IsReadOnly() {
+		return false
+	}
+	if _, isQueryTxnRequest := ba.GetArg(roachpb.QueryTxn); isQueryTxnRequest {
+		return false
+	}
+	if _, isQueryIntent := ba.GetArg(roachpb.QueryIntent); isQueryIntent {
+		return false
+	}
+	return true
+}
+
 // DisableFirstRangeUpdates disables updates of the first range via
 // gossip. Used by tests which want finer control of the contents of the range
 // cache.
@@ -322,6 +398,12 @@ func (ds *DistSender) DisableParallelBatches() {
 // sender's activity.
 func (ds *DistSender) Metrics() DistSenderMetrics {
 	return ds.metrics
+}
+
+// AdmissionControllerMetrics returns a struct which contains metrics related
+// to the distributed sender's admission controller.
+func (ds *DistSender) AdmissionControllerMetrics() *admission.Metrics {
+	return ds.admissionController.Metrics()
 }
 
 // RangeDescriptorCache gives access to the DistSender's range cache.
@@ -666,7 +748,12 @@ func (ds *DistSender) Send(
 	ctx context.Context, ba roachpb.BatchRequest,
 ) (*roachpb.BatchResponse, *roachpb.Error) {
 	ds.metrics.BatchCount.Inc(1)
-
+	if ds.admissionController != nil && canUseAdmissionController(&ba) {
+		if l, ok := qos.LevelFromContext(ctx); !ok {
+		} else if err := ds.admissionController.Admit(ctx, l); err != nil {
+			return nil, roachpb.NewError(err)
+		}
+	}
 	tracing.AnnotateTrace()
 
 	// TODO(nvanbenschoten): This causes ba to escape to the heap. Either
@@ -1504,6 +1591,16 @@ func (ds *DistSender) sendPartialBatch(
 			log.VEventf(ctx, 1, "likely split; resending batch to span: %s", tErr)
 			reply, pErr = ds.divideAndSendBatchToRanges(ctx, ba, rs, withCommit, batchIdx)
 			return response{reply: reply, positions: positions, pErr: pErr}
+
+		case *roachpb.ReadRejectedError:
+			// NB: If we got ReadRejectedError then this request can use the admission
+			// controller.
+			if l, ok := qos.LevelFromContext(ctx); !ok {
+				log.Infof(ctx, "WTF is going on here?", err)
+			} else if err := ds.admissionController.Admit(ctx, l); err != nil {
+				return response{pErr: roachpb.NewError(&roachpb.ReadRejectedError{})}
+			}
+			continue
 		}
 		break
 	}
@@ -1731,6 +1828,13 @@ func (ds *DistSender) sendToReplicas(
 			case *roachpb.StoreNotFoundError, *roachpb.NodeUnavailableError:
 				// These errors are likely to be unique to the replica that reported
 				// them, so no action is required before the next retry.
+			case *roachpb.ReadRejectedError:
+				// These errors are unfortunate and imply that the downstream server is
+				// severely overloaded. This request should fail and the overload signal
+				// should be set to true for this level
+				ds.recordReadRejectedError(ctx)
+				propagateError = true
+
 			case *roachpb.RangeNotFoundError:
 				// The store we routed to doesn't have this replica. This can happen when
 				// our descriptor is outright outdated, but it can also be caused by a

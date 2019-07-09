@@ -2,16 +2,21 @@ package readcontrol
 
 import (
 	"context"
+	"errors"
+	"math"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/ajwerner/tdigest"
 	"github.com/cockroachdb/cockroach/pkg/qos"
 	"github.com/cockroachdb/cockroach/pkg/qos/admission"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -25,13 +30,36 @@ type Controller struct {
 	readQuota           *quotapool.IntPool
 	quotaStats          quotaStats
 
+	currentLimit int64
+	numBlocked   int64
+	queueLimit   int64
+
+	queueSizeFunc func(limit int) (queueSize int)
+
 	acquisitionSyncPool sync.Pool
 	startOnce           sync.Once
 }
 
+func maxF64(a, b float64) float64 {
+	if a < b {
+		return b
+	}
+	return a
+}
+
+func minF64(a, b float64) float64 {
+	if a > b {
+		return b
+	}
+	return a
+}
+
 // TODO(ajwerner): properly plumb admission control configuration.
 // TODO(ajwerner): plumb through read quota configuration
-func (c *Controller) Initialize(ctx context.Context, settings *cluster.Settings) {
+func (c *Controller) Initialize(
+	ctx context.Context, settings *cluster.Settings, summary *metric.WindowedSummary,
+) {
+	initialLimit := 8 * runtime.NumCPU()
 	*c = Controller{
 		clusterSetting: settings,
 		acquisitionSyncPool: sync.Pool{
@@ -39,26 +67,85 @@ func (c *Controller) Initialize(ctx context.Context, settings *cluster.Settings)
 				return new(Acquisition)
 			},
 		},
-		readQuota: quotapool.NewIntPool("read quota", 1024,
+		readQuota: quotapool.NewIntPool("read quota", uint64(initialLimit),
 			quotapool.LogSlowAcquisition,
 			quotapool.OnAcquisition(c.onAcquisition)),
+		currentLimit: int64(initialLimit),
+		queueLimit:   int64(math.Ceil(math.Sqrt(float64(initialLimit)))) + 8,
 	}
+
+	const longMeasurementPeriod = 5 * time.Minute
+	const shortMeasurementPeriod = 2 * time.Second
 	admissionCfg := admission.Config{
 		Name:         "read",
-		TickInterval: 250 * time.Millisecond,
+		TickInterval: 500 * time.Millisecond,
 		OverloadSignal: func(cur qos.Level) (overloaded bool, lim qos.Level) {
 			requests, avg, min, max := c.quotaStats.WaitStats(true)
-			qLen := int64(c.readQuota.Len())
-			if log.V(1) {
-				log.Infof(context.TODO(), "overload signal %v: avg %v, min %v, max %v, qLen %v, reqs %v",
-					cur, avg, min, max, qLen, requests)
+
+			qLen, quota := int64(c.readQuota.Len()), c.readQuota.ApproximateQuota()
+
+			var longLat, shortLat float64
+			summary.ReadAt(longMeasurementPeriod, func(_ time.Duration, r tdigest.Reader) {
+				longLat = r.TrimmedMean(.9)
+			})
+			summary.ReadAt(shortMeasurementPeriod, func(_ time.Duration, r tdigest.Reader) {
+				shortLat = r.TrimmedMean(.9)
+			})
+			// This is a hack to try to deal with the case where the system's load has
+			// diminished drastically. We want to accelerate the return to steady
+			// state.
+			// TODO(ajwerner): make this better.
+			if longLat < shortLat/2 {
+				summary.ReadAt(longMeasurementPeriod/5, func(_ time.Duration, r tdigest.Reader) {
+					longLat = r.TrimmedMean(.9)
+				})
 			}
-			return (min > 20*time.Millisecond || avg > 50*time.Millisecond) && qLen > requests/5,
+			curLimit := atomic.LoadInt64(&c.currentLimit)
+			inFlight := curLimit - int64(quota)
+			queueLimit := atomic.LoadInt64(&c.queueLimit)
+			numBlocked := atomic.SwapInt64(&c.numBlocked, 0)
+			if log.V(1) {
+				log.Infof(context.TODO(), "overload signal %v: avg %v, min %v, max %v, qLen %v, reqs %v, inFlight %v, longDur %v, shortDur %v, curLimit %v, numBlocked %v, quota %v, queueLimit %v",
+					cur, avg, min, max, qLen, requests, inFlight, time.Duration(longLat), time.Duration(shortLat), curLimit, numBlocked, quota, queueLimit)
+			}
+			const tolerance = 1.5
+			const smoothing = .2
+			const minLimit = 8
+			if inFlight < int64(curLimit/2) && numBlocked == 0 && curLimit > int64(initialLimit) {
+				// Do nothing
+			} else {
+
+				gradient := maxF64(.5, minF64(1.0, (tolerance*longLat)/shortLat))
+				calculatedLimit := int64(math.Ceil(float64(curLimit)*gradient)) + queueLimit
+				newLimit := int64(maxF64(minLimit, float64(calculatedLimit)*smoothing+float64(curLimit)*(1-smoothing)))
+				if newLimit != curLimit {
+					queueLimit = int64(math.Ceil(math.Sqrt(float64(newLimit)))) + 8
+					atomic.StoreInt64(&c.currentLimit, newLimit)
+					atomic.StoreInt64(&c.queueLimit, queueLimit)
+					c.readQuota.UpdateCapacity(uint64(newLimit))
+					if log.V(1) {
+						log.Infof(context.TODO(), "updating read quota limit: oldLimit=%v, calcLimit=%v, newLimit=%v, shortDur=%v, longDur=%v, gradient=%v, inFlight=%v, queueLen=%v",
+							curLimit,
+							calculatedLimit,
+							newLimit,
+							time.Duration(shortLat),
+							time.Duration(longLat),
+							gradient,
+							inFlight,
+							queueLimit)
+					}
+				}
+			}
+			return numBlocked > 0 ||
+					(min > 5*time.Millisecond || avg > 20*time.Millisecond) &&
+						(qLen > requests/10 || requests > 100),
 				qos.Level{Class: qos.ClassHigh, Shard: 0}
+
 		},
-		PruneRate:  .020,
-		GrowRate:   .005,
-		MaxBlocked: 1000,
+		PruneRate:          .020,
+		GrowRate:           .005,
+		MaxBlocked:         1000,
+		MaxReqsPerInterval: 10000,
 	}
 	c.admissionController = admission.NewController(admissionCfg)
 }
@@ -82,6 +169,11 @@ type quotaStats struct {
 	numRequests    int64
 }
 
+// Admit is going to first check what should happen to this request given its
+// qos.Level and the current admission and rejection level. Then, assuming it
+// should be admitted, it attempts to acquire quota from the readquota. If the
+// queue is full for read quota then the request is blocked for the remainder of
+// this interval to repeat the process later.
 func (c *Controller) Admit(ctx context.Context, ba *roachpb.BatchRequest) (*Acquisition, error) {
 	a := c.getAcquisition(ctx, ba)
 	if !requiresReadControl(c.clusterSetting, ba) || a.l.Class == 4 {
@@ -93,11 +185,21 @@ func (c *Controller) Admit(ctx context.Context, ba *roachpb.BatchRequest) (*Acqu
 		c.putAcquisition(a)
 		return nil, err
 	}
-	if err := a.acquire(ctx); err != nil {
-		c.putAcquisition(a)
-		return nil, err
+	for {
+		switch err := a.acquire(ctx); err {
+		case errQueueFull:
+			atomic.AddInt64(&c.numBlocked, 1)
+			if err = c.admissionController.Block(ctx, a.l); err != nil {
+				c.putAcquisition(a)
+				return nil, err
+			}
+		case nil:
+			return a, nil
+		default:
+			c.putAcquisition(a)
+			return nil, err
+		}
 	}
-	return a, nil
 }
 
 var disableReadQuota = settings.RegisterBoolSetting(
@@ -125,6 +227,7 @@ func requiresReadControl(settings *cluster.Settings, ba *roachpb.BatchRequest) b
 }
 
 func (c *Controller) putAcquisition(a *Acquisition) {
+	*a = Acquisition{}
 	c.acquisitionSyncPool.Put(a)
 }
 
@@ -178,12 +281,21 @@ type Acquisition struct {
 	alloc      *quotapool.IntAlloc
 }
 
+// func (a *Acquisition) Acquire(ctx context.Context) error {
+// 	return a.acquire(ctx)
+// }
+
+var errQueueFull = errors.New("queue full")
+
 func (a *Acquisition) acquireFunc(
 	ctx context.Context, p quotapool.PoolInfo,
 ) (took uint64, err error) {
 	// if a.guess == 0 {
 	// 	a.guess = a.rq.guessReadSize(a.l.Class)
 	// }
+	if lim := atomic.LoadInt64(&a.controller.queueLimit); int(lim) < p.Len {
+		return 0, errQueueFull
+	}
 	if log.V(3) {
 		log.Infof(ctx, "attempting to acquire %v %v", a.guess, p)
 	}

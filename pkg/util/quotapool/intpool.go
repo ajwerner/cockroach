@@ -33,12 +33,28 @@ type IntPool struct {
 	// The capacity is originally set when the IntPool is constructed, and then it
 	// can be decreased by IntAlloc.Freeze().
 	capacity uint64
+
+	maxQueueLen uint64
 }
 
 // IntAlloc is an allocated quantity which should be released.
 type IntAlloc struct {
 	alloc uint64
 	p     *IntPool
+}
+
+func (p *IntPool) UpdateCapacity(newCapacity uint64) {
+	// TODO(ajwerner): add proper synchronization.
+	// This for now is a sort-of best-effort thing
+	// If you lower capacity and it's available then this is straightforward.
+	// When you increase capacity it's also straightforward.
+	oldCapacity := atomic.SwapUint64(&p.capacity, newCapacity)
+	toRelease := uint64(0)
+	if newCapacity > oldCapacity {
+		toRelease = newCapacity - oldCapacity
+	}
+	ia := p.newIntAlloc(toRelease)
+	ia.Release()
 }
 
 // Release releases an IntAlloc back into the IntPool.
@@ -92,9 +108,8 @@ func (ia *intAlloc) Merge(other Resource) {
 //
 // capacity is the amount of quota initially available.
 func NewIntPool(name string, capacity uint64, options ...Option) *IntPool {
-	p := IntPool{
-		capacity: capacity,
-	}
+	p := IntPool{}
+	p.capacity = capacity
 	p.qp = New(name, (*intAlloc)(p.newIntAlloc(capacity)), options...)
 	return &p
 }
@@ -155,6 +170,9 @@ type PoolInfo struct {
 	// decrease over time. It can be used to determine that the resources required
 	// by a request will never be available.
 	Capacity uint64
+
+	// Len is the current queue length.
+	Len int
 }
 
 // AcquireFunc acquires a quantity of quota determined by a function which is
@@ -293,8 +311,10 @@ func (r *intFuncRequest) Acquire(ctx context.Context, v Resource) (fulfilled boo
 	pi := PoolInfo{
 		Available: ia.alloc,
 		Capacity:  ia.p.Capacity(),
+		Len:       int(ia.p.qp.mu.q.len) - ia.p.qp.mu.numCanceled,
 	}
 	took, err := r.f(ctx, pi)
+	r.took = took
 	if err != nil {
 		if took != 0 {
 			panic(fmt.Sprintf("IntRequestFunc returned both took: %d and err: %s", took, err))
@@ -309,7 +329,6 @@ func (r *intFuncRequest) Acquire(ctx context.Context, v Resource) (fulfilled boo
 	if took > ia.alloc {
 		panic(errors.Errorf("took %d quota > %d allocated", took, ia.alloc))
 	}
-	r.took = took
 	ia.alloc -= took
 	return true, ia
 }
