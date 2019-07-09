@@ -333,6 +333,46 @@ func (c *Controller) Admit(ctx context.Context, p qos.Level) error {
 	return c.AdmitAt(ctx, p, timeutil.Now())
 }
 
+// Block will clock this request.
+func (c *Controller) Block(ctx context.Context, l qos.Level) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if err := c.blockRLocked(ctx, l); err != nil {
+		return err
+	}
+	for l.Less(c.mu.admissionLevel) {
+		// Reject requests which are at or below the current rejection level.
+		if c.mu.rejectionLevel != minLevel && !c.mu.rejectionLevel.Less(l) {
+			atomic.AddInt64(&c.mu.numRejected, 1)
+			c.mu.rejectHist.record(l, 1)
+			return ErrRejected
+		}
+		if err := c.blockRLocked(ctx, l); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Controller) blockRLocked(ctx context.Context, l qos.Level) error {
+	if numBlocked := atomic.AddInt64(&c.mu.numBlocked, 1); numBlocked == c.cfg.MaxBlocked+1 {
+		c.raiseRejectionLevelRLocked(l)
+		return nil
+	} else if numBlocked > c.cfg.MaxBlocked {
+		atomic.AddInt64(&c.mu.numBlockWaiting, 1)
+		c.mu.blockCond.Wait()
+		return nil
+	}
+	c.metrics.NumBlocked.Inc(1)
+	waitErr := c.waitRLocked(ctx, l)
+	if waitErr == nil {
+		c.metrics.NumUnblocked.Inc(1)
+		return nil
+	}
+	atomic.AddInt64(&c.mu.numCanceled, 1)
+	return waitErr
+}
+
 // AdmitAt attempts to admit a request at the specified level and time.
 // Admit at may return ErrRejected if the rejection level at any point rises to
 // or above l. Context cancellations will also propagate an error.
@@ -351,21 +391,8 @@ func (c *Controller) AdmitAt(ctx context.Context, l qos.Level, now time.Time) er
 				c.mu.rejectHist.record(l, 1)
 				return ErrRejected
 			}
-			if numBlocked := atomic.AddInt64(&c.mu.numBlocked, 1); numBlocked == c.cfg.MaxBlocked+1 {
-				c.raiseRejectionLevelRLocked(l)
-				continue
-			} else if numBlocked > c.cfg.MaxBlocked {
-				atomic.AddInt64(&c.mu.numBlockWaiting, 1)
-				c.mu.blockCond.Wait()
-				continue
-			}
-			c.metrics.NumBlocked.Inc(1)
-			waitErr := c.waitRLocked(ctx, l)
-			if waitErr == nil {
-				c.metrics.NumUnblocked.Inc(1)
-			} else {
-				atomic.AddInt64(&c.mu.numCanceled, 1)
-				return waitErr
+			if err := c.blockRLocked(ctx, l); err != nil {
+				return err
 			}
 		}
 	}
@@ -411,8 +438,7 @@ func (c *Controller) tickLocked(now time.Time) {
 	if overloaded {
 		c.metrics.Inc.Inc(1)
 		c.raiseAdmissionLevelLocked(max)
-	} else if c.mu.admissionLevel != minLevel {
-		c.metrics.Dec.Inc(1)
+	} else {
 		freed := c.lowerAdmissionLevelLocked()
 		numCanceled := atomic.SwapInt64(&c.mu.numCanceled, 0)
 		unblocked := int64(freed) + numCanceled
@@ -421,6 +447,9 @@ func (c *Controller) tickLocked(now time.Time) {
 		if numBlocked < c.cfg.MaxBlocked/2 {
 			c.mu.rejectionLevel = minLevel
 			c.mu.rejectionOn = false
+		}
+		if freed > 0 || prev != minLevel {
+			c.metrics.Dec.Inc(1)
 		}
 	}
 	if log.V(1) {
@@ -498,6 +527,12 @@ func (c *Controller) lowerAdmissionLevelLocked() (freed int) {
 	cur := prev.Dec()
 	sizeFactor, total := admittedAbove(cur, &c.mu.admitHists, c.cfg.ScaleFactor)
 	target := int64(float64(total)*(1+c.cfg.GrowRate)) + 1
+	for l := maxLevel; prev.Less(l); l = l.Dec() {
+		freed += c.releaseLevelLocked(l)
+		if l == minLevel {
+			break
+		}
+	}
 	for ; cur != minLevel; prev, cur = cur, cur.Dec() {
 		if cur.Class != prev.Class {
 			sizeFactor = c.cfg.ScaleFactor(cur.Class)
@@ -511,7 +546,9 @@ func (c *Controller) lowerAdmissionLevelLocked() (freed int) {
 			break
 		}
 	}
-	c.mu.admissionLevel = cur
+	if cur.Less(c.mu.admissionLevel) {
+		c.mu.admissionLevel = cur
+	}
 	return freed
 }
 

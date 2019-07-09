@@ -1544,7 +1544,7 @@ func main() {
 	rootCmd.PersistentFlags().BoolVarP(
 		&quiet, "quiet", "q", false, "disable fancy progress output")
 
-	for _, cmd := range []*cobra.Command{createCmd, destroyCmd, extendCmd, logsCmd} {
+	for _, cmd := range []*cobra.Command{createCmd, destroyCmd, extendCmd, logsCmd, setupSSHCmd} {
 		cmd.Flags().StringVarP(&username, "username", "u", os.Getenv("ROACHPROD_USER"),
 			"Username to run under, detect if blank")
 	}

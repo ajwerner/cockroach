@@ -305,6 +305,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	}
 	s.distSender = kv.NewDistSender(distSenderCfg, s.gossip)
 	s.registry.AddMetricStruct(s.distSender.Metrics())
+	s.registry.AddMetricStruct(s.distSender.AdmissionControllerMetrics())
 
 	txnMetrics := kv.MakeTxnMetrics(s.cfg.HistogramWindowInterval())
 	s.registry.AddMetricStruct(txnMetrics)

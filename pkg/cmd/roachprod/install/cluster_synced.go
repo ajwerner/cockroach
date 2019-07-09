@@ -516,6 +516,7 @@ func (c *SyncedCluster) Wait() error {
 
 			_, err = sess.CombinedOutput("test -e /mnt/data1/.roachprod-initialized")
 			if err != nil {
+				fmt.Printf("err on %d: %v", i, err)
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}

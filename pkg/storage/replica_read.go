@@ -71,9 +71,15 @@ func (r *Replica) executeReadOnlyBatch(
 	if err != nil {
 		return nil, roachpb.NewError(err)
 	}
-	latchStart = timeutil.Now()
+	acq, err := r.store.readControl.Admit(ctx, &ba)
+	if err != nil {
+		return nil, roachpb.NewError(err)
+	}
+	defer func() { acq.Release(ctx, respSize) }()
+
 	// Acquire latches to prevent overlapping commands from executing
 	// until this command completes.
+	latchStart = timeutil.Now()
 	log.Event(ctx, "acquire latches")
 	ec, err := r.beginCmds(ctx, ba, spans)
 	if err != nil {
