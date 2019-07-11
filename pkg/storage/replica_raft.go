@@ -423,6 +423,7 @@ func (r *Replica) handleRaftReady(
 		elapsed := timeutil.Since(start)
 		r.store.metrics.RaftHandleReadyLatency.RecordValue(elapsed.Nanoseconds())
 		r.store.metrics.RaftHandleReadyLatencySummary.Add(float64(elapsed.Nanoseconds()))
+		r.store.readControl.RecordRaftReadyDuration(elapsed)
 	}(timeutil.Now())
 	r.raftMu.Lock()
 	defer r.raftMu.Unlock()

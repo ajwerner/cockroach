@@ -142,10 +142,10 @@ func (c *Controller) Initialize(
 				qos.Level{Class: qos.ClassHigh, Shard: 0}
 
 		},
-		PruneRate:          .020,
-		GrowRate:           .005,
+		PruneRate:          .05,
+		GrowRate:           .01,
 		MaxBlocked:         1000,
-		MaxReqsPerInterval: 10000,
+		MaxReqsPerInterval: 2000,
 	}
 	c.admissionController = admission.NewController(admissionCfg)
 }
@@ -167,6 +167,8 @@ type quotaStats struct {
 	maxWaitNanos   int64
 	totalWaitNanos int64
 	numRequests    int64
+
+	maxRaftReadyDuration int64
 }
 
 // Admit is going to first check what should happen to this request given its
@@ -214,6 +216,9 @@ func requiresReadControl(settings *cluster.Settings, ba *roachpb.BatchRequest) b
 	if disableReadQuota.Get(&settings.SV) {
 		return false
 	}
+	if ba.RangeID <= 20 {
+		return false
+	}
 	if ba.Txn != nil && ba.Txn.Key != nil {
 		return false
 	}
@@ -231,6 +236,10 @@ func (c *Controller) putAcquisition(a *Acquisition) {
 	c.acquisitionSyncPool.Put(a)
 }
 
+func (c *Controller) RecordRaftReadyDuration(d time.Duration) {
+	c.quotaStats.recordRaftReady(d)
+}
+
 func (c *Controller) getAcquisition(ctx context.Context, ba *roachpb.BatchRequest) *Acquisition {
 	a := c.acquisitionSyncPool.Get().(*Acquisition)
 	*a = Acquisition{controller: c}
@@ -242,12 +251,19 @@ func (c *Controller) getAcquisition(ctx context.Context, ba *roachpb.BatchReques
 	return a
 }
 
-func (qs *quotaStats) readLocked() (reqs int64, total, min, max time.Duration) {
+func (qs *quotaStats) recordRaftReady(d time.Duration) {
+	qs.RLock()
+	defer qs.RUnlock()
+	setIfGt(&qs.maxRaftReadyDuration, int64(d))
+}
+
+func (qs *quotaStats) readLocked() (reqs int64, total, min, max, maxRaftReady time.Duration) {
 	reqs = atomic.LoadInt64(&qs.numRequests)
 	total = time.Duration(atomic.LoadInt64(&qs.totalWaitNanos))
 	min = time.Duration(atomic.LoadInt64(&qs.minWaitNanos))
 	max = time.Duration(atomic.LoadInt64(&qs.maxWaitNanos))
-	return reqs, total, min, max
+	maxRaftReady = time.Duration(atomic.LoadInt64(&qs.maxRaftReadyDuration))
+	return reqs, total, min, max, maxRaftReady
 }
 
 func (qs *quotaStats) clearLocked() {
@@ -255,11 +271,14 @@ func (qs *quotaStats) clearLocked() {
 	atomic.StoreInt64(&qs.minWaitNanos, 0)
 	atomic.StoreInt64(&qs.maxWaitNanos, 0)
 	atomic.StoreInt64(&qs.numRequests, 0)
+	atomic.StoreInt64(&qs.maxRaftReadyDuration, 0)
 }
 
-func (qs *quotaStats) WaitStats(reset bool) (reqs int64, avg, min, max time.Duration) {
+func (qs *quotaStats) WaitStats(
+	reset bool,
+) (reqs int64, avg, min, max, maxRaftReady time.Duration) {
 	qs.Lock()
-	reqs, total, min, max := qs.readLocked()
+	reqs, total, min, max, maxRaftReady := qs.readLocked()
 	if reset {
 		qs.clearLocked()
 	}
@@ -268,7 +287,7 @@ func (qs *quotaStats) WaitStats(reset bool) (reqs int64, avg, min, max time.Dura
 		// Integer division is fine, 1ns is not long.
 		avg = total / time.Duration(reqs)
 	}
-	return reqs, avg, min, max
+	return reqs, avg, min, max, maxRaftReady
 }
 
 // Acquisition exists to avoid having to allocate a closure around the priority

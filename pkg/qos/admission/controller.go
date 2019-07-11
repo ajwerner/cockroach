@@ -453,8 +453,8 @@ func (c *Controller) tickLocked(now time.Time) {
 		}
 	}
 	if log.V(1) {
-		log.Infof(context.TODO(), "tick %v: overload %v (%d) prev %v next %v\n%v",
-			now.Unix(), overloaded, numAdmitted, prev, c.mu.admissionLevel, before)
+		log.Infof(context.TODO(), "%v tick %v: overload %v (%d) prev %v next %v\n%v",
+			c.cfg.Name, now.Unix(), overloaded, numAdmitted, prev, c.mu.admissionLevel, before)
 	}
 	c.mu.admitHists.rotate()
 	c.mu.rejectHist = histogram{}

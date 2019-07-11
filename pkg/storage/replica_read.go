@@ -75,6 +75,9 @@ func (r *Replica) executeReadOnlyBatch(
 	if err != nil {
 		return nil, roachpb.NewError(err)
 	}
+	if err := acq.Acquire(ctx); err != nil {
+		return nil, roachpb.NewError(err)
+	}
 	defer func() { acq.Release(ctx, respSize) }()
 
 	// Acquire latches to prevent overlapping commands from executing
