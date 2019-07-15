@@ -151,7 +151,7 @@
 
 [[projects]]
   branch = "master"
-  digest = "1:2074a8fdd09ceacb2aae6a1d4bf830ef700ef3d43db4c406ecd144ac0d8c9685"
+  digest = "1:efb60377eb2e4f8b26701596b2e41bf545c328d2d3220c5da17fc0d9c892d59a"
   name = "github.com/ajwerner/tdigest"
   packages = [
     ".",
@@ -160,7 +160,7 @@
     "windowed",
   ]
   pruneopts = "UT"
-  revision = "67e3066a09615f8a6fa17436eddb83cda1ff825e"
+  revision = "8600d07e18d48f0ce844eb6289279b42492d9522"
 
 [[projects]]
   branch = "master"

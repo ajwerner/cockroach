@@ -560,13 +560,49 @@ func (e *Rate) Add(v float64) {
 	e.mu.Unlock()
 }
 
+// WindowedSummary tracks a distribution over various window sizes.
+type WindowedSummary struct {
+	BaseMetadata Metadata
+	sketch       *windowed.TDigest
+	reader       windowed.Reader
+}
+
 // Summary tracks a distribution of values.
-// The values decay according to a provided timescale.
 type Summary struct {
 	Metadata
+	w         *WindowedSummary
 	timescale time.Duration
-	sketch    *windowed.TDigest
-	reader    windowed.Reader
+}
+
+// Add adds the given measurement to the Summary.
+func (w *WindowedSummary) Add(v float64) {
+	w.sketch.AddAt(now(), v, 1)
+}
+
+// ReadAt provides read access to the underlying tdigest.
+func (w *WindowedSummary) ReadAt(
+	trailing time.Duration, f func(last time.Duration, r tdigest.Reader),
+) {
+	w.reader.Read(trailing, w.sketch, f)
+}
+
+// NewWindowedSummary creates a metric which tracks a distribution of values using an
+// using a TDigest which internally does bucketing.
+func NewWindowedSummary(baseMetadata Metadata) *WindowedSummary {
+	return &WindowedSummary{
+		BaseMetadata: baseMetadata,
+		sketch:       windowed.NewTDigest(),
+	}
+}
+
+func (w *WindowedSummary) Summary(timescale time.Duration) *Summary {
+	s := &Summary{
+		Metadata:  w.BaseMetadata,
+		w:         w,
+		timescale: timescale,
+	}
+	s.Name += "." + timescale.String()
+	return s
 }
 
 // PrometheusSummaryQuantiles are the quantiles of a summary which are exported
@@ -574,16 +610,6 @@ type Summary struct {
 // tsdb. See pkg/server/status/recorder.go
 var PrometheusSummaryQuantiles = []float64{
 	.5, .75, .9, .99, .999, .9999, .99999, 1,
-}
-
-// NewSummary creates a metric which tracks a distribution of values using an
-// using a TDigest which internally does bucketing.
-func NewSummary(metadata Metadata, timescale time.Duration) *Summary {
-	return &Summary{
-		Metadata:  metadata,
-		timescale: timescale,
-		sketch:    windowed.NewTDigest(),
-	}
 }
 
 // Inspect calls the given closure with itself.
@@ -630,17 +656,12 @@ func (e *Summary) GetMetadata() Metadata {
 	return baseMetadata
 }
 
-// Add adds the given measurement to the Summary.
-func (e *Summary) Add(v float64) {
-	e.sketch.AddAt(now(), v, 1)
-}
-
 // Read provides read access to the underlying tdigest.
 func (e *Summary) Read(f func(last time.Duration, r tdigest.Reader)) {
-	e.reader.Read(e.timescale, e.sketch, f)
+	e.w.reader.Read(e.timescale, e.w.sketch, f)
 }
 
-// ReadAt provides read access to the underlying tdigest.
-func (e *Summary) ReadAt(trailing time.Duration, f func(last time.Duration, r tdigest.Reader)) {
-	e.reader.Read(trailing, e.sketch, f)
+// Add adds the given measurement to the Summary.
+func (e *Summary) Add(v float64) {
+	e.w.sketch.AddAt(now(), v, 1)
 }

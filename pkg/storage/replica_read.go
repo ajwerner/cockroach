@@ -12,6 +12,7 @@ package storage
 
 import (
 	"context"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -21,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 // executeReadOnlyBatch updates the read timestamp cache and waits for any
@@ -29,6 +31,22 @@ import (
 func (r *Replica) executeReadOnlyBatch(
 	ctx context.Context, ba *roachpb.BatchRequest,
 ) (br *roachpb.BatchResponse, pErr *roachpb.Error) {
+	var (
+		start                = timeutil.Now()
+		latchStart, latchEnd time.Time
+		respSize             int
+	)
+	defer func() {
+		if respSize <= 0 {
+			return
+		}
+		if respSize < 1024 {
+			respSize = 1024
+		}
+		took := timeutil.Since(start) - latchEnd.Sub(latchStart)
+		r.store.metrics.ReadLatencySummary.Add(float64(took.Nanoseconds()))
+		r.store.metrics.ReadThroughputSummary.Add(float64(respSize) / took.Seconds())
+	}()
 	// If the read is not inconsistent, the read requires the range lease or
 	// permission to serve via follower reads.
 	var status storagepb.LeaseStatus
@@ -46,7 +64,7 @@ func (r *Replica) executeReadOnlyBatch(
 	if err != nil {
 		return nil, roachpb.NewError(err)
 	}
-
+	latchStart = timeutil.Now()
 	// Acquire latches to prevent overlapping commands from executing
 	// until this command completes.
 	log.Event(ctx, "acquire latches")
@@ -54,6 +72,7 @@ func (r *Replica) executeReadOnlyBatch(
 	if err != nil {
 		return nil, roachpb.NewError(err)
 	}
+	latchEnd = timeutil.Now()
 
 	log.Event(ctx, "waiting for read lock")
 	r.readOnlyCmdMu.RLock()
@@ -121,6 +140,7 @@ func (r *Replica) executeReadOnlyBatch(
 		log.VErrEvent(ctx, 3, pErr.String())
 	} else {
 		log.Event(ctx, "read completed")
+		respSize = br.Size()
 	}
 	return br, pErr
 }
