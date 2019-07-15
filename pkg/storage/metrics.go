@@ -289,6 +289,18 @@ var (
 		Measurement: "Read Ops",
 		Unit:        metric.Unit_COUNT,
 	}
+	metaReadLatencySummary = metric.Metadata{
+		Name:        "read.latency",
+		Help:        "Distribution of read latency",
+		Measurement: "Nanoseconds",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
+	metaReadThroughputSummary = metric.Metadata{
+		Name:        "read.throughput",
+		Help:        "Distribution of read throughput",
+		Measurement: "Nanoseconds",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
 
 	// RocksDB metrics.
 	metaRdbBlockCacheHits = metric.Metadata{
@@ -1028,6 +1040,18 @@ type StoreMetrics struct {
 	// Follower read metrics.
 	FollowerReadsCount *metric.Counter
 
+	// Read metrics
+	ReadLatencySummary    *metric.WindowedSummary
+	ReadLatencySummary2s  *metric.Summary
+	ReadLatencySummary10s *metric.Summary
+	ReadLatencySummary60s *metric.Summary
+	ReadLatencySummary5m  *metric.Summary
+
+	ReadThroughputSummary    *metric.WindowedSummary
+	ReadThroughputSummary10s *metric.Summary
+	ReadThroughputSummary60s *metric.Summary
+	ReadThroughputSummary5m  *metric.Summary
+
 	// RocksDB metrics.
 	RdbBlockCacheHits           *metric.Gauge
 	RdbBlockCacheMisses         *metric.Gauge
@@ -1242,7 +1266,9 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		AverageWritesPerSecond:  metric.NewGaugeFloat64(metaAverageWritesPerSecond),
 
 		// Follower reads metrics.
-		FollowerReadsCount: metric.NewCounter(metaFollowerReadsCount),
+		FollowerReadsCount:    metric.NewCounter(metaFollowerReadsCount),
+		ReadLatencySummary:    metric.NewWindowedSummary(metaReadLatencySummary),
+		ReadThroughputSummary: metric.NewWindowedSummary(metaReadThroughputSummary),
 
 		// RocksDB metrics.
 		RdbBlockCacheHits:           metric.NewGauge(metaRdbBlockCacheHits),
@@ -1277,7 +1303,7 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 		RaftLogCommitLatency:          metric.NewLatency(metaRaftLogCommitLatency, histogramWindow),
 		RaftCommandCommitLatency:      metric.NewLatency(metaRaftCommandCommitLatency, histogramWindow),
 		RaftHandleReadyLatency:        metric.NewLatency(metaRaftHandleReadyLatency, histogramWindow),
-		RaftHandleReadyLatencySummary: metric.NewSummary(metaRaftHandleReadyLatencySummary, histogramWindow),
+		RaftHandleReadyLatencySummary: metric.NewWindowedSummary(metaRaftHandleReadyLatencySummary).Summary(histogramWindow),
 		RaftApplyCommittedLatency:     metric.NewLatency(metaRaftApplyCommittedLatency, histogramWindow),
 
 		// Raft message metrics.
@@ -1398,6 +1424,13 @@ func newStoreMetrics(histogramWindow time.Duration) *StoreMetrics {
 	sm.raftRcvdMessages[raftpb.MsgHeartbeatResp] = sm.RaftRcvdMsgHeartbeatResp
 	sm.raftRcvdMessages[raftpb.MsgTransferLeader] = sm.RaftRcvdMsgTransferLeader
 	sm.raftRcvdMessages[raftpb.MsgTimeoutNow] = sm.RaftRcvdMsgTimeoutNow
+	sm.ReadLatencySummary2s = sm.ReadLatencySummary.Summary(2 * time.Second)
+	sm.ReadLatencySummary10s = sm.ReadLatencySummary.Summary(9 * time.Second)
+	sm.ReadLatencySummary60s = sm.ReadLatencySummary.Summary(60 * time.Second)
+	sm.ReadLatencySummary5m = sm.ReadLatencySummary.Summary(5 * time.Minute)
+	sm.ReadThroughputSummary10s = sm.ReadThroughputSummary.Summary(10 * time.Second)
+	sm.ReadThroughputSummary60s = sm.ReadThroughputSummary.Summary(60 * time.Second)
+	sm.ReadThroughputSummary5m = sm.ReadThroughputSummary.Summary(5 * time.Minute)
 
 	storeRegistry.AddMetricStruct(sm)
 
