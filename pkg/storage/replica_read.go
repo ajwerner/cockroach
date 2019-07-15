@@ -33,6 +33,7 @@ func (r *Replica) executeReadOnlyBatch(
 ) (br *roachpb.BatchResponse, pErr *roachpb.Error) {
 	var (
 		start                = timeutil.Now()
+		admitStart, admitEnd time.Time
 		latchStart, latchEnd time.Time
 		respSize             int
 	)
@@ -40,12 +41,12 @@ func (r *Replica) executeReadOnlyBatch(
 		if respSize <= 0 {
 			return
 		}
-		if respSize < 1024 {
-			respSize = 1024
+		if respSize < 512 {
+			respSize = 512
 		}
-		took := timeutil.Since(start) - latchEnd.Sub(latchStart)
+		took := timeutil.Since(start) - latchEnd.Sub(latchStart) - admitEnd.Sub(admitStart)
 		r.store.metrics.ReadLatencySummary.Add(float64(took.Nanoseconds()))
-		r.store.metrics.ReadThroughputSummary.Add(float64(respSize) / took.Seconds())
+		r.store.metrics.ReadThroughputSummary.Add(float64(took.Nanoseconds()) / float64(respSize))
 	}()
 	// If the read is not inconsistent, the read requires the range lease or
 	// permission to serve via follower reads.
@@ -58,27 +59,21 @@ func (r *Replica) executeReadOnlyBatch(
 			r.store.metrics.FollowerReadsCount.Inc(1)
 		}
 	}
-	respSize = 0
+
+	admitStart = timeutil.Now()
 	acq, err := r.store.readControl.Admit(ctx, &ba)
 	if err != nil {
 		return nil, roachpb.NewError(err)
 	}
 	defer func() { acq.Release(ctx, respSize) }()
+	admitEnd = timeutil.Now()
 
-	r.limitTxnMaxTimestamp(ctx, ba, status)
+	r.limitTxnMaxTimestamp(ctx, &ba, status)
 
-	spans, err := r.collectSpans(ba)
+	spans, err := r.collectSpans(&ba)
 	if err != nil {
 		return nil, roachpb.NewError(err)
 	}
-	acq, err := r.store.readControl.Admit(ctx, &ba)
-	if err != nil {
-		return nil, roachpb.NewError(err)
-	}
-	if err := acq.Acquire(ctx); err != nil {
-		return nil, roachpb.NewError(err)
-	}
-	defer func() { acq.Release(ctx, respSize) }()
 
 	// Acquire latches to prevent overlapping commands from executing
 	// until this command completes.
