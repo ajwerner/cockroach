@@ -30,9 +30,10 @@ type Controller struct {
 	readQuota           *quotapool.IntPool
 	quotaStats          quotaStats
 
-	currentLimit int64
-	numBlocked   int64
-	queueLimit   int64
+	currentLimit   int64
+	numBlocked     int64
+	queueLimit     int64
+	leastQuotaSeen int64
 
 	queueSizeFunc func(limit int) (queueSize int)
 
@@ -59,7 +60,7 @@ func minF64(a, b float64) float64 {
 func (c *Controller) Initialize(
 	ctx context.Context, settings *cluster.Settings, summary *metric.WindowedSummary,
 ) {
-	initialLimit := 8 * runtime.NumCPU()
+	initialLimit := 2 * runtime.NumCPU()
 	*c = Controller{
 		clusterSetting: settings,
 		acquisitionSyncPool: sync.Pool{
@@ -71,7 +72,7 @@ func (c *Controller) Initialize(
 			quotapool.LogSlowAcquisition,
 			quotapool.OnAcquisition(c.onAcquisition)),
 		currentLimit: int64(initialLimit),
-		queueLimit:   int64(math.Ceil(math.Sqrt(float64(initialLimit)))) + 8,
+		queueLimit:   int64(math.Ceil(math.Sqrt(float64(initialLimit)))) + 2,
 	}
 
 	const longMeasurementPeriod = 5 * time.Minute
@@ -80,13 +81,13 @@ func (c *Controller) Initialize(
 		Name:         "read",
 		TickInterval: 500 * time.Millisecond,
 		OverloadSignal: func(cur qos.Level) (overloaded bool, lim qos.Level) {
-			requests, avg, min, max := c.quotaStats.WaitStats(true)
+			requests, avg, min, max, _ := c.quotaStats.WaitStats(true)
 
-			qLen, quota := int64(c.readQuota.Len()), c.readQuota.ApproximateQuota()
+			qLen := int64(c.readQuota.Len())
 
 			var longLat, shortLat float64
 			summary.ReadAt(longMeasurementPeriod, func(_ time.Duration, r tdigest.Reader) {
-				longLat = r.TrimmedMean(.9)
+				longLat = r.TrimmedMean(.8)
 			})
 			summary.ReadAt(shortMeasurementPeriod, func(_ time.Duration, r tdigest.Reader) {
 				shortLat = r.TrimmedMean(.9)
@@ -95,12 +96,13 @@ func (c *Controller) Initialize(
 			// diminished drastically. We want to accelerate the return to steady
 			// state.
 			// TODO(ajwerner): make this better.
-			if longLat < shortLat/2 {
-				summary.ReadAt(longMeasurementPeriod/5, func(_ time.Duration, r tdigest.Reader) {
-					longLat = r.TrimmedMean(.9)
-				})
-			}
+			// if shortLat < longLat/2 {
+			// 	summary.ReadAt(longMeasurementPeriod/5, func(_ time.Duration, r tdigest.Reader) {
+			// 		longLat = r.TrimmedMean(.9)
+			// 	})
+			// }
 			curLimit := atomic.LoadInt64(&c.currentLimit)
+			quota := atomic.SwapInt64(&c.leastQuotaSeen, curLimit)
 			inFlight := curLimit - int64(quota)
 			queueLimit := atomic.LoadInt64(&c.queueLimit)
 			numBlocked := atomic.SwapInt64(&c.numBlocked, 0)
@@ -111,29 +113,33 @@ func (c *Controller) Initialize(
 			const tolerance = 1.5
 			const smoothing = .2
 			const minLimit = 8
-			if inFlight < int64(curLimit/2) && numBlocked == 0 && curLimit > int64(initialLimit) {
+
+			if inFlight < int64(queueLimit/2) && numBlocked == 0 && curLimit > int64(2*initialLimit) {
 				// Do nothing
 			} else {
 
 				gradient := maxF64(.5, minF64(1.0, (tolerance*longLat)/shortLat))
 				calculatedLimit := int64(math.Ceil(float64(curLimit)*gradient)) + queueLimit
 				newLimit := int64(maxF64(minLimit, float64(calculatedLimit)*smoothing+float64(curLimit)*(1-smoothing)))
+				queueLimit = int64(math.Ceil(math.Sqrt(float64(newLimit)))) + 2
+				if log.V(1) {
+					log.Infof(context.TODO(), "updating read quota limit: oldLimit=%v, calcLimit=%v, newLimit=%v, shortDur=%v, longDur=%v, gradient=%v, inFlight=%v, queueLen=%v",
+						curLimit,
+						calculatedLimit,
+						newLimit,
+						time.Duration(shortLat),
+						time.Duration(longLat),
+						gradient,
+						inFlight,
+						queueLimit)
+				}
 				if newLimit != curLimit {
-					queueLimit = int64(math.Ceil(math.Sqrt(float64(newLimit)))) + 8
+
 					atomic.StoreInt64(&c.currentLimit, newLimit)
 					atomic.StoreInt64(&c.queueLimit, queueLimit)
+					atomic.StoreInt64(&c.leastQuotaSeen, newLimit)
 					c.readQuota.UpdateCapacity(uint64(newLimit))
-					if log.V(1) {
-						log.Infof(context.TODO(), "updating read quota limit: oldLimit=%v, calcLimit=%v, newLimit=%v, shortDur=%v, longDur=%v, gradient=%v, inFlight=%v, queueLen=%v",
-							curLimit,
-							calculatedLimit,
-							newLimit,
-							time.Duration(shortLat),
-							time.Duration(longLat),
-							gradient,
-							inFlight,
-							queueLimit)
-					}
+
 				}
 			}
 			return numBlocked > 0 ||
@@ -176,7 +182,14 @@ type quotaStats struct {
 // should be admitted, it attempts to acquire quota from the readquota. If the
 // queue is full for read quota then the request is blocked for the remainder of
 // this interval to repeat the process later.
-func (c *Controller) Admit(ctx context.Context, ba *roachpb.BatchRequest) (*Acquisition, error) {
+func (c *Controller) Admit(
+	ctx context.Context, ba *roachpb.BatchRequest,
+) (_ *Acquisition, err error) {
+	defer func() {
+		if err == admission.ErrRejected {
+			err = roachpb.NewReadRejectedError()
+		}
+	}()
 	a := c.getAcquisition(ctx, ba)
 	if !requiresReadControl(c.clusterSetting, ba) || a.l.Class == 4 {
 		a.l.Class = qos.ClassHigh
@@ -193,6 +206,9 @@ func (c *Controller) Admit(ctx context.Context, ba *roachpb.BatchRequest) (*Acqu
 			atomic.AddInt64(&c.numBlocked, 1)
 			if err = c.admissionController.Block(ctx, a.l); err != nil {
 				c.putAcquisition(a)
+				if err == admission.ErrRejected {
+
+				}
 				return nil, err
 			}
 		case nil:
@@ -296,6 +312,7 @@ type Acquisition struct {
 	ctx        context.Context
 	l          qos.Level
 	guess      int64
+	quota      int64
 	controller *Controller
 	alloc      *quotapool.IntAlloc
 }
@@ -320,21 +337,19 @@ func (a *Acquisition) acquireFunc(
 	}
 	const guess = 1
 	if guess <= p.Available {
+		a.quota = int64(p.Available)
 		return 1, nil
 	}
 	return 0, quotapool.ErrNotEnoughQuota
 }
 
 func (a *Acquisition) admit(ctx context.Context) (err error) {
-	err = a.controller.admissionController.Admit(ctx, a.l)
-	if err != nil && ctx.Err() == nil {
-		err = roachpb.NewReadRejectedError()
-	}
-	return err
+	return a.controller.admissionController.Admit(ctx, a.l)
 }
 
 func (a *Acquisition) acquire(ctx context.Context) (err error) {
 	a.alloc, err = a.controller.readQuota.AcquireFunc(ctx, a.acquireFunc)
+	a.controller.recordInFlight(a.quota)
 	return err
 }
 
@@ -362,6 +377,10 @@ func (c *Controller) onAcquisition(
 	//rq.s.metrics.ReadQuotaAcquisitions.Inc(1)
 	//rq.s.metrics.ReadQuotaTimeSpentWaitingRate10s.Add(float64(took.Nanoseconds()))
 	//rq.s.metrics.ReadQuotaTimeSpentWaitingSummary10s.Add(float64(took.Nanoseconds()))
+}
+
+func (c *Controller) recordInFlight(quotaSize int64) {
+	setIfLt(&c.leastQuotaSeen, quotaSize)
 }
 
 func (qs *quotaStats) record(took time.Duration) {

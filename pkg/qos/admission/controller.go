@@ -342,7 +342,7 @@ func (c *Controller) Block(ctx context.Context, l qos.Level) error {
 	}
 	for l.Less(c.mu.admissionLevel) {
 		// Reject requests which are at or below the current rejection level.
-		if c.mu.rejectionLevel != minLevel && !c.mu.rejectionLevel.Less(l) {
+		if c.mu.rejectionOn && !c.mu.rejectionLevel.Less(l) {
 			atomic.AddInt64(&c.mu.numRejected, 1)
 			c.mu.rejectHist.record(l, 1)
 			return ErrRejected
@@ -524,10 +524,10 @@ func (h *admitHists) countAt(l qos.Level) (c uint64) {
 // TODO(ajwerner): meter releasing requests.
 func (c *Controller) lowerAdmissionLevelLocked() (freed int) {
 	prev := c.mu.admissionLevel
-	cur := prev.Dec()
+	cur := prev
 	sizeFactor, total := admittedAbove(cur, &c.mu.admitHists, c.cfg.ScaleFactor)
 	target := int64(float64(total)*(1+c.cfg.GrowRate)) + 1
-	for l := maxLevel; prev.Less(l); l = l.Dec() {
+	for l := maxLevel; l != prev && prev.Less(l); l = l.Dec() {
 		freed += c.releaseLevelLocked(l)
 		if l == minLevel {
 			break
@@ -572,6 +572,9 @@ func (c *Controller) raiseRejectionLevelRLocked(l qos.Level) {
 		}
 		blocked -= int64(c.releaseLevelLocked(r))
 		c.mu.rejectionLevel = r
+		if !c.mu.rejectionLevel.Less(c.mu.admissionLevel) {
+			c.mu.admissionLevel = r.Inc()
+		}
 	}
 	blocked-- // count this one
 	atomic.StoreInt64(&c.mu.numBlocked, blocked)
