@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/VividCortex/ewma"
+	"github.com/ajwerner/tdigest"
+	"github.com/ajwerner/tdigest/windowed"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/codahale/hdrhistogram"
@@ -122,6 +124,7 @@ var _ Iterable = &GaugeFloat64{}
 var _ Iterable = &Counter{}
 var _ Iterable = &Histogram{}
 var _ Iterable = &Rate{}
+var _ Iterable = &Summary{}
 
 var _ json.Marshaler = &Gauge{}
 var _ json.Marshaler = &GaugeFloat64{}
@@ -134,6 +137,7 @@ var _ PrometheusExportable = &GaugeFloat64{}
 var _ PrometheusExportable = &Counter{}
 var _ PrometheusExportable = &Histogram{}
 var _ PrometheusExportable = &Rate{}
+var _ PrometheusExportable = &Summary{}
 
 type periodic interface {
 	nextTick() time.Time
@@ -264,6 +268,7 @@ func (h *Histogram) Inspect(f func(interface{})) {
 
 // GetType returns the prometheus type enum for this metric.
 func (h *Histogram) GetType() *prometheusgo.MetricType {
+
 	return prometheusgo.MetricType_HISTOGRAM.Enum()
 }
 
@@ -553,4 +558,89 @@ func (e *Rate) Add(v float64) {
 	maybeTick(e)
 	e.curSum += v
 	e.mu.Unlock()
+}
+
+// Summary tracks a distribution of values.
+// The values decay according to a provided timescale.
+type Summary struct {
+	Metadata
+	timescale time.Duration
+	sketch    *windowed.TDigest
+	reader    windowed.Reader
+}
+
+// PrometheusSummaryQuantiles are the quantiles of a summary which are exported
+// to prometheus. They reflect the values stored for histograms in the internal
+// tsdb. See pkg/server/status/recorder.go
+var PrometheusSummaryQuantiles = []float64{
+	.5, .75, .9, .99, .999, .9999, .99999, 1,
+}
+
+// NewSummary creates a metric which tracks a distribution of values using an
+// using a TDigest which internally does bucketing.
+func NewSummary(metadata Metadata, timescale time.Duration) *Summary {
+	return &Summary{
+		Metadata:  metadata,
+		timescale: timescale,
+		sketch:    windowed.NewTDigest(),
+	}
+}
+
+// Inspect calls the given closure with itself.
+func (e *Summary) Inspect(f func(interface{})) { f(e) }
+
+// GetType returns the prometheus type enum for this metric.
+func (h *Summary) GetType() *prometheusgo.MetricType {
+	return prometheusgo.MetricType_SUMMARY.Enum()
+}
+
+// ToPrometheusMetric returns a filled-in prometheus metric of the right type.
+func (e *Summary) ToPrometheusMetric() *prometheusgo.Metric {
+	// Allocate the prometheus Summary before interacting with any synchronized
+	// data structures.
+	summary := &prometheusgo.Summary{}
+	summary.Quantile = make([]*prometheusgo.Quantile, len(PrometheusSummaryQuantiles))
+	for i := range PrometheusSummaryQuantiles {
+		summary.Quantile[i] = &prometheusgo.Quantile{
+			Quantile: &PrometheusSummaryQuantiles[i],
+			Value:    new(float64),
+		}
+	}
+	summary.SampleCount = new(uint64)
+	summary.SampleSum = new(float64)
+	e.Read(func(_ time.Duration, s tdigest.Reader) {
+		// The below code round-trips through an int64 to defeat the linter which
+		// warns about converting from a float64 to a uint64.
+		*summary.SampleCount = uint64(int64(math.Round(s.TotalCount())))
+		*summary.SampleSum = s.TotalSum()
+		for i, q := range PrometheusSummaryQuantiles {
+			*summary.Quantile[i].Value = s.ValueAt(q)
+		}
+	})
+	return &prometheusgo.Metric{
+		Summary: summary,
+	}
+}
+
+// GetMetadata returns the metric's metadata including the Prometheus
+// MetricType.
+func (e *Summary) GetMetadata() Metadata {
+	baseMetadata := e.Metadata
+	baseMetadata.MetricType = prometheusgo.MetricType_SUMMARY
+	return baseMetadata
+}
+
+// Add adds the given measurement to the Summary.
+func (e *Summary) Add(v float64) {
+	e.sketch.AddAt(now(), v, 1)
+}
+
+// Read provides read access to the underlying tdigest.
+func (e *Summary) Read(f func(last time.Duration, r tdigest.Reader)) {
+	e.reader.Read(e.timescale, e.sketch, f)
+}
+
+// ReadAt provides read access to the underlying tdigest.
+func (e *Summary) ReadAt(trailing time.Duration, f func(last time.Duration, r tdigest.Reader)) {
+	e.reader.Read(trailing, e.sketch, f)
 }
