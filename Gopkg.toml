@@ -124,6 +124,10 @@ ignored = [
   name = "google.golang.org/genproto"
   branch = "master"
 
+[[constraint]]
+  name = "github.com/ajwerner/tdigest"
+  branch = "master"
+
 [prune]
   go-tests = true
   unused-packages = true
