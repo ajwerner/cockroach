@@ -25,6 +25,7 @@ import (
 
 // Controller gates access for read requests based on quality of service.
 type Controller struct {
+	metrics             Metrics
 	clusterSetting      *cluster.Settings
 	admissionController *admission.Controller
 	readQuota           *quotapool.IntPool
@@ -72,25 +73,24 @@ func (c *Controller) Initialize(
 			quotapool.LogSlowAcquisition,
 			quotapool.OnAcquisition(c.onAcquisition)),
 		currentLimit: int64(initialLimit),
-		queueLimit:   int64(math.Ceil(math.Sqrt(float64(initialLimit)))) + 2,
+		queueLimit:   int64(math.Ceil(math.Sqrt(float64(initialLimit)))) + 1,
 	}
-
 	const longMeasurementPeriod = 5 * time.Minute
 	const shortMeasurementPeriod = 2 * time.Second
 	admissionCfg := admission.Config{
 		Name:         "read",
-		TickInterval: 500 * time.Millisecond,
+		TickInterval: 250 * time.Millisecond,
 		OverloadSignal: func(cur qos.Level) (overloaded bool, lim qos.Level) {
-			requests, avg, min, max, _ := c.quotaStats.WaitStats(true)
+			requests, avg, min, max, handleReady := c.quotaStats.WaitStats(true)
 
 			qLen := int64(c.readQuota.Len())
 
 			var longLat, shortLat float64
 			summary.ReadAt(longMeasurementPeriod, func(_ time.Duration, r tdigest.Reader) {
-				longLat = r.TrimmedMean(.8)
+				longLat = r.TrimmedMean(.1, .6)
 			})
 			summary.ReadAt(shortMeasurementPeriod, func(_ time.Duration, r tdigest.Reader) {
-				shortLat = r.TrimmedMean(.9)
+				shortLat = r.InnerMean(.9)
 			})
 			// This is a hack to try to deal with the case where the system's load has
 			// diminished drastically. We want to accelerate the return to steady
@@ -112,7 +112,7 @@ func (c *Controller) Initialize(
 			}
 			const tolerance = 1.5
 			const smoothing = .2
-			const minLimit = 8
+			const minLimit = 4
 
 			if inFlight < int64(queueLimit/2) && numBlocked == 0 && curLimit > int64(2*initialLimit) {
 				// Do nothing
@@ -121,8 +121,9 @@ func (c *Controller) Initialize(
 				gradient := maxF64(.5, minF64(1.0, (tolerance*longLat)/shortLat))
 				calculatedLimit := int64(math.Ceil(float64(curLimit)*gradient)) + queueLimit
 				newLimit := int64(maxF64(minLimit, float64(calculatedLimit)*smoothing+float64(curLimit)*(1-smoothing)))
-				queueLimit = int64(math.Ceil(math.Sqrt(float64(newLimit)))) + 2
+				queueLimit = int64(math.Ceil(math.Sqrt(float64(newLimit)))) + 1
 				if log.V(1) {
+
 					log.Infof(context.TODO(), "updating read quota limit: oldLimit=%v, calcLimit=%v, newLimit=%v, shortDur=%v, longDur=%v, gradient=%v, inFlight=%v, queueLen=%v",
 						curLimit,
 						calculatedLimit,
@@ -134,30 +135,75 @@ func (c *Controller) Initialize(
 						queueLimit)
 				}
 				if newLimit != curLimit {
-
 					atomic.StoreInt64(&c.currentLimit, newLimit)
 					atomic.StoreInt64(&c.queueLimit, queueLimit)
 					atomic.StoreInt64(&c.leastQuotaSeen, newLimit)
 					c.readQuota.UpdateCapacity(uint64(newLimit))
-
+					if delta := newLimit - curLimit; delta > 0 {
+						c.metrics.Increases.Inc(delta)
+					} else {
+						c.metrics.Decreases.Inc(-delta)
+					}
+					c.metrics.CurrentLimit.Update(newLimit)
 				}
 			}
 			return numBlocked > 0 ||
 					(min > 5*time.Millisecond || avg > 20*time.Millisecond) &&
-						(qLen > requests/10 || requests > 100),
+						(qLen > requests/10 || requests > 100) ||
+					handleReady > 500*time.Millisecond && requests > 100,
 				qos.Level{Class: qos.ClassHigh, Shard: 0}
-
 		},
 		PruneRate:          .05,
 		GrowRate:           .01,
-		MaxBlocked:         1000,
+		MaxBlocked:         200,
 		MaxReqsPerInterval: 2000,
 	}
 	c.admissionController = admission.NewController(admissionCfg)
+	c.metrics = makeMetrics()
+	c.metrics.AdmissionMetrics = c.admissionController.Metrics()
+	c.metrics.CurrentLimit.Update(c.currentLimit)
 }
 
-func (c *Controller) AdmissionMetrics() *admission.Metrics {
-	return c.admissionController.Metrics()
+type Metrics struct {
+	AdmissionMetrics *admission.Metrics
+
+	CurrentLimit *metric.Gauge
+	Increases    *metric.Counter
+	Decreases    *metric.Counter
+}
+
+var (
+	metaCurrentLimit = metric.Metadata{
+		Name:        "readcontrol.current_limit",
+		Help:        "Gauge of the current limit for the read controller",
+		Measurement: "Concurrent Requests",
+		Unit:        metric.Unit_COUNT,
+	}
+
+	metaIncreases = metric.Metadata{
+		Name:        "readcontrol.increases",
+		Help:        "Counter of increases to the limit for the read controller",
+		Measurement: "Concurrent Requests",
+		Unit:        metric.Unit_COUNT,
+	}
+	metaDecreases = metric.Metadata{
+		Name:        "readcontrol.decreases",
+		Help:        "Counter of decreases to the limit for the read controller",
+		Measurement: "Concurrent Requests",
+		Unit:        metric.Unit_COUNT,
+	}
+)
+
+func makeMetrics() Metrics {
+	return Metrics{
+		CurrentLimit: metric.NewGauge(metaCurrentLimit),
+		Increases:    metric.NewCounter(metaIncreases),
+		Decreases:    metric.NewCounter(metaDecreases),
+	}
+}
+
+func (c *Controller) Metrics() *Metrics {
+	return &c.metrics
 }
 
 func (c *Controller) Start(ctx context.Context, stopper *stop.Stopper) {

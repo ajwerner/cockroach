@@ -569,7 +569,7 @@ func eachRecordableValue(reg *metric.Registry, fn func(string, float64)) {
 				for _, pt := range recordHistogramQuantiles {
 					fn(name+pt.suffix, r.ValueAt(pt.quantile/100))
 				}
-				fn(name+".tmean", r.TrimmedMean(.90))
+				fn(name+".tmean", r.InnerMean(.90))
 			})
 		} else {
 			val, err := extractValue(mtr)
