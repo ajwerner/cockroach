@@ -815,7 +815,7 @@ func NewStore(
 	s.metrics.registry.AddMetricStruct(s.raftEntryCache.Metrics())
 
 	s.readControl.Initialize(ctx, cfg.Settings, s.metrics.ReadLatencySummary)
-	s.metrics.registry.AddMetricStruct(s.readControl.AdmissionMetrics())
+	s.metrics.registry.AddMetricStruct(s.readControl.Metrics())
 
 	s.coalescedMu.Lock()
 	s.coalescedMu.heartbeats = map[roachpb.StoreIdent][]RaftHeartbeat{}

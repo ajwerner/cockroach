@@ -5,6 +5,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 )
 
+// Metrics has metrics about the state of admission control.
 type Metrics struct {
 	AdmissionLevel *metric.GaugeFloat64
 	RejectionLevel *metric.GaugeFloat64
@@ -15,6 +16,9 @@ type Metrics struct {
 	Inc            *metric.Counter
 	Dec            *metric.Counter
 }
+
+// Metrics implements metric.MetricStruct.
+func (m *Metrics) MetricStruct() {}
 
 func levelMetric(l qos.Level) float64 {
 	return float64(l.Class) + float64(l.Shard)/qos.NumShards
