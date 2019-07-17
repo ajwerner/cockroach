@@ -632,7 +632,13 @@ func (ex *connExecutor) setQosLevel(
 func (ex *connExecutor) dispatchToExecutionEngine(
 	ctx context.Context, planner *planner, res RestrictedCommandResult,
 ) error {
-	ctx, _ = ex.setQosLevel(ctx, planner)
+	ctx, l := ex.setQosLevel(ctx, planner)
+	if ex.planner.txn == nil || ex.planner.txn.Serialize().Key == nil {
+		if err := ex.planner.execCfg.DistSender.AdmissionController().Admit(ctx, l); err != nil {
+			res.SetError(err)
+			return nil
+		}
+	}
 	stmt := planner.stmt
 	ex.sessionTracing.TracePlanStart(ctx, stmt.AST.StatementTag())
 	planner.statsCollector.PhaseTimes()[plannerStartLogicalPlan] = timeutil.Now()
