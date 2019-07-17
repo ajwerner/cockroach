@@ -61,16 +61,16 @@ func (r *Replica) executeReadOnlyBatch(
 	}
 
 	admitStart = timeutil.Now()
-	acq, err := r.store.readControl.Admit(ctx, &ba)
+	acq, err := r.store.readControl.Admit(ctx, ba)
 	if err != nil {
 		return nil, roachpb.NewError(err)
 	}
 	defer func() { acq.Release(ctx, respSize) }()
 	admitEnd = timeutil.Now()
 
-	r.limitTxnMaxTimestamp(ctx, &ba, status)
+	r.limitTxnMaxTimestamp(ctx, ba, status)
 
-	spans, err := r.collectSpans(&ba)
+	spans, err := r.collectSpans(ba)
 	if err != nil {
 		return nil, roachpb.NewError(err)
 	}

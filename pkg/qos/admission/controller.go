@@ -533,7 +533,7 @@ func (c *Controller) lowerAdmissionLevelLocked() (freed int) {
 			break
 		}
 	}
-	for ; cur != minLevel; prev, cur = cur, cur.Dec() {
+	for cur = cur.Dec(); cur != minLevel; prev, cur = cur, cur.Dec() {
 		if cur.Class != prev.Class {
 			sizeFactor = c.cfg.ScaleFactor(cur.Class)
 		}
@@ -559,12 +559,17 @@ func (c *Controller) raiseRejectionLevelRLocked(l qos.Level) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	r := c.mu.rejectionLevel
-	blocked := atomic.LoadInt64(&c.mu.numBlocked)
+	numBlocked := atomic.LoadInt64(&c.mu.numBlocked)
 	blockWaiting := atomic.LoadInt64(&c.mu.numBlockWaiting)
 	canceled := atomic.SwapInt64(&c.mu.numCanceled, 0)
-	blocked -= blockWaiting
-	blocked -= canceled
-	for blocked > c.cfg.MaxBlocked {
+	blocked := numBlocked - blockWaiting - canceled
+	for blocked > c.cfg.MaxBlocked && c.mu.rejectionLevel.Less(maxLevel) {
+		if log.V(3) {
+			log.Infof(context.TODO(),
+				"raising rejection level. blocked=%v, blockedWaiting=%v, canceled=%v, MaxBlocked=%v, admissionlevel=%v, rejectionLevel=%v, rejectionOn=%v",
+				blocked, blockWaiting, canceled, c.cfg.MaxBlocked, c.mu.admissionLevel, r, c.mu.rejectionOn)
+
+		}
 		if !c.mu.rejectionOn {
 			c.mu.rejectionOn = true
 		} else {

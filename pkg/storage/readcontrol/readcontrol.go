@@ -31,15 +31,22 @@ type Controller struct {
 	readQuota           *quotapool.IntPool
 	quotaStats          quotaStats
 
-	currentLimit   int64
-	numBlocked     int64
-	queueLimit     int64
-	leastQuotaSeen int64
+	// The below variables control the current state of the controller.
+	// Acessed with atomics!
+	currentLimit int64
+	numBlocked   int64
+	queueLimit   int64
 
-	queueSizeFunc func(limit int) (queueSize int)
+	// The below variables measure the high watermark for in-flight and blocked.
+	leastQuotaSeen int64
+	longestQueue   int64
+
+	queueSizeFunc func(limit int64) (queueSize int64)
 
 	acquisitionSyncPool sync.Pool
 	startOnce           sync.Once
+	latencySummary      *metric.WindowedSummary
+	baseLimit           int64
 }
 
 func maxF64(a, b float64) float64 {
@@ -56,12 +63,106 @@ func minF64(a, b float64) float64 {
 	return a
 }
 
+const longMeasurementPeriod = 5 * time.Minute
+const shortMeasurementPeriod = 2 * time.Second
+
+func (c *Controller) overloadSignal(cur qos.Level) (overloaded bool, lim qos.Level) {
+	requests, avg, min, max, handleReady := c.quotaStats.WaitStats(true)
+	qLen := int64(c.readQuota.Len())
+	var longLat, shortLat float64
+	c.latencySummary.ReadAt(longMeasurementPeriod, func(_ time.Duration, r tdigest.Reader) {
+		longLat = r.TrimmedMean(.1, .6)
+	})
+	c.latencySummary.ReadAt(shortMeasurementPeriod, func(_ time.Duration, r tdigest.Reader) {
+		shortLat = r.InnerMean(.9)
+	})
+	// This is a hack to try to deal with the case where the system's load has
+	// diminished drastically. We want to accelerate the return to steady
+	// state.
+	// TODO(ajwerner): make this better.
+	// if shortLat < longLat/2 {
+	// 	summary.ReadAt(longMeasurementPeriod/5, func(_ time.Duration, r tdigest.Reader) {
+	// 		longLat = r.TrimmedMean(.9)
+	// 	})
+	// }
+	curLimit := atomic.LoadInt64(&c.currentLimit)
+	quota := atomic.SwapInt64(&c.leastQuotaSeen, curLimit)
+	inFlight := curLimit - int64(quota)
+	queueLimit := atomic.LoadInt64(&c.queueLimit)
+	numBlocked := atomic.SwapInt64(&c.numBlocked, 0)
+	if log.V(2) {
+		log.Infof(context.TODO(), "overload signal %v: avg %v, min %v, max %v, qLen %v, reqs %v, inFlight %v, longDur %v, shortDur %v, curLimit %v, numBlocked %v, quota %v, queueLimit %v, handleReady %v",
+			cur, avg, min, max, qLen, requests, inFlight, time.Duration(longLat), time.Duration(shortLat), curLimit, numBlocked, quota, queueLimit, handleReady)
+	}
+	const tolerance = 1.2
+	const smoothing = .2
+	const minLimit = 5 // combines nicely with sqrt such that with a gradient of 1 you get 6
+	if lim := concurrencyLimit.Get(&c.clusterSetting.SV); lim > 0 {
+		c.setLimit(lim)
+	} else if inFlight < int64(queueLimit/2) && numBlocked == 0 && curLimit > c.baseLimit {
+		// Do nothing
+		atomic.StoreInt64(&c.leastQuotaSeen, curLimit)
+		atomic.StoreInt64(&c.longestQueue, 0)
+	} else {
+		gradient := maxF64(.5, minF64(1.0, (tolerance*longLat)/shortLat))
+		longestQueue := atomic.LoadInt64(&c.longestQueue)
+		calculatedLimit := int64(math.Ceil(float64(curLimit) * gradient))
+		calculatedLimit += c.queueSizeFunc(calculatedLimit)
+		newLimit := int64(maxF64(minLimit, math.Ceil(float64(calculatedLimit)*smoothing+float64(curLimit)*(1-smoothing))))
+		if log.V(1) {
+			log.Infof(context.TODO(), "updating read quota limit: oldLimit=%v, calcLimit=%v, newLimit=%v, shortDur=%v, longDur=%v, gradient=%v, inFlight=%v, queueLen=%v",
+				curLimit,
+				calculatedLimit,
+				newLimit,
+				time.Duration(shortLat),
+				time.Duration(longLat),
+				gradient,
+				inFlight,
+				longestQueue)
+		}
+		c.setLimit(newLimit)
+	}
+	tooManyBlocked := numBlocked > 1
+	tooMuchQueuing := (min > 5*time.Millisecond || avg > 20*time.Millisecond) &&
+		(qLen > requests/10 || requests > 100)
+	handleReadyTooSlow := handleReady > 500*time.Millisecond && requests > 100
+	overloaded = tooManyBlocked || tooMuchQueuing || handleReadyTooSlow
+	if overloaded && log.V(1) {
+		log.Infof(context.TODO(), "overload signal %v: avg %v, min %v, max %v, qLen %v, reqs %v, inFlight %v, longDur %v, shortDur %v, curLimit %v, numBlocked %v, quota %v, queueLimit %v, handleReady %v, tooManyBlocked %v, tooMuchQueuing %v, handleReadyTooSlow %v",
+			cur, avg, min, max, qLen, requests, inFlight, time.Duration(longLat), time.Duration(shortLat), curLimit, numBlocked, quota, queueLimit, handleReady,
+			tooManyBlocked, tooMuchQueuing, handleReadyTooSlow)
+	}
+	return overloaded, qos.Level{Class: qos.ClassHigh, Shard: 0}
+}
+
+func (c *Controller) setLimit(newLimit int64) {
+	queueLimit := c.queueSizeFunc(newLimit)
+	if curLimit := atomic.LoadInt64(&c.currentLimit); newLimit != curLimit {
+		atomic.StoreInt64(&c.currentLimit, newLimit)
+		atomic.StoreInt64(&c.queueLimit, queueLimit)
+		atomic.StoreInt64(&c.leastQuotaSeen, newLimit)
+		atomic.StoreInt64(&c.longestQueue, 0)
+		c.readQuota.UpdateCapacity(uint64(newLimit))
+		if delta := newLimit - curLimit; delta > 0 {
+			c.metrics.Increases.Inc(delta)
+		} else {
+			c.metrics.Decreases.Inc(-delta)
+		}
+		c.metrics.CurrentLimit.Update(newLimit)
+	}
+}
+
+func sqrt(v int64) int64 {
+	return int64(math.Ceil(math.Sqrt(float64(v))))
+}
+
 // TODO(ajwerner): properly plumb admission control configuration.
 // TODO(ajwerner): plumb through read quota configuration
 func (c *Controller) Initialize(
 	ctx context.Context, settings *cluster.Settings, summary *metric.WindowedSummary,
 ) {
-	initialLimit := 2 * runtime.NumCPU()
+	baseLimit := int64(2 * runtime.NumCPU())
+	queueSizeFunc := sqrt
 	*c = Controller{
 		clusterSetting: settings,
 		acquisitionSyncPool: sync.Pool{
@@ -69,92 +170,21 @@ func (c *Controller) Initialize(
 				return new(Acquisition)
 			},
 		},
-		readQuota: quotapool.NewIntPool("read quota", uint64(initialLimit),
+		readQuota: quotapool.NewIntPool("read quota", uint64(baseLimit),
 			quotapool.LogSlowAcquisition,
 			quotapool.OnAcquisition(c.onAcquisition)),
-		currentLimit: int64(initialLimit),
-		queueLimit:   int64(math.Ceil(math.Sqrt(float64(initialLimit)))) + 1,
+		currentLimit:   baseLimit,
+		queueLimit:     queueSizeFunc(baseLimit),
+		queueSizeFunc:  queueSizeFunc,
+		baseLimit:      baseLimit,
+		latencySummary: summary,
 	}
-	const longMeasurementPeriod = 5 * time.Minute
-	const shortMeasurementPeriod = 2 * time.Second
 	admissionCfg := admission.Config{
-		Name:         "read",
-		TickInterval: 250 * time.Millisecond,
-		OverloadSignal: func(cur qos.Level) (overloaded bool, lim qos.Level) {
-			requests, avg, min, max, handleReady := c.quotaStats.WaitStats(true)
-
-			qLen := int64(c.readQuota.Len())
-
-			var longLat, shortLat float64
-			summary.ReadAt(longMeasurementPeriod, func(_ time.Duration, r tdigest.Reader) {
-				longLat = r.TrimmedMean(.1, .6)
-			})
-			summary.ReadAt(shortMeasurementPeriod, func(_ time.Duration, r tdigest.Reader) {
-				shortLat = r.InnerMean(.9)
-			})
-			// This is a hack to try to deal with the case where the system's load has
-			// diminished drastically. We want to accelerate the return to steady
-			// state.
-			// TODO(ajwerner): make this better.
-			// if shortLat < longLat/2 {
-			// 	summary.ReadAt(longMeasurementPeriod/5, func(_ time.Duration, r tdigest.Reader) {
-			// 		longLat = r.TrimmedMean(.9)
-			// 	})
-			// }
-			curLimit := atomic.LoadInt64(&c.currentLimit)
-			quota := atomic.SwapInt64(&c.leastQuotaSeen, curLimit)
-			inFlight := curLimit - int64(quota)
-			queueLimit := atomic.LoadInt64(&c.queueLimit)
-			numBlocked := atomic.SwapInt64(&c.numBlocked, 0)
-			if log.V(1) {
-				log.Infof(context.TODO(), "overload signal %v: avg %v, min %v, max %v, qLen %v, reqs %v, inFlight %v, longDur %v, shortDur %v, curLimit %v, numBlocked %v, quota %v, queueLimit %v",
-					cur, avg, min, max, qLen, requests, inFlight, time.Duration(longLat), time.Duration(shortLat), curLimit, numBlocked, quota, queueLimit)
-			}
-			const tolerance = 1.5
-			const smoothing = .2
-			const minLimit = 4
-
-			if inFlight < int64(queueLimit/2) && numBlocked == 0 && curLimit > int64(2*initialLimit) {
-				// Do nothing
-			} else {
-
-				gradient := maxF64(.5, minF64(1.0, (tolerance*longLat)/shortLat))
-				calculatedLimit := int64(math.Ceil(float64(curLimit)*gradient)) + queueLimit
-				newLimit := int64(maxF64(minLimit, float64(calculatedLimit)*smoothing+float64(curLimit)*(1-smoothing)))
-				queueLimit = int64(math.Ceil(math.Sqrt(float64(newLimit)))) + 1
-				if log.V(1) {
-
-					log.Infof(context.TODO(), "updating read quota limit: oldLimit=%v, calcLimit=%v, newLimit=%v, shortDur=%v, longDur=%v, gradient=%v, inFlight=%v, queueLen=%v",
-						curLimit,
-						calculatedLimit,
-						newLimit,
-						time.Duration(shortLat),
-						time.Duration(longLat),
-						gradient,
-						inFlight,
-						queueLimit)
-				}
-				if newLimit != curLimit {
-					atomic.StoreInt64(&c.currentLimit, newLimit)
-					atomic.StoreInt64(&c.queueLimit, queueLimit)
-					atomic.StoreInt64(&c.leastQuotaSeen, newLimit)
-					c.readQuota.UpdateCapacity(uint64(newLimit))
-					if delta := newLimit - curLimit; delta > 0 {
-						c.metrics.Increases.Inc(delta)
-					} else {
-						c.metrics.Decreases.Inc(-delta)
-					}
-					c.metrics.CurrentLimit.Update(newLimit)
-				}
-			}
-			return numBlocked > 0 ||
-					(min > 5*time.Millisecond || avg > 20*time.Millisecond) &&
-						(qLen > requests/10 || requests > 100) ||
-					handleReady > 500*time.Millisecond && requests > 100,
-				qos.Level{Class: qos.ClassHigh, Shard: 0}
-		},
-		PruneRate:          .05,
-		GrowRate:           .01,
+		Name:               "read",
+		TickInterval:       500 * time.Millisecond,
+		OverloadSignal:     c.overloadSignal,
+		PruneRate:          .025,
+		GrowRate:           .005,
 		MaxBlocked:         200,
 		MaxReqsPerInterval: 2000,
 	}
@@ -266,6 +296,12 @@ func (c *Controller) Admit(
 	}
 }
 
+var concurrencyLimit = settings.RegisterIntSetting(
+	"kv.read_controller.concurrency_limit",
+	"set to a positive number to manually control the concurrency limit",
+	-1,
+)
+
 var disableReadQuota = settings.RegisterBoolSetting(
 	"kv.read_controller.disabled",
 	"set to true to disable the read quota.",
@@ -357,31 +393,25 @@ func (qs *quotaStats) WaitStats(
 type Acquisition struct {
 	ctx        context.Context
 	l          qos.Level
-	guess      int64
-	quota      int64
+	quota      int64 // available quota at time of acquisition
+	len        int64 // queue length at time of acquisition
 	controller *Controller
 	alloc      *quotapool.IntAlloc
 }
-
-// func (a *Acquisition) Acquire(ctx context.Context) error {
-// 	return a.acquire(ctx)
-// }
 
 var errQueueFull = errors.New("queue full")
 
 func (a *Acquisition) acquireFunc(
 	ctx context.Context, p quotapool.PoolInfo,
 ) (took uint64, err error) {
-	// if a.guess == 0 {
-	// 	a.guess = a.rq.guessReadSize(a.l.Class)
-	// }
 	if lim := atomic.LoadInt64(&a.controller.queueLimit); int(lim) < p.Len {
 		return 0, errQueueFull
 	}
-	if log.V(3) {
-		log.Infof(ctx, "attempting to acquire %v %v", a.guess, p)
-	}
+	a.len = int64(p.Len)
 	const guess = 1
+	if log.V(3) {
+		log.Infof(ctx, "attempting to acquire %v %v", guess, p)
+	}
 	if guess <= p.Available {
 		a.quota = int64(p.Available)
 		return 1, nil
@@ -395,7 +425,9 @@ func (a *Acquisition) admit(ctx context.Context) (err error) {
 
 func (a *Acquisition) acquire(ctx context.Context) (err error) {
 	a.alloc, err = a.controller.readQuota.AcquireFunc(ctx, a.acquireFunc)
-	a.controller.recordInFlight(a.quota)
+	if err != nil {
+		a.controller.recordInFlight(a.quota, a.len)
+	}
 	return err
 }
 
@@ -425,8 +457,9 @@ func (c *Controller) onAcquisition(
 	//rq.s.metrics.ReadQuotaTimeSpentWaitingSummary10s.Add(float64(took.Nanoseconds()))
 }
 
-func (c *Controller) recordInFlight(quotaSize int64) {
+func (c *Controller) recordInFlight(quotaSize, queueLen int64) {
 	setIfLt(&c.leastQuotaSeen, quotaSize)
+	setIfGt(&c.longestQueue, queueLen)
 }
 
 func (qs *quotaStats) record(took time.Duration) {

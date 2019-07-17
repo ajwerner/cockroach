@@ -215,6 +215,7 @@ type DistSender struct {
 		syncutil.RWMutex
 		maxSeen    qos.Level
 		errorsSeen int64
+		sentCount  int64 // total transport sent requests as of the last check
 	}
 }
 
@@ -239,6 +240,9 @@ func (ds *DistSender) recordReadRejectedError(ctx context.Context) {
 
 func (ds *DistSender) isOverloaded(cur qos.Level) (overloaded bool, limit qos.Level) {
 	ds.rejectionMu.Lock()
+	lastSent := ds.rejectionMu.sentCount
+	ds.rejectionMu.sentCount = ds.metrics.SentCount.Count()
+	sent := ds.rejectionMu.sentCount - lastSent
 	seen := atomic.LoadInt64(&ds.rejectionMu.errorsSeen)
 	maxRejectedLevel := ds.rejectionMu.maxSeen
 	ds.rejectionMu.maxSeen = qos.Level{}
@@ -248,7 +252,7 @@ func (ds *DistSender) isOverloaded(cur qos.Level) (overloaded bool, limit qos.Le
 		log.Infof(context.TODO(), "dist-sender overloaded: %v %v %v",
 			cur, seen, maxRejectedLevel)
 	}
-	if seen > 32 && cur.Less(maxRejectedLevel) {
+	if seen > sent/10 && cur.Less(maxRejectedLevel) {
 		limit = maxRejectedLevel
 		overloaded = true
 	}
@@ -335,8 +339,8 @@ func NewDistSender(cfg DistSenderConfig, g *gossip.Gossip) *DistSender {
 		RandomizationFactor: .1,
 		OverloadSignal:      ds.isOverloaded,
 		MaxBlocked:          50000,
-		GrowRate:            .01,
-		PruneRate:           .05,
+		GrowRate:            .005,
+		PruneRate:           .025,
 	}
 	ds.admissionController = admission.NewController(admissionCfg)
 	ctx := ds.AnnotateCtx(context.Background())
@@ -404,6 +408,12 @@ func (ds *DistSender) Metrics() DistSenderMetrics {
 // to the distributed sender's admission controller.
 func (ds *DistSender) AdmissionControllerMetrics() *admission.Metrics {
 	return ds.admissionController.Metrics()
+}
+
+// AdmissionController returns a struct which contains metrics related
+// to the distributed sender's admission controller.
+func (ds *DistSender) AdmissionController() *admission.Controller {
+	return ds.admissionController
 }
 
 // RangeDescriptorCache gives access to the DistSender's range cache.
