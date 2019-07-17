@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ajwerner/tdigest"
+	"github.com/ajwerner/tdigest/windowed"
 	"github.com/cockroachdb/cockroach/pkg/qos"
 	"github.com/cockroachdb/cockroach/pkg/qos/admission"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -46,6 +47,7 @@ type Controller struct {
 	acquisitionSyncPool sync.Pool
 	startOnce           sync.Once
 	latencySummary      *metric.WindowedSummary
+	reader              windowed.Reader
 	baseLimit           int64
 }
 
@@ -69,13 +71,19 @@ const shortMeasurementPeriod = 2 * time.Second
 func (c *Controller) overloadSignal(cur qos.Level) (overloaded bool, lim qos.Level) {
 	requests, avg, min, max, handleReady := c.quotaStats.WaitStats(true)
 	qLen := int64(c.readQuota.Len())
-	var longLat, shortLat float64
+	var longLat, shortLat, shortCount, longCount float64
 	c.latencySummary.ReadAt(longMeasurementPeriod, func(_ time.Duration, r tdigest.Reader) {
 		longLat = r.TrimmedMean(.1, .6)
+		longCount = r.TotalCount()
 	})
 	c.latencySummary.ReadAt(shortMeasurementPeriod, func(_ time.Duration, r tdigest.Reader) {
 		shortLat = r.InnerMean(.9)
+		shortCount = r.TotalCount()
 	})
+
+	w := c.latencySummary.Windowed()
+	delta, ks := c.latencySummary.Reader().KSScore(longMeasurementPeriod, shortMeasurementPeriod, w, 200, &c.reader)
+
 	// This is a hack to try to deal with the case where the system's load has
 	// diminished drastically. We want to accelerate the return to steady
 	// state.
@@ -90,13 +98,15 @@ func (c *Controller) overloadSignal(cur qos.Level) (overloaded bool, lim qos.Lev
 	inFlight := curLimit - int64(quota)
 	queueLimit := atomic.LoadInt64(&c.queueLimit)
 	numBlocked := atomic.SwapInt64(&c.numBlocked, 0)
-	if log.V(2) {
-		log.Infof(context.TODO(), "overload signal %v: avg %v, min %v, max %v, qLen %v, reqs %v, inFlight %v, longDur %v, shortDur %v, curLimit %v, numBlocked %v, quota %v, queueLimit %v, handleReady %v",
-			cur, avg, min, max, qLen, requests, inFlight, time.Duration(longLat), time.Duration(shortLat), curLimit, numBlocked, quota, queueLimit, handleReady)
-	}
 	const tolerance = 1.2
 	const smoothing = .2
 	const minLimit = 5 // combines nicely with sqrt such that with a gradient of 1 you get 6
+	gradient := maxF64(.5, minF64(1.0, (tolerance*longLat)/shortLat))
+	if log.V(2) {
+		log.Infof(context.TODO(), "overload signal %v: avg %v, min %v, max %v, qLen %v, reqs %v, inFlight %v, longDur %v, shortDur %v, curLimit %v, numBlocked %v, quota %v, queueLimit %v, handleReady %v, ks %v delta %v, longCount %v, shortCount %v, lim %v",
+			cur, avg, min, max, qLen, requests, inFlight, time.Duration(longLat), time.Duration(shortLat), curLimit, numBlocked, quota, queueLimit, handleReady, ks, delta, longCount, shortCount, math.Sqrt(shortCount)*delta)
+	}
+
 	if lim := concurrencyLimit.Get(&c.clusterSetting.SV); lim > 0 {
 		c.setLimit(lim)
 	} else if inFlight < int64(queueLimit/2) && numBlocked == 0 && curLimit > c.baseLimit {
@@ -104,7 +114,6 @@ func (c *Controller) overloadSignal(cur qos.Level) (overloaded bool, lim qos.Lev
 		atomic.StoreInt64(&c.leastQuotaSeen, curLimit)
 		atomic.StoreInt64(&c.longestQueue, 0)
 	} else {
-		gradient := maxF64(.5, minF64(1.0, (tolerance*longLat)/shortLat))
 		longestQueue := atomic.LoadInt64(&c.longestQueue)
 		calculatedLimit := int64(math.Ceil(float64(curLimit) * gradient))
 		calculatedLimit += c.queueSizeFunc(calculatedLimit)
@@ -126,9 +135,10 @@ func (c *Controller) overloadSignal(cur qos.Level) (overloaded bool, lim qos.Lev
 	tooMuchQueuing := (min > 5*time.Millisecond || avg > 20*time.Millisecond) &&
 		(qLen > requests/10 || requests > 100)
 	handleReadyTooSlow := handleReady > 500*time.Millisecond && requests > 100
-	overloaded = tooManyBlocked || tooMuchQueuing || handleReadyTooSlow
+	slowness := gradient < .8 && delta > ks*10
+	overloaded = tooManyBlocked || tooMuchQueuing || handleReadyTooSlow || slowness
 	if overloaded && log.V(1) {
-		log.Infof(context.TODO(), "overload signal %v: avg %v, min %v, max %v, qLen %v, reqs %v, inFlight %v, longDur %v, shortDur %v, curLimit %v, numBlocked %v, quota %v, queueLimit %v, handleReady %v, tooManyBlocked %v, tooMuchQueuing %v, handleReadyTooSlow %v",
+		log.Infof(context.TODO(), "overload signal %v: avg %v, min %v, max %v, qLen %v, reqs %v, inFlight %v, longDur %v, shortDur %v, curLimit %v, numBlocked %v, quota %v, queueLimit %v, handleReady %v, tooManyBlocked %v, tooMuchQueuing %v, handleReadyTooSlow %v, slowness %v",
 			cur, avg, min, max, qLen, requests, inFlight, time.Duration(longLat), time.Duration(shortLat), curLimit, numBlocked, quota, queueLimit, handleReady,
 			tooManyBlocked, tooMuchQueuing, handleReadyTooSlow)
 	}
