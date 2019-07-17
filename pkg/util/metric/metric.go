@@ -567,6 +567,14 @@ type WindowedSummary struct {
 	reader       windowed.Reader
 }
 
+func (w *WindowedSummary) Windowed() *windowed.TDigest {
+	return w.sketch
+}
+
+func (w *WindowedSummary) Reader() *windowed.Reader {
+	return &w.reader
+}
+
 // Summary tracks a distribution of values.
 type Summary struct {
 	Metadata

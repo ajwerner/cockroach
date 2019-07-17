@@ -130,7 +130,7 @@ ignored = [
 
 [[constraint]]
   name = "github.com/ajwerner/tdigest"
-  branch = "master"
+  branch = "ajwerner/kolmogorov–smirnov-experiment"
 
 [prune]
   go-tests = true

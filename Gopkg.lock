@@ -150,8 +150,8 @@
   source = "https://github.com/cockroachdb/teamcity"
 
 [[projects]]
-  branch = "master"
-  digest = "1:c6e30b8f08af940b7f9d07f90892eab98794fef429c2087d9d8de5367d5798af"
+  branch = "ajwerner/kolmogorov–smirnov-experiment"
+  digest = "1:da0d6073a943b5cbf854af755e2ed39b33b4e0f6e796580fe82fb27915dedddf"
   name = "github.com/ajwerner/tdigest"
   packages = [
     ".",
@@ -160,7 +160,7 @@
     "windowed",
   ]
   pruneopts = "UT"
-  revision = "e3700397f60d2df5acec0a54e2dfb7ad75c08577"
+  revision = "8d1dc552a89bad2cf6e34bb857282af55a84d779"
 
 [[projects]]
   branch = "master"
