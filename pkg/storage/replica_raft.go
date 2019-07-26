@@ -932,9 +932,9 @@ func (r *Replica) refreshProposalsLocked(refreshAtDelta int, reason refreshRaftR
 	if log.V(1) && len(reproposals) > 0 {
 		ctx := r.AnnotateCtx(context.TODO())
 		log.Infof(ctx,
-			"pending commands: reproposing %d (at %d.%d) %s",
+			"pending commands: reproposing %d (at %d.%d) %v %s %v",
 			len(reproposals), r.mu.state.RaftAppliedIndex,
-			r.mu.state.LeaseAppliedIndex, reason)
+			r.mu.state.LeaseAppliedIndex, reason, reproposals)
 	}
 
 	// Reproposals are those commands which we weren't able to send back to the

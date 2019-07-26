@@ -582,6 +582,9 @@ func (r *Replica) cleanupFailedProposal(p *ProposalData) {
 // cleanupFailedProposalLocked is like cleanupFailedProposal, but requires
 // the Replica mutex to be exclusively held.
 func (r *Replica) cleanupFailedProposalLocked(p *ProposalData) {
+	if log.V(1) {
+		log.Infof(p.ctx, "cleanupFailedProposalLocked %+v", p)
+	}
 	// Clear the proposal from the proposals map. May be a no-op if the
 	// proposal has not yet been inserted into the map.
 	delete(r.mu.proposals, p.idKey)

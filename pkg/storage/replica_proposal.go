@@ -116,6 +116,11 @@ type ProposalData struct {
 	Request *roachpb.BatchRequest
 }
 
+func (proposal *ProposalData) String() string {
+	return fmt.Sprintf("ProposalData{id: %v, maxLeaseIndex: %v, quota %v}",
+		proposal.idKey, proposal.command.MaxLeaseIndex, proposal.quotaSize)
+}
+
 // finishApplication is called when a command application has finished. The
 // method will be called downstream of Raft if the command required consensus,
 // but can be called upstream of Raft if the command did not and was never

@@ -235,6 +235,14 @@ func (r *Replica) updateProposalQuotaRaftMuLocked(
 		for _, rel := range r.mu.quotaReleaseQueue[:numReleases] {
 			sum += rel
 		}
+
+		if r.mu.proposalQuotaBaseIndex+numReleases > r.mu.lastIndex {
+			log.Fatalf(ctx, "proposalQuotaBaseIndex (%d) + numReleases (%d) > lastIndex (%d), %v",
+				r.mu.proposalQuotaBaseIndex, numReleases, r.mu.lastIndex, r.mu.quotaReleaseQueue)
+		} else if r.mu.proposalQuotaBaseIndex+uint64(len(r.mu.quotaReleaseQueue)) > r.mu.lastIndex {
+			log.Fatalf(ctx, "proposalQuotaBaseIndex (%d) + len(quotaReleaseQueue) (%d) > lastIndex (%d), %v",
+				r.mu.proposalQuotaBaseIndex, len(r.mu.quotaReleaseQueue), r.mu.lastIndex, r.mu.quotaReleaseQueue)
+		}
 		r.mu.proposalQuotaBaseIndex += numReleases
 		r.mu.quotaReleaseQueue = r.mu.quotaReleaseQueue[numReleases:]
 

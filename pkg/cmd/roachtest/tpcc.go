@@ -158,7 +158,7 @@ func runTPCC(ctx context.Context, t *test, c *cluster, opts tpccOptions) {
 			c.Run(ctx, crdbNodes, "sudo zfs rollback data1@pristine")
 			c.Start(ctx, t, crdbNodes, startArgsDontEncrypt)
 		} else {
-			c.Start(ctx, t, crdbNodes, startArgsDontEncrypt)
+			c.Start(ctx, t, crdbNodes, startArgsDontEncrypt, startArgs("--args='--vmodule=*raft=3,replica*=2'"))
 			c.Run(ctx, workloadNode, tpccFixturesCmd(t, cloud, opts.Warehouses, ""))
 		}
 	}()
@@ -247,7 +247,7 @@ func registerTPCC(r *testRegistry) {
 			t.l.Printf("computed headroom warehouses of %d\n", headroomWarehouses)
 			runTPCC(ctx, t, c, tpccOptions{
 				Warehouses: headroomWarehouses,
-				Duration:   120 * time.Minute,
+				Duration:   120 * time.Second,
 			})
 		},
 	})
