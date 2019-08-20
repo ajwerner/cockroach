@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -34,11 +35,17 @@ LIMIT
     100;`
 
 type tpccOLAPSpec struct {
-	Nodes       int
-	CPUs        int
-	Warehouses  int
+	Nodes      int
+	CPUs       int
+	Warehouses int
+	// Concurrency is calibrated for AWS. GCP at the same core count is run at
+	// with gcpConcurrencyCorrection applied to this number.
 	Concurrency int
 }
+
+// gcp nodes with the same core count are slower.
+// This factor was determined empirically.
+const gcpConcurrencyCorrection = 3 / 4
 
 func (s tpccOLAPSpec) run(ctx context.Context, t *test, c *cluster) {
 	crdbNodes, workloadNode := setupTPCC(ctx, t, c, s.Warehouses, false /* zfs */, nil /* versions */)
@@ -49,7 +56,11 @@ func (s tpccOLAPSpec) run(ctx context.Context, t *test, c *cluster) {
 	t.Status("waiting")
 	m := newMonitor(ctx, c, crdbNodes)
 	rampDuration := time.Minute
-	duration := 2 * time.Minute
+	duration := 3 * time.Minute
+	concurrency := s.Concurrency
+	if cloud == "gcp" {
+		concurrency = int(math.Ceil(float64(concurrency) * gcpConcurrencyCorrection))
+	}
 	m.Go(func(ctx context.Context) error {
 		t.WorkerStatus("running querybench")
 		cmd := fmt.Sprintf(
@@ -59,7 +70,7 @@ func (s tpccOLAPSpec) run(ctx context.Context, t *test, c *cluster) {
 				" --query-file %s"+
 				" --histograms="+perfArtifactsDir+"/stats.json "+
 				" --ramp=%s --duration=%s {pgurl:1-%d}",
-			s.Warehouses, queryFileName, rampDuration, duration, c.spec.NodeCount-1)
+			concurrency, queryFileName, rampDuration, duration, c.spec.NodeCount-1)
 		c.Run(ctx, workloadNode, cmd)
 		return nil
 	})
@@ -110,7 +121,7 @@ func registerOverload(r *testRegistry) {
 	specs := []tpccOLAPSpec{
 		{
 			CPUs:        16,
-			Concurrency: 256,
+			Concurrency: 128,
 			Nodes:       3,
 			Warehouses:  100,
 		},
