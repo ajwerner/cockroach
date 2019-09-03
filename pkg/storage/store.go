@@ -3350,7 +3350,9 @@ func (s *Store) HandleRaftUncoalescedRequest(
 // initialized) Replica specified in the request. The replica passed to
 // the function will have its Replica.raftMu locked.
 func (s *Store) withReplicaForRequest(
-	ctx context.Context, req *RaftMessageRequest, f func(context.Context, *Replica) *roachpb.Error,
+	ctx context.Context,
+	req *RaftMessageRequest,
+	f func(context.Context, *Replica) *roachpb.Error,
 ) *roachpb.Error {
 	// Lazily create the replica.
 	r, _, err := s.getOrCreateReplica(
@@ -3464,6 +3466,16 @@ func (s *Store) processRaftSnapshotRequest(
 			}
 			return nil
 		}(); err != nil {
+			// If the replica was destroyed then it must be deleted.
+			// TODO(ajwerner): returning an error here throws away this fresh
+			// snapshot. Ideally we'd be able to just use it.
+			if _, isReplicaTooOld := err.(*roachpb.ReplicaTooOldError); isReplicaTooOld {
+				if removeErr := s.removeReplicaImpl(ctx, r, snapHeader.State.Desc.NextReplicaID, RemoveOptions{
+					DestroyData: true,
+				}); removeErr != nil {
+					log.Infof(ctx, "error: failed to destroy replica: %v", removeErr)
+				}
+			}
 			return roachpb.NewError(err)
 		}
 
