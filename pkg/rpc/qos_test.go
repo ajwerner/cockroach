@@ -99,7 +99,7 @@ func TestQosMiddleware(t *testing.T) {
 	// Make the interval shorter to speed up the test.
 	clientCtx.heartbeatInterval = 1 * time.Millisecond
 	go func() { heartbeat.ready <- nil }()
-	conn, err := clientCtx.GRPCDialNode(remoteAddr, serverNodeID).Connect(context.Background())
+	conn, err := clientCtx.GRPCDialNode(remoteAddr, serverNodeID, DefaultClass).Connect(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

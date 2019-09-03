@@ -810,7 +810,7 @@ func NewStore(
 	s.raftEntryCache = raftentry.NewCache(cfg.RaftEntryCacheSize)
 	s.metrics.registry.AddMetricStruct(s.raftEntryCache.Metrics())
 
-	s.readControl.Initialize(ctx, cfg.Settings, s.metrics.ReadLatencySummary)
+	s.readControl.Initialize(ctx, cfg.Settings, s.metrics.ReadLatencySummary, s.cfg.RPCContext.Metrics())
 	s.metrics.registry.AddMetricStruct(s.readControl.Metrics())
 
 	s.coalescedMu.Lock()

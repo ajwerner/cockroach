@@ -12,9 +12,12 @@ package rpc
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"golang.org/x/sync/syncmap"
 	"google.golang.org/grpc/stats"
 )
@@ -100,6 +103,8 @@ type StatsHandler struct {
 	// never remove items from this map; because we don't expect to add
 	// and remove sufficiently many nodes, this should be fine in practice.
 	stats syncmap.Map
+
+	ctx *Context
 }
 
 var _ stats.Handler = &StatsHandler{}
@@ -113,10 +118,23 @@ func (sh *StatsHandler) newClient(target string) stats.Handler {
 	}
 }
 
+type responseTiming struct {
+	start time.Time
+}
+
+var responseTimingPool = sync.Pool{
+	New: func() interface{} {
+		return new(responseTiming)
+	},
+}
+
+type responseTimingKey struct{}
+
 // TagRPC implements the grpc.stats.Handler interface. This
 // interface is used directly for server-side stats recording.
 func (sh *StatsHandler) TagRPC(ctx context.Context, rti *stats.RPCTagInfo) context.Context {
-	return ctx
+	rt := responseTimingPool.Get().(*responseTiming)
+	return context.WithValue(ctx, responseTimingKey{}, rt)
 }
 
 // HandleRPC implements the grpc.stats.Handler interface. This
@@ -138,6 +156,13 @@ func (sh *StatsHandler) HandleRPC(ctx context.Context, rpcStats stats.RPCStats) 
 		value, _ = sh.stats.LoadOrStore(remoteAddr, &Stats{})
 	}
 	value.(*Stats).record(rpcStats)
+	if _, ok := rpcStats.(*stats.End); ok {
+		if rt, ok := ctx.Value(responseTimingKey{}).(*responseTiming); ok && !rt.start.IsZero() {
+			sh.ctx.metrics.RPCResponseDurationWindowed.Add(float64(timeutil.Since(rt.start).Nanoseconds()))
+			rt.start = time.Time{}
+			responseTimingPool.Put(rt)
+		}
+	}
 }
 
 // TagConn implements the grpc.stats.Handler interface. This interface

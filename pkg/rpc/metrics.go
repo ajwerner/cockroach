@@ -10,7 +10,11 @@
 
 package rpc
 
-import "github.com/cockroachdb/cockroach/pkg/util/metric"
+import (
+	"time"
+
+	"github.com/cockroachdb/cockroach/pkg/util/metric"
+)
 
 // We want to have a way to track the number of connection
 // but we also want to have a way to know that connection health.
@@ -61,6 +65,13 @@ var (
 		Measurement: "Connections",
 		Unit:        metric.Unit_COUNT,
 	}
+
+	metaRPCResponseDuration = metric.Metadata{
+		Name:        "rpc.response.send_duration",
+		Help:        "Histogram of time taken to send an RPC response",
+		Measurement: "Nanoseconds",
+		Unit:        metric.Unit_NANOSECONDS,
+	}
 )
 
 type heartbeatState int
@@ -73,12 +84,16 @@ const (
 )
 
 func makeMetrics() Metrics {
+	windowed := metric.NewWindowedSummary(metaRPCResponseDuration)
 	return Metrics{
-		HeartbeatLoopsStarted:  metric.NewCounter(metaHeartbeatLoopsStarted),
-		HeartbeatLoopsExited:   metric.NewCounter(metaHeartbeatLoopsExited),
-		HeartbeatsInitializing: metric.NewGauge(metaHeartbeatsInitializing),
-		HeartbeatsNominal:      metric.NewGauge(metaHeartbeatsNominal),
-		HeartbeatsFailed:       metric.NewGauge(metaHeartbeatsFailed),
+		HeartbeatLoopsStarted:       metric.NewCounter(metaHeartbeatLoopsStarted),
+		HeartbeatLoopsExited:        metric.NewCounter(metaHeartbeatLoopsExited),
+		HeartbeatsInitializing:      metric.NewGauge(metaHeartbeatsInitializing),
+		HeartbeatsNominal:           metric.NewGauge(metaHeartbeatsNominal),
+		HeartbeatsFailed:            metric.NewGauge(metaHeartbeatsFailed),
+		RPCResponseDurationWindowed: windowed,
+		RPCResponseDurationShort:    windowed.Summary(30 * time.Second),
+		RPCResponseDurationLong:     windowed.Summary(5 * time.Minute),
 	}
 }
 
@@ -103,6 +118,10 @@ type Metrics struct {
 	// HeartbeatsNominal tracks the current number of heartbeat loops which
 	// succeeded on their previous attempt.
 	HeartbeatsFailed *metric.Gauge
+
+	RPCResponseDurationWindowed *metric.WindowedSummary
+	RPCResponseDurationShort    *metric.Summary
+	RPCResponseDurationLong     *metric.Summary
 }
 
 // updateHeartbeatState decrements the gauge for the current state and

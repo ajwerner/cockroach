@@ -474,6 +474,7 @@ func NewContextWithTestingKnobs(
 		ctx.LocalClock, 10*ctx.heartbeatInterval, baseCtx.HistogramWindowInterval)
 	ctx.heartbeatTimeout = 2 * ctx.heartbeatInterval
 	ctx.metrics = makeMetrics()
+	ctx.stats.ctx = ctx
 
 	stopper.RunWorker(ctx.masterCtx, func(context.Context) {
 		<-stopper.ShouldQuiesce()

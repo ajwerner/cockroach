@@ -16,6 +16,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/qos"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
@@ -42,7 +43,14 @@ func qosServerInterceptor(
 	errMalformedQosLevelEvery := log.Every(time.Second)
 	return func(
 		goCtx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler,
-	) (interface{}, error) {
+	) (resp interface{}, err error) {
+		defer func() {
+			if err == nil {
+				if rt, ok := goCtx.Value(responseTimingKey{}).(*responseTiming); ok {
+					rt.start = timeutil.Now()
+				}
+			}
+		}()
 		if md, ok := metadata.FromIncomingContext(goCtx); ok {
 			if v := md.Get(clientQosLevelKey); len(v) > 0 {
 				// We don't expect more than one item; gRPC does not copy metadata
