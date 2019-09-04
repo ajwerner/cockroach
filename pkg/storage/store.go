@@ -3645,6 +3645,16 @@ func (s *Store) processRequestQueue(ctx context.Context, rangeID roachpb.RangeID
 				// might have closed.
 				log.VEventf(ctx, 1, "error sending error: %s", err)
 			}
+			if replicaTooOldError, ok := pErr.GoError().(*roachpb.ReplicaTooOldError); ok && lastRepl != nil {
+				lastRepl.mu.RLock()
+				lastReplID := lastRepl.mu.replicaID
+				lastRepl.mu.RUnlock()
+				if lastReplID == replicaTooOldError.ReplicaID {
+					log.Infof(ctx, "dropping all requests and waiting for replica to be destroyed")
+					lastRepl = nil
+					break
+				}
+			}
 		}
 	}
 
@@ -3983,6 +3993,15 @@ func (s *Store) tryGetOrCreateReplica(
 			if !found && creatingReplica.ReplicaID < desc.NextReplicaID {
 				replTooOldErr = roachpb.NewReplicaTooOldError(creatingReplica.ReplicaID)
 			}
+		}
+
+		// This request is destined for a later replica on this Store. We need to
+		// ignore this message and destroy the replica.
+		if repl.mu.replicaID < replicaID {
+			log.Infof(ctx, "found message for replica %d but have replica %d, enqueuing for removal", repl.mu.replicaID, replicaID)
+			s.replicaGCQueue.MaybeAddAsync(ctx, repl, s.cfg.Clock.Now())
+			repl.raftMu.Unlock()
+			return nil, false, roachpb.NewReplicaTooOldError(repl.mu.replicaID)
 		}
 
 		var err error
