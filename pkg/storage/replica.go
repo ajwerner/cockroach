@@ -346,6 +346,7 @@ type Replica struct {
 		// The minimum allowed ID for this replica. Initialized from
 		// RaftTombstone.NextReplicaID.
 		minReplicaID roachpb.ReplicaID
+
 		// The ID of the leader replica within the Raft group. Used to determine
 		// when the leadership changes.
 		leaderID roachpb.ReplicaID
@@ -486,6 +487,14 @@ type Replica struct {
 		syncutil.Mutex
 		remotes map[roachpb.ReplicaID]struct{}
 	}
+}
+
+// ReplicaID returns the ID for the Replica. It may be zero if the replica does
+// not know its ID.
+func (r *Replica) ReplicaID() roachpb.ReplicaID {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.mu.replicaID
 }
 
 var _ batcheval.EvalContext = &Replica{}
