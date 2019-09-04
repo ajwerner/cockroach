@@ -628,7 +628,8 @@ func (s *Store) canApplySnapshotLocked(
 	existingRepl.raftMu.AssertHeld()
 
 	existingRepl.mu.RLock()
-	existingIsInitialized := existingRepl.isInitializedRLocked()
+	existingDesc := existingRepl.mu.state.Desc
+	existingIsInitialized := existingDesc.IsInitialized()
 	existingRepl.mu.RUnlock()
 
 	if existingIsInitialized {
@@ -643,6 +644,14 @@ func (s *Store) canApplySnapshotLocked(
 		// (that would provide a range descriptor with this replica in
 		// it) but this node reboots (temporarily forgetting its
 		// replicaID) before the snapshot arrives.
+
+		existingReplicaDesc, storeHasReplica := existingDesc.GetReplicaDescriptor(s.Ident.StoreID)
+		snapReplicaDesc, snapHasReplica := desc.GetReplicaDescriptor(s.Ident.StoreID)
+		if storeHasReplica && snapHasReplica && snapReplicaDesc.ReplicaID != existingReplicaDesc.ReplicaID {
+			return nil, &roachpb.ReplicaTooOldError{
+				ReplicaID: existingReplicaDesc.ReplicaID,
+			}
+		}
 		return nil, nil
 	}
 

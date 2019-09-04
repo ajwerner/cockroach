@@ -114,7 +114,10 @@ func newReplicaGCQueue(store *Store, db *client.DB, gossip *gossip.Gossip) *repl
 // in the past.
 func (rgcq *replicaGCQueue) shouldQueue(
 	ctx context.Context, now hlc.Timestamp, repl *Replica, _ *config.SystemConfig,
-) (bool, float64) {
+) (should bool, prio float64) {
+	defer func() {
+		log.Infof(ctx, "should enqueue repl %v %v %v", repl, should, prio)
+	}()
 	lastCheck, err := repl.GetLastReplicaGCTimestamp(ctx)
 	if err != nil {
 		log.Errorf(ctx, "could not read last replica GC timestamp: %+v", err)
@@ -149,11 +152,11 @@ func (rgcq *replicaGCQueue) shouldQueue(
 			}
 		}
 	}
-	return replicaGCShouldQueueImpl(now, lastCheck, lastActivity, isCandidate)
+	return replicaGCShouldQueueImpl(ctx, now, lastCheck, lastActivity, isCandidate)
 }
 
 func replicaGCShouldQueueImpl(
-	now, lastCheck, lastActivity hlc.Timestamp, isCandidate bool,
+	ctx context.Context, now, lastCheck, lastActivity hlc.Timestamp, isCandidate bool,
 ) (bool, float64) {
 	timeout := ReplicaGCQueueInactivityThreshold
 	priority := replicaGCPriorityDefault
@@ -215,10 +218,15 @@ func (rgcq *replicaGCQueue) process(
 	}
 	replyDesc := rs[0]
 
+	repl.mu.RLock()
+	replicaID := repl.mu.replicaID
+	ticks := repl.mu.ticks
+	repl.mu.RUnlock()
+
 	// Now check whether the replica is meant to still exist.
 	// Maybe it was deleted "under us" by being moved.
 	currentDesc, currentMember := replyDesc.GetReplicaDescriptor(repl.store.StoreID())
-	if desc.RangeID == replyDesc.RangeID && currentMember {
+	if desc.RangeID == replyDesc.RangeID && currentMember && currentDesc.ReplicaID == replicaID {
 		// This replica is a current member of the raft group. Set the last replica
 		// GC check time to avoid re-processing for another check interval.
 		//
@@ -226,18 +234,13 @@ func (rgcq *replicaGCQueue) process(
 		// but also on how good a job the queue does at inspecting every
 		// Replica (see #8111) when inactive ones can be starved by
 		// event-driven additions.
-		log.VEventf(ctx, 1, "not gc'able, replica is still in range descriptor: %v", currentDesc)
+		log.VEventf(ctx, 1, "not gc'able, replica %d is still in range descriptor: %v", replicaID, currentDesc)
 		if err := repl.setLastReplicaGCTimestamp(ctx, repl.store.Clock().Now()); err != nil {
 			return err
 		}
 	} else if desc.RangeID == replyDesc.RangeID {
 		// We are no longer a member of this range, but the range still exists.
 		// Clean up our local data.
-
-		repl.mu.RLock()
-		replicaID := repl.mu.replicaID
-		ticks := repl.mu.ticks
-		repl.mu.RUnlock()
 
 		if replicaID == 0 {
 			// This is a preemptive replica. GC'ing a preemptive replica is a
@@ -275,7 +278,7 @@ func (rgcq *replicaGCQueue) process(
 			// NB: there's solid evidence that this phenomenon can actually lead
 			// to a large spike in Raft snapshots early in the life of a cluster
 			// (in particular when combined with a restore operation) when the
-			// removed replica has many pending splits and thus incurs a Raft
+			// removed replica has many pending splits and thus incurs a Raftzz
 			// snapshot for *each* of them. This typically happens for the last
 			// range:
 			// [n1,replicaGC,s1,r33/1:/{Table/53/1/3…-Max}] removing replica [...]
