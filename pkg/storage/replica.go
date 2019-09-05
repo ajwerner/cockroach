@@ -343,6 +343,7 @@ type Replica struct {
 		// Raft group). The replica ID will be non-zero whenever the replica is
 		// part of a Raft group.
 		replicaID roachpb.ReplicaID
+		readdedAs roachpb.ReplicaID
 		// The minimum allowed ID for this replica. Initialized from
 		// RaftTombstone.NextReplicaID.
 		minReplicaID roachpb.ReplicaID
@@ -486,6 +487,17 @@ type Replica struct {
 		syncutil.Mutex
 		remotes map[roachpb.ReplicaID]struct{}
 	}
+}
+
+func (r *Replica) isRemoved(storeID roachpb.StoreID) bool {
+	r.mu.RLock()
+	readdedAs := r.mu.readdedAs
+	desc := r.mu.state.Desc
+	replicaID := r.mu.replicaID
+	r.mu.RUnlock()
+	currentRepl, currentMember := desc.GetReplicaDescriptor(r.store.StoreID())
+	log.Infof(r.AnnotateCtx(context.TODO()), "isRemoved %v %v %v %v %v", !currentMember || readdedAs > currentRepl.ReplicaID, currentMember, readdedAs, currentRepl, replicaID)
+	return !currentMember || readdedAs > currentRepl.ReplicaID
 }
 
 var _ batcheval.EvalContext = &Replica{}

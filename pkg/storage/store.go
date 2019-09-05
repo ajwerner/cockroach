@@ -3998,8 +3998,25 @@ func (s *Store) tryGetOrCreateReplica(
 		// This request is destined for a later replica on this Store. We need to
 		// ignore this message and destroy the replica.
 		if repl.mu.replicaID < replicaID {
-			log.Infof(ctx, "found message for replica %d but have replica %d, enqueuing for removal", repl.mu.replicaID, replicaID)
-			s.replicaGCQueue.MaybeAddAsync(ctx, repl, s.cfg.Clock.Now())
+			repl.mu.destroyStatus.Set(errors.Errorf("%s: removed and re-added as %d", repl, replicaID), destroyReasonRemoved)
+			if !repl.isInitializedRLocked() {
+				// Only an uninitialized replica can have a placeholder since, by
+				// definition, an initialized replica will be present in the
+				// replicasByKey map. While the replica will usually consume the
+				// placeholder itself, that isn't guaranteed and so this invocation
+				// here is crucial (i.e. don't remove it).
+				if s.removePlaceholderLocked(ctx, rangeID) {
+					atomic.AddInt32(&s.counts.droppedPlaceholders, 1)
+				}
+				s.unlinkReplicaByRangeIDLocked(repl.RangeID)
+			} else {
+				// log.Infof(ctx, "%v found message for replica %d but have replica %d, enqueuing for removal %v", rangeID, replicaID, repl.mu.replicaID, repl.isInitializedRLocked())
+
+				if replicaID > repl.mu.readdedAs {
+					repl.mu.readdedAs = replicaID
+				}
+				s.replicaGCQueue.MaybeAddAsync(ctx, repl, s.cfg.Clock.Now())
+			}
 			repl.raftMu.Unlock()
 			return nil, false, roachpb.NewReplicaTooOldError(repl.mu.replicaID)
 		}

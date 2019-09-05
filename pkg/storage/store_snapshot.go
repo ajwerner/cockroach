@@ -648,6 +648,13 @@ func (s *Store) canApplySnapshotLocked(
 		existingReplicaDesc, storeHasReplica := existingDesc.GetReplicaDescriptor(s.Ident.StoreID)
 		snapReplicaDesc, snapHasReplica := desc.GetReplicaDescriptor(s.Ident.StoreID)
 		if storeHasReplica && snapHasReplica && snapReplicaDesc.ReplicaID != existingReplicaDesc.ReplicaID {
+			existingRepl.mu.Lock()
+			if snapReplicaDesc.ReplicaID > existingRepl.mu.readdedAs {
+				existingRepl.mu.readdedAs = snapReplicaDesc.ReplicaID
+			}
+			existingRepl.mu.Unlock()
+			log.Infof(existingRepl.AnnotateCtx(ctx), "refusing snapshot intended for replica %d", snapReplicaDesc.ReplicaID)
+			s.replicaGCQueue.MaybeAddAsync(ctx, existingRepl, s.cfg.Clock.Now())
 			return nil, &roachpb.ReplicaTooOldError{
 				ReplicaID: existingReplicaDesc.ReplicaID,
 			}

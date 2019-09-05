@@ -124,7 +124,7 @@ func (rgcq *replicaGCQueue) shouldQueue(
 		return false, 0
 	}
 
-	if _, currentMember := repl.Desc().GetReplicaDescriptor(repl.store.StoreID()); !currentMember {
+	if repl.isRemoved(repl.store.StoreID()) {
 		return true, replicaGCPriorityRemoved
 	}
 
@@ -160,7 +160,7 @@ func replicaGCShouldQueueImpl(
 ) (bool, float64) {
 	timeout := ReplicaGCQueueInactivityThreshold
 	priority := replicaGCPriorityDefault
-
+	log.Infof(ctx, "is candidate %v %v %v", isCandidate, now, timeout)
 	if isCandidate {
 		// If the range is a candidate (which happens if its former replica set
 		// ignores it), let it expire much earlier.
@@ -226,6 +226,7 @@ func (rgcq *replicaGCQueue) process(
 	// Now check whether the replica is meant to still exist.
 	// Maybe it was deleted "under us" by being moved.
 	currentDesc, currentMember := replyDesc.GetReplicaDescriptor(repl.store.StoreID())
+	log.Infof(ctx, "processing replica %v %v %v %v %v %v", replicaID, desc, repl, desc.RangeID == replyDesc.RangeID, currentMember, currentDesc.ReplicaID == replicaID)
 	if desc.RangeID == replyDesc.RangeID && currentMember && currentDesc.ReplicaID == replicaID {
 		// This replica is a current member of the raft group. Set the last replica
 		// GC check time to avoid re-processing for another check interval.
