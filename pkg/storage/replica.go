@@ -491,13 +491,13 @@ type Replica struct {
 
 func (r *Replica) isRemoved(storeID roachpb.StoreID) bool {
 	r.mu.RLock()
-	readdedAs := r.mu.readdedAs
+	minReplicaID := r.mu.minReplicaID
 	desc := r.mu.state.Desc
 	replicaID := r.mu.replicaID
 	r.mu.RUnlock()
 	currentRepl, currentMember := desc.GetReplicaDescriptor(r.store.StoreID())
-	log.Infof(r.AnnotateCtx(context.TODO()), "isRemoved %v %v %v %v %v", !currentMember || readdedAs > currentRepl.ReplicaID, currentMember, readdedAs, currentRepl, replicaID)
-	return !currentMember || readdedAs > currentRepl.ReplicaID
+	log.Infof(r.AnnotateCtx(context.TODO()), "isRemoved %v %v %v %v %v", !currentMember || minReplicaID > currentRepl.ReplicaID, currentMember, minReplicaID, currentRepl, replicaID)
+	return !currentMember || minReplicaID > currentRepl.ReplicaID
 }
 
 var _ batcheval.EvalContext = &Replica{}

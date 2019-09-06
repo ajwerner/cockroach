@@ -638,27 +638,10 @@ func (s *Store) canApplySnapshotLocked(
 		// in Replica.maybeAcquireSnapshotMergeLock for how this is
 		// made safe.
 		//
-		// NB: we expect the replica to know its replicaID at this point
-		// (i.e. !existingIsPreemptive), though perhaps it's possible
-		// that this isn't true if the leader initiates a Raft snapshot
-		// (that would provide a range descriptor with this replica in
-		// it) but this node reboots (temporarily forgetting its
-		// replicaID) before the snapshot arrives.
-
-		existingReplicaDesc, storeHasReplica := existingDesc.GetReplicaDescriptor(s.Ident.StoreID)
-		snapReplicaDesc, snapHasReplica := desc.GetReplicaDescriptor(s.Ident.StoreID)
-		if storeHasReplica && snapHasReplica && snapReplicaDesc.ReplicaID != existingReplicaDesc.ReplicaID {
-			existingRepl.mu.Lock()
-			if snapReplicaDesc.ReplicaID > existingRepl.mu.readdedAs {
-				existingRepl.mu.readdedAs = snapReplicaDesc.ReplicaID
-			}
-			existingRepl.mu.Unlock()
-			log.Infof(existingRepl.AnnotateCtx(ctx), "refusing snapshot intended for replica %d", snapReplicaDesc.ReplicaID)
-			s.replicaGCQueue.MaybeAddAsync(ctx, existingRepl, s.cfg.Clock.Now())
-			return nil, &roachpb.ReplicaTooOldError{
-				ReplicaID: existingReplicaDesc.ReplicaID,
-			}
-		}
+		// NB: The snapshot must be intended for this replica as
+		// withReplicaForRequest ensures that requests with a non-zero replica
+		// id are passed to a replica with a matching id. Given this is not a
+		// preemptive snapshot we know that its id must be non-zero.
 		return nil, nil
 	}
 
@@ -765,15 +748,21 @@ func (s *Store) shouldAcceptSnapshotData(
 		int64(desc.RangeID),
 	); ok {
 		existingRepl := (*Replica)(v)
+
 		existingRepl.mu.RLock()
-		existingIsInitialized := existingRepl.isInitializedRLocked()
+		existingDesc := existingRepl.mu.state.Desc
+		existingIsInitialized := existingDesc.IsInitialized()
 		existingRepl.mu.RUnlock()
 
 		if existingIsInitialized {
-			// Regular Raft snapshots can't be refused at this point,
-			// even if they widen the existing replica. See the comments
-			// in Replica.maybeAcquireSnapshotMergeLock for how this is
-			// made safe.
+			// Regular Raft snapshots can't be refused at this point so long as
+			// the snapshot was intended for this replica, even if they widen
+			// the existing replica. See the comments in
+			// Replica.maybeAcquireSnapshotMergeLock for how this is made safe.
+			// The tricky edge case here is if this store has been removed from
+			// the range and re-added as a different replica. In this later case
+			// we note that the replica needs to be destroyed and queue it for
+			// removal.
 			//
 			// NB: we expect the replica to know its replicaID at this point
 			// (i.e. !existingIsPreemptive), though perhaps it's possible
@@ -781,6 +770,22 @@ func (s *Store) shouldAcceptSnapshotData(
 			// (that would provide a range descriptor with this replica in
 			// it) but this node reboots (temporarily forgetting its
 			// replicaID) before the snapshot arrives.
+			existingReplicaDesc, storeHasReplica := existingDesc.GetReplicaDescriptor(s.Ident.StoreID)
+			snapReplicaDesc, snapHasReplica := desc.GetReplicaDescriptor(s.Ident.StoreID)
+			if storeHasReplica && snapHasReplica && snapReplicaDesc.ReplicaID != existingReplicaDesc.ReplicaID {
+				err := &roachpb.ReplicaTooOldError{
+					ReplicaID: existingReplicaDesc.ReplicaID,
+				}
+				existingRepl.mu.Lock()
+				if snapReplicaDesc.ReplicaID > existingRepl.mu.minReplicaID {
+					existingRepl.mu.minReplicaID = snapReplicaDesc.ReplicaID
+					existingRepl.mu.destroyStatus.Set(err, destroyReasonRemovalPending)
+				}
+				existingRepl.mu.Unlock()
+				log.Infof(existingRepl.AnnotateCtx(ctx), "refusing snapshot intended for replica %d", snapReplicaDesc.ReplicaID)
+				s.replicaGCQueue.MaybeAddAsync(ctx, existingRepl, s.cfg.Clock.Now())
+				return err
+			}
 			return nil
 		}
 	}
