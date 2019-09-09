@@ -3555,18 +3555,19 @@ func TestRemoveRangeWithoutGC(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		desc := rep.Desc()
-		if len(desc.InternalReplicas) != 1 {
-			return errors.Errorf("range has %d replicas", len(desc.InternalReplicas))
+		if _, err := rep.IsDestroyed(); err == nil {
+			return errors.Errorf("range is still alive")
 		}
 		return nil
 	})
 
 	// The replica's data is still on disk.
+	// We use an inconsistent scan because there's going to be an intent on the
+	// range descriptor to remove this replica.
 	var desc roachpb.RangeDescriptor
 	descKey := keys.RangeDescriptorKey(roachpb.RKeyMin)
 	if ok, err := engine.MVCCGetProto(context.Background(), mtc.stores[0].Engine(), descKey,
-		mtc.stores[0].Clock().Now(), &desc, engine.MVCCGetOptions{}); err != nil {
+		mtc.stores[0].Clock().Now(), &desc, engine.MVCCGetOptions{Inconsistent: true}); err != nil {
 		t.Fatal(err)
 	} else if !ok {
 		t.Fatal("expected range descriptor to be present")

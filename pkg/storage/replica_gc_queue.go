@@ -115,6 +115,7 @@ func newReplicaGCQueue(store *Store, db *client.DB, gossip *gossip.Gossip) *repl
 func (rgcq *replicaGCQueue) shouldQueue(
 	ctx context.Context, now hlc.Timestamp, repl *Replica, _ *config.SystemConfig,
 ) (should bool, prio float64) {
+
 	lastCheck, err := repl.GetLastReplicaGCTimestamp(ctx)
 	if err != nil {
 		log.Errorf(ctx, "could not read last replica GC timestamp: %+v", err)
@@ -157,6 +158,7 @@ func replicaGCShouldQueueImpl(
 ) (bool, float64) {
 	timeout := ReplicaGCQueueInactivityThreshold
 	priority := replicaGCPriorityDefault
+	log.Infof(ctx, "is candidate %v %v %v", isCandidate, now, timeout)
 	if isCandidate {
 		// If the range is a candidate (which happens if its former replica set
 		// ignores it), let it expire much earlier.
@@ -231,7 +233,7 @@ func (rgcq *replicaGCQueue) process(
 		// but also on how good a job the queue does at inspecting every
 		// Replica (see #8111) when inactive ones can be starved by
 		// event-driven additions.
-		log.VEventf(ctx, 1, "not gc'able, replica %d is still in range descriptor: %v", replicaID, currentDesc)
+		log.VEventf(ctx, 1, "not gc'able, replica is still in range descriptor: %v", currentDesc)
 		if err := repl.setLastReplicaGCTimestamp(ctx, repl.store.Clock().Now()); err != nil {
 			return err
 		}

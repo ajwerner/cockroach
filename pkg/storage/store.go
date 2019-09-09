@@ -3950,7 +3950,6 @@ func (s *Store) getOrCreateReplica(
 	r := retry.StartWithCtx(ctx, retry.Options{
 		InitialBackoff: time.Microsecond,
 		MaxBackoff:     10 * time.Millisecond,
-		Closer:         s.stopper.ShouldQuiesce(),
 	})
 	for r.Next() {
 		r, created, err := s.tryGetOrCreateReplica(
@@ -3994,14 +3993,6 @@ func (s *Store) tryGetOrCreateReplica(
 		repl.raftMu.Lock() // not unlocked
 		repl.mu.Lock()
 		defer repl.mu.Unlock()
-
-		// The replicaID is zero when we're acquiring the merge lock.
-		// In that case we must return the replica.
-		if replicaID != 0 && !repl.mu.destroyStatus.IsAlive() {
-			log.Infof(ctx, "returning early due to destroy status %v %v %v", replicaID, repl.mu.replicaID, repl.mu.destroyStatus)
-			repl.raftMu.Unlock()
-			return nil, false, errRetry
-		}
 
 		var replTooOldErr error
 		if creatingReplica != nil {

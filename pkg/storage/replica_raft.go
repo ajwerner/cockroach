@@ -730,7 +730,6 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 			// Might have gone negative if node was recently restarted.
 			raftLogSize = 0
 		}
-
 	}
 
 	// Update protected state - last index, last term, raft log size, and raft
@@ -763,24 +762,43 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 
 	applicationStart := timeutil.Now()
 	if len(rd.CommittedEntries) > 0 {
-		switch err := appTask.ApplyCommittedEntries(ctx); err {
+		err := appTask.ApplyCommittedEntries(ctx)
+		stats.applyCommittedEntriesStats = sm.moveStats()
+		switch err {
 		case nil:
 		case apply.ErrRemoved:
 			// We know that our replica has been removed. We also know that we've
 			// stepped the state machine up to the point where it's been removed.
 			// TODO(ajwerner): decide if there's more to be done here.
-			log.Infof(ctx, "setting replica to destroyed at %v", r.mu.replicaID)
+			log.Infof(ctx, "setting replica to destroyed at %v %v %v", r.mu.replicaID, stats.entriesProcessed, len(rd.CommittedEntries))
+			rd.CommittedEntries = rd.CommittedEntries[:stats.entriesProcessed]
+			const expl = "during advance"
+			// Tell raft we applied up to where we applied. This is super duper gross
+			// but I think is important for when we need to check the raft state when
+			// deciding whether we can remove this
 			r.mu.Lock()
-			r.mu.destroyStatus.Set(roachpb.NewReplicaTooOldError(r.mu.replicaID), destroyReasonRemovalPending)
+			if err := r.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
+				raftGroup.Advance(rd)
+
+				// If the Raft group still has more to process then we immediately
+				// re-enqueue it for another round of processing. This is possible if
+				// the group's committed entries were paginated due to size limitations
+				// and we didn't apply all of them in this pass.
+				if raftGroup.HasReady() {
+					r.store.enqueueRaftUpdateCheck(r.RangeID)
+				}
+				return true, nil
+			}); err != nil {
+				return stats, expl, errors.Wrap(err, expl)
+			}
+			r.mu.destroyStatus.Set(roachpb.NewRangeNotFoundError(r.RangeID, r.store.StoreID()), destroyReasonRemovalPending)
 			r.mu.removed = true
 			r.mu.Unlock()
 			r.store.replicaGCQueue.AddAsync(ctx, r, replicaGCPriorityRemoved)
-			stats.applyCommittedEntriesStats = sm.moveStats()
 			return stats, "", nil
 		default:
 			return stats, err.(*nonDeterministicFailure).safeExpl, err
 		}
-		stats.applyCommittedEntriesStats = sm.moveStats()
 
 		// etcd raft occasionally adds a nil entry (our own commands are never
 		// empty). This happens in two situations: When a new leader is elected, and
