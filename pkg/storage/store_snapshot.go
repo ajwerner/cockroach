@@ -778,7 +778,9 @@ func (s *Store) shouldAcceptSnapshotData(
 				}
 				existingRepl.mu.Lock()
 				if snapReplicaDesc.ReplicaID > existingRepl.mu.minReplicaID {
+					log.Infof(ctx, "encountered snapshot for replica %d with replica id %d, destroying", snapReplicaDesc.ReplicaID, existingRepl.mu.minReplicaID)
 					existingRepl.mu.minReplicaID = snapReplicaDesc.ReplicaID
+					existingRepl.mu.removed = true
 					existingRepl.mu.destroyStatus.Set(err, destroyReasonRemovalPending)
 				}
 				existingRepl.mu.Unlock()

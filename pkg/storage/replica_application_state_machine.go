@@ -435,6 +435,26 @@ func (b *replicaAppBatch) Stage(cmdI apply.Command) (apply.CheckedCommand, error
 		log.Event(ctx, "applying command")
 	}
 
+	// Determine whether the command is going to remove us from the range.
+	// If it is we'll return an error right here which should bail us all out
+	// of processing the rest of the messages.
+	storeID := b.r.store.StoreID()
+	// We need to know if we're currently in the range. When running with a
+	// preemptive snapshot we won't be so we shouldn't remove ourself now.
+	_, existsCurrently := b.state.Desc.GetReplicaDescriptor(storeID)
+	if rr := cmd.replicatedResult(); existsCurrently && rr != nil && rr.ChangeReplicas != nil {
+		var found bool
+		for _, rDesc := range rr.ChangeReplicas.Replicas() {
+			if rDesc.StoreID == storeID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, apply.ErrRemoved
+		}
+	}
+
 	// Acquire the split or merge lock, if necessary. If a split or merge
 	// command was rejected with a below-Raft forced error then its replicated
 	// result was just cleared and this will be a no-op.

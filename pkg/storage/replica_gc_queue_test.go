@@ -11,6 +11,7 @@
 package storage
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -61,7 +62,7 @@ func TestReplicaGCShouldQueue(t *testing.T) {
 		{now: iTS, lastCheck: bTS, lastActivity: z, isCandidate: false, shouldQ: true, priority: 0},
 	} {
 		if sq, pr := replicaGCShouldQueueImpl(
-			test.now, test.lastCheck, test.lastActivity, test.isCandidate,
+			context.TODO(), test.now, test.lastCheck, test.lastActivity, test.isCandidate,
 		); sq != test.shouldQ || pr != test.priority {
 			t.Errorf("%d: %+v: got (%t,%f)", i, test, sq, pr)
 		}

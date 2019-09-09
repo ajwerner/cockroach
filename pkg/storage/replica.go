@@ -343,10 +343,13 @@ type Replica struct {
 		// Raft group). The replica ID will be non-zero whenever the replica is
 		// part of a Raft group.
 		replicaID roachpb.ReplicaID
-		readdedAs roachpb.ReplicaID
 		// The minimum allowed ID for this replica. Initialized from
-		// RaftTombstone.NextReplicaID.
+		// RaftTombstone.NextReplicaID. Also set if messages destined for this store
+		// with a higher replicaID have been observed. In that case removed will
+		// also be true.
 		minReplicaID roachpb.ReplicaID
+		removed      bool
+
 		// The ID of the leader replica within the Raft group. Used to determine
 		// when the leadership changes.
 		leaderID roachpb.ReplicaID
@@ -491,13 +494,11 @@ type Replica struct {
 
 func (r *Replica) isRemoved(storeID roachpb.StoreID) bool {
 	r.mu.RLock()
-	minReplicaID := r.mu.minReplicaID
 	desc := r.mu.state.Desc
-	replicaID := r.mu.replicaID
+	removalPending := r.mu.destroyStatus.reason == destroyReasonRemovalPending
 	r.mu.RUnlock()
-	currentRepl, currentMember := desc.GetReplicaDescriptor(r.store.StoreID())
-	log.Infof(r.AnnotateCtx(context.TODO()), "isRemoved %v %v %v %v %v", !currentMember || minReplicaID > currentRepl.ReplicaID, currentMember, minReplicaID, currentRepl, replicaID)
-	return !currentMember || minReplicaID > currentRepl.ReplicaID
+	_, currentMember := desc.GetReplicaDescriptor(r.store.StoreID())
+	return !currentMember || removalPending
 }
 
 var _ batcheval.EvalContext = &Replica{}

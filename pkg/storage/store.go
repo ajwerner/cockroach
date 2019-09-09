@@ -3562,8 +3562,8 @@ func (s *Store) HandleRaftResponse(ctx context.Context, resp *RaftMessageRespons
 				// The replica will be garbage collected soon (we are sure
 				// since our replicaID is definitely too old), but in the meantime we
 				// already want to bounce all traffic from it. Note that the replica
-				// could be re-added with a higher replicaID, in which this error is
-				// cleared in setReplicaIDRaftMuLockedMuLocked.
+				// could be re-added with a higher replicaID, but we want to clear the
+				// replica's data before that happens.
 				if repl.mu.destroyStatus.IsAlive() {
 					storeID := repl.store.StoreID()
 					repl.mu.destroyStatus.Set(roachpb.NewRangeNotFoundError(repl.RangeID, storeID), destroyReasonRemovalPending)
@@ -3947,7 +3947,12 @@ func (s *Store) getOrCreateReplica(
 	replicaID roachpb.ReplicaID,
 	creatingReplica *roachpb.ReplicaDescriptor,
 ) (_ *Replica, created bool, _ error) {
-	for {
+	r := retry.StartWithCtx(ctx, retry.Options{
+		InitialBackoff: time.Microsecond,
+		MaxBackoff:     10 * time.Millisecond,
+		Closer:         s.stopper.ShouldQuiesce(),
+	})
+	for r.Next() {
 		r, created, err := s.tryGetOrCreateReplica(
 			ctx,
 			rangeID,
@@ -3955,6 +3960,7 @@ func (s *Store) getOrCreateReplica(
 			creatingReplica,
 		)
 		if err == errRetry {
+			log.Infof(ctx, "retrying tryGetOrCreateReplica %v %v %v", rangeID, replicaID, creatingReplica)
 			continue
 		}
 		if err != nil {
@@ -3962,6 +3968,12 @@ func (s *Store) getOrCreateReplica(
 		}
 		return r, created, err
 	}
+	// The retry stopped which means that we were canceled or the store
+	// is shutting down.
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return nil, false, stop.ErrUnavailable
 }
 
 // tryGetOrCreateReplica performs a single attempt at trying to lookup or
@@ -3983,6 +3995,14 @@ func (s *Store) tryGetOrCreateReplica(
 		repl.mu.Lock()
 		defer repl.mu.Unlock()
 
+		// The replicaID is zero when we're acquiring the merge lock.
+		// In that case we must return the replica.
+		if replicaID != 0 && !repl.mu.destroyStatus.IsAlive() {
+			log.Infof(ctx, "returning early due to destroy status %v %v %v", replicaID, repl.mu.replicaID, repl.mu.destroyStatus)
+			repl.raftMu.Unlock()
+			return nil, false, errRetry
+		}
+
 		var replTooOldErr error
 		if creatingReplica != nil {
 			// Drop messages that come from a node that we believe was once a member of
@@ -3997,29 +4017,50 @@ func (s *Store) tryGetOrCreateReplica(
 
 		// This request is destined for a later replica on this Store. We need to
 		// ignore this message and destroy the replica.
-		if repl.mu.replicaID != 0 && repl.mu.replicaID < replicaID {
-			repl.mu.destroyStatus.Set(errors.Errorf("%s: removed and re-added as %d", repl, replicaID), destroyReasonRemoved)
-			if !repl.isInitializedRLocked() {
-				s.mu.Lock()
-				// Only an uninitialized replica can have a placeholder since, by
-				// definition, an initialized replica will be present in the
-				// replicasByKey map. While the replica will usually consume the
-				// placeholder itself, that isn't guaranteed and so this invocation
-				// here is crucial (i.e. don't remove it).
-				if s.removePlaceholderLocked(ctx, rangeID) {
-					atomic.AddInt32(&s.counts.droppedPlaceholders, 1)
-				}
-				s.unlinkReplicaByRangeIDLocked(repl.RangeID)
-				s.mu.Unlock()
-			} else {
-				// log.Infof(ctx, "%v found message for replica %d but have replica %d, enqueuing for removal %v", rangeID, replicaID, repl.mu.replicaID, repl.isInitializedRLocked())
-
-				if replicaID > repl.mu.minReplicaID {
-					repl.mu.minReplicaID = replicaID
-					s.replicaGCQueue.MaybeAddAsync(ctx, repl, s.cfg.Clock.Now())
-				}
+		if replicaID != 0 && repl.mu.replicaID != 0 && repl.mu.replicaID < replicaID {
+			log.Infof(ctx, "found message for newer replica ID: %v %v %v", repl.mu.replicaID, replicaID, repl.mu.minReplicaID)
+			defer repl.raftMu.Unlock()
+			isAlive := repl.mu.destroyStatus.IsAlive()
+			if !isAlive {
+				return nil, false, repl.mu.destroyStatus.err
 			}
-			repl.raftMu.Unlock()
+			repl.mu.destroyStatus.Set(errors.Errorf("%s: removed and re-added as %d", repl, replicaID), destroyReasonRemovalPending)
+
+			if !repl.isInitializedRLocked() {
+				// We need to launch an async task to remove this uninitialized replica.
+				_ = s.stopper.RunAsyncTask(repl.AnnotateCtx(ctx), "remove uninitialized replica", func(context.Context) {
+					s.mu.Lock()
+					defer s.mu.Unlock()
+					repl.mu.Lock()
+					defer repl.mu.Unlock()
+					if repl.isInitializedRLocked() {
+						log.Fatalf(ctx, "how can I be initialized now considering I wasn't initialized before?")
+					}
+					value, stillExists := s.mu.replicas.Load(int64(rangeID))
+					if !stillExists {
+						log.Fatalf(ctx, "uninitialized replica was removed in the meantime")
+						return
+					}
+					existing := (*Replica)(value)
+					// Only an uninitialized replica can have a placeholder since, by
+					// definition, an initialized replica will be present in the
+					// replicasByKey map. While the replica will usually consume the
+					// placeholder itself, that isn't guaranteed and so this invocation
+					// here is crucial (i.e. don't remove it).
+
+					if existing == repl {
+						log.Infof(ctx, "removing uninitialized replica")
+						if s.removePlaceholderLocked(ctx, rangeID) {
+							atomic.AddInt32(&s.counts.droppedPlaceholders, 1)
+						}
+						s.unlinkReplicaByRangeIDLocked(rangeID)
+					} else {
+						log.Fatalf(ctx, "uninitialized replica was already removed?")
+					}
+				})
+			} else {
+				s.replicaGCQueue.MaybeAddAsync(ctx, repl, s.cfg.Clock.Now())
+			}
 			return nil, false, roachpb.NewReplicaTooOldError(repl.mu.replicaID)
 		}
 
@@ -4028,8 +4069,12 @@ func (s *Store) tryGetOrCreateReplica(
 			err = replTooOldErr
 		} else if ds := repl.mu.destroyStatus; ds.reason == destroyReasonRemoved {
 			err = errRetry
-		} else {
+		} else if repl.mu.replicaID == 0 {
 			err = repl.setReplicaIDRaftMuLockedMuLocked(replicaID)
+		} else if replicaID != 0 && repl.mu.replicaID > replicaID {
+			err = roachpb.NewReplicaTooOldError(replicaID)
+		} else if replicaID != 0 && repl.mu.replicaID != replicaID {
+			log.Fatalf(ctx, "we should never update the replica id based on a message %v %v", repl.mu.replicaID, replicaID)
 		}
 		if err != nil {
 			repl.raftMu.Unlock()

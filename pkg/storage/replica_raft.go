@@ -451,17 +451,24 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	raftLogSize := r.mu.raftLogSize
 	leaderID := r.mu.leaderID
 	lastLeaderID := leaderID
-
-	err := r.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
-		if err := r.mu.proposalBuf.FlushLockedWithRaftGroup(raftGroup); err != nil {
-			return false, err
-		}
-		if hasReady = raftGroup.HasReady(); hasReady {
-			rd = raftGroup.Ready()
-		}
-		return hasReady /* unquiesceAndWakeLeader */, nil
-	})
+	removed := r.mu.removed
+	var err error
+	if !removed {
+		err = r.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
+			if err := r.mu.proposalBuf.FlushLockedWithRaftGroup(raftGroup); err != nil {
+				return false, err
+			}
+			if hasReady = raftGroup.HasReady(); hasReady {
+				rd = raftGroup.Ready()
+			}
+			return hasReady /* unquiesceAndWakeLeader */, nil
+		})
+	}
 	r.mu.Unlock()
+	if removed {
+		log.Infof(ctx, "not processing ready for removed replica")
+		return stats, "", nil
+	}
 	if err != nil {
 		const expl = "while checking raft group for Ready"
 		return stats, expl, errors.Wrap(err, expl)
@@ -756,7 +763,21 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 
 	applicationStart := timeutil.Now()
 	if len(rd.CommittedEntries) > 0 {
-		if err := appTask.ApplyCommittedEntries(ctx); err != nil {
+		switch err := appTask.ApplyCommittedEntries(ctx); err {
+		case nil:
+		case apply.ErrRemoved:
+			// We know that our replica has been removed. We also know that we've
+			// stepped the state machine up to the point where it's been removed.
+			// TODO(ajwerner): decide if there's more to be done here.
+			log.Infof(ctx, "setting replica to destroyed at %v", r.mu.replicaID)
+			r.mu.Lock()
+			r.mu.destroyStatus.Set(roachpb.NewReplicaTooOldError(r.mu.replicaID), destroyReasonRemovalPending)
+			r.mu.removed = true
+			r.mu.Unlock()
+			r.store.replicaGCQueue.AddAsync(ctx, r, replicaGCPriorityRemoved)
+			stats.applyCommittedEntriesStats = sm.moveStats()
+			return stats, "", nil
+		default:
 			return stats, err.(*nonDeterministicFailure).safeExpl, err
 		}
 		stats.applyCommittedEntriesStats = sm.moveStats()
@@ -789,9 +810,10 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 		r.mu.Unlock()
 	}
 
-	// TODO(bdarnell): need to check replica id and not Advance if it
-	// has changed. Or do we need more locking to guarantee that replica
-	// ID cannot change during handleRaftReady?
+	// NB: if we just processed a command which removed this replica from the
+	// raft group we will early return before this point. This, combined with
+	// the fact that we'll refuse to process messages intended for a higher
+	// replica ID ensures that our replica ID could not have changed.
 	const expl = "during advance"
 	if err := r.withRaftGroup(true, func(raftGroup *raft.RawNode) (bool, error) {
 		raftGroup.Advance(rd)

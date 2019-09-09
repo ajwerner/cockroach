@@ -270,8 +270,9 @@ func (r *Replica) maybeInitializeRaftGroup(ctx context.Context) {
 	// If this replica hasn't initialized the Raft group, create it and
 	// unquiesce and wake the leader to ensure the replica comes up to date.
 	initialized := r.mu.internalRaftGroup != nil
+	removed := !r.mu.destroyStatus.IsAlive()
 	r.mu.RUnlock()
-	if initialized {
+	if initialized || removed {
 		return
 	}
 
