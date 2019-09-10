@@ -4052,7 +4052,7 @@ func (s *Store) tryGetOrCreateReplica(
 			} else {
 				s.replicaGCQueue.MaybeAddAsync(ctx, repl, s.cfg.Clock.Now())
 			}
-			return nil, false, roachpb.NewReplicaTooOldError(repl.mu.replicaID)
+			return nil, false, roachpb.NewRangeNotFoundError(rangeID, s.StoreID())
 		}
 
 		var err error
@@ -4063,7 +4063,7 @@ func (s *Store) tryGetOrCreateReplica(
 		} else if repl.mu.replicaID == 0 {
 			err = repl.setReplicaIDRaftMuLockedMuLocked(replicaID)
 		} else if replicaID != 0 && repl.mu.replicaID > replicaID {
-			err = roachpb.NewReplicaTooOldError(replicaID)
+			err = roachpb.NewRangeNotFoundError(rangeID, s.StoreID())
 		} else if replicaID != 0 && repl.mu.replicaID != replicaID {
 			log.Fatalf(ctx, "we should never update the replica id based on a message %v %v", repl.mu.replicaID, replicaID)
 		}
@@ -4085,6 +4085,7 @@ func (s *Store) tryGetOrCreateReplica(
 		return nil, false, err
 	} else if ok {
 		if replicaID != 0 && replicaID < tombstone.NextReplicaID {
+			log.Infof(ctx, "here with the raft group deleted error")
 			return nil, false, &roachpb.RaftGroupDeletedError{}
 		}
 	}

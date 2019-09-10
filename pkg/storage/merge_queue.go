@@ -280,29 +280,33 @@ func (mq *mergeQueue) process(
 		// side and AdminRelocateRange removes any on the range it operates on.
 		// For the sake of obviousness, just fix this all upfront.
 		var err error
+		log.Infof(ctx, "lhsDesc before maybeLeaseAtomic %v", lhsDesc)
 		lhsDesc, err = maybeLeaveAtomicChangeReplicas(ctx, store, lhsDesc)
 		if err != nil {
 			log.VEventf(ctx, 2, `%v`, err)
 			return err
 		}
+		log.Infof(ctx, "lhsDesc after maybeLeaseAtomic %v", lhsDesc)
 
 		lhsDesc, err = removeLearners(ctx, db, lhsDesc)
 		if err != nil {
 			log.VEventf(ctx, 2, `%v`, err)
 			return err
 		}
-
+		log.Infof(ctx, "lhsDesc after removeLearners %v", lhsDesc)
+		log.Infof(ctx, "rhsDesc before maybeLeaseAtomic %v %v", rhsDesc, rhsDesc.Replicas().InAtomicReplicationChange())
 		rhsDesc, err = maybeLeaveAtomicChangeReplicas(ctx, store, rhsDesc)
 		if err != nil {
 			log.VEventf(ctx, 2, `%v`, err)
 			return err
 		}
-
+		log.Infof(ctx, "rhsDesc after  maybeLeaseAtomic %v", rhsDesc)
 		rhsDesc, err = removeLearners(ctx, db, rhsDesc)
 		if err != nil {
 			log.VEventf(ctx, 2, `%v`, err)
 			return err
 		}
+		log.Infof(ctx, "rhsDesc after removeLearners %v", rhsDesc)
 	}
 	lhsReplicas, rhsReplicas := lhsDesc.Replicas().All(), rhsDesc.Replicas().All()
 

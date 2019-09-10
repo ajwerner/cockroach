@@ -1240,6 +1240,17 @@ func (m *multiTestContext) unreplicateRangeNonFatal(rangeID roachpb.RangeID, des
 	m.mu.RUnlock()
 
 	_, err := m.changeReplicas(startKey, dest, roachpb.REMOVE_REPLICA)
+	if err != nil {
+		return err
+	}
+	// Wait for the unreplications to complete on destination node.
+	return retry.ForDuration(testutils.DefaultSucceedsSoonDuration, func() error {
+		_, err := m.stores[dest].GetReplica(rangeID)
+		if err == nil {
+			return fmt.Errorf("replica still exists on dest %d", dest)
+		}
+		return nil
+	})
 	return err
 }
 
@@ -1247,7 +1258,45 @@ func (m *multiTestContext) unreplicateRangeNonFatal(rangeID roachpb.RangeID, des
 // from all configured engines, filling in zeros when the value is not
 // found. Returns a slice of the same length as mtc.engines.
 func (m *multiTestContext) readIntFromEngines(key roachpb.Key) []int64 {
+	values := m.readFromEngines(key)
 	results := make([]int64, len(m.engines))
+	for i, val := range values {
+		if val == nil {
+			continue
+		}
+		var err error
+		if results[i], err = val.GetInt(); err != nil {
+			log.Errorf(context.TODO(), "engine %d: error decoding %s from key %s: %+v",
+				i, val, key, err)
+		}
+	}
+	return results
+}
+
+// readBytesFromEngines reads the current bytes value at the given key
+// from all configured engines, filling in zeros when the value is not
+// found. Returns a slice of the same length as mtc.engines.
+func (m *multiTestContext) readBytesFromEngines(key roachpb.Key) [][]byte {
+	values := m.readFromEngines(key)
+	results := make([][]byte, len(m.engines))
+	for i, val := range values {
+		if val == nil {
+			continue
+		}
+		var err error
+		if results[i], err = val.GetBytes(); err != nil {
+			log.Errorf(context.TODO(), "engine %d: error decoding %s from key %s: %+v",
+				i, val, key, err)
+		}
+	}
+	return results
+}
+
+// readFromEngines reads the current value at the given key
+// from all configured engines, filling in nil when the value is not
+// found. Returns a slice of the same length as mtc.engines.
+func (m *multiTestContext) readFromEngines(key roachpb.Key) []*roachpb.Value {
+	results := make([]*roachpb.Value, len(m.engines))
 	for i, eng := range m.engines {
 		val, _, err := engine.MVCCGet(context.Background(), eng, key, m.clocks[i].Now(),
 			engine.MVCCGetOptions{})
@@ -1256,10 +1305,7 @@ func (m *multiTestContext) readIntFromEngines(key roachpb.Key) []int64 {
 		} else if val == nil {
 			log.VEventf(context.TODO(), 1, "engine %d: missing key %s", i, key)
 		} else {
-			results[i], err = val.GetInt()
-			if err != nil {
-				log.Errorf(context.TODO(), "engine %d: error decoding %s from key %s: %+v", i, val, key, err)
-			}
+			results[i] = val
 		}
 	}
 	return results
@@ -1271,6 +1317,19 @@ func (m *multiTestContext) waitForValuesT(t testing.TB, key roachpb.Key, expecte
 	t.Helper()
 	testutils.SucceedsSoon(t, func() error {
 		actual := m.readIntFromEngines(key)
+		if !reflect.DeepEqual(expected, actual) {
+			return errors.Errorf("expected %v, got %v", expected, actual)
+		}
+		return nil
+	})
+}
+
+// waitForByteValuesT is like waitForValues but allows the caller to provide a
+// testing.T which may differ from m.t.
+func (m *multiTestContext) waitForByteValuesT(t testing.TB, key roachpb.Key, expected [][]byte) {
+	t.Helper()
+	testutils.SucceedsSoon(t, func() error {
+		actual := m.readBytesFromEngines(key)
 		if !reflect.DeepEqual(expected, actual) {
 			return errors.Errorf("expected %v, got %v", expected, actual)
 		}

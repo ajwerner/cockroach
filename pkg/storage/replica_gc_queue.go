@@ -292,7 +292,11 @@ func (rgcq *replicaGCQueue) process(
 		// replica became "non-gc'able" in the meantime by checking (with raftMu
 		// held throughout) whether the replicaID is still smaller than the
 		// NextReplicaID.
-		if err := repl.store.RemoveReplica(ctx, repl, replyDesc.NextReplicaID, RemoveOptions{
+		nextReplicaID := replyDesc.NextReplicaID
+		if currentMember {
+			nextReplicaID = currentDesc.ReplicaID
+		}
+		if err := repl.store.RemoveReplica(ctx, repl, nextReplicaID, RemoveOptions{
 			DestroyData: true,
 		}); err != nil {
 			return err

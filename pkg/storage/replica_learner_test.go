@@ -32,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
@@ -966,6 +967,7 @@ func TestMergeQueueSeesLearnerOrJointConfig(t *testing.T) {
 	// Create the RHS again and repeat the same game, except this time the LHS
 	// gets a VOTER_INCOMING for s2, and then the merge queue runs into it. It
 	// will transition the LHS out of the joint config and then do the merge.
+	log.Infof(ctx, "part 2")
 	{
 		desc := splitAndUnsplit()
 
@@ -977,7 +979,10 @@ func TestMergeQueueSeesLearnerOrJointConfig(t *testing.T) {
 		checkTransitioningOut := func() {
 			t.Helper()
 			store, repl := getFirstStoreReplica(t, tc.Server(0), scratchStartKey)
-			trace, errMsg, err := store.ManuallyEnqueue(ctx, "merge", repl, true /* skipShouldQueue */)
+			var err error
+			var errMsg string
+			var trace []tracing.RecordedSpan
+			trace, errMsg, err = store.ManuallyEnqueue(ctx, "merge", repl, true /* skipShouldQueue */)
 			require.NoError(t, err)
 			require.Equal(t, ``, errMsg)
 			formattedTrace := tracing.FormatRecordedSpans(trace)
@@ -995,9 +1000,11 @@ func TestMergeQueueSeesLearnerOrJointConfig(t *testing.T) {
 		require.Len(t, desc.Replicas().Voters(), 2)
 		require.False(t, desc.Replicas().InAtomicReplicationChange(), desc)
 
+		log.Infof(ctx, "part 3")
 		// Repeat the game, except now we start with two replicas and we're
 		// giving the RHS a VOTER_OUTGOING.
 		desc = splitAndUnsplit()
+		log.Infof(ctx, "part 3 - after split and unsplit")
 		ltk.withStopAfterJointConfig(func() {
 			descRight := tc.RemoveReplicasOrFatal(t, desc.EndKey.AsRawKey(), tc.Target(1))
 			require.Len(t, descRight.Replicas().Filter(predOutgoing), 1, desc)
