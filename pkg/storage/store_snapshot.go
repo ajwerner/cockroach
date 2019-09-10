@@ -857,6 +857,7 @@ func (s *Store) tryAcceptSnapshotData(
 		// We think the snapshot is addressed to a higher replica ID which
 		// will necessitate the removal of the existingRepl.
 		existingRepl.mu.Lock()
+		defer existingRepl.mu.Unlock()
 		// Detect a race on a raft message informing us that we are indeed this replica.
 		// We know that our replica didn't become zero because replica IDs don't
 		// move backwards
@@ -864,7 +865,6 @@ func (s *Store) tryAcceptSnapshotData(
 		destroyStatus = existingRepl.mu.destroyStatus.reason
 		shouldDestroyExisting := destroyStatus == destroyReasonAlive && existingRepl.mu.replicaID < snapReplicaDesc.ReplicaID
 		if !shouldDestroyExisting {
-			existingRepl.mu.Unlock()
 			if !existingDesc.IsInitialized() {
 				return false, s.checkSnapshotOverlapLocked(ctx, snapHeader)
 			}
@@ -876,6 +876,7 @@ func (s *Store) tryAcceptSnapshotData(
 		// TODO(ajwerner): I think this might be super wrong. This is an optimization so maybe what we should
 		// do is just receive the snapshot? In theory nobody should talk to us again with the old ID but
 		// if we restart and then they do we might have some weird stuff happen.
+
 		err := roachpb.NewRangeNotFoundError(existingRepl.RangeID, s.StoreID())
 		if !existingDesc.IsInitialized() {
 			return false, err

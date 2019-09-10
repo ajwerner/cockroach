@@ -3353,10 +3353,11 @@ func TestMergeQueue(t *testing.T) {
 	t.Run("non-collocated", func(t *testing.T) {
 		reset(t)
 		verifyUnmerged(t)
-		mtc.replicateRange(rhs().RangeID, 1)
-		mtc.transferLease(ctx, rhs().RangeID, 0, 1)
-		mtc.unreplicateRange(rhs().RangeID, 0)
-		mtc.waitForUnreplicated(rhs().RangeID, 0)
+		rhsRangeID := rhs().RangeID
+		mtc.replicateRange(rhsRangeID, 1)
+		mtc.transferLease(ctx, rhsRangeID, 0, 1)
+		mtc.unreplicateRange(rhsRangeID, 0)
+		require.NoError(t, mtc.waitForUnreplicated(rhsRangeID, 0))
 
 		clearRange(t, lhsStartKey, rhsEndKey)
 		store.MustForceMergeScanAndProcess()
