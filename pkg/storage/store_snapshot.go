@@ -722,16 +722,13 @@ func (s *Store) checkSnapshotOverlapLocked(
 	return nil
 }
 
-// shouldAcceptSnapshotData is an optimization to check whether we should even
-// bother to read the data for an incoming snapshot. If the snapshot overlaps an
-// existing replica or placeholder, we'd error during application anyway, so do
-// it before transferring all the data. This method is a guess and may have
-// false positives. If the snapshot should be rejected, an error is returned
-// with a description of why. Otherwise, nil means we should accept the
-// snapshot.
 func (s *Store) shouldAcceptSnapshotData(
 	ctx context.Context, snapHeader *SnapshotRequest_Header,
 ) (err error) {
+	log.Infof(ctx, "in shouldAcceptSnapshotData for %v %v", snapHeader.RaftMessageRequest.RangeID, snapHeader.RaftMessageRequest.ToReplica)
+	defer func() {
+		log.Infof(ctx, "returning from  shouldAcceptSnapshotData for  %v %v %v", snapHeader.RaftMessageRequest.RangeID, snapHeader.RaftMessageRequest.ToReplica, err)
+	}()
 	if snapHeader.IsPreemptive() {
 		return crdberrors.AssertionFailedf(`expected a raft or learner snapshot`)
 	}
@@ -739,23 +736,36 @@ func (s *Store) shouldAcceptSnapshotData(
 	// TODO(ajwerner): this construct is sort of lame. It doesn't release the
 	// reserved snapshot and it also might end up with infinite recursion though
 	// that would probably only be possible with a bug.
-
-	var waitCh chan error
-	defer func() {
-		if waitCh == nil {
-			return
-		}
-		log.Infof(ctx, "waiting for removal")
-		select {
-		case err = <-waitCh:
-			if err == nil {
-				err = s.shouldAcceptSnapshotData(ctx, snapHeader)
+	waitCh := make(chan struct{}, 1)
+	var wait bool
+	for {
+		if wait, err = s.tryAcceptSnapshotData(ctx, snapHeader, waitCh); err == nil && wait {
+			log.Infof(ctx, "waiting for removal")
+			select {
+			case <-waitCh:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-		case <-ctx.Done():
-			err = ctx.Err()
+		} else {
+			return err
 		}
-	}()
+	}
+}
 
+// shouldAcceptSnapshotData is an optimization to check whether we should even
+// bother to read the data for an incoming snapshot. If the snapshot overlaps an
+// existing replica or placeholder, we'd error during application anyway, so do
+// it before transferring all the data. This method is a guess and may have
+// false positives. If the snapshot should be rejected, an error is returned
+// with a description of why. Otherwise, nil means we should accept the
+// snapshot.
+
+// tryAcceptSnapshotData is a helper of shouldAcceptSnapshotData which deals
+// with cases where the snapshot is addressed to either older or uninitialized
+// replicas in which case the snapshot should wait.
+func (s *Store) tryAcceptSnapshotData(
+	ctx context.Context, snapHeader *SnapshotRequest_Header, waitCh chan struct{},
+) (wait bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -769,76 +779,125 @@ func (s *Store) shouldAcceptSnapshotData(
 		// We have a key range [desc.StartKey,desc.EndKey) which we want to apply a
 		// snapshot for. Is there a conflicting existing placeholder or an
 		// overlapping range?
-		return s.checkSnapshotOverlapLocked(ctx, snapHeader)
+		return false, s.checkSnapshotOverlapLocked(ctx, snapHeader)
 	}
 	existingRepl := (*Replica)(v)
 
+	// TODO(ajwerner): consider holding the mutex on the replica for this whole
+	// method from here down, it might simplify the code.
 	existingRepl.mu.RLock()
 	existingDesc := existingRepl.mu.state.Desc
 	existingIsInitialized := existingDesc.IsInitialized()
 	destroyStatus := existingRepl.mu.destroyStatus.reason
+	existingReplID := existingRepl.mu.replicaID
 	existingRepl.mu.RUnlock()
 
+	log.Infof(ctx, "in shouldAcceptSnapshotData %v %v %v %v", existingRepl, existingDesc, existingIsInitialized, destroyStatus)
+	// shouldDestroyExisting is set to true if after the switch the existingRepl
+	// should be destroyed. If it is true then existingRepl.mu will be locked after
+	// the switch with a deferred Unlock.
 	switch destroyStatus {
 	case destroyReasonMergePending:
 		// TODO(ajwerner): think about this case, we know that there's no way it
 		// could be for a newer replica. I suppose it could be for an older replica
 		// but we'll sort that out later.
-		return nil
-	case destroyReasonRemovalPending, destroyReasonRemoved:
-		if log.V(2) {
-			log.Infof(ctx, "got snapshot but found replica waiting for removal")
-		}
+		return false, nil
 	case destroyReasonAlive:
-		if !existingIsInitialized {
-			// We'll end up removing this uninitialized replica later.
-			return nil
-		}
-		// Regular Raft snapshots can't be refused at this point so long as
-		// the snapshot was intended for this replica, even if they widen
-		// the existing replica. See the comments in
-		// Replica.maybeAcquireSnapshotMergeLock for how this is made safe.
-		// The tricky edge case here is if this store has been removed from
-		// the range and re-added as a different replica. In this later case
-		// we note that the replica needs to be destroyed and queue it for
-		// removal.
+
+		// We want to detect cases where the inbound snapshot is for a later version
+		// of this range. If we don't know our replica ID we're going to let the
+		// snapshot through.
 		//
-		// NB: we expect the replica to know its replicaID at this point
-		// (i.e. !existingIsPreemptive), though perhaps it's possible
-		// that this isn't true if the leader initiates a Raft snapshot
-		// (that would provide a range descriptor with this replica in
-		// it) but this node reboots (temporarily forgetting its
-		// replicaID) before the snapshot arrives.
-		existingReplicaDesc, storeHasReplica := existingDesc.GetReplicaDescriptor(s.Ident.StoreID)
+		// TODO(ajwerner): figure out when this happens and maybe even assert on it.
 		snapReplicaDesc, snapHasReplica := desc.GetReplicaDescriptor(s.Ident.StoreID)
-		// TODO(ajwerner): it also seems bad if the storeHasReplica and snap doesn't have replica which
-		// will happen with a pre-emptive snapshot but let's allow those for now.
-		if storeHasReplica && snapHasReplica && snapReplicaDesc.ReplicaID != existingReplicaDesc.ReplicaID {
-			log.Infof(ctx, "got a snapshot for a newer replica %v but have replica %v, enqueueing for removal",
-				snapReplicaDesc.ReplicaID, existingReplicaDesc.ReplicaID)
-			err = &roachpb.ReplicaTooOldError{
-				ReplicaID: existingReplicaDesc.ReplicaID,
+
+		okReplicaID := existingReplID == 0 || snapHasReplica && existingReplID == snapReplicaDesc.ReplicaID
+		if okReplicaID {
+			// Regular Raft snapshots can't be refused at this point so long as
+			// the snapshot was intended for this replica, even if they widen
+			// the existing replica. See the comments in
+			// Replica.maybeAcquireSnapshotMergeLock for how this is made safe.
+			// The tricky edge case here is if this store has been removed from
+			// the range and re-added as a different replica. In this later case
+			// we note that the replica needs to be destroyed and queue it for
+			// removal. The extra tricky case here is if we stumble upon an initialized
+			// replica which could have been created by:
+			//
+			// 1) a pre-emptive snapshot
+			// 2) a split
+			// 3) a raft message which lazily created the replica
+			//
+			// NB: we expect the replica to know its replicaID at this point
+			// (i.e. !existingIsPreemptive), though perhaps it's possible
+			// that this isn't true if the leader initiates a Raft snapshot
+			// (that would provide a range descriptor with this replica inz
+			// it) but this node reboots (temporarily forgetting its
+			// replicaID) before the snapshot arrives.
+			if !existingDesc.IsInitialized() && okReplicaID {
+				return false, s.checkSnapshotOverlapLocked(ctx, snapHeader)
 			}
-			destroyStatus = destroyReasonRemovalPending
-			existingRepl.mu.Lock()
-			if snapReplicaDesc.ReplicaID > existingRepl.mu.minReplicaID {
-				log.Infof(ctx, "encountered snapshot for replica %d with replica id %d, destroying", snapReplicaDesc.ReplicaID, existingRepl.mu.minReplicaID)
-				existingRepl.mu.destroyStatus.Set(err, destroyStatus)
-			}
-			existingRepl.mu.Unlock()
-			log.Infof(existingRepl.AnnotateCtx(ctx), "refusing snapshot intended for replica %d", snapReplicaDesc.ReplicaID)
-			s.replicaGCQueue.MaybeAddAsync(ctx, existingRepl, s.cfg.Clock.Now())
+
+			return false, nil
 		}
+
+		if existingReplID > snapReplicaDesc.ReplicaID {
+			// This snapshot is addressed to an old replica. It's not clear how this
+			// could possibly happen.
+			log.Warningf(ctx, "rejecting a snapshot for an older incarnation of this range: have %d, got %d",
+				existingReplID, snapReplicaDesc.ReplicaID)
+			// TODO(ajwerner): consider making this an assertion or using a better error.
+			// We only ever snapshot from leaseholders. I guess it's possible for an
+			// old leaseholder to send an old snapshot. This is probably the wrong error
+			// here as ReplicaTooOld is usually just used for raft messages to imply that
+			// the sneder is too old. Consider renaming that FromReplicaTooOldError and
+			// making a new ToReplicaTooOldError.
+			return false, roachpb.NewReplicaTooOldError(snapReplicaDesc.ReplicaID)
+		}
+
+		// We think the snapshot is addressed to a higher replica ID which
+		// will necessitate the removal of the existingRepl.
+		existingRepl.mu.Lock()
+		// Detect a race on a raft message informing us that we are indeed this replica.
+		// We know that our replica didn't become zero because replica IDs don't
+		// move backwards
+		existingDesc = existingRepl.mu.state.Desc
+		destroyStatus = existingRepl.mu.destroyStatus.reason
+		shouldDestroyExisting := destroyStatus == destroyReasonAlive && existingRepl.mu.replicaID < snapReplicaDesc.ReplicaID
+		if !shouldDestroyExisting {
+			existingRepl.mu.Unlock()
+			if !existingDesc.IsInitialized() {
+				return false, s.checkSnapshotOverlapLocked(ctx, snapHeader)
+			}
+			return false, nil
+		}
+		log.Infof(ctx, "encountered snapshot for replica %d with replica id %d, destroying",
+			snapReplicaDesc.ReplicaID, existingRepl.mu.replicaID)
+
+		// TODO(ajwerner): I think this might be super wrong. This is an optimization so maybe what we should
+		// do is just receive the snapshot? In theory nobody should talk to us again with the old ID but
+		// if we restart and then they do we might have some weird stuff happen.
+		err := roachpb.NewRangeNotFoundError(existingRepl.RangeID, s.StoreID())
+		if !existingDesc.IsInitialized() {
+			return false, err
+		}
+		destroyStatus = destroyReasonRemovalPending
+		existingRepl.mu.destroyStatus.Set(err, destroyStatus)
+		s.replicaGCQueue.MaybeAddAsync(ctx, existingRepl, s.cfg.Clock.Now())
 	}
 	switch destroyStatus {
 	case destroyReasonRemovalPending, destroyReasonRemoved:
 		log.Infof(ctx, "doing that waiting dance")
-		waitCh = make(chan error, 1)
-		s.replicaGCQueue.MaybeAddCallback(desc.RangeID, func(err error) {
-			waitCh <- err
-		})
+		if !s.replicaGCQueue.MaybeAddCallback(desc.RangeID, func(err error) {
+			// Ignore the error, we'll potentially wait again if there was one
+			// but in general if there's a pending removal we're okay.
+			waitCh <- struct{}{}
+		}) {
+			waitCh <- struct{}{}
+		}
+		return true, nil
 	}
-	return nil
+	log.Fatalf(ctx, "what case is this? the other destroy status?")
+	return false, nil
 }
 
 // receiveSnapshot receives an incoming snapshot via a pre-opened GRPC stream.

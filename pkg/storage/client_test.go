@@ -1240,9 +1240,10 @@ func (m *multiTestContext) unreplicateRangeNonFatal(rangeID roachpb.RangeID, des
 	m.mu.RUnlock()
 
 	_, err := m.changeReplicas(startKey, dest, roachpb.REMOVE_REPLICA)
-	if err != nil {
-		return err
-	}
+	return err
+}
+
+func (m *multiTestContext) waitForUnreplicated(rangeID roachpb.RangeID, dest int) error {
 	// Wait for the unreplications to complete on destination node.
 	return retry.ForDuration(testutils.DefaultSucceedsSoonDuration, func() error {
 		_, err := m.stores[dest].GetReplica(rangeID)
@@ -1251,7 +1252,6 @@ func (m *multiTestContext) unreplicateRangeNonFatal(rangeID roachpb.RangeID, des
 		}
 		return nil
 	})
-	return err
 }
 
 // readIntFromEngines reads the current integer value at the given key

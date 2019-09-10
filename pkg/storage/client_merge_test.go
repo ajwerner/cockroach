@@ -3356,6 +3356,7 @@ func TestMergeQueue(t *testing.T) {
 		mtc.replicateRange(rhs().RangeID, 1)
 		mtc.transferLease(ctx, rhs().RangeID, 0, 1)
 		mtc.unreplicateRange(rhs().RangeID, 0)
+		mtc.waitForUnreplicated(rhs().RangeID, 0)
 
 		clearRange(t, lhsStartKey, rhsEndKey)
 		store.MustForceMergeScanAndProcess()

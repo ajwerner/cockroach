@@ -62,6 +62,11 @@ func (s destroyStatus) Removed() bool {
 	return s.reason == destroyReasonRemoved
 }
 
+// RemovalPending returns whether the replica has its removal pending or is removed.
+func (s destroyStatus) RemovalPending() bool {
+	return s.reason == destroyReasonRemovalPending || s.reason == destroyReasonRemoved
+}
+
 func (r *Replica) preDestroyRaftMuLocked(
 	ctx context.Context,
 	reader engine.Reader,

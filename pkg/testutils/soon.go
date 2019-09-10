@@ -12,7 +12,9 @@ package testutils
 
 import (
 	"context"
+	"os"
 	"runtime/debug"
+	"runtime/pprof"
 	"testing"
 	"time"
 
@@ -33,6 +35,7 @@ const DefaultSucceedsSoonDuration = 45 * time.Second
 func SucceedsSoon(t testing.TB, fn func() error) {
 	t.Helper()
 	if err := SucceedsSoonError(fn); err != nil {
+		pprof.Lookup("goroutine").WriteTo(os.Stdout, 2)
 		t.Fatalf("condition failed to evaluate within %s: %s\n%s",
 			DefaultSucceedsSoonDuration, err, string(debug.Stack()))
 	}

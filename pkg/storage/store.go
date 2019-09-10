@@ -1142,7 +1142,7 @@ func (s *Store) IsStarted() bool {
 	return atomic.LoadInt32(&s.started) == 1
 }
 
-// IterateIDPrefixKeys helps visit system keys that use RangeID prefixing ( such as
+// IterateIDPrefixKeys helps visit system keys that use RangeID prefixing (such as
 // RaftHardStateKey, RaftTombstoneKey, and many others). Such keys could in principle exist at any
 // RangeID, and this helper efficiently discovers all the keys of the desired type (as specified by
 // the supplied `keyFn`) and, for each key-value pair discovered, unmarshals it into `msg` and then
@@ -3975,6 +3975,44 @@ func (s *Store) getOrCreateReplica(
 	return nil, false, stop.ErrUnavailable
 }
 
+// // removeUninitializedReplica unlinks an uninitialized replica object from the Store.
+// // This is potentially scary because we don't have the raftMu. Ideally we'd
+// // really like to garbage collect the data of this range if and only if we knew
+// // it has been removed and not subsumed.
+// func (s *Store) removeUninitializedReplica(ctx context.Context, repl *Replica) error {
+// 	s.mu.Lock()
+// 	defer s.mu.Unlock()
+// 	repl.mu.Lock()
+// 	defer repl.mu.Unlock()
+// 	if !repl.mu.destroyStatus.RemovalPending() {
+// 		log.Fatalf(ctx, "cannot remove uninitialized replica which is not removal pending: %v", destroyStatus)
+// 	}
+
+// 	// When we're in this state we should have already had our destroy status set
+// 	// so it shouldn't have been possible to process any raft messages or apply
+// 	// any snapshots.
+// 	if repl.isInitializedRLocked() {
+// 		log.Fatalf(ctx, "how can I be initialized now considering I wasn't initialized before?")
+// 	}
+// 	value, stillExists := s.mu.replicas.Load(int64(rangeID))
+// 	if !stillExists {
+// 		log.Fatalf(ctx, "uninitialized replica was removed in the meantime")
+// 		return
+// 	}
+// 	existing := (*Replica)(value)
+// 	// Only an uninitialized replica can have a placeholder since, by
+// 	// definition, an initialized replica will be present in the
+// 	// replicasByKey map. While the replica will usually consume the
+// 	// placeholder itself, that isn't guaranteed and so this invocation
+// 	// here is crucial (i.e. don't remove it).
+// 	if existing == repl {
+// 		log.Infof(ctx, "removing uninitialized replica")
+
+// 	} else {
+// 		log.Fatalf(ctx, "uninitialized replica was already removed?")
+// 	}
+// }
+
 // tryGetOrCreateReplica performs a single attempt at trying to lookup or
 // create a replica. It will fail with errRetry if it finds a Replica that has
 // been destroyed (and is no longer in Store.mu.replicas) or if during creation
@@ -4009,21 +4047,59 @@ func (s *Store) tryGetOrCreateReplica(
 		// This request is destined for a later replica on this Store. We need to
 		// ignore this message and destroy the replica.
 		if replicaID != 0 && repl.mu.replicaID != 0 && repl.mu.replicaID < replicaID {
-			log.Infof(ctx, "found message for newer replica ID: %v %v %v", repl.mu.replicaID, replicaID, repl.mu.minReplicaID)
 			defer repl.raftMu.Unlock()
+			log.Infof(ctx, "found message for newer replica ID: %v %v %v %v", repl.mu.replicaID, replicaID, repl.mu.minReplicaID, repl.mu.state.Desc)
 			isAlive := repl.mu.destroyStatus.IsAlive()
 			if !isAlive {
 				return nil, false, repl.mu.destroyStatus.err
 			}
-			repl.mu.destroyStatus.Set(errors.Errorf("%s: removed and re-added as %d", repl, replicaID), destroyReasonRemovalPending)
-
+			err := errors.Errorf("%s removed and re-added as %d", repl, replicaID)
 			if !repl.isInitializedRLocked() {
+				log.Infof(ctx, "doing this craziness")
+				batch := repl.Engine().NewWriteOnlyBatch()
+				repl.mu.destroyStatus.Set(err, destroyReasonRemoved)
+				repl.mu.Unlock()
+				defer repl.mu.Lock()
+				defer batch.Close()
+				if err := repl.preDestroyRaftMuLocked(
+					ctx,
+					repl.Engine(),
+					batch,
+					replicaID,
+					true,  /* rangeIDLocalOnly */
+					false, /* mustClearRange */
+				); err != nil {
+					return nil, false, err
+				}
+
+				// We need to sync here because we are potentially deleting sideloaded
+				// proposals from the file system next. We could write the tombstone only in
+				// a synchronous batch first and then delete the data alternatively, but
+				// then need to handle the case in which there is both the tombstone and
+				// leftover replica data.
+				if err := batch.Commit(true); err != nil {
+					return nil, false, err
+				}
+
+				if repl.raftMu.sideloaded != nil {
+					if err := repl.raftMu.sideloaded.Clear(ctx); err != nil {
+						log.Warningf(ctx, "failed to remove sideload storage for %v: %v", repl, err)
+					}
+				}
+
 				// We need to launch an async task to remove this uninitialized replica.
-				_ = s.stopper.RunAsyncTask(repl.AnnotateCtx(ctx), "remove uninitialized replica", func(context.Context) {
+				_ = s.stopper.RunAsyncTask(repl.AnnotateCtx(ctx), "remove uninitialized replica", func(ctx context.Context) {
 					s.mu.Lock()
 					defer s.mu.Unlock()
 					repl.mu.Lock()
 					defer repl.mu.Unlock()
+					if !repl.mu.destroyStatus.RemovalPending() {
+						log.Fatalf(ctx, "cannot remove uninitialized replica which is not removal pending: %v", repl.mu.destroyStatus)
+					}
+
+					// When we're in this state we should have already had our destroy status set
+					// so it shouldn't have been possible to process any raft messages or apply
+					// any snapshots.
 					if repl.isInitializedRLocked() {
 						log.Fatalf(ctx, "how can I be initialized now considering I wasn't initialized before?")
 					}
@@ -4038,27 +4114,28 @@ func (s *Store) tryGetOrCreateReplica(
 					// replicasByKey map. While the replica will usually consume the
 					// placeholder itself, that isn't guaranteed and so this invocation
 					// here is crucial (i.e. don't remove it).
-
 					if existing == repl {
 						log.Infof(ctx, "removing uninitialized replica")
-						if s.removePlaceholderLocked(ctx, rangeID) {
-							atomic.AddInt32(&s.counts.droppedPlaceholders, 1)
-						}
-						s.unlinkReplicaByRangeIDLocked(rangeID)
+
 					} else {
 						log.Fatalf(ctx, "uninitialized replica was already removed?")
 					}
+					if s.removePlaceholderLocked(ctx, repl.RangeID) {
+						atomic.AddInt32(&s.counts.droppedPlaceholders, 1)
+					}
+					s.unlinkReplicaByRangeIDLocked(repl.RangeID)
 				})
-			} else {
-				s.replicaGCQueue.MaybeAddAsync(ctx, repl, s.cfg.Clock.Now())
+				return nil, false, errRetry
 			}
-			return nil, false, roachpb.NewRangeNotFoundError(rangeID, s.StoreID())
+			repl.mu.destroyStatus.Set(err, destroyReasonRemovalPending)
+			s.replicaGCQueue.MaybeAddAsync(ctx, repl, s.cfg.Clock.Now())
+			return nil, false, err
 		}
 
 		var err error
 		if replTooOldErr != nil {
 			err = replTooOldErr
-		} else if ds := repl.mu.destroyStatus; ds.reason == destroyReasonRemoved {
+		} else if ds := repl.mu.destroyStatus; ds.RemovalPending() {
 			err = errRetry
 		} else if repl.mu.replicaID == 0 {
 			err = repl.setReplicaIDRaftMuLockedMuLocked(replicaID)
