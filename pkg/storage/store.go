@@ -2615,7 +2615,7 @@ func (s *Store) removeReplicaImpl(
 	// they can differ in cases when a replica's ID is increased due to an
 	// incoming raft message (see #14231 for background).
 	rep.mu.Lock()
-	log.Infof(ctx, "removing replica %v %d", rep.mu.destroyStatus.Removed())
+	log.Infof(ctx, "removing replica %v %d", rep.mu.destroyStatus.Removed(), rep.mu.replicaID)
 	if rep.mu.destroyStatus.Removed() {
 		rep.mu.Unlock()
 		log.Infof(ctx, "already removed replica %v %d")
