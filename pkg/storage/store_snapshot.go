@@ -788,7 +788,7 @@ func (s *Store) tryAcceptSnapshotData(
 	existingRepl.mu.RLock()
 	existingDesc := existingRepl.mu.state.Desc
 	existingIsInitialized := existingDesc.IsInitialized()
-	destroyStatus := existingRepl.mu.destroyStatus.reason
+	destroyStatus := existingRepl.mu.destroyStatus
 	existingReplID := existingRepl.mu.replicaID
 	existingRepl.mu.RUnlock()
 
@@ -796,7 +796,7 @@ func (s *Store) tryAcceptSnapshotData(
 	// shouldDestroyExisting is set to true if after the switch the existingRepl
 	// should be destroyed. If it is true then existingRepl.mu will be locked after
 	// the switch with a deferred Unlock.
-	switch destroyStatus {
+	switch destroyStatus.reason {
 	case destroyReasonMergePending:
 		// TODO(ajwerner): think about this case, we know that there's no way it
 		// could be for a newer replica. I suppose it could be for an older replica
@@ -862,8 +862,8 @@ func (s *Store) tryAcceptSnapshotData(
 		// We know that our replica didn't become zero because replica IDs don't
 		// move backwards
 		existingDesc = existingRepl.mu.state.Desc
-		destroyStatus = existingRepl.mu.destroyStatus.reason
-		shouldDestroyExisting := destroyStatus == destroyReasonAlive && existingRepl.mu.replicaID < snapReplicaDesc.ReplicaID
+		destroyStatus = existingRepl.mu.destroyStatus
+		shouldDestroyExisting := destroyStatus.IsAlive() && existingRepl.mu.replicaID < snapReplicaDesc.ReplicaID
 		if !shouldDestroyExisting {
 			if !existingDesc.IsInitialized() {
 				return false, s.checkSnapshotOverlapLocked(ctx, snapHeader)
@@ -881,20 +881,15 @@ func (s *Store) tryAcceptSnapshotData(
 		if !existingDesc.IsInitialized() {
 			return false, err
 		}
-		destroyStatus = destroyReasonRemovalPending
-		existingRepl.mu.destroyStatus.Set(err, destroyStatus)
+
+		existingRepl.mu.destroyStatus.Set(err, destroyReasonRemovalPending)
+		destroyStatus = existingRepl.mu.destroyStatus
 		s.replicaGCQueue.MaybeAddAsync(ctx, existingRepl, s.cfg.Clock.Now())
 	}
-	switch destroyStatus {
+	switch destroyStatus.reason {
 	case destroyReasonRemovalPending, destroyReasonRemoved:
-		log.Infof(ctx, "doing that waiting dance")
-		if !s.replicaGCQueue.MaybeAddCallback(desc.RangeID, func(err error) {
-			// Ignore the error, we'll potentially wait again if there was one
-			// but in general if there's a pending removal we're okay.
-			waitCh <- struct{}{}
-		}) {
-			waitCh <- struct{}{}
-		}
+		log.Infof(ctx, "doing that waiting dance %v", existingDesc.IsInitialized(), destroyStatus)
+		waitCh <- struct{}{}
 		return true, nil
 	}
 	log.Fatalf(ctx, "what case is this? the other destroy status?")

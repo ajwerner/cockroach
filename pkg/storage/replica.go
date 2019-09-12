@@ -492,6 +492,14 @@ type Replica struct {
 	}
 }
 
+// ReplicaID returns the ID for the Replica. It may be zero if the replica does
+// not know its ID.
+func (r *Replica) ReplicaID() roachpb.ReplicaID {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.mu.replicaID
+}
+
 func (r *Replica) isRemoved(storeID roachpb.StoreID) bool {
 	r.mu.RLock()
 	desc := r.mu.state.Desc

@@ -1582,6 +1582,8 @@ func (r *Replica) maybeAcquireSnapshotMergeLock(
 func (r *Replica) maybeAcquireSplitMergeLock(
 	ctx context.Context, raftCmd storagepb.RaftCommand,
 ) (func(), error) {
+	// There's a super nasty case where we're shutting down and we need to wait
+	// for a replica to be GC'd before we could grab it
 	if split := raftCmd.ReplicatedEvalResult.Split; split != nil {
 		return r.acquireSplitLock(ctx, &split.SplitTrigger)
 	} else if merge := raftCmd.ReplicatedEvalResult.Merge; merge != nil {

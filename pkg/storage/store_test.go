@@ -569,8 +569,8 @@ func TestStoreAddRemoveRanges(t *testing.T) {
 	// Try to remove range 1 again.
 	if err := store.RemoveReplica(context.Background(), repl1, repl1.Desc().NextReplicaID, RemoveOptions{
 		DestroyData: true,
-	}); err == nil {
-		t.Fatal("expected error re-removing same range")
+	}); err != nil {
+		t.Fatalf("didn't expected error re-removing same range: %v", err)
 	}
 	// Try to add a range with previously-used (but now removed) ID.
 	repl2Dup := createReplica(store, 1, roachpb.RKey("a"), roachpb.RKey("b"))
@@ -1354,7 +1354,7 @@ func splitTestRange(store *Store, key, splitKey roachpb.RKey, t *testing.T) *Rep
 	require.NoError(t, err)
 	newLeftDesc := *repl.Desc()
 	newLeftDesc.EndKey = splitKey
-	err = store.SplitRange(repl.AnnotateCtx(context.TODO()), repl, newRng, newLeftDesc)
+	err = store.SplitRange(repl.AnnotateCtx(context.TODO()), repl, newRng, newLeftDesc, nil)
 	require.NoError(t, err)
 	return newRng
 }

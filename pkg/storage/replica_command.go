@@ -1072,7 +1072,6 @@ func maybeLeaveAtomicChangeReplicas(
 	}
 
 	// NB: this is matched on in TestMergeQueueSeesLearner.
-	log.Infof(ctx, "so yeah?")
 	log.Eventf(ctx, "transitioning out of joint configuration %s", desc)
 
 	// NB: reason and detail won't be used because no range log event will be
