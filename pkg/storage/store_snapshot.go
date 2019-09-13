@@ -873,21 +873,11 @@ func (s *Store) tryAcceptSnapshotData(
 		err := roachpb.NewRangeNotFoundError(existingRepl.RangeID, s.StoreID())
 		existingRepl.mu.destroyStatus.Set(err, destroyReasonRemovalPending)
 		existingRepl.mu.Unlock()
-		s.stopper.RunAsyncTask(ctx, "removed stale replica", func(ctx context.Context) {
-			// Hold the raftMu to prevent races from underneath raft or from applying
-			// a snapshot.
-			existingRepl.raftMu.Lock()
-			defer existingRepl.raftMu.Unlock()
-			var err error
-			if !existingRepl.IsInitialized() {
-				err = s.removeUninitializedReplicaRaftMuLocked(ctx, existingRepl, snapReplicaDesc.ReplicaID)
-			} else {
-				err = s.removeReplicaImpl(ctx, existingRepl, snapReplicaDesc.ReplicaID, RemoveOptions{
-					DestroyData: true,
-				})
-			}
-			if err != nil {
-				log.Fatalf(ctx, "failed to removed replica %v", existingRepl)
+		_ = s.stopper.RunAsyncTask(ctx, "removed stale replica", func(ctx context.Context) {
+			if err := s.removeMaybeUninitializedReplica(ctx, existingRepl, snapReplicaDesc.ReplicaID, RemoveOptions{
+				DestroyData: true,
+			}); err != nil {
+				log.Fatalf(ctx, "failed to remove replica %v: %v", existingRepl, err)
 			}
 		})
 		return errRetry

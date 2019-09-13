@@ -2561,6 +2561,24 @@ type RemoveOptions struct {
 	DestroyData bool
 }
 
+// removeMaybeUninitializedReplica will remove the passed replica. It will call
+// one of removeReplicaImpl or removeUninitializedReplicaRaftMu locked depending
+// on the initialization status of rep. It grabs the Replica's raftMu before
+// operating to ensure that it does not race with concurrent snapshots, removals
+// under raft, splits, or merges.
+func (s *Store) removeMaybeUninitializedReplica(
+	ctx context.Context, rep *Replica, nextReplicaID roachpb.ReplicaID, opts RemoveOptions,
+) error {
+	// Hold the raftMu to prevent races from underneath raft or from applying
+	// a snapshot.
+	rep.raftMu.Lock()
+	defer rep.raftMu.Unlock()
+	if !rep.IsInitialized() {
+		return s.removeUninitializedReplicaRaftMuLocked(ctx, rep, nextReplicaID)
+	}
+	return s.removeReplicaImpl(ctx, rep, nextReplicaID, opts)
+}
+
 // RemoveReplica removes the replica from the store's replica map and from the
 // sorted replicasByKey btree.
 //
@@ -2677,14 +2695,6 @@ func (s *Store) removeReplicaImpl(
 	s.replicaGCQueue.MaybeRemove(rep.RangeID)
 	s.scanner.RemoveReplica(rep)
 	return nil
-}
-
-func (s *Store) removeUninitializedReplica(
-	ctx context.Context, rep *Replica, nextReplicaID roachpb.ReplicaID,
-) error {
-	rep.raftMu.Lock()
-	defer rep.raftMu.Unlock()
-	return s.removeUninitializedReplicaRaftMuLocked(ctx, rep, nextReplicaID)
 }
 
 func (s *Store) removeUninitializedReplicaRaftMuLocked(
@@ -3644,16 +3654,10 @@ func (s *Store) HandleRaftResponse(ctx context.Context, resp *RaftMessageRespons
 				repl.mu.destroyStatus.Set(roachpb.NewRangeNotFoundError(repl.RangeID, storeID),
 					destroyReasonRemovalPending)
 				repl.mu.Unlock()
-				if !repl.isInitializedRLocked() {
-					if err := s.removeUninitializedReplicaRaftMuLocked(ctx, repl, tErr.ReplicaID+1); err != nil {
-						log.Fatalf(ctx, "failed to remove uninitialized replica %v: %v", repl, err)
-					}
-				} else {
-					if err := s.removeReplicaImpl(ctx, repl, tErr.ReplicaID+1, RemoveOptions{
-						DestroyData: true,
-					}); err != nil {
-						log.Fatalf(ctx, "failed to remove uninitialized replica %v: %v", repl, err)
-					}
+				if err := s.removeMaybeUninitializedReplica(ctx, repl, tErr.ReplicaID+1, RemoveOptions{
+					DestroyData: true,
+				}); err != nil {
+					log.Fatalf(ctx, "failed to remove uninitialized replica %v: %v", repl, err)
 				}
 
 			case *roachpb.RaftGroupDeletedError:
