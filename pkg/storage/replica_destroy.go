@@ -13,7 +13,6 @@ package storage
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -138,6 +137,7 @@ func (r *Replica) destroyUninitializedReplicaRaftMuLocked(
 ) {
 	batch := r.Engine().NewWriteOnlyBatch()
 	defer batch.Close()
+
 	if err := r.preDestroyRaftMuLocked(
 		ctx,
 		r.Engine(),
@@ -163,45 +163,7 @@ func (r *Replica) destroyUninitializedReplicaRaftMuLocked(
 			log.Warningf(ctx, "failed to remove sideload storage for %v: %v", r, err)
 		}
 	}
-	s := r.store
 
-	// We need to launch an async task to remove this uninitialized replica.
-	_ = r.store.stopper.RunAsyncTask(r.AnnotateCtx(ctx), "remove uninitialized replica", func(ctx context.Context) {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		if !r.mu.destroyStatus.RemovalPending() {
-			log.Fatalf(ctx, "cannot remove uninitialized replica which is not removal pending: %v", r.mu.destroyStatus)
-		}
-
-		// When we're in this state we should have already had our destroy status set
-		// so it shouldn't have been possible to process any raft messages or apply
-		// any snapshots.
-		if r.isInitializedRLocked() {
-			log.Fatalf(ctx, "how can I be initialized now considering I wasn't initialized before?")
-		}
-		value, stillExists := s.mu.replicas.Load(int64(r.RangeID))
-		if !stillExists {
-			log.Fatalf(ctx, "uninitialized replica was removed in the meantime")
-			return
-		}
-		existing := (*Replica)(value)
-		// Only an uninitialized replica can have a placeholder since, by
-		// definition, an initialized replica will be present in the
-		// replicasByKey map. While the replica will usually consume the
-		// placeholder itself, that isn't guaranteed and so this invocation
-		// here is crucial (i.e. don't remove it).
-		if existing == r {
-			log.Infof(ctx, "removing uninitialized replica")
-		} else {
-			log.Fatalf(ctx, "uninitialized replica was already removed?")
-		}
-		if s.removePlaceholderLocked(ctx, r.RangeID) {
-			atomic.AddInt32(&s.counts.droppedPlaceholders, 1)
-		}
-		s.unlinkReplicaByRangeIDLocked(r.RangeID)
-	})
 }
 
 // destroyRaftMuLocked deletes data associated with a replica, leaving a

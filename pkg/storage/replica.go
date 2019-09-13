@@ -659,6 +659,7 @@ func (r *Replica) GetMaxBytes() int64 {
 func (r *Replica) SetZoneConfig(zone *config.ZoneConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	//log.Infof(r.AnnotateCtx(context.TODO()), "setting zone config to %p %v", zone, zone)
 	r.mu.zone = zone
 }
 

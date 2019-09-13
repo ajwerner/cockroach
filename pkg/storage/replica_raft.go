@@ -772,33 +772,7 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 			// We know that our replica has been removed. We also know that we've
 			// stepped the state machine up to the point where it's been removed.
 			// TODO(ajwerner): decide if there's more to be done here.
-			if log.V(1) {
-				log.Infof(ctx, "setting replica to destroyed at %v %v %v", r.mu.replicaID, stats.entriesProcessed, len(rd.CommittedEntries))
-			}
-			rd.CommittedEntries = rd.CommittedEntries[:stats.entriesProcessed]
-			const expl = "during advance"
-			// Tell raft we applied up to where we applied. This is super duper gross
-			// but I think is important for when we need to check the raft state when
-			// deciding whether we can remove this
-			r.mu.Lock()
-			if err := r.withRaftGroupLocked(true, func(raftGroup *raft.RawNode) (bool, error) {
-				raftGroup.Advance(rd)
-
-				// If the Raft group still has more to process then we immediately
-				// re-enqueue it for another round of processing. This is possible if
-				// the group's committed entries were paginated due to size limitations
-				// and we didn't apply all of them in this pass.
-				if raftGroup.HasReady() {
-					r.store.enqueueRaftUpdateCheck(r.RangeID)
-				}
-				return true, nil
-			}); err != nil {
-				return stats, expl, errors.Wrap(err, expl)
-			}
-			r.mu.destroyStatus.Set(roachpb.NewRangeNotFoundError(r.RangeID, r.store.StoreID()), destroyReasonRemovalPending)
-			r.mu.Unlock()
-			r.store.replicaGCQueue.AddAsync(ctx, r, replicaGCPriorityRemoved)
-			return stats, "", nil
+			return stats, "", err
 		default:
 			return stats, err.(*nonDeterministicFailure).safeExpl, err
 		}

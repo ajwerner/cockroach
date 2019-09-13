@@ -293,25 +293,28 @@ func (r *Replica) handleComputeChecksumResult(ctx context.Context, cc *storagepb
 	r.computeChecksumPostApply(ctx, *cc)
 }
 
-func (r *Replica) handleChangeReplicasResult(ctx context.Context, chng *storagepb.ChangeReplicas) {
-	log.Infof(ctx, "handleChangeReplicasResult: %v", chng)
-	storeID := r.store.StoreID()
-	var found bool
-	for _, rDesc := range chng.Replicas() {
-		if rDesc.StoreID == storeID {
-			found = true
-			break
-		}
+func (r *Replica) handleChangeReplicasResult(
+	ctx context.Context, removed bool, chng *storagepb.ChangeReplicas,
+) {
+	// If this command removes us then we need to go through the process of
+	// removing our replica from the store. After this method returns the code
+	// should roughly return all the way up to whoever called handleRaftReady
+	// and this Replica should never be heard from again.
+	if !removed {
+		return
 	}
-	// All ChangeReplicas which remove this command should be handled before being
-	// applied. After they're applied we'll be in a weird state.
-	if !found {
-		log.Fatalf(ctx, "processing command to remove this replica")
-		// This wants to run as late as possible, maximizing the chances
-		// that the other nodes have finished this command as well (since
-		// processing the removal from the queue looks up the Range at the
-		// lease holder, being too early here turns this into a no-op).
-		//r.store.replicaGCQueue.AddAsync(ctx, r, replicaGCPriorityRemoved)
+	if log.V(1) {
+		log.Infof(ctx, "removing replica due to ChangeReplicasTrigger: %v", chng)
+	}
+	r.mu.Lock()
+	r.mu.destroyStatus.Set(
+		roachpb.NewRangeNotFoundError(r.RangeID, r.store.StoreID()),
+		destroyReasonRemovalPending)
+	r.mu.Unlock()
+	if err := r.store.removeReplicaImpl(ctx, r, chng.Desc.NextReplicaID, RemoveOptions{
+		DestroyData: true,
+	}); err != nil {
+		log.Fatalf(ctx, "failed to remove replica: %v", err)
 	}
 }
 

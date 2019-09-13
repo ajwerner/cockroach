@@ -3361,10 +3361,10 @@ func TestSplitTriggerMeetsUnexpectedReplicaID(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		// if desc := repl.Desc(); !descLHS.Equal(desc) {
-		// 	store.ManualReplicaGC(repl)
-		// 	return errors.Errorf("expected %s got %s", &descLHS, desc)
-		// }
+		if desc := repl.Desc(); desc.IsInitialized() && !descLHS.Equal(desc) {
+			store.ManualReplicaGC(repl)
+			return errors.Errorf("expected %s got %s", &descLHS, desc)
+		}
 		return nil
 	})
 }
