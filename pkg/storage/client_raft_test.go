@@ -3582,13 +3582,9 @@ func TestRemovedReplicaError(t *testing.T) {
 func TestRemoveRangeWithoutGC(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	// TODO(ajwerner): update this test to create the scenario where we do
-	// not process the remove and then shut down the node and restart it.
-	// Perhaps add a testing flag.
-	t.Skip("we now will remove the replica")
-
 	sc := storage.TestStoreConfig(nil)
 	sc.TestingKnobs.DisableReplicaGCQueue = true
+	sc.TestingKnobs.DisableEagerReplicaRemoval = true
 	mtc := &multiTestContext{storeConfig: &sc}
 	defer mtc.Stop()
 	mtc.Start(t, 2)

@@ -292,6 +292,15 @@ func (rgcq *replicaGCQueue) process(
 			// from getting a snapshot and becoming a part of the rang.e
 			nextReplicaID = currentDesc.ReplicaID
 		}
+		// Note that this seems racy - we didn't hold any locks between reading
+		// the range descriptor above and deciding to remove the replica - but
+		// we pass in the NextReplicaID to detect situations in which the
+		// replica became "non-gc'able" in the meantime by checking (with raftMu
+		// held throughout) whether the replicaID is still smaller than the
+		// NextReplicaID. Given non-zero replica IDs don't change this is only
+		// possible if we currently think we're processing a pre-emptive snapshot
+		// but discover in RemoveReplica that this range has since been added and
+		// knows that.
 		if err := repl.store.RemoveReplica(ctx, repl, nextReplicaID, RemoveOptions{
 			DestroyData: true,
 		}); err != nil {
@@ -330,15 +339,6 @@ func (rgcq *replicaGCQueue) process(
 			}
 		}
 
-		// Note that this seems racy - we didn't hold any locks between reading
-		// the range descriptor above and deciding to remove the replica - but
-		// we pass in the NextReplicaID to detect situations in which the
-		// replica became "non-gc'able" in the meantime by checking (with raftMu
-		// held throughout) whether the replicaID is still smaller than the
-		// NextReplicaID. Given non-zero replica IDs don't change this is only
-		// possible if we currently think we're processing a pre-emptive snapshot
-		// but discover in RemoveReplica that this range has since been added and
-		// knows that.
 		const nextReplicaID = math.MaxInt32
 		if err := repl.store.RemoveReplica(ctx, repl, nextReplicaID, RemoveOptions{
 			DestroyData: true,

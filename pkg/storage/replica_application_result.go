@@ -307,6 +307,9 @@ func (r *Replica) handleChangeReplicasResult(
 	if ds, _ := r.IsDestroyed(); ds != destroyReasonRemovalPending {
 		return false
 	}
+	if r.store.TestingKnobs().DisableEagerReplicaRemoval {
+		return true
+	}
 	if log.V(1) {
 		log.Infof(ctx, "removing replica due to ChangeReplicasTrigger: %v", chng)
 	}

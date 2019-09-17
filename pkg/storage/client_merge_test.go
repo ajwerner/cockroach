@@ -57,7 +57,6 @@ import (
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
 )
 
@@ -1633,12 +1632,12 @@ func TestStoreRangeMergeConcurrentRequests(t *testing.T) {
 func TestStoreReplicaGCAfterMerge(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	t.Skip("this test seems byzantine, right? ")
 	ctx := context.Background()
 	storeCfg := storage.TestStoreConfig(nil)
 	storeCfg.TestingKnobs.DisableReplicateQueue = true
 	storeCfg.TestingKnobs.DisableReplicaGCQueue = true
 	storeCfg.TestingKnobs.DisableMergeQueue = true
+	storeCfg.TestingKnobs.DisableEagerReplicaRemoval = true
 	mtc := &multiTestContext{storeConfig: &storeCfg}
 	mtc.Start(t, 2)
 	defer mtc.Stop()
@@ -1727,30 +1726,6 @@ func TestStoreReplicaGCAfterMerge(t *testing.T) {
 	// tombstone was not written correctly when the replica was GC'd, this will
 	// cause a panic.
 	sendHeartbeat(rhsReplDesc1)
-
-	// Send a heartbeat to a fictional replica on store1 with a large replica ID.
-	// This tests an implementation detail: the replica tombstone that gets
-	// written in this case will use the maximum possible replica ID, so store1
-	// should ignore heartbeats for replicas of the range with _any_ replica ID.
-	sendHeartbeat(roachpb.ReplicaDescriptor{
-		NodeID:    store1.Ident.NodeID,
-		StoreID:   store1.Ident.StoreID,
-		ReplicaID: 123456,
-	})
-
-	// Be extra paranoid and verify the exact value of the replica tombstone.
-	var rhsTombstone1 roachpb.RaftTombstone
-	rhsTombstoneKey := keys.RaftTombstoneKey(rhsDesc.RangeID)
-	ok, err = engine.MVCCGetProto(ctx, store1.Engine(), rhsTombstoneKey, hlc.Timestamp{},
-		&rhsTombstone1, engine.MVCCGetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	} else if !ok {
-		t.Fatalf("missing raft tombstone at key %s", rhsTombstoneKey)
-	}
-	if e, a := roachpb.ReplicaID(math.MaxInt32), rhsTombstone1.NextReplicaID; e != a {
-		t.Fatalf("expected next replica ID to be %d, but got %d", e, a)
-	}
 }
 
 // TestStoreRangeMergeAddReplicaRace verifies that when an add replica request
@@ -2036,13 +2011,13 @@ func TestStoreRangeMergeSlowAbandonedFollower(t *testing.T) {
 func TestStoreRangeMergeAbandonedFollowers(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	t.Skip("these invariants are no longer true")
 	ctx := context.Background()
 	storeCfg := storage.TestStoreConfig(nil)
 	storeCfg.TestingKnobs.DisableReplicateQueue = true
 	storeCfg.TestingKnobs.DisableReplicaGCQueue = true
 	storeCfg.TestingKnobs.DisableSplitQueue = true
 	storeCfg.TestingKnobs.DisableMergeQueue = true
+	storeCfg.TestingKnobs.DisableEagerReplicaRemoval = true
 	mtc := &multiTestContext{storeConfig: &storeCfg}
 	mtc.Start(t, 3)
 	defer mtc.Stop()
@@ -2808,101 +2783,6 @@ func TestStoreRangeMergeSlowWatcher(t *testing.T) {
 	if atomic.LoadInt64(&sawMeta2Req) != 1 {
 		t.Fatalf("test did not generate expected meta2 get request/response")
 	}
-}
-
-// unreliableRaftHandler drops all Raft messages that are addressed to the
-// specified rangeID, but lets all other messages through.
-type unreliableRaftHandler struct {
-	rangeID roachpb.RangeID
-	storage.RaftMessageHandler
-	// If non-nil, can return false to avoid dropping a msg to rangeID
-	dropReq  func(*storage.RaftMessageRequest) bool
-	dropHB   func(*storage.RaftHeartbeat) bool
-	dropResp func(*storage.RaftMessageResponse) bool
-}
-
-func (h *unreliableRaftHandler) HandleRaftRequest(
-	ctx context.Context,
-	req *storage.RaftMessageRequest,
-	respStream storage.RaftMessageResponseStream,
-) *roachpb.Error {
-	if len(req.Heartbeats)+len(req.HeartbeatResps) > 0 {
-		reqCpy := *req
-		req = &reqCpy
-		req.Heartbeats = h.filterHeartbeats(req.Heartbeats)
-		req.HeartbeatResps = h.filterHeartbeats(req.HeartbeatResps)
-		if len(req.Heartbeats)+len(req.HeartbeatResps) == 0 {
-			// Entirely filtered.
-			return nil
-		}
-	} else if req.RangeID == h.rangeID {
-		if h.dropReq == nil || h.dropReq(req) {
-			log.Infof(
-				ctx,
-				"dropping Raft message %s",
-				raft.DescribeMessage(req.Message, func([]byte) string {
-					return "<omitted>"
-				}),
-			)
-
-			return nil
-		}
-	}
-	return h.RaftMessageHandler.HandleRaftRequest(ctx, req, respStream)
-}
-
-func (h *unreliableRaftHandler) filterHeartbeats(
-	hbs []storage.RaftHeartbeat,
-) []storage.RaftHeartbeat {
-	if len(hbs) == 0 {
-		return hbs
-	}
-	var cpy []storage.RaftHeartbeat
-	for i := range hbs {
-		hb := &hbs[i]
-		if hb.RangeID != h.rangeID || (h.dropHB != nil && !h.dropHB(hb)) {
-			cpy = append(cpy, *hb)
-		}
-	}
-	return cpy
-}
-
-func (h *unreliableRaftHandler) HandleRaftResponse(
-	ctx context.Context, resp *storage.RaftMessageResponse,
-) error {
-	if resp.RangeID == h.rangeID {
-		if h.dropResp == nil || h.dropResp(resp) {
-			return nil
-		}
-	}
-	return h.RaftMessageHandler.HandleRaftResponse(ctx, resp)
-}
-
-// mtcStoreRaftMessageHandler exists to allows a store to be stopped and
-// restarted while maintaining a partition using an unreliableRaftHandler.
-type mtcStoreRaftMessageHandler struct {
-	mtc      *multiTestContext
-	storeIdx int
-}
-
-func (h *mtcStoreRaftMessageHandler) HandleRaftRequest(
-	ctx context.Context,
-	req *storage.RaftMessageRequest,
-	respStream storage.RaftMessageResponseStream,
-) *roachpb.Error {
-	return h.mtc.stores[h.storeIdx].HandleRaftRequest(ctx, req, respStream)
-}
-
-func (h *mtcStoreRaftMessageHandler) HandleRaftResponse(
-	ctx context.Context, resp *storage.RaftMessageResponse,
-) error {
-	return h.mtc.stores[h.storeIdx].HandleRaftResponse(ctx, resp)
-}
-
-func (h *mtcStoreRaftMessageHandler) HandleSnapshot(
-	header *storage.SnapshotRequest_Header, respStream storage.SnapshotResponseStream,
-) error {
-	return h.mtc.stores[h.storeIdx].HandleSnapshot(header, respStream)
 }
 
 func TestStoreRangeMergeRaftSnapshot(t *testing.T) {

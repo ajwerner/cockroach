@@ -13,6 +13,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -442,6 +443,19 @@ func (b *replicaAppBatch) Stage(cmdI apply.Command) (apply.CheckedCommand, error
 	// command was rejected with a below-Raft forced error then its replicated
 	// result was just cleared and this will be a no-op.
 	if splitMergeUnlock, err := b.r.maybeAcquireSplitMergeLock(ctx, cmd.raftCmd); err != nil {
+		b.r.mu.Lock()
+		replicaID := b.r.mu.replicaID
+		if replicaID == 0 {
+			b.r.mu.destroyStatus.Set(err, destroyReasonRemovalPending)
+			b.r.mu.Unlock()
+			log.Infof(ctx, "destroying preemptive snapshot due to failed split/merge lock: %v", err)
+			if err := b.r.store.removeReplicaImpl(ctx, b.r, b.state.Desc.NextReplicaID, RemoveOptions{
+				DestroyData: true,
+			}); err != nil {
+				log.Fatalf(ctx, "failed to destroy pre-emptive snapshot")
+			}
+		}
+		b.r.mu.Unlock()
 		kind := "merge"
 		if cmd.raftCmd.ReplicatedEvalResult.Split != nil {
 			kind = "split"
@@ -596,7 +610,7 @@ func (b *replicaAppBatch) runPreApplyTriggers(ctx context.Context, cmd *replicat
 		}
 		const mustClearRange = false
 		if err := rhsRepl.preDestroyRaftMuLocked(
-			ctx, b.batch, b.batch, merge.RightDesc.NextReplicaID, clearRangeIDLocalOnly, mustClearRange,
+			ctx, b.batch, b.batch, roachpb.ReplicaID(math.MaxInt32), clearRangeIDLocalOnly, mustClearRange,
 		); err != nil {
 			return wrapWithNonDeterministicFailure(err, "unable to destroy replica before merge")
 		}
@@ -647,15 +661,17 @@ func (b *replicaAppBatch) runPreApplyTriggers(ctx context.Context, cmd *replicat
 		b.r.mu.Unlock()
 		b.changeRemovesReplica = true
 		const mustUseRangeDeletionTombstone = true
-		if err := b.r.preDestroyRaftMuLocked(
-			ctx,
-			b.batch,
-			b.batch,
-			change.Desc.NextReplicaID,
-			clearAll,
-			mustUseRangeDeletionTombstone,
-		); err != nil {
-			return wrapWithNonDeterministicFailure(err, "unable to destroy replica before removal")
+		if !b.r.store.TestingKnobs().DisableEagerReplicaRemoval {
+			if err := b.r.preDestroyRaftMuLocked(
+				ctx,
+				b.batch,
+				b.batch,
+				change.Desc.NextReplicaID,
+				clearAll,
+				mustUseRangeDeletionTombstone,
+			); err != nil {
+				return wrapWithNonDeterministicFailure(err, "unable to destroy replica before removal")
+			}
 		}
 	}
 
