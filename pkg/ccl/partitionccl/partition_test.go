@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
@@ -209,12 +210,14 @@ func (t *partitioningTest) parse() error {
 // verifyScansFn returns a closure that runs the test's `scans` and returns a
 // descriptive error if any of them fail. It is not required for `parse` to have
 // been called.
-func (t *partitioningTest) verifyScansFn(ctx context.Context, db *gosql.DB) func() error {
+func (pt *partitioningTest) verifyScansFn(
+	ctx context.Context, t *testing.T, db *gosql.DB,
+) func() error {
 	return func() error {
-		for where, expectedNodes := range t.scans {
-			query := fmt.Sprintf(`SELECT count(*) FROM %s WHERE %s`, tree.NameStringP(&t.name), where)
+		for where, expectedNodes := range pt.scans {
+			query := fmt.Sprintf(`SELECT count(*) FROM %s WHERE %s`, tree.NameStringP(&pt.name), where)
 			log.Infof(ctx, "query: %s", query)
-			if err := verifyScansOnNode(db, query, expectedNodes); err != nil {
+			if err := verifyScansOnNode(ctx, t, db, query, expectedNodes); err != nil {
 				if log.V(1) {
 					log.Errorf(ctx, "scan verification failed: %s", err)
 				}
@@ -1068,26 +1071,27 @@ func allRepartitioningTests(partitioningTests []partitioningTest) ([]repartition
 	return tests, nil
 }
 
-func verifyScansOnNode(db *gosql.DB, query string, node string) error {
+func verifyScansOnNode(
+	ctx context.Context, t *testing.T, db *gosql.DB, query string, node string,
+) error {
 	// TODO(dan): This is a stopgap. At some point we should have a syntax for
 	// doing this directly (running a query and getting back the nodes it ran on
 	// and attributes/localities of those nodes). Users will also want this to
 	// be sure their partitioning is working.
-	if _, err := db.Exec(fmt.Sprintf(`SET tracing = on; %s; SET tracing = off`, query)); err != nil {
-		return err
-	}
-	rows, err := db.Query(`SELECT concat(tag, ' ', message) FROM [SHOW TRACE FOR SESSION]`)
+	conn, err := db.Conn(ctx)
 	if err != nil {
-		return err
+		t.Fatalf("failed to create conn: %v", err)
 	}
+	sqlDB := sqlutils.MakeSQLRunner(conn)
+	defer conn.Close()
+	sqlDB.Exec(t, fmt.Sprintf(`SET tracing = on; %s; SET tracing = off`, query))
+	rows := sqlDB.Query(t, `SELECT concat(tag, ' ', message) FROM [SHOW TRACE FOR SESSION]`)
 	defer rows.Close()
 	var scansWrongNode []string
 	var traceLines []string
 	var traceLine gosql.NullString
 	for rows.Next() {
-		if err := rows.Scan(&traceLine); err != nil {
-			return err
-		}
+		rows.Scan(&traceLine)
 		traceLines = append(traceLines, traceLine.String)
 		if strings.Contains(traceLine.String, "read completed") {
 			if strings.Contains(traceLine.String, "SystemCon") {
@@ -1122,17 +1126,21 @@ func setupPartitioningTestCluster(
 
 	tsArgs := func(attr string) base.TestServerArgs {
 		s := cluster.MakeTestingClusterSettingsWithVersion(cluster.BinaryMinimumSupportedVersion, cluster.BinaryServerVersion)
+		updater := settings.NewUpdater(&s.SV)
+		updater.Set("cluster.preserve_downgrade_option", "19.1", "s")
+		updater.Set("version", "19.1-0", "s")
 		return base.TestServerArgs{
 			Settings: s,
 			Knobs: base.TestingKnobs{
 				Store: &storage.StoreTestingKnobs{
-					BootstrapVersion: &cluster.ClusterVersion{roachpb.Version{Major: 19, Minor: 1, Unstable: 0}},
 					// Disable LBS because when the scan is happening at the rate it's happening
 					// below, it's possible that one of the system ranges trigger a split.
+					BootstrapVersion:          &cluster.ClusterVersion{cluster.VersionByKey(cluster.Version19_1)},
 					DisableLoadBasedSplitting: true,
 				},
 				Server: &server.TestingKnobs{
-					DefaultZoneConfigOverride: &cfg,
+					DefaultZoneConfigOverride:      &cfg,
+					DisableAutomaticVersionUpgrade: 1,
 				},
 			},
 			ScanInterval: 100 * time.Millisecond,
@@ -1142,7 +1150,6 @@ func setupPartitioningTestCluster(
 			UseDatabase: "data",
 		}
 	}
-
 	tcArgs := base.TestClusterArgs{ServerArgsPerNode: map[int]base.TestServerArgs{
 		0: tsArgs("n1"),
 		1: tsArgs("n2"),
@@ -1192,7 +1199,7 @@ func TestInitialPartitioning(t *testing.T) {
 			sqlDB.Exec(t, test.parsed.createStmt)
 			sqlDB.Exec(t, test.parsed.zoneConfigStmts)
 
-			testutils.SucceedsSoon(t, test.verifyScansFn(ctx, db))
+			testutils.SucceedsSoon(t, test.verifyScansFn(ctx, t, db))
 		})
 	}
 }
@@ -1288,11 +1295,12 @@ func TestRepartitioning(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	db, sqlDB, cleanup := setupPartitioningTestCluster(ctx, t)
-	defer cleanup()
 
 	for _, test := range testCases {
 		t.Run(fmt.Sprintf("%s/%s", test.old.name, test.new.name), func(t *testing.T) {
+			db, sqlDB, cleanup := setupPartitioningTestCluster(ctx, t)
+			defer cleanup()
+
 			sqlDB.Exec(t, `DROP DATABASE IF EXISTS data`)
 			sqlDB.Exec(t, `CREATE DATABASE data`)
 
@@ -1303,7 +1311,7 @@ func TestRepartitioning(t *testing.T) {
 				sqlDB.Exec(t, test.old.parsed.createStmt)
 				sqlDB.Exec(t, test.old.parsed.zoneConfigStmts)
 
-				testutils.SucceedsSoon(t, test.old.verifyScansFn(ctx, db))
+				testutils.SucceedsSoon(t, test.old.verifyScansFn(ctx, t, db))
 			}
 
 			{
@@ -1333,6 +1341,21 @@ func TestRepartitioning(t *testing.T) {
 						t.Fatalf("%+v", err)
 					}
 				}
+				upgradeChan := make(chan struct{})
+				go func() {
+					time.Sleep(200 * time.Millisecond)
+					_, err := sqlDB.DB.ExecContext(ctx, "RESET CLUSTER SETTING cluster.preserve_downgrade_option;")
+					if err != nil {
+						t.Error(err)
+					}
+					_, err = sqlDB.DB.ExecContext(ctx, "SET CLUSTER SETTING version = crdb_internal.node_executable_version();")
+					if err != nil {
+						t.Error(err)
+					}
+					log.Infof(ctx, "did reset cluster setting %v", err)
+					close(upgradeChan)
+				}()
+
 				sqlDB.Exec(t, repartition.String())
 
 				// Verify that repartitioning removes zone configs for partitions that
@@ -1356,7 +1379,9 @@ func TestRepartitioning(t *testing.T) {
 				// does not apply a new zone config). This is fine.
 				sqlDB.Exec(t, test.new.parsed.zoneConfigStmts)
 
-				testutils.SucceedsSoon(t, test.new.verifyScansFn(ctx, db))
+				testutils.SucceedsSoon(t, test.new.verifyScansFn(ctx, t, db))
+				<-upgradeChan
+
 			}
 		})
 	}
