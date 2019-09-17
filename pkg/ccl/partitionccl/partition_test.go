@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
@@ -1121,7 +1122,11 @@ func setupPartitioningTestCluster(
 	cfg.NumReplicas = proto.Int32(1)
 
 	tsArgs := func(attr string) base.TestServerArgs {
+		s := cluster.MakeTestingClusterSettingsWithVersion(cluster.BinaryMinimumSupportedVersion, cluster.BinaryMinimumSupportedVersion)
+		updater := settings.NewUpdater(&s.SV)
+		updater.Set("cluster.preserve_downgrade_option", "19.1", "s")
 		return base.TestServerArgs{
+			Settings: s,
 			Knobs: base.TestingKnobs{
 				Store: &storage.StoreTestingKnobs{
 					// Disable LBS because when the scan is happening at the rate it's happening
@@ -1129,7 +1134,8 @@ func setupPartitioningTestCluster(
 					DisableLoadBasedSplitting: true,
 				},
 				Server: &server.TestingKnobs{
-					DefaultZoneConfigOverride: &cfg,
+					DefaultZoneConfigOverride:      &cfg,
+					DisableAutomaticVersionUpgrade: 1,
 				},
 			},
 			ScanInterval: 100 * time.Millisecond,
@@ -1284,11 +1290,12 @@ func TestRepartitioning(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	db, sqlDB, cleanup := setupPartitioningTestCluster(ctx, t)
-	defer cleanup()
 
 	for _, test := range testCases {
 		t.Run(fmt.Sprintf("%s/%s", test.old.name, test.new.name), func(t *testing.T) {
+			db, sqlDB, cleanup := setupPartitioningTestCluster(ctx, t)
+			defer cleanup()
+
 			sqlDB.Exec(t, `DROP DATABASE IF EXISTS data`)
 			sqlDB.Exec(t, `CREATE DATABASE data`)
 
@@ -1329,6 +1336,21 @@ func TestRepartitioning(t *testing.T) {
 						t.Fatalf("%+v", err)
 					}
 				}
+				upgradeChan := make(chan struct{})
+				go func() {
+					time.Sleep(200 * time.Millisecond)
+					_, err := sqlDB.DB.ExecContext(ctx, "RESET CLUSTER SETTING cluster.preserve_downgrade_option;")
+					if err != nil {
+						t.Error(err)
+					}
+					_, err = sqlDB.DB.ExecContext(ctx, "SET CLUSTER SETTING version = crdb_internal.node_executable_version();")
+					if err != nil {
+						t.Error(err)
+					}
+					log.Infof(ctx, "did reset cluster setting %v", err)
+					close(upgradeChan)
+				}()
+
 				sqlDB.Exec(t, repartition.String())
 
 				// Verify that repartitioning removes zone configs for partitions that
@@ -1353,6 +1375,7 @@ func TestRepartitioning(t *testing.T) {
 				sqlDB.Exec(t, test.new.parsed.zoneConfigStmts)
 
 				testutils.SucceedsSoon(t, test.new.verifyScansFn(ctx, db))
+				<-upgradeChan
 			}
 		})
 	}
