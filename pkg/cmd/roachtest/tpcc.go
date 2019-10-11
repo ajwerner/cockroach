@@ -783,7 +783,6 @@ func runTPCCBench(ctx context.Context, t *test, c *cluster, b tpccBenchSpec) {
 				case multiLoadgen:
 					extraFlags = fmt.Sprintf(` --partitions=%d --partition-affinity=%d`,
 						b.partitions(), groupIdx)
-					activeWarehouses = warehouses / numLoadGroups
 				default:
 					panic("unexpected")
 				}
