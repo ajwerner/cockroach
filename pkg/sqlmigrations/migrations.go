@@ -233,6 +233,13 @@ var backwardCompatibleMigrations = []migrationDescriptor{
 		name:   "update system.locations with default location data",
 		workFn: updateSystemLocationData,
 	},
+	{
+		// Introduced in v20.1
+		name:                "create system.protected_ts_meta and system.protected_ts_spans tables",
+		workFn:              createProtectedTSTables,
+		includedInBootstrap: true,
+		newDescriptorIDs:    staticIDs(keys.ProtectedTSMetaTableID, keys.ProtectedTSSpansTableID),
+	},
 }
 
 func staticIDs(ids ...sqlbase.ID) func(ctx context.Context, db db) ([]sqlbase.ID, error) {
@@ -555,17 +562,22 @@ func migrationKey(migration migrationDescriptor) roachpb.Key {
 	return append(keys.MigrationPrefix, roachpb.RKey(migration.name)...)
 }
 
-func createSystemTable(ctx context.Context, r runner, desc sqlbase.TableDescriptor) error {
+func createSystemTables(ctx context.Context, r runner, descs ...sqlbase.TableDescriptor) error {
 	// We install the table at the KV layer so that we can choose a known ID in
 	// the reserved ID space. (The SQL layer doesn't allow this.)
 	err := r.db.Txn(ctx, func(ctx context.Context, txn *client.Txn) error {
-		b := txn.NewBatch()
-		b.CPut(sqlbase.MakeNameMetadataKey(desc.GetParentID(), desc.GetName()), desc.GetID(), nil)
-		b.CPut(sqlbase.MakeDescMetadataKey(desc.GetID()), sqlbase.WrapDescriptor(&desc), nil)
-		if err := txn.SetSystemConfigTrigger(); err != nil {
-			return err
+		for _, desc := range descs {
+			b := txn.NewBatch()
+			b.CPut(sqlbase.MakeNameMetadataKey(desc.GetParentID(), desc.GetName()), desc.GetID(), nil)
+			b.CPut(sqlbase.MakeDescMetadataKey(desc.GetID()), sqlbase.WrapDescriptor(&desc), nil)
+			if err := txn.SetSystemConfigTrigger(); err != nil {
+				return err
+			}
+			if err := txn.Run(ctx, b); err != nil {
+				return err
+			}
 		}
-		return txn.Run(ctx, b)
+		return nil
 	})
 	// CPuts only provide idempotent inserts if we ignore the errors that arise
 	// when the condition isn't met.
@@ -576,11 +588,11 @@ func createSystemTable(ctx context.Context, r runner, desc sqlbase.TableDescript
 }
 
 func createCommentTable(ctx context.Context, r runner) error {
-	return createSystemTable(ctx, r, sqlbase.CommentsTable)
+	return createSystemTables(ctx, r, sqlbase.CommentsTable)
 }
 
 func createReplicationConstraintStatsTable(ctx context.Context, r runner) error {
-	if err := createSystemTable(ctx, r, sqlbase.ReplicationConstraintStatsTable); err != nil {
+	if err := createSystemTables(ctx, r, sqlbase.ReplicationConstraintStatsTable); err != nil {
 		return err
 	}
 	_, err := r.sqlExecutor.Exec(ctx, "add-constraints-ttl", nil, /* txn */
@@ -590,11 +602,11 @@ func createReplicationConstraintStatsTable(ctx context.Context, r runner) error 
 }
 
 func createReplicationCriticalLocalitiesTable(ctx context.Context, r runner) error {
-	return createSystemTable(ctx, r, sqlbase.ReplicationCriticalLocalitiesTable)
+	return createSystemTables(ctx, r, sqlbase.ReplicationCriticalLocalitiesTable)
 }
 
 func createReplicationStatsTable(ctx context.Context, r runner) error {
-	if err := createSystemTable(ctx, r, sqlbase.ReplicationStatsTable); err != nil {
+	if err := createSystemTables(ctx, r, sqlbase.ReplicationStatsTable); err != nil {
 		return err
 	}
 	_, err := r.sqlExecutor.Exec(ctx, "add-replication-status-ttl", nil, /* txn */
@@ -604,7 +616,11 @@ func createReplicationStatsTable(ctx context.Context, r runner) error {
 }
 
 func createReportsMetaTable(ctx context.Context, r runner) error {
-	return createSystemTable(ctx, r, sqlbase.ReportsMetaTable)
+	return createSystemTables(ctx, r, sqlbase.ReportsMetaTable)
+}
+
+func createProtectedTSTables(ctx context.Context, r runner) error {
+	return createSystemTables(ctx, r, sqlbase.ProtectedTSMetaTable, sqlbase.ProtectedTSSpansTable)
 }
 
 func runStmtAsRootWithRetry(

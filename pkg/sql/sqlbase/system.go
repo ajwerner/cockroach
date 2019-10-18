@@ -269,6 +269,8 @@ var SystemAllowedPrivileges = map[ID]privilege.List{
 	keys.ReplicationCriticalLocalitiesTableID: privilege.ReadWriteData,
 	keys.ReplicationStatsTableID:              privilege.ReadWriteData,
 	keys.ReportsMetaTableID:                   privilege.ReadWriteData,
+	keys.ProtectedTSMetaTableID:               privilege.ReadWriteData,
+	keys.ProtectedTSSpansTableID:              privilege.ReadWriteData,
 }
 
 // Helpers used to make some of the TableDescriptor literals below more concise.
@@ -1050,6 +1052,116 @@ var (
 		FormatVersion:  InterleavedFormatVersion,
 		NextMutationID: 1,
 	}
+
+	ProtectedTSMetaTable = TableDescriptor{
+		Name:     "protected_ts_meta",
+		ID:       keys.ProtectedTSMetaTableID,
+		ParentID: keys.SystemDatabaseID,
+		Version:  1,
+		Columns: []ColumnDescriptor{
+			{Name: "id", ID: 1, Type: *types.Uuid},
+			{Name: "ts", ID: 2, Type: *types.Decimal},
+			{Name: "meta_type", ID: 3, Type: *types.String},
+			{Name: "meta", ID: 4, Type: *types.Bytes, Nullable: true},
+		},
+		NextColumnID: 5,
+		Families: []ColumnFamilyDescriptor{
+			{
+				Name:        "primary",
+				ColumnNames: []string{"id", "ts", "meta_type", "meta"},
+				ColumnIDs:   []ColumnID{1, 2, 3, 4},
+			},
+		},
+		NextFamilyID: 1,
+		PrimaryIndex: IndexDescriptor{
+			Name:        "primary",
+			ID:          1,
+			Unique:      true,
+			ColumnNames: []string{"id"},
+			ColumnIDs:   []ColumnID{1},
+			ColumnDirections: []IndexDescriptor_Direction{
+				IndexDescriptor_ASC,
+			},
+			InterleavedBy: []ForeignKeyReference{
+				{
+					Table: keys.ProtectedTSSpansTableID,
+					Index: 1,
+				},
+			},
+		},
+		NextIndexID:    2,
+		Privileges:     NewCustomSuperuserPrivilegeDescriptor(SystemAllowedPrivileges[keys.ReplicationStatsTableID]),
+		FormatVersion:  InterleavedFormatVersion,
+		NextMutationID: 1,
+		InboundFKs: []ForeignKeyConstraint{
+			{
+				OriginTableID:         keys.ProtectedTSSpansTableID,
+				OriginColumnIDs:       []ColumnID{1},
+				ReferencedColumnIDs:   []ColumnID{1},
+				ReferencedTableID:     keys.ProtectedTSMetaTableID,
+				Name:                  "fk_protected_ts_meta",
+				Validity:              ConstraintValidity_Validated,
+				LegacyOriginIndex:     1,
+				LegacyReferencedIndex: 1,
+			},
+		},
+	}
+
+	ProtectedTSSpansTable = TableDescriptor{
+		Name:     "protected_ts_spans",
+		ID:       keys.ProtectedTSSpansTableID,
+		ParentID: keys.SystemDatabaseID,
+		Version:  1,
+		Columns: []ColumnDescriptor{
+			{Name: "id", ID: 1, Type: *types.Uuid},
+			{Name: "key", ID: 2, Type: *types.Bytes},
+			{Name: "end_key", ID: 3, Type: *types.Bytes},
+		},
+		NextColumnID: 4,
+		Families: []ColumnFamilyDescriptor{
+			{
+				Name:        "primary",
+				ColumnNames: []string{"id", "key", "end_key"},
+				ColumnIDs:   []ColumnID{1, 2, 3},
+			},
+		},
+		NextFamilyID: 1,
+		PrimaryIndex: IndexDescriptor{
+			Name:        "primary",
+			ID:          1,
+			Unique:      true,
+			ColumnNames: []string{"id", "key", "end_key"},
+			ColumnIDs:   []ColumnID{1, 2, 3},
+			ColumnDirections: []IndexDescriptor_Direction{
+				IndexDescriptor_ASC, IndexDescriptor_ASC, IndexDescriptor_ASC,
+			},
+			Interleave: InterleaveDescriptor{
+				Ancestors: []InterleaveDescriptor_Ancestor{
+					{
+						TableID:         keys.ProtectedTSMetaTableID,
+						IndexID:         1,
+						SharedPrefixLen: 1,
+					},
+				},
+			},
+		},
+		NextIndexID:    2,
+		Privileges:     NewCustomSuperuserPrivilegeDescriptor(SystemAllowedPrivileges[keys.ReplicationStatsTableID]),
+		FormatVersion:  InterleavedFormatVersion,
+		NextMutationID: 1,
+		OutboundFKs: []ForeignKeyConstraint{
+			{
+				OriginTableID:         keys.ProtectedTSSpansTableID,
+				OriginColumnIDs:       []ColumnID{1},
+				ReferencedColumnIDs:   []ColumnID{1},
+				ReferencedTableID:     keys.ProtectedTSMetaTableID,
+				Name:                  "fk_protected_ts_meta",
+				Validity:              ConstraintValidity_Validated,
+				LegacyOriginIndex:     1,
+				LegacyReferencedIndex: 1,
+			},
+		},
+	}
 )
 
 // Create a kv pair for the zone config for the given key and config value.
@@ -1099,6 +1211,8 @@ func addSystemDescriptorsToSchema(target *MetadataSchema) {
 	target.AddDescriptor(keys.SystemDatabaseID, &ReplicationConstraintStatsTable)
 	target.AddDescriptor(keys.SystemDatabaseID, &ReplicationStatsTable)
 	target.AddDescriptor(keys.SystemDatabaseID, &ReplicationCriticalLocalitiesTable)
+	target.AddDescriptor(keys.SystemDatabaseID, &ProtectedTSMetaTable)
+	target.AddDescriptor(keys.SystemDatabaseID, &ProtectedTSSpansTable)
 }
 
 // addSystemDatabaseToSchema populates the supplied MetadataSchema with the
