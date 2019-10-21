@@ -3,19 +3,21 @@
 
 package sqlbase
 
-import proto "github.com/gogo/protobuf/proto"
-import fmt "fmt"
-import math "math"
-import hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
+import (
+	bytes "bytes"
+	fmt "fmt"
+	io "io"
+	math "math"
 
-import github_com_cockroachdb_cockroach_pkg_sql_types "github.com/cockroachdb/cockroach/pkg/sql/types"
-import github_com_cockroachdb_cockroach_pkg_roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
+	github_com_cockroachdb_cockroach_pkg_roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
+	github_com_cockroachdb_cockroach_pkg_sql_types "github.com/cockroachdb/cockroach/pkg/sql/types"
+	hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
+	proto "github.com/gogo/protobuf/proto"
+	github_com_gogo_protobuf_proto "github.com/gogo/protobuf/proto"
+)
 
-import bytes "bytes"
 
-import io "io"
 
-import github_com_gogo_protobuf_proto "github.com/gogo/protobuf/proto"
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
@@ -1193,7 +1195,12 @@ func (m *DescriptorMutation) GetConstraint() *ConstraintToUpdate {
 }
 
 // XXX_OneofFuncs is for the internal use of the proto package.
-func (*DescriptorMutation) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
+func (*DescriptorMutation) XXX_OneofFuncs() (
+	func(msg proto.Message, b *proto.Buffer) error,
+	func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error),
+	func(msg proto.Message) (n int),
+	[]interface{},
+) {
 	return _DescriptorMutation_OneofMarshaler, _DescriptorMutation_OneofUnmarshaler, _DescriptorMutation_OneofSizer, []interface{}{
 		(*DescriptorMutation_Column)(nil),
 		(*DescriptorMutation_Index)(nil),
@@ -1227,7 +1234,9 @@ func _DescriptorMutation_OneofMarshaler(msg proto.Message, b *proto.Buffer) erro
 	return nil
 }
 
-func _DescriptorMutation_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
+func _DescriptorMutation_OneofUnmarshaler(
+	msg proto.Message, tag, wire int, b *proto.Buffer,
+) (bool, error) {
 	m := msg.(*DescriptorMutation)
 	switch tag {
 	case 1: // descriptor.column
@@ -1713,7 +1722,9 @@ func (*TableDescriptor_SchemaChangeLease) Descriptor() ([]byte, []int) {
 func (m *TableDescriptor_SchemaChangeLease) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
-func (m *TableDescriptor_SchemaChangeLease) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+func (m *TableDescriptor_SchemaChangeLease) XXX_Marshal(
+	b []byte, deterministic bool,
+) ([]byte, error) {
 	b = b[:cap(b)]
 	n, err := m.MarshalTo(b)
 	if err != nil {
@@ -1751,7 +1762,9 @@ func (*TableDescriptor_CheckConstraint) Descriptor() ([]byte, []int) {
 func (m *TableDescriptor_CheckConstraint) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
-func (m *TableDescriptor_CheckConstraint) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+func (m *TableDescriptor_CheckConstraint) XXX_Marshal(
+	b []byte, deterministic bool,
+) ([]byte, error) {
 	b = b[:cap(b)]
 	n, err := m.MarshalTo(b)
 	if err != nil {
@@ -2044,7 +2057,9 @@ func (*TableDescriptor_GCDescriptorMutation) Descriptor() ([]byte, []int) {
 func (m *TableDescriptor_GCDescriptorMutation) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
-func (m *TableDescriptor_GCDescriptorMutation) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+func (m *TableDescriptor_GCDescriptorMutation) XXX_Marshal(
+	b []byte, deterministic bool,
+) ([]byte, error) {
 	b = b[:cap(b)]
 	n, err := m.MarshalTo(b)
 	if err != nil {
@@ -2200,7 +2215,12 @@ func (m *Descriptor) GetDatabase() *DatabaseDescriptor {
 }
 
 // XXX_OneofFuncs is for the internal use of the proto package.
-func (*Descriptor) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
+func (*Descriptor) XXX_OneofFuncs() (
+	func(msg proto.Message, b *proto.Buffer) error,
+	func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error),
+	func(msg proto.Message) (n int),
+	[]interface{},
+) {
 	return _Descriptor_OneofMarshaler, _Descriptor_OneofUnmarshaler, _Descriptor_OneofSizer, []interface{}{
 		(*Descriptor_Table)(nil),
 		(*Descriptor_Database)(nil),

@@ -330,8 +330,13 @@ const (
 	ReplicationCriticalLocalitiesTableID = 26
 	ReplicationStatsTableID              = 27
 	ReportsMetaTableID                   = 28
-	ProtectedTSMetaTableID               = 29
-	ProtectedTSSpansTableID              = 30
+
+	// TODO(ajwerner): I want to not hard-code these at all.
+	// it'd be nice if we had a mechanism which at bootstrap time knows it can
+	// hand out these table IDs sequentially.
+	ProtectedTSMetaTableID       = 29
+	ProtectedTSSpansTableID      = 30
+	ProtectedTSTimestampsTableID = 31
 
 	// CommentType is type for system.comments
 	DatabaseCommentType = 0

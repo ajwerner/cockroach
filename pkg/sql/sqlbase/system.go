@@ -270,6 +270,7 @@ var SystemAllowedPrivileges = map[ID]privilege.List{
 	keys.ReplicationStatsTableID:              privilege.ReadWriteData,
 	keys.ReportsMetaTableID:                   privilege.ReadWriteData,
 	keys.ProtectedTSMetaTableID:               privilege.ReadWriteData,
+	keys.ProtectedTSTimestampsTableID:         privilege.ReadWriteData,
 	keys.ProtectedTSSpansTableID:              privilege.ReadWriteData,
 }
 
@@ -1059,6 +1060,48 @@ var (
 		ParentID: keys.SystemDatabaseID,
 		Version:  1,
 		Columns: []ColumnDescriptor{
+			{
+				Name:        "_id",
+				ID:          1,
+				Type:        *types.Int4,
+				Hidden:      true,
+				ComputeExpr: func() *string { s := "0"; return &s }(),
+			}, // TODO(ajwerner): what should this pk be?
+			{Name: "version", ID: 2, Type: *types.Int},
+			{Name: "rows", ID: 3, Type: *types.Int4},
+			{Name: "spans", ID: 4, Type: *types.Int4},
+		},
+		NextColumnID: 5,
+		Families: []ColumnFamilyDescriptor{
+			{
+				Name:        "primary",
+				ColumnNames: []string{"_id", "version", "rows", "spans"},
+				ColumnIDs:   []ColumnID{1, 2, 3, 4},
+			},
+		},
+		NextFamilyID: 1,
+		PrimaryIndex: IndexDescriptor{
+			Name:        "primary",
+			ID:          1,
+			Unique:      true,
+			ColumnNames: []string{"_id"},
+			ColumnIDs:   []ColumnID{1},
+			ColumnDirections: []IndexDescriptor_Direction{
+				IndexDescriptor_ASC,
+			},
+		},
+		NextIndexID:    2,
+		Privileges:     NewCustomSuperuserPrivilegeDescriptor(SystemAllowedPrivileges[keys.ReplicationStatsTableID]),
+		FormatVersion:  InterleavedFormatVersion,
+		NextMutationID: 1,
+	}
+
+	ProtectedTSTimestampsTable = TableDescriptor{
+		Name:     "protected_ts_timestamps",
+		ID:       keys.ProtectedTSTimestampsTableID,
+		ParentID: keys.SystemDatabaseID,
+		Version:  1,
+		Columns: []ColumnDescriptor{
 			{Name: "id", ID: 1, Type: *types.Uuid},
 			{Name: "ts", ID: 2, Type: *types.Decimal},
 			{Name: "meta_type", ID: 3, Type: *types.String},
@@ -1084,8 +1127,10 @@ var (
 			},
 			InterleavedBy: []ForeignKeyReference{
 				{
-					Table: keys.ProtectedTSSpansTableID,
-					Index: 1,
+					Table:           keys.ProtectedTSSpansTableID,
+					Index:           1,
+					OnDelete:        ForeignKeyReference_CASCADE,
+					SharedPrefixLen: 1,
 				},
 			},
 		},
@@ -1098,11 +1143,12 @@ var (
 				OriginTableID:         keys.ProtectedTSSpansTableID,
 				OriginColumnIDs:       []ColumnID{1},
 				ReferencedColumnIDs:   []ColumnID{1},
-				ReferencedTableID:     keys.ProtectedTSMetaTableID,
-				Name:                  "fk_protected_ts_meta",
+				ReferencedTableID:     keys.ProtectedTSTimestampsTableID,
+				Name:                  "fk_protected_ts_timestamps",
 				Validity:              ConstraintValidity_Validated,
 				LegacyOriginIndex:     1,
 				LegacyReferencedIndex: 1,
+				OnDelete:              ForeignKeyReference_CASCADE,
 			},
 		},
 	}
@@ -1138,7 +1184,7 @@ var (
 			Interleave: InterleaveDescriptor{
 				Ancestors: []InterleaveDescriptor_Ancestor{
 					{
-						TableID:         keys.ProtectedTSMetaTableID,
+						TableID:         keys.ProtectedTSTimestampsTableID,
 						IndexID:         1,
 						SharedPrefixLen: 1,
 					},
@@ -1154,11 +1200,12 @@ var (
 				OriginTableID:         keys.ProtectedTSSpansTableID,
 				OriginColumnIDs:       []ColumnID{1},
 				ReferencedColumnIDs:   []ColumnID{1},
-				ReferencedTableID:     keys.ProtectedTSMetaTableID,
-				Name:                  "fk_protected_ts_meta",
+				ReferencedTableID:     keys.ProtectedTSTimestampsTableID,
+				Name:                  "fk_protected_ts_timestamps",
 				Validity:              ConstraintValidity_Validated,
 				LegacyOriginIndex:     1,
 				LegacyReferencedIndex: 1,
+				OnDelete:              ForeignKeyReference_CASCADE,
 			},
 		},
 	}
@@ -1212,6 +1259,7 @@ func addSystemDescriptorsToSchema(target *MetadataSchema) {
 	target.AddDescriptor(keys.SystemDatabaseID, &ReplicationStatsTable)
 	target.AddDescriptor(keys.SystemDatabaseID, &ReplicationCriticalLocalitiesTable)
 	target.AddDescriptor(keys.SystemDatabaseID, &ProtectedTSMetaTable)
+	target.AddDescriptor(keys.SystemDatabaseID, &ProtectedTSTimestampsTable)
 	target.AddDescriptor(keys.SystemDatabaseID, &ProtectedTSSpansTable)
 }
 
