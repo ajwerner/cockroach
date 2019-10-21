@@ -1,8 +1,17 @@
+// Copyright 2019 The Cockroach Authors.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
 package provider
 
 import (
 	"context"
-	"fmt"
 	"html/template"
 	"strings"
 
@@ -16,9 +25,7 @@ import (
 )
 
 // Protect protects a timestamp. The txn may be nil in which case a new
-// transaction is created.
-//
-// TODO(ajwerner): if I left the client provide a txn, who calls CleanupOnError?
+// transaction from the Provider's underlying DB is used.
 func (p *Provider) Protect(
 	ctx context.Context,
 	txn *client.Txn,
@@ -55,6 +62,11 @@ var protectQueryTmpl = template.Must(template.New("protect").Funcs(template.Func
     current_meta
         AS (
             SELECT * FROM read_meta
+            UNION ALL
+                SELECT
+                    0 AS rows, 0 AS spans, 0 AS version
+                WHERE
+                    NOT EXISTS (SELECT * FROM read_meta)
         ),
     checks
         AS (
@@ -74,9 +86,10 @@ var protectQueryTmpl = template.Must(template.New("protect").Funcs(template.Func
             UPSERT
             INTO
                 system.protected_ts_meta
+            (rows, spans, version)
             (
                 SELECT
-                    new_rows AS rows, new_spans AS spans, new_version AS version
+                    new_rows, new_spans, new_version
                 FROM
                     checks
                 WHERE
@@ -135,7 +148,7 @@ var protectQueryTmpl = template.Must(template.New("protect").Funcs(template.Func
                 NULL
         )
 SELECT
-    failed, rows AS prev_rows, spans AS prev_spans, version AS prev_version, new_rows, new_spans, new_version, $3
+    failed, rows AS prev_rows, spans AS prev_spans, version AS prev_version
 FROM
     checks, current_meta;`))
 
@@ -148,6 +161,7 @@ func protectImpl(
 	meta []byte,
 	spans []roachpb.Span,
 ) (*protectedts.ProtectedTS, error) {
+
 	// TODO(ajwerner): We should maybe cache the string used to install common
 	// numbers of spans like 1. Given the lack of prepared statement with the
 	// internal executor the parsing and planning probably dominates the rendering
@@ -161,12 +175,10 @@ func protectImpl(
 	args = append(args, maxRows, maxSpans, len(spans),
 		[]byte(id[:]), ts.AsOfSystemTime(), metaType, meta)
 	args = spansToValues(args, spans)
-	fmt.Println(buf.String())
 	row, err := p.ex.QueryRow(ctx, "protect-ts", txn, buf.String(), args...)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println(row)
 	if *row[0].(*tree.DBool) {
 		if rows := int(*row[1].(*tree.DInt)); rows >= maxRows {
 			return nil, errors.Errorf("limits exceeded: %d+1 > %d rows",
@@ -188,6 +200,13 @@ func protectImpl(
 	//
 	// This feels like a natural place for a ROLLBACK TO SAVEPOINT if we had set up a
 	// savepoint just before the above write.
+	//
+	// TODO(ajwerner): this doesn't work at all. There is no minimum gcttl and well
+	// there is no guarantee that this doesn't get pushed. We need to figure out a
+	// real deadline for this transaction and set it. Ideally that deadline should
+	// be the timestamp plus some multiple of the minimum gcttl for the spans we're
+	// protecting. Then we need to transactionally ensure that we have the right
+	// system config.
 	if !txn.Serialize().Timestamp.Less(deadline) {
 		return nil, errors.Errorf("failed to lay down intents to protect %v before %v, the minimum timestamp at which a read on protected_ts_timestamps table or the protected_ts_meta table",
 			ts, deadline)

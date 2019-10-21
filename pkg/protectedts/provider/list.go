@@ -1,3 +1,13 @@
+// Copyright 2019 The Cockroach Authors.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
 package provider
 
 import (
@@ -12,6 +22,21 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
+
+// List returns the current set of protected timestamps.
+func (p *Provider) List(ctx context.Context) (*protectedts.ProtectedTimestamps, error) {
+	row, err := p.ex.QueryRow(ctx, "iterate-protected-ts", nil, listQuery)
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	var v protectedts.ProtectedTimestamps
+	row[0].(*tree.DJSON).JSON.Format(&buf)
+	if err := json.Unmarshal(buf.Bytes(), (*protectedTimestampsUnmarshaler)(&v)); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
 
 const listQuery = `
 SELECT
@@ -115,20 +140,6 @@ func (ts *protectedTSUnmarshaler) toTS() protectedts.ProtectedTS {
 		ret.Meta = ts.Meta
 	}
 	return ret
-}
-
-func (p *Provider) List(ctx context.Context) (*protectedts.ProtectedTimestamps, error) {
-	row, err := p.ex.QueryRow(ctx, "iterate-protected-ts", nil, listQuery)
-	if err != nil {
-		return nil, err
-	}
-	var buf bytes.Buffer
-	var v protectedts.ProtectedTimestamps
-	row[0].(*tree.DJSON).JSON.Format(&buf)
-	if err := json.Unmarshal(buf.Bytes(), (*protectedTimestampsUnmarshaler)(&v)); err != nil {
-		return nil, err
-	}
-	return &v, nil
 }
 
 type hlcTimestampUnmarshaler hlc.Timestamp

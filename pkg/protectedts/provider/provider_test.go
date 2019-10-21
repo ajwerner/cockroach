@@ -3,7 +3,6 @@ package provider_test
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"sort"
 	"testing"
 
@@ -39,10 +38,6 @@ func TestProtectQuery(t *testing.T) {
 	require.NoError(t, err)
 	got, err := p.List(ctx)
 	require.NoError(t, err)
-
-	row, err := ex.QueryRow(ctx, "bootstap", nil, "SELECT * FROM system.protected_ts_meta")
-	require.NoError(t, err)
-	require.Nil(t, row, fmt.Sprint(row))
 
 	// Add 9 more (which should be allowed).
 	list := []protectedts.ProtectedTS{*ts}
@@ -94,7 +89,7 @@ func TestProtectQuery(t *testing.T) {
 	// Try to add another row which should fail.
 	ts, err = p.Protect(ctx, nil, s0.Clock().Now(), "", nil, spans...)
 	require.Nil(t, ts)
-	require.True(t, testutils.IsError(err, "limits exceeded: 8\\+100 > 100 spans"), err)
+	require.True(t, testutils.IsError(err, "limits exceeded: 16\\+100 > 100 spans"), err)
 
 	// Now insert another row which would exceed the span limit.
 }

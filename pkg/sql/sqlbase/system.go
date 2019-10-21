@@ -1054,6 +1054,7 @@ var (
 		NextMutationID: 1,
 	}
 
+	truth                = "true"
 	ProtectedTSMetaTable = TableDescriptor{
 		Name:     "protected_ts_meta",
 		ID:       keys.ProtectedTSMetaTableID,
@@ -1061,21 +1062,28 @@ var (
 		Version:  1,
 		Columns: []ColumnDescriptor{
 			{
-				Name:        "_id",
+				Name:        "_exists",
 				ID:          1,
-				Type:        *types.Int4,
+				Type:        *types.Bool,
 				Hidden:      true,
-				ComputeExpr: func() *string { s := "0"; return &s }(),
+				DefaultExpr: &truth,
 			}, // TODO(ajwerner): what should this pk be?
 			{Name: "version", ID: 2, Type: *types.Int},
 			{Name: "rows", ID: 3, Type: *types.Int4},
 			{Name: "spans", ID: 4, Type: *types.Int4},
 		},
+		Checks: []*TableDescriptor_CheckConstraint{
+			{
+				Name:      "check_exists",
+				Expr:      "true",
+				ColumnIDs: []ColumnID{1},
+			},
+		},
 		NextColumnID: 5,
 		Families: []ColumnFamilyDescriptor{
 			{
 				Name:        "primary",
-				ColumnNames: []string{"_id", "version", "rows", "spans"},
+				ColumnNames: []string{"_exists", "version", "rows", "spans"},
 				ColumnIDs:   []ColumnID{1, 2, 3, 4},
 			},
 		},
@@ -1084,7 +1092,7 @@ var (
 			Name:        "primary",
 			ID:          1,
 			Unique:      true,
-			ColumnNames: []string{"_id"},
+			ColumnNames: []string{"_exists"},
 			ColumnIDs:   []ColumnID{1},
 			ColumnDirections: []IndexDescriptor_Direction{
 				IndexDescriptor_ASC,
