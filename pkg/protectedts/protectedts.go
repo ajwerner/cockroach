@@ -42,12 +42,6 @@ type Iterator func(*ProtectedTS) (wantMore bool)
 // transaction is subsequently committed, the resulting state of the system
 // is undefined.
 //
-//
-// The above comment about an undefined state occurs because this transaction
-// may determine that the limits have been reached for the maximum number of
-// rows or spans but it will already have laid down an intent to update those
-// values.
-//
 // It is the caller's responsibility to ensure that a timestamp is ultimately
 // released.
 type Store interface {
@@ -61,18 +55,19 @@ type Store interface {
 	// is laid down within the minimum GC interval thus ensuring that any
 	// successful read of the table during which could possibly attempt to
 	// GC this timestamp would fail.
-	//
-	// TODO(ajwerner): should this just return a UUID?
 	Protect(
-		_ context.Context,
+		ctx context.Context,
 		txn *client.Txn,
 		ts hlc.Timestamp,
 		metaType string, meta []byte,
 		spans ...roachpb.Span,
-	) (*ProtectedTS, error)
+	) (uuid.UUID, error)
 
 	// Release allows spans which were previously protected to now be garbage
 	// collected.
+	//
+	// If the specified UUID does not exist ErrNotFound is returned but the
+	// passed txn remains safe for future use.
 	Release(_ context.Context, txn *client.Txn, id uuid.UUID) error
 }
 
