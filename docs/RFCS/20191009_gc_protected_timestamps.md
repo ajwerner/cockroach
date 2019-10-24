@@ -16,11 +16,11 @@ jobs to prevent relevant spans from being garbage collected.
 
 # Motivation
 
-CockroachDB internally uses [MVCC](https://www.cockroachlabs.com/docs/stable/architecture/storage-layer.html#mvcc)
+CockroachDB internally uses
+[MVCC](https://www.cockroachlabs.com/docs/stable/architecture/storage-layer.html#mvcc)
 to store key-value pairs. Old values need to be removed eventually.
 Today's default GC threshold is 25 hours. This threshold comes from an
-assumption about common backup strategies; we assume that customers frequentlyFurthermore, some long-running operations rely on data not being garbage
-collected. 
+assumption about common backup strategies; we assume that customers frequently.
 run a nightly incremental backup from the previous incremental backup and then
 run a full backup once a week. With this assumption we need to ensure that at
 least 24 hours of history remains and will continue to remain until the
@@ -33,26 +33,27 @@ For workloads which update rows frequently throughout a single day this GC
 policy can have huge costs for query execution 
 [#17229](https://github.com/cockroachdb/cockroach/issues/17229).
 
-One particularly pernicious interaction with garbage collection relates to
-long running schema changes with backfill. These jobs can fail or be canceled.
-In order to properly revert any changes they have created, these backfills use
-a mechanism called revert range to move the ranges back to their previous state.
+One particularly pernicious interaction with garbage collection relates to long
+running schema changes with backfill. These jobs can fail or be canceled. In
+order to properly revert any changes they have created, these backfills use a
+mechanism called revert range to move the ranges back to their previous state.
 In order to perform a revert-range operation the data prior to the beginning of
 the schema change must be retained.
 
-In order to perform an incremental backup the value as of the last backup must be retained in order to know what to include. 
+In order to perform an incremental backup the value as of the last backup must
+be retained in order to know what to include.
 
 Long-running OLAP transactions also merit consideration. Imagine a transaction
 is kept open for a long period of time, today if it attempts to read at a
 timestamp which has been garbage collected, the client will receive an error.
-This last use case is generally not a problem with day-long TTLs but may be more
-of a problem with TTLs on the order of minutes. This may become a yet further
-problem when work on admission control makes it feasible to run low-priority,
-long-running OLAP queries concurrently with bursty OLTP-workloads but can expose
-the OLAP queries to large amount of delay. This use case is not overly
-considered in this RFC but we do not want to preclude it by choosing solutions
-that are unlikely to be reasonably efficient if run once for every minutes-long
-query.
+This last use case is generally not a problem with day-long TTLs but may be
+more of a problem with TTLs on the order of minutes. This may become a yet
+further problem when work on admission control makes it feasible to run
+low-priority, long-running OLAP queries concurrently with bursty OLTP-workloads
+but can expose the OLAP queries to large amount of delay. This use case is not
+overly considered in this RFC but we do not want to preclude it by choosing
+solutions that are unlikely to be reasonably efficient if run once for every
+minutes-long query.
 
 This RFC works to enable a shorter default GC interval by implementing a 
 system to allow for fine-grained prevention of GC for key spans at or above
@@ -61,29 +62,31 @@ historical data.
 
 # Guide-level explanation
 
-This RFC introduces a `protectedts` subsystem which provides primitives
-on top of which long running jobs can safely prevent relevant data from being
-garbage collected. This state is then plumbed in to the `storage` layer's data GC process to provide the specified semantics. 
-We'll then detail how clients can use the transactional API
-to safely protect data needed for long-running jobs.
+This RFC introduces a `protectedts` subsystem which provides primitives on top
+of which long running jobs can safely prevent relevant data from being garbage
+collected. This state is then plumbed in to the `storage` layer's data GC
+process to provide the specified semantics. We'll then detail how clients can
+use the transactional API to safely protect data needed for long-running jobs.
 
 ## Basic terminology
 
-A protected timestamp is an HLC timestamp associated with a set of spans
-which, while it exists, prevents any range which contains data in those
-spans from garbage collecting data at that timestamp (open question about
-partial coverings, say Range contains [a, c) and [a, b) is protected, will
-[b,c) get collected?). There are two protection
-modes, `ProtectAt` and `ProtectAfter`. `ProtectAt` ensures only that values which are live at the specified timestamp are protected whereby 
-`ProtectAfter` ensures that all values live at or after the timestamp are
-protected (note that `ProtectAfter` includes `ProtectAt` and protections
-marked as `ProtectAt` will be treated the sam in the initial implementation).
-Each protected timestamp may contain metadata to identify
-the record (what exactly this metadata looks like is an open question).
+A protected timestamp is an HLC timestamp associated with a set of spans which,
+while it exists, prevents any range which contains data in those spans from
+garbage collecting data at that timestamp (open question about partial
+coverings, say Range contains [a, c) and [a, b) is protected, will [b,c) get
+collected?). There are two protection modes, `ProtectAt` and
+`ProtectAfter`. `ProtectAt` ensures only that values which are live at the
+specified timestamp are protected whereby `ProtectAfter` ensures that all
+values live at or after the timestamp are protected (note that `ProtectAfter`
+includes `ProtectAt` and protections marked as `ProtectAt` will be treated the
+sam in the initial implementation).  Each protected timestamp may contain
+metadata to identify the record (what exactly this metadata looks like is an
+open question).
 
-In this section we'll go through a high level overview of the basic operations and describe how they are made safe, describing the changes to the Replica's
-GC in the process, and then we'll talk about how we anticipate the API
-will be integrated.
+In this section we'll go through a high level overview of the basic operations
+and describe how they are made safe, describing the changes to the Replica's GC
+in the process, and then we'll talk about how we anticipate the API will be
+integrated.
 
 ## Semantics of protecting a timestamp
 
@@ -92,19 +95,52 @@ if a timestamp is successfully protected then it is not possible that any data
 live in any of the protected timestamp's spans at the timestamp will be garbage
 collected until the protected timestamp is released.
 
-It would be unreasonable if an attempt to protect a timestamp succeeded after data
-live at that timestamp has already been GC'd. The protected timestamp
-subsystem should only succeed if indeed it is impossible for the timestamp which
-the client tries to protect is indeed protected. Furthermore it useful that
-clients be able to protect timestamps inside of a transaction rather than
-as a distinct transaction (i.e. the interface will take a `*client.Txn`).
+It would be unreasonable if an attempt to protect a timestamp succeeded after
+data live at that timestamp has already been GC'd. However for our use case
+we're going to say that it is okay to allow clients to install protections for
+timestamps which may fail to apply. We'll provide mechanisms in later sections
+to ensure that all ranges have indeed protected the specified timestamp.
 
 An important element to all of this is that GC TTLs are defined in 
 [Zone Configurations](https://www.cockroachlabs.com/docs/stable/configure-replication-zones.html).
-This implies a to need to couple the protected timestamp subsystem to
-the zone configuration subsystem or the downstream side-effects of those zone
-configs, replica state. This chooses to base its implementation on the zone
-config GC TTLs.
+This implies a to need to couple the protected timestamp subsystem to the zone
+configuration subsystem or the downstream side-effects of those zone configs,
+replica state. This chooses to base its implementation on the zone config GC
+TTLs despite the challenge it poses to providing guarantees.
+
+A replica is free is GC any data which is older than the current timestamp
+less its current view of its GC ttl. Unfortunately we have no claims on the
+staleness of a Replica's current view of its GC ttl.
+
+Imagine the following scenario:
+
+The GC ttl for a range begins at 2:
+
+A key is updated at timest t0, t2, and t3.
+At time 3 we decide we need to run GC.
+At time 4.01 we decide to GC and we'll 
+select `now-gcttl == 2.01`. At this point we will update the GC TTL and
+proceed to remove the values at t0, and t2.
+```
+0 23
+* ** 
+```
+
+Now imagine we didn't run GC then but instead we attempted to protect
+timestamp t0. This seems silly because certainly the range was free to
+GC t1 as recently as t0 
+
+
+ The protected timestamp
+subsystem should only succeed if indeed it is impossible for the timestamp
+which the client tries to protect is indeed protected. Furthermore it useful
+that clients be able to protect timestamps inside of a transaction rather than
+as a distinct transaction (i.e. the interface will take a `*client.Txn`).
+
+
+This goal however is complicated by the fact that zone configurations
+controlling GC ttls can change. Further
+
 
 There are different choices we could make about which timestamp are available
 for protection at any given time. This proposal allows clients to protect
@@ -124,26 +160,25 @@ the Replica state itself is discussed below.
 In order to achieve correctness we must only GC timestamps at which we know
 that no future transactions could add a protected timestamp to.
 
-We achieve this by having a special, single-row `system.protected_ts_meta` table
-through which we'll chain causality between zone configs and protected
+We achieve this by having a special, single-row `system.protected_ts_meta`
+table through which we'll chain causality between zone configs and protected
 timestamps.
 
-This meta row will help us implement this feature by enabling
-caching and size limits. It will be observed and modified in all transactions
-which create protected timestamps. We'll also observe this meta row in all
-transactions which update zone configurations.
+This meta row will help us implement this feature by enabling caching and size
+limits. It will be observed and modified in all transactions which create
+protected timestamps. We'll also observe this meta row in all transactions
+which update zone configurations.
 
 Now let's walk through the high level protocol for writing protected timestamps
-and for GC.  
+and for GC.
 
 #### Protecting a timestamp
 
-First the code will, in the transaction, 
-read all of the relevant zone configurations
-for the spans being protected (this is not as cheap as it should be, see TODO
-other RFC). It will then determine the relevant zone config with the shortest
-TTL. The deadline for the transaction to be committed is the requested timestamp
-plus that minimum TTL.
+First the code will, in the transaction, read all of the relevant zone
+configurations for the spans being protected (this is not as cheap as it should
+be, see TODO other RFC). It will then determine the relevant zone config with
+the shortest TTL. The deadline for the transaction to be committed is the
+requested timestamp plus that minimum TTL.
 
 Every time a protected timestamp is written it must check that it will not
 exceed the rows or spans limits. If the limits would be exceeded an errors is
@@ -302,7 +337,7 @@ type Store interface {
 ### `protectedtsbase`
 
 ```go
-package protectedts
+package protectedtsbase
 
 type Record struct {
   ID        uuid.UUID
@@ -404,12 +439,12 @@ in another).
 The current state of the table is stored in a special table called
 `system.protected_ts_meta`. 
 ```sql
-  CREATE TABLE protected_ts_meta (                       
-      version INT8 NOT NULL,                             
-      rows    INT4 NOT NULL,                                
-      spans   INT4 NOT NULL,                               
-      FAMILY "primary" (_exists, version, rows, spans),  
-      CONSTRAINT check_exists CHECK (_exists)               
+  CREATE TABLE protected_ts_meta (
+      version INT8 NOT NULL,
+      rows    INT4 NOT NULL,
+      spans   INT4 NOT NULL,
+      FAMILY "primary" (_exists, version, rows, spans),
+      CONSTRAINT check_exists CHECK (_exists)
   )
 ```
 
@@ -423,22 +458,22 @@ _exists BOOL NOT NULL CHECK (_exists) DEFAULT (true) PRIMARY KEY
 The other tables are defined as:
 
 ```sql 
-  CREATE TABLE protected_ts_timestamps (          
-      id UUID NOT NULL,                           
+  CREATE TABLE protected_ts_timestamps (
+      id UUID NOT NULL,
       ts DECIMAL NOT NULL,
-      mode INT NOT NULL,                    
-      meta_type STRING NOT NULL,                  
-      meta BYTES NULL,                            
-      CONSTRAINT "primary" PRIMARY KEY (id ASC),  
-      FAMILY "primary" (id, ts, meta_type, meta)  
+      mode INT NOT NULL,
+      meta_type STRING NOT NULL,
+      meta BYTES NULL,
+      CONSTRAINT "primary" PRIMARY KEY (id ASC),
+      FAMILY "primary" (id, ts, meta_type, meta)
   )
 
-  CREATE TABLE protected_ts_spans (                                    
-    id UUID NOT NULL,                  
+  CREATE TABLE protected_ts_spans (
+    id UUID NOT NULL,
     key BYTES NOT NULL,
     end_key BYTES NOT NULL,
     CONSTRAINT "primary" PRIMARY KEY (id ASC, key ASC, end_key ASC),
-    CONSTRAINT fk_protected_ts_timestamps FOREIGN KEY (id) REFERENCES protected_ts_timestamps(id) ON DELETE CASCADE,  
+    CONSTRAINT fk_protected_ts_timestamps FOREIGN KEY (id) REFERENCES protected_ts_timestamps(id) ON DELETE CASCADE,
     FAMILY "primary" (id, key, end_key)
   ) INTERLEAVE IN PARENT protected_ts_timestamps (id)
 ```
