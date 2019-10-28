@@ -58,17 +58,17 @@ func run() error {
 		flags.PrintDefaults()
 	}
 
-	if len(os.Args) < 2 {
+	if len(os.Args) < 3 {
 		var b bytes.Buffer
 		flags.SetOutput(&b)
 		flags.Usage()
 		return errors.New(b.String())
 	}
-
 	cluster := os.Args[1]
-	if err := flags.Parse(os.Args[2:]); err != nil {
+	if err := flags.Parse(os.Args[3:]); err != nil {
 		return err
 	}
+	fmt.Println(os.Args, flags.Args())
 
 	if !*flagStderr {
 		return errors.New("-stderr=false is unsupported, please tee to a file (or implement the feature)")
