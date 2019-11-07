@@ -5,7 +5,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/ptpb"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
 
@@ -40,13 +39,13 @@ func (s *storageWithDatabase) Release(ctx context.Context, txn *client.Txn, id u
 
 func (s *storageWithDatabase) GetRecord(
 	ctx context.Context, txn *client.Txn, id uuid.UUID,
-) (r *ptpb.Record, createdAt hlc.Timestamp, err error) {
+) (r *ptpb.Record, err error) {
 	if txn == nil {
 		err = s.db.Txn(ctx, func(ctx context.Context, txn *client.Txn) error {
-			r, createdAt, err = s.s.GetRecord(ctx, txn, id)
+			r, err = s.s.GetRecord(ctx, txn, id)
 			return err
 		})
-		return r, createdAt, err
+		return r, err
 	}
 	return s.s.GetRecord(ctx, txn, id)
 }

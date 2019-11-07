@@ -1,13 +1,3 @@
-// Copyright 2019 The Cockroach Authors.
-//
-// Use of this software is governed by the Business Source License
-// included in the file licenses/BSL.txt.
-//
-// As of the Change Date specified in that file, in accordance with
-// the Business Source License, use of this software will be governed
-// by the Apache License, Version 2.0, included in the file
-// licenses/APL.txt.
-
 package ptstorage_test
 
 import (
@@ -17,6 +7,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/ptpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/ptstorage"
@@ -25,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestProvider(t *testing.T) {
+func TestStorage(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	// Start small: create a record, get it etc
 
@@ -34,7 +25,8 @@ func TestProvider(t *testing.T) {
 	defer tc.Stopper().Stop(ctx)
 
 	s := tc.Server(0)
-	p := protectedts.WithDatabase(ptstorage.NewProvider(s.ClusterSettings()), s.DB())
+	p := protectedts.WithDatabase(ptstorage.New(s.ClusterSettings(),
+		s.InternalExecutor().(*sql.InternalExecutor)), s.DB())
 	ts := s.Clock().Now()
 
 	meta, err := p.GetMetadata(ctx, nil /* txn */)
@@ -51,11 +43,14 @@ func TestProvider(t *testing.T) {
 		EndKey: keys.MakeTablePrefix(11),
 	})
 	require.NoError(t, p.Protect(ctx, nil /* txn */, &r))
+	// Creating the record again should fail.
+	require.Equal(t, protectedts.ErrExists, p.Protect(ctx, nil /* txn */, &r))
 
 	// Make sure we read it.
-	read, _, err := p.GetRecord(ctx, nil /* txn */, r.ID)
+	read, err := p.GetRecord(ctx, nil /* txn */, r.ID)
 	require.NoError(t, err)
 	require.EqualValues(t, r, *read)
+
 	// Make sure that the metadata has been updated to reflect the state.
 	state, err = p.GetState(ctx, nil /* txn */)
 	require.NoError(t, err)
@@ -64,10 +59,13 @@ func TestProvider(t *testing.T) {
 
 	// Release the span.
 	require.NoError(t, p.Release(ctx, nil /* txn */, r.ID))
-	_, _, err = p.GetRecord(ctx, nil /* txn */, r.ID)
+	_, err = p.GetRecord(ctx, nil /* txn */, r.ID)
 	require.EqualError(t, err, protectedts.ErrNotFound.Error())
 	state, err = p.GetState(ctx, nil /* txn */)
 	require.NoError(t, err)
 	require.Equal(t, ptpb.Metadata{Version: 2, NumRecords: 0, NumSpans: 0}, state.Metadata)
 	require.EqualValues(t, []ptpb.Record(nil), state.Records)
+
 }
+
+// TODO(ajwerner): more testing

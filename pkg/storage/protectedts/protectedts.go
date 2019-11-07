@@ -28,6 +28,10 @@ import (
 // not exist.
 var ErrNotFound = errors.New("protected timestamp record not found")
 
+// ErrExists returned from Protect when trying to protect a record
+// with an ID which already exists.
+var ErrExists = errors.New("protected timestamp record not found")
+
 // Provider is the central coordinator for the protectedts subsystem.
 // It exists to abstract interaction with subsystem.
 type Provider interface {
@@ -76,7 +80,7 @@ type Storage interface {
 	// at which the Record providing that protection was created.
 	GetRecord(
 		context.Context, *client.Txn, uuid.UUID,
-	) (_ *ptpb.Record, createdAt hlc.Timestamp, _ error)
+	) (_ *ptpb.Record, _ error)
 
 	// Release allows spans which were previously protected to now be garbage
 	// collected.

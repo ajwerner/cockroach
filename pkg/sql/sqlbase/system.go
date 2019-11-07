@@ -269,7 +269,9 @@ var SystemAllowedPrivileges = map[ID]privilege.List{
 	keys.ReplicationCriticalLocalitiesTableID: privilege.ReadWriteData,
 	keys.ReplicationStatsTableID:              privilege.ReadWriteData,
 	keys.ReportsMetaTableID:                   privilege.ReadWriteData,
-	keys.ProtectedTimestampRecordsTableID:     privilege.ReadWriteData,
+	keys.ProtectedTimestampsMetaTableID:       privilege.ReadWriteData,
+	keys.ProtectedTimestampsRecordsTableID:    privilege.ReadWriteData,
+	keys.ProtectedTimestampsSpansTableID:      privilege.ReadWriteData,
 }
 
 // Helpers used to make some of the TableDescriptor literals below more concise.
@@ -1052,21 +1054,73 @@ var (
 		NextMutationID: 1,
 	}
 
-	ProtectedTimestampRecordsTable = TableDescriptor{
+	truth                        = "true"
+	ProtectedTimestampsMetaTable = TableDescriptor{
+		Name:     "protected_ts_meta",
+		ID:       keys.ProtectedTimestampsMetaTableID,
+		ParentID: keys.SystemDatabaseID,
+		Version:  1,
+		Columns: []ColumnDescriptor{
+			{
+				Name:        "_exists",
+				ID:          1,
+				Type:        *types.Bool,
+				Hidden:      true,
+				DefaultExpr: &truth,
+			}, // TODO(ajwerner): what should this pk be?
+			{Name: "version", ID: 2, Type: *types.Int},
+			{Name: "num_records", ID: 3, Type: *types.Int4},
+			{Name: "num_spans", ID: 4, Type: *types.Int4},
+		},
+		Checks: []*TableDescriptor_CheckConstraint{
+			{
+				Name:      "check_exists",
+				Expr:      "true",
+				ColumnIDs: []ColumnID{1},
+			},
+		},
+		NextColumnID: 5,
+		Families: []ColumnFamilyDescriptor{
+			{
+				Name:        "primary",
+				ColumnNames: []string{"_exists", "version", "num_records", "num_spans"},
+				ColumnIDs:   []ColumnID{1, 2, 3, 4},
+			},
+		},
+		NextFamilyID: 1,
+		PrimaryIndex: IndexDescriptor{
+			Name:        "primary",
+			ID:          1,
+			Unique:      true,
+			ColumnNames: []string{"_exists"},
+			ColumnIDs:   []ColumnID{1},
+			ColumnDirections: []IndexDescriptor_Direction{
+				IndexDescriptor_ASC,
+			},
+		},
+		NextIndexID:    2,
+		Privileges:     NewCustomSuperuserPrivilegeDescriptor(SystemAllowedPrivileges[keys.ReplicationStatsTableID]),
+		FormatVersion:  InterleavedFormatVersion,
+		NextMutationID: 1,
+	}
+
+	ProtectedTimestampsRecordsTable = TableDescriptor{
 		Name:     "protected_ts_records",
-		ID:       keys.ProtectedTimestampRecordsTableID,
+		ID:       keys.ProtectedTimestampsRecordsTableID,
 		ParentID: keys.SystemDatabaseID,
 		Version:  1,
 		Columns: []ColumnDescriptor{
 			{Name: "id", ID: 1, Type: *types.Uuid},
-			{Name: "record", ID: 2, Type: *types.Bytes},
+			{Name: "ts", ID: 2, Type: *types.Decimal},
+			{Name: "meta_type", ID: 3, Type: *types.String},
+			{Name: "meta", ID: 4, Type: *types.Bytes, Nullable: true},
 		},
-		NextColumnID: 3,
+		NextColumnID: 5,
 		Families: []ColumnFamilyDescriptor{
 			{
 				Name:        "primary",
-				ColumnNames: []string{"id", "record"},
-				ColumnIDs:   []ColumnID{1, 2},
+				ColumnNames: []string{"id", "ts", "meta_type", "meta"},
+				ColumnIDs:   []ColumnID{1, 2, 3, 4},
 			},
 		},
 		NextFamilyID: 1,
@@ -1079,11 +1133,89 @@ var (
 			ColumnDirections: []IndexDescriptor_Direction{
 				IndexDescriptor_ASC,
 			},
+			InterleavedBy: []ForeignKeyReference{
+				{
+					Table:           keys.ProtectedTimestampsSpansTableID,
+					Index:           1,
+					OnDelete:        ForeignKeyReference_CASCADE,
+					SharedPrefixLen: 1,
+				},
+			},
 		},
 		NextIndexID:    2,
-		Privileges:     NewCustomSuperuserPrivilegeDescriptor(SystemAllowedPrivileges[keys.ProtectedTimestampRecordsTableID]),
+		Privileges:     NewCustomSuperuserPrivilegeDescriptor(SystemAllowedPrivileges[keys.ReplicationStatsTableID]),
 		FormatVersion:  InterleavedFormatVersion,
 		NextMutationID: 1,
+		InboundFKs: []ForeignKeyConstraint{
+			{
+				OriginTableID:         keys.ProtectedTimestampsSpansTableID,
+				OriginColumnIDs:       []ColumnID{1},
+				ReferencedColumnIDs:   []ColumnID{1},
+				ReferencedTableID:     keys.ProtectedTimestampsRecordsTableID,
+				Name:                  "fk_protected_ts_timestamps",
+				Validity:              ConstraintValidity_Validated,
+				LegacyOriginIndex:     1,
+				LegacyReferencedIndex: 1,
+				OnDelete:              ForeignKeyReference_CASCADE,
+			},
+		},
+	}
+
+	ProtectedTimestampsSpansTable = TableDescriptor{
+		Name:     "protected_ts_spans",
+		ID:       keys.ProtectedTimestampsSpansTableID,
+		ParentID: keys.SystemDatabaseID,
+		Version:  1,
+		Columns: []ColumnDescriptor{
+			{Name: "id", ID: 1, Type: *types.Uuid},
+			{Name: "key", ID: 2, Type: *types.Bytes},
+			{Name: "end_key", ID: 3, Type: *types.Bytes},
+		},
+		NextColumnID: 4,
+		Families: []ColumnFamilyDescriptor{
+			{
+				Name:        "primary",
+				ColumnNames: []string{"id", "key", "end_key"},
+				ColumnIDs:   []ColumnID{1, 2, 3},
+			},
+		},
+		NextFamilyID: 1,
+		PrimaryIndex: IndexDescriptor{
+			Name:        "primary",
+			ID:          1,
+			Unique:      true,
+			ColumnNames: []string{"id", "key", "end_key"},
+			ColumnIDs:   []ColumnID{1, 2, 3},
+			ColumnDirections: []IndexDescriptor_Direction{
+				IndexDescriptor_ASC, IndexDescriptor_ASC, IndexDescriptor_ASC,
+			},
+			Interleave: InterleaveDescriptor{
+				Ancestors: []InterleaveDescriptor_Ancestor{
+					{
+						TableID:         keys.ProtectedTimestampsRecordsTableID,
+						IndexID:         1,
+						SharedPrefixLen: 1,
+					},
+				},
+			},
+		},
+		NextIndexID:    2,
+		Privileges:     NewCustomSuperuserPrivilegeDescriptor(SystemAllowedPrivileges[keys.ReplicationStatsTableID]),
+		FormatVersion:  InterleavedFormatVersion,
+		NextMutationID: 1,
+		OutboundFKs: []ForeignKeyConstraint{
+			{
+				OriginTableID:         keys.ProtectedTimestampsSpansTableID,
+				OriginColumnIDs:       []ColumnID{1},
+				ReferencedColumnIDs:   []ColumnID{1},
+				ReferencedTableID:     keys.ProtectedTimestampsRecordsTableID,
+				Name:                  "fk_protected_ts_timestamps",
+				Validity:              ConstraintValidity_Validated,
+				LegacyOriginIndex:     1,
+				LegacyReferencedIndex: 1,
+				OnDelete:              ForeignKeyReference_CASCADE,
+			},
+		},
 	}
 )
 
@@ -1134,7 +1266,9 @@ func addSystemDescriptorsToSchema(target *MetadataSchema) {
 	target.AddDescriptor(keys.SystemDatabaseID, &ReplicationConstraintStatsTable)
 	target.AddDescriptor(keys.SystemDatabaseID, &ReplicationStatsTable)
 	target.AddDescriptor(keys.SystemDatabaseID, &ReplicationCriticalLocalitiesTable)
-	target.AddDescriptor(keys.SystemDatabaseID, &ProtectedTimestampRecordsTable)
+	target.AddDescriptor(keys.SystemDatabaseID, &ProtectedTimestampsMetaTable)
+	target.AddDescriptor(keys.SystemDatabaseID, &ProtectedTimestampsRecordsTable)
+	target.AddDescriptor(keys.SystemDatabaseID, &ProtectedTimestampsSpansTable)
 }
 
 // addSystemDatabaseToSchema populates the supplied MetadataSchema with the

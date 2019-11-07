@@ -3,6 +3,7 @@ package ptprovider
 import (
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/ptstorage"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/pttracker"
@@ -10,21 +11,22 @@ import (
 
 // Config configures the Provider.
 type Config struct {
-	Settings *cluster.Settings
-	DB       *client.DB
+	Settings         *cluster.Settings
+	DB               *client.DB
+	InternalExecutor *sql.InternalExecutor
 }
 
 type provider struct {
-	*ptstorage.Provider
+	*ptstorage.Storage
 	*pttracker.Tracker
 }
 
 // New creates a new protectedts.Provider.
 func New(c Config) protectedts.Provider {
-	s := ptstorage.NewProvider(c.Settings)
+	s := ptstorage.New(c.Settings, c.InternalExecutor)
 	t := pttracker.New(c.Settings, c.DB, s)
 	return &provider{
-		Provider: s,
-		Tracker:  t,
+		Storage: s,
+		Tracker: t,
 	}
 }
