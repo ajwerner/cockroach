@@ -3,61 +3,62 @@ package ptverifier
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/ptpb"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/storage/protectedts"
+	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/pkg/errors"
 )
 
-func Verify(ctx context.Context, ds *kv.DistSender, r *ptpb.Record, createdAt hlc.Timestamp) error {
+func Verify(ctx context.Context, db *client.DB, s protectedts.Storage, id uuid.UUID) error {
 	// For all of the spans in the record we need to go reach out to all of the ranges which cover that span.
 	// We're going to do this in an iterative way by finding the ranges, sending them
 	//
 	// AdminVerifyProtectedTimestampRequests then waiting for responses which will include range info.
 
-	ri := kv.NewRangeIterator(ds)
-	var ba roachpb.BatchRequest
-	var req roachpb.AdminVerifyProtectedTimestampRequest
-	mergedSpans, _ := roachpb.MergeSpans(r.Spans)
-	remaining := roachpb.Spans(mergedSpans)
+	// We want to make the responses combinable
 
-	var done roachpb.Spans
-	for len(remaining) > 0 {
-		for _, s := range remaining {
-			// TODO(ajwerner): deal with adressing.
-			rs := roachpb.RSpan{
-				Key:    roachpb.RKey(s.Key),
-				EndKey: roachpb.RKey(s.EndKey),
-			}
-			ri.Seek(ctx, rs.Key, kv.Ascending)
-			for ri.Valid() {
-				desc := ri.Desc()
-				req.Reset()
-				ba.Reset()
-				req.Key = roachpb.Key(desc.StartKey)
-				req.EndKey = roachpb.Key(desc.EndKey)
-				ba.Header.ReturnRangeInfo = true
-				ba.Add(&req)
-				br, pErr := ds.Send(ctx, ba)
-				if pErr != nil {
-					return errors.Wrapf(pErr.GoError(), "failed to verify protection on %v", desc)
-				}
-				resp := br.Responses[0].GetAdminVerifyProtectedTimestamp()
-				if !resp.Verified {
-					return errors.Errorf("failed to verify protection on %v", desc)
-				}
-				for _, ri := range resp.RangeInfos {
-					done = append(done, ri.Desc.RSpan().AsRawSpanWithNoLocals())
-				}
-				if ri.NeedAnother(rs) {
-					ri.Next(ctx)
-				} else {
-					break
-				}
-			}
+	// We want to create a single batch which will verify the record
+
+	// First we want to read the record, then we want to run the batch
+	txn := db.NewTxn(ctx, "verify")
+	r, err := s.GetRecord(ctx, txn, id)
+	ts := txn.Serialize().Timestamp
+	_ = txn.Rollback(ctx) // We don't care.
+	if err != nil {
+		return errors.Wrapf(err, "failed to fetch record %s", id)
+	}
+
+	mergedSpans, _ := roachpb.MergeSpans(r.Spans)
+	var b client.Batch
+	for _, s := range mergedSpans {
+		var req roachpb.AdminVerifyProtectedTimestampRequest
+		req.RecordAliveAt = ts
+		req.Protected = r.Timestamp
+		req.RecordID = r.ID
+		req.Key = s.Key
+		req.EndKey = s.EndKey
+		b.AddRawRequest(&req)
+	}
+	if err := db.Run(ctx, &b); err != nil {
+		return err
+	}
+	// Now we should go check the responses and synthesize an error.
+	rawResponse := b.RawResponse()
+	var failed []roachpb.RangeDescriptor
+	for _, r := range rawResponse.Responses {
+		resp := r.GetInner().(*roachpb.AdminVerifyProtectedTimestampResponse)
+		if len(resp.FailedRanges) == 0 {
+			continue
 		}
-		remaining, done = roachpb.SubtractSpans(remaining, done), done[:0]
+		if len(failed) == 0 {
+			failed = resp.FailedRanges
+		} else {
+			failed = append(failed, resp.FailedRanges...)
+		}
+	}
+	if len(failed) > 0 {
+		return errors.Errorf("failed to verify protection %v on %v", r, failed)
 	}
 	return nil
 }

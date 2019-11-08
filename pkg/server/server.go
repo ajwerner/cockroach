@@ -476,8 +476,9 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	}
 
 	s.protectedtsProvider = ptprovider.New(ptprovider.Config{
-		DB:       s.db,
-		Settings: st,
+		DB:               s.db,
+		InternalExecutor: internalExecutor,
+		Settings:         st,
 	})
 
 	// Similarly for execCfg.

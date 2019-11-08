@@ -256,6 +256,19 @@ func (sr *ScanResponse) combine(c combinable) error {
 	return nil
 }
 
+var _ combinable = &AdminVerifyProtectedTimestampResponse{}
+
+func (avptr *AdminVerifyProtectedTimestampResponse) combine(c combinable) error {
+	other := c.(*AdminVerifyProtectedTimestampResponse)
+	if avptr != nil {
+		avptr.FailedRanges = append(avptr.FailedRanges, other.FailedRanges...)
+		if err := avptr.ResponseHeader.combine(other.Header()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 var _ combinable = &ScanResponse{}
 
 // combine implements the combinable interface.

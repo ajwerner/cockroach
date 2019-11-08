@@ -495,6 +495,7 @@ type Replica struct {
 		syncutil.Mutex
 		minStateReadTimestamp hlc.Timestamp
 		pendingGCThreshold    hlc.Timestamp
+		promisedIDs           map[uuid.UUID]struct{}
 	}
 }
 

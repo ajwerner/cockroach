@@ -13,7 +13,10 @@ package storage
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/ptpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/pkg/errors"
 )
 
@@ -21,7 +24,7 @@ import (
 // protects the specified time and was created at the specified time will
 // apply. It returns false if it may not.
 func (r *Replica) recordWillApply(
-	ctx context.Context, protected, recordCreatedAt hlc.Timestamp,
+	ctx context.Context, protected, recordAliveAt hlc.Timestamp, id uuid.UUID,
 ) (willApply bool, _ error) {
 	ls, pErr := r.redirectOnOrAcquireLease(ctx)
 	if pErr != nil {
@@ -32,9 +35,10 @@ func (r *Replica) recordWillApply(
 	if r.mu.state.GCThreshold.Less(protected) {
 		return false, nil
 	}
-	if recordCreatedAt.Less(ls.Lease.Start) {
+	if recordAliveAt.Less(ls.Lease.Start) {
 		return true, nil
 	}
+
 	// Now we're in the case where maybe it is possible that we're going to later
 	// attempt to set the GC threshold above our protected point so to prevent
 	// that we add some state to the replica.
@@ -43,7 +47,23 @@ func (r *Replica) recordWillApply(
 	if protected.Less(r.protectedTimestampMu.pendingGCThreshold) {
 		return false, nil
 	}
-	r.protectedTimestampMu.minStateReadTimestamp = recordCreatedAt
+
+	var seen bool
+	desc := r.mu.state.Desc
+	r.store.protectedtsTracker.ProtectedBy(ctx, roachpb.Span{
+		Key:    roachpb.Key(desc.StartKey),
+		EndKey: roachpb.Key(desc.EndKey),
+	}, func(r *ptpb.Record) {
+		if r.ID == id {
+			seen = true
+		}
+	})
+	if seen {
+		return true, nil
+	}
+
+	r.protectedTimestampMu.minStateReadTimestamp.Forward(recordAliveAt)
+	r.protectedTimestampMu.promisedIDs[id] = struct{}{} // TODO(ajwerner): clear this out
 	return true, nil
 }
 

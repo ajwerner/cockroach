@@ -15,8 +15,8 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/ptpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/ptstorage"
@@ -74,7 +74,8 @@ func TestProtectedTimestamps(t *testing.T) {
 
 	// So now we should have run GC.
 	require.Regexp(t, "(?s)shouldQueue=true.*processing replica.*GC score after GC", trace.String())
-	p := protectedts.WithDatabase(ptstorage.NewProvider(s0.ClusterSettings()), s.DB())
+	pts := ptstorage.New(s0.ClusterSettings(), lhServer.InternalExecutor().(*sql.InternalExecutor))
+	p := protectedts.WithDatabase(pts, s.DB())
 	ptsRec := ptpb.NewRecord(s0.Clock().Now(), ptpb.PROTECT_AT, "", nil, roachpb.Span{
 		Key:    startKey,
 		EndKey: startKey.Next(),
@@ -98,9 +99,9 @@ func TestProtectedTimestamps(t *testing.T) {
 	failedRec.ID = uuid.MakeV4()
 	failedRec.Timestamp = beforeGC
 	require.NoError(t, p.Protect(ctx, nil /* txn */, &failedRec))
-	failed, createdAt, err := p.GetRecord(ctx, nil /* txn */, failedRec.ID)
+	_, err = p.GetRecord(ctx, nil /* txn */, failedRec.ID)
 	require.NoError(t, err)
 	// Verify that it indeed did fail.
-	verifyErr := ptverifier.Verify(ctx, s0.DistSenderI().(*kv.DistSender), failed, createdAt)
-	require.True(t, testutils.IsError(verifyErr, "failed to verify protection on"), "%v", err)
+	verifyErr := ptverifier.Verify(ctx, s0.DB(), pts, failedRec.ID)
+	require.True(t, testutils.IsError(verifyErr, "failed to verify protection"), "%v", verifyErr)
 }

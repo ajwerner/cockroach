@@ -2539,7 +2539,10 @@ func (r *Replica) adminVerifyProtectedTimestamp(
 	//
 	// 1) The lease started after our timestamp, in which case we're golden
 	// 2) put under the protectedts mu that we'll preserve this timestamp
-	resp.Verified, err = r.recordWillApply(ctx, args.Protected, args.RecordCreatedAt)
+	verified, err := r.recordWillApply(ctx, args.Protected, args.RecordAliveAt, args.RecordID)
+	if err == nil && !verified {
+		resp.FailedRanges = append(resp.FailedRanges, *r.Desc())
+	}
 	return resp, err
 }
 

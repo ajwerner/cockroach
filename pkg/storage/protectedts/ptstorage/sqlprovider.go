@@ -256,7 +256,7 @@ GROUP BY (m.id, m.meta, m.ts)`
 
 	listQuery = `WITH` + currentMetaCTEs + `
 SELECT
-    json_build_object(
+    jsonb_build_object(
         'version', version,
         'num_records', num_records,
         'num_spans', num_spans,

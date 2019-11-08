@@ -49,6 +49,7 @@ func newReplica(rangeID roachpb.RangeID, store *Store) *Replica {
 	r.mu.stateLoader = stateloader.Make(rangeID)
 	r.mu.quiescent = true
 	r.mu.zone = store.cfg.DefaultZoneConfig
+	r.protectedTimestampMu.promisedIDs = map[uuid.UUID]struct{}{} // TODO(ajwerner): lazily initialize this
 	split.Init(&r.loadBasedSplitter, rand.Intn, func() float64 {
 		return float64(SplitByLoadQPSThreshold.Get(&store.cfg.Settings.SV))
 	})
