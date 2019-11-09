@@ -375,6 +375,12 @@ func execCmd(ctx context.Context, l *logger, args ...string) error {
 	if err := cmd.Run(); err != nil {
 		cancel()
 		wg.Wait() // synchronize access to ring buffer
+
+		// Context deadline exceeded errors opaquely appear as "signal killed" when
+		// manifested. We surface this error explicitly.
+		if ctx.Err() == context.DeadlineExceeded {
+			return ctx.Err()
+		}
 		return errors.Wrapf(
 			err,
 			"%s returned:\nstderr:\n%s\nstdout:\n%s",
@@ -1065,7 +1071,9 @@ func (c *cluster) setTest(t testI) {
 func (c *cluster) Save(ctx context.Context, msg string, l *logger) {
 	l.PrintfCtx(ctx, "saving cluster %s for debugging (--debug specified)", c)
 	// TODO(andrei): should we extend the cluster here? For how long?
-	c.destroyState.alloc.Freeze()
+	if c.destroyState.owned { // we won't have an alloc for an unowned cluster
+		c.destroyState.alloc.Freeze()
+	}
 	c.r.markClusterAsSaved(c, msg)
 	c.destroyState.mu.Lock()
 	c.destroyState.mu.saved = true
@@ -1528,7 +1536,7 @@ func (c *cluster) PutE(ctx context.Context, l *logger, src, dest string, opts ..
 
 	err := execCmd(ctx, c.l, roachprod, "put", c.makeNodes(opts...), src, dest)
 	if err != nil {
-		return errors.Wrap(ctx.Err(), "cluster.Put")
+		return errors.Wrap(err, "cluster.Put")
 	}
 	return nil
 }
@@ -1633,6 +1641,26 @@ func roachprodArgs(opts []option) []string {
 		args = append(args, ([]string)(a)...)
 	}
 	return args
+}
+
+// Restart restarts the specified cockroach node. It takes a test and, on error,
+// calls t.Fatal().
+func (c *cluster) Restart(ctx context.Context, t *test, node nodeListOption) {
+	// We bound the time taken to restart a node through roachprod. Because
+	// roachprod uses SSH, it's particularly vulnerable to network flakiness (as
+	// seen in #35326) and may stall indefinitely. Setting up timeouts better
+	// surfaces this kind of failure.
+	//
+	// TODO(irfansharif): The underlying issue here is the fact that we're running
+	// roachprod commands that may (reasonably) fail due to connection issues, and
+	// we're unable to retry them safely (the underlying commands are
+	// non-idempotent). Presently we simply fail the entire test, when really we
+	// should be able to retry the specific roachprod commands.
+	var cancel func()
+	ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+	c.Stop(ctx, node)
+	c.Start(ctx, t, node)
+	cancel()
 }
 
 // StartE starts cockroach nodes on a subset of the cluster. The nodes parameter
