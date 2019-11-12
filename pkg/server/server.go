@@ -744,7 +744,8 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 			true /*enableGc*/, true /*forceSyncWrites*/, true, /* enableMsgCount */
 		),
 
-		QueryCache: querycache.New(s.cfg.SQLQueryCacheSize),
+		QueryCache:                querycache.New(s.cfg.SQLQueryCacheSize),
+		ProtectedTimestampStorage: s.protectedtsProvider,
 	}
 
 	if sqlSchemaChangerTestingKnobs := s.cfg.TestingKnobs.SQLSchemaChanger; sqlSchemaChangerTestingKnobs != nil {

@@ -3,7 +3,7 @@ package ptprovider
 import (
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/ptstorage"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/pttracker"
@@ -13,7 +13,7 @@ import (
 type Config struct {
 	Settings         *cluster.Settings
 	DB               *client.DB
-	InternalExecutor *sql.InternalExecutor
+	InternalExecutor sqlutil.InternalExecutor
 }
 
 type provider struct {

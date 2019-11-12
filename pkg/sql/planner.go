@@ -26,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -277,6 +278,7 @@ func newInternalPlanner(
 	p.extendedEvalCtx.Placeholders = &p.semaCtx.Placeholders
 	p.extendedEvalCtx.Annotations = &p.semaCtx.Annotations
 	p.extendedEvalCtx.Tables = tables
+	p.extendedEvalCtx.ProtectedTimestampStorage = execCfg.ProtectedTimestampStorage
 
 	p.queryCacheSession.Init()
 	p.optPlanningCtx.init(p)
@@ -392,6 +394,10 @@ func (p *planner) DistSQLPlanner() *DistSQLPlanner {
 // We define this here to break the dependency from eval.go to the parser.
 func (p *planner) ParseType(sql string) (*types.T, error) {
 	return parser.ParseType(sql)
+}
+
+func (p *planner) ProtectedTimestampStorage() protectedts.Storage {
+	return p.extendedEvalCtx.ProtectedTimestampStorage
 }
 
 // ParseQualifiedTableName implements the tree.EvalDatabase interface.

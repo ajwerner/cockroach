@@ -9,7 +9,9 @@
 package importccl
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"math"
 	"sort"
 	"strconv"
@@ -29,8 +31,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
+	"github.com/cockroachdb/cockroach/pkg/storage/protectedts"
+	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/ptpb"
+	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/ptstorage"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -38,6 +44,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 )
 
@@ -574,20 +581,59 @@ func importPlanHook(
 
 		telemetry.CountBucketed("import.files", int64(len(files)))
 
-		_, errCh, err := p.ExecCfg().JobRegistry.StartJob(ctx, resultsCh, jobs.Record{
+		// Create the durable artifacts for the job before we kick it off.
+		// Ideally we'd just set up the durable state of the job here and
+		// defer execution and waiting to the connExecutor above us.
+		//
+		// Unfortunately things are not plumbed together properly for that.
+		// Instead we write the durable state in a new transaction and then
+		// synchronously run the job (which will get its own transaction).
+		//
+		// The transaction in the planner won't end up getting committed
+		// until we return.
+
+		// Prepare the protected timestamp record.
+		spans := make([]roachpb.Span, 0, len(tableDetails))
+		for i := range tableDetails {
+			spans = append(spans, tableDetails[i].Desc.TableSpan())
+		}
+		revertTimestamp := hlc.Timestamp{WallTime: walltime}.Prev()
+		ptRecord := ptpb.NewRecord(revertTimestamp, ptpb.PROTECT_AT,
+			"job", nil /* meta, to be filled in below */, spans...)
+
+		// Prepare the job.
+		jobRecord := jobs.Record{
 			Description: jobDesc,
 			Username:    p.User(),
 			Details: jobspb.ImportDetails{
-				URIs:       files,
-				Format:     format,
-				ParentID:   parentID,
-				Tables:     tableDetails,
-				SSTSize:    sstSize,
-				Oversample: oversample,
-				SkipFKs:    skipFKs,
+				URIs:              files,
+				Format:            format,
+				ParentID:          parentID,
+				Tables:            tableDetails,
+				SSTSize:           sstSize,
+				Oversample:        oversample,
+				SkipFKs:           skipFKs,
+				ProtectedtsRecord: ptRecord.ID,
 			},
 			Progress: jobspb.ImportProgress{},
-		})
+		}
+		job := p.ExecCfg().JobRegistry.NewJob(jobRecord)
+
+		// Write the job and protected timestamp records.
+		if err := p.ExecCfg().DB.Txn(ctx, func(ctx context.Context, txn *client.Txn) error {
+			if err := job.WithTxn(txn).Created(ctx); err != nil {
+				return err
+			}
+			var buf bytes.Buffer
+			_, _ = fmt.Fprintf(&buf, "%d", *job.ID())
+			ptRecord.Meta = buf.Bytes()
+			return p.ProtectedTimestampStorage().Protect(ctx, txn, &ptRecord)
+		}); err != nil {
+			return errors.Wrap(err, "failed to create job")
+		}
+
+		// Run the job.
+		_, errCh, err := p.ExecCfg().JobRegistry.StartJob(ctx, resultsCh, jobRecord)
 		if err != nil {
 			return err
 		}
@@ -597,10 +643,11 @@ func importPlanHook(
 }
 
 type importResumer struct {
-	job            *jobs.Job
-	settings       *cluster.Settings
-	res            roachpb.BulkOpSummary
-	statsRefresher *stats.Refresher
+	job                *jobs.Job
+	settings           *cluster.Settings
+	res                roachpb.BulkOpSummary
+	statsRefresher     *stats.Refresher
+	protectedtsStorage protectedts.Storage
 
 	testingKnobs struct {
 		afterImport func() error
@@ -861,6 +908,26 @@ func (r *importResumer) Resume(
 
 	r.res = res
 	r.statsRefresher = p.ExecCfg().StatsRefresher
+	r.protectedtsStorage = p.ProtectedTimestampStorage()
+	if r.protectedtsStorage == nil {
+		panic("here")
+	}
+	return nil
+}
+
+func cleanUpProtectedTimestamp(
+	ctx context.Context, r *importResumer, details *jobspb.ImportDetails, txn *client.Txn,
+) error {
+	if details.ProtectedtsRecord == (uuid.UUID{}) {
+		return nil
+	}
+	err := r.protectedtsStorage.Release(ctx, txn, details.ProtectedtsRecord)
+	// TODO(ajwerner): decide whether we want to actually fail here.
+	// More likely we just want to log and fall back to another mechanism
+	// to clean up the protected timestamp record.
+	if err != nil && err != protectedts.ErrNotFound {
+		return errors.Wrap(err, "failed to remove protected timestamp")
+	}
 	return nil
 }
 
@@ -873,6 +940,10 @@ func (r *importResumer) OnFailOrCancel(ctx context.Context, txn *client.Txn) err
 
 	// Needed to trigger the schema change manager.
 	if err := txn.SetSystemConfigTrigger(); err != nil {
+		return err
+	}
+
+	if err := cleanUpProtectedTimestamp(ctx, r, &details, txn); err != nil {
 		return err
 	}
 
@@ -953,6 +1024,9 @@ func (r *importResumer) OnSuccess(ctx context.Context, txn *client.Txn) error {
 
 	// Needed to trigger the schema change manager.
 	if err := txn.SetSystemConfigTrigger(); err != nil {
+		return err
+	}
+	if err := cleanUpProtectedTimestamp(ctx, r, &details, txn); err != nil {
 		return err
 	}
 	b := txn.NewBatch()
@@ -1036,6 +1110,16 @@ func (r *importResumer) OnTerminal(
 }
 
 var _ jobs.Resumer = &importResumer{}
+
+// TODO(ajwerner): make this less gnarly. There was no access to an internal
+// executor or protectedts storage before this hook was added. It seems
+// reasonable-ish to pass the InternalExecutor to the resumer constructor
+// but I could also see it as reasonable to pass it to all of the methods
+// on the resumer interface.
+
+func (r *importResumer) SetInternalExecutor(ex sqlutil.InternalExecutor) {
+	r.protectedtsStorage = ptstorage.New(r.settings, ex)
+}
 
 func init() {
 	sql.AddPlanHook(importPlanHook)

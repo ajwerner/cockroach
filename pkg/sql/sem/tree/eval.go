@@ -33,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/util/arith"
 	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
@@ -2722,6 +2723,8 @@ type EvalContext struct {
 	TestingKnobs EvalContextTestingKnobs
 
 	Mon *mon.BytesMonitor
+
+	ProtectedTimestampStorage protectedts.Storage
 }
 
 // MakeTestingEvalContext returns an EvalContext that includes a MemoryMonitor.

@@ -558,7 +558,15 @@ func (r *Registry) createResumer(job *Job, settings *cluster.Settings) (Resumer,
 	if wrapper := r.TestingResumerCreationKnobs[payload.Type()]; wrapper != nil {
 		return wrapper(fn(job, settings)), nil
 	}
-	return fn(job, settings), nil
+	res := fn(job, settings)
+	if s, ok := res.(internalExecutorSetter); ok {
+		s.SetInternalExecutor(r.ex)
+	}
+	return res, nil
+}
+
+type internalExecutorSetter interface {
+	SetInternalExecutor(sqlutil.InternalExecutor)
 }
 
 type retryJobError string

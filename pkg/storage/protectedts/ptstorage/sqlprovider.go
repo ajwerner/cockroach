@@ -21,8 +21,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/storage/protectedts/ptpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -30,16 +30,19 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
+// TODO(ajwerner): Consider memory accounting.
+// TODO(ajwerner): Add metrics.
+
 // Storage interacts with the durable state of the protectedts subsystem.
 type Storage struct {
 	settings *cluster.Settings
-	ex       *sql.InternalExecutor
+	ex       sqlutil.InternalExecutor
 }
 
 var _ protectedts.Storage = (*Storage)(nil)
 
 // New creates a new Storage.
-func New(settings *cluster.Settings, ex *sql.InternalExecutor) *Storage {
+func New(settings *cluster.Settings, ex sqlutil.InternalExecutor) *Storage {
 	return &Storage{settings: settings, ex: ex}
 }
 

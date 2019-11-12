@@ -116,6 +116,8 @@ message ImportDetails {
   // sort that produced sorted, non-overlapping data to ingest. When ingesting
   // directly, many other fields like samples, oversample, sst_size are ignored.
   bool ingest_directly = 11;
+
+  bytes protectedts_record = 18 [(gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/util/uuid.UUID", (gogoproto.nullable) = false];
 }
 
 message ImportProgress {
@@ -264,6 +266,7 @@ message Payload {
   reserved 7;
   string error = 8;
   Lease lease = 9;
+
   oneof details {
     BackupDetails backup = 10;
     RestoreDetails restore = 11;

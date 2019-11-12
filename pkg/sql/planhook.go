@@ -16,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/storage/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
@@ -73,6 +74,7 @@ type PlanHookState interface {
 	SessionData() *sessiondata.SessionData
 	ExecCfg() *ExecutorConfig
 	DistSQLPlanner() *DistSQLPlanner
+	ProtectedTimestampStorage() protectedts.Storage
 	LeaseMgr() *LeaseManager
 	TypeAsString(e tree.Expr, op string) (func() (string, error), error)
 	TypeAsStringArray(e tree.Exprs, op string) (func() ([]string, error), error)
