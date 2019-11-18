@@ -38,7 +38,6 @@ type Provider interface {
 	Storage
 	Tracker
 	Verifier
-	Start(context.Context, *stop.Stopper) error
 }
 
 // Storage provides clients with a mechanism to transactionally protect and
@@ -102,6 +101,9 @@ type Tracker interface {
 	// records is known to be valid.
 	ProtectedBy(context.Context, roachpb.Span, func(*ptpb.Record)) (asOf hlc.Timestamp)
 
+	// Start starts a Tracker.
+	Start(context.Context, *stop.Stopper) error
+
 	// TODO(ajwerner): consider providing a method to force refreshing the
 	// state as of the current time. Clients may want to call this when
 	// zone configs are changing.
@@ -130,4 +132,8 @@ func (t *clockTracker) ProtectedBy(
 	context.Context, roachpb.Span, func(*ptpb.Record),
 ) (asOf hlc.Timestamp) {
 	return (*hlc.Clock)(t).Now()
+}
+
+func (t *clockTracker) Start(context.Context, *stop.Stopper) error {
+	return nil
 }
