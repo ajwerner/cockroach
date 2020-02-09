@@ -10,6 +10,7 @@ package tablefeed
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
@@ -24,20 +25,11 @@ func TestTableHistoryIngestionTracking(t *testing.T) {
 
 	ctx := context.Background()
 	ts := func(wt int64) hlc.Timestamp { return hlc.Timestamp{WallTime: wt} }
-	cfg := Config{
-		Clock:            nil,
-		Settings:         nil,
-		Targets:          nil,
-		LeaseManager:     nil,
-		FilterFunc:       nil,
-		InitialHighWater: hlc.Timestamp{},
-	}
-	validateFn := func(_ context.Context, e Event) (bool, error) {
-		desc := e.After
+	validateFn := func(_ context.Context, desc *sqlbase.TableDescriptor) error {
 		if desc.Name != `` {
-			return false, errors.New(desc.Name)
+			return errors.New(desc.Name)
 		}
-		return false, nil
+		return nil
 	}
 	requireChannelEmpty := func(t *testing.T, ch chan error) {
 		t.Helper()
@@ -48,35 +40,36 @@ func TestTableHistoryIngestionTracking(t *testing.T) {
 		}
 	}
 
-	m := New(validateFn, ts(0))
+	m := TableFeed{}
+	m.mu.highWater = ts(0)
 
 	require.Equal(t, ts(0), m.highWater())
 
 	// advance
-	require.NoError(t, m.ingestDescriptors(ctx, ts(0), ts(1), nil))
+	require.NoError(t, m.ingestDescriptors(ctx, ts(0), ts(1), nil, validateFn))
 	require.Equal(t, ts(1), m.highWater())
-	require.NoError(t, m.ingestDescriptors(ctx, ts(1), ts(2), nil))
+	require.NoError(t, m.ingestDescriptors(ctx, ts(1), ts(2), nil, validateFn))
 	require.Equal(t, ts(2), m.highWater())
 
 	// no-ops
-	require.NoError(t, m.ingestDescriptors(ctx, ts(0), ts(1), nil))
+	require.NoError(t, m.ingestDescriptors(ctx, ts(0), ts(1), nil, validateFn))
 	require.Equal(t, ts(2), m.highWater())
-	require.NoError(t, m.ingestDescriptors(ctx, ts(1), ts(2), nil))
+	require.NoError(t, m.ingestDescriptors(ctx, ts(1), ts(2), nil, validateFn))
 	require.Equal(t, ts(2), m.highWater())
 
 	// overlap
-	require.NoError(t, m.ingestDescriptors(ctx, ts(1), ts(3), nil))
+	require.NoError(t, m.ingestDescriptors(ctx, ts(1), ts(3), nil, validateFn))
 	require.Equal(t, ts(3), m.highWater())
 
 	// gap
-	require.EqualError(t, m.ingestDescriptors(ctx, ts(4), ts(5), nil),
+	require.EqualError(t, m.ingestDescriptors(ctx, ts(4), ts(5), nil, validateFn),
 		`gap between 0.000000003,0 and 0.000000004,0`)
 	require.Equal(t, ts(3), m.highWater())
 
 	// validates
 	require.NoError(t, m.ingestDescriptors(ctx, ts(3), ts(4), []*sqlbase.TableDescriptor{
 		{ID: 0},
-	}))
+	}, validateFn))
 	require.Equal(t, ts(4), m.highWater())
 
 	// high-water already high enough. fast-path
@@ -92,17 +85,17 @@ func TestTableHistoryIngestionTracking(t *testing.T) {
 	requireChannelEmpty(t, errCh7)
 
 	// high-water advances, but not enough
-	require.NoError(t, m.ingestDescriptors(ctx, ts(4), ts(5), nil))
+	require.NoError(t, m.ingestDescriptors(ctx, ts(4), ts(5), nil, validateFn))
 	requireChannelEmpty(t, errCh6)
 	requireChannelEmpty(t, errCh7)
 
 	// high-water advances, unblocks only errCh6
-	require.NoError(t, m.ingestDescriptors(ctx, ts(5), ts(6), nil))
+	require.NoError(t, m.ingestDescriptors(ctx, ts(5), ts(6), nil, validateFn))
 	require.NoError(t, <-errCh6)
 	requireChannelEmpty(t, errCh7)
 
 	// high-water advances again, unblocks errCh7
-	require.NoError(t, m.ingestDescriptors(ctx, ts(6), ts(7), nil))
+	require.NoError(t, m.ingestDescriptors(ctx, ts(6), ts(7), nil, validateFn))
 	require.NoError(t, <-errCh7)
 
 	// validate ctx cancellation
@@ -116,7 +109,7 @@ func TestTableHistoryIngestionTracking(t *testing.T) {
 	// does not validate, high-water does not change
 	require.EqualError(t, m.ingestDescriptors(ctx, ts(7), ts(10), []*sqlbase.TableDescriptor{
 		{ID: 0, Name: `whoops!`},
-	}), `whoops!`)
+	}, validateFn), `whoops!`)
 	require.Equal(t, ts(7), m.highWater())
 
 	// ts 10 has errored, so validate can return its error without blocking
@@ -133,7 +126,7 @@ func TestTableHistoryIngestionTracking(t *testing.T) {
 	// turns out ts 10 is not a tight bound. ts 9 also has an error
 	require.EqualError(t, m.ingestDescriptors(ctx, ts(7), ts(9), []*sqlbase.TableDescriptor{
 		{ID: 0, Name: `oh no!`},
-	}), `oh no!`)
+	}, validateFn), `oh no!`)
 	require.Equal(t, ts(7), m.highWater())
 	require.EqualError(t, <-errCh9, `oh no!`)
 
@@ -145,7 +138,18 @@ func TestTableHistoryIngestionTracking(t *testing.T) {
 	require.EqualError(t, m.waitForTS(ctx, ts(9)), `oh no!`)
 
 	// something earlier than ts 10 can still be okay
-	require.NoError(t, m.ingestDescriptors(ctx, ts(7), ts(8), nil))
+	require.NoError(t, m.ingestDescriptors(ctx, ts(7), ts(8), nil, validateFn))
 	require.Equal(t, ts(8), m.highWater())
 	require.NoError(t, <-errCh8)
+}
+
+func formatEvents(events []Event) string {
+	var buf strings.Builder
+	for i, e := range events {
+		if i > 0 {
+			buf.WriteString(" ")
+		}
+		buf.WriteString(formatEvent(e))
+	}
+	return buf.String()
 }

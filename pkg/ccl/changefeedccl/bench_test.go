@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvfeed"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -188,7 +190,7 @@ func createBenchmarkChangefeed(
 			StatementTimeName: tableDesc.Name,
 		}},
 		Opts: map[string]string{
-			optEnvelope: string(optEnvelopeRow),
+			changefeedbase.OptEnvelope: string(changefeedbase.OptEnvelopeRow),
 		},
 	}
 	initialHighWater := hlc.Timestamp{}
@@ -200,16 +202,25 @@ func createBenchmarkChangefeed(
 
 	settings := s.ClusterSettings()
 	metrics := MakeMetrics(server.DefaultHistogramWindowInterval).(*Metrics)
-	buf := makeBuffer()
+	buf := kvfeed.MakeBuffer()
 	leaseMgr := s.LeaseManager().(*sql.LeaseManager)
 	mm := mon.MakeUnlimitedMonitor(
 		context.Background(), "test", mon.MemoryResource,
 		nil /* curCount */, nil /* maxHist */, math.MaxInt64, settings,
 	)
-	poller := makePoller(
-		settings, s.DB(), feedClock, s.GossipI().(*gossip.Gossip), spans, details, initialHighWater, buf,
-		leaseMgr, metrics, &mm,
-	)
+	kvfeedCfg := kvfeed.Config{
+		Settings:         settings,
+		DB:               s.DB(),
+		Clock:            feedClock,
+		Gossip:           s.GossipI().(*gossip.Gossip),
+		Spans:            spans,
+		Details:          details,
+		Sink:             buf,
+		LeaseMgr:         leaseMgr,
+		Metrics:          &metrics.KVFeedMetrics,
+		MM:               &mm,
+		InitialHighWater: initialHighWater,
+	}
 
 	rowsFn := kvsToRows(s.LeaseManager().(*sql.LeaseManager), details, buf.Get)
 	sf := span.MakeFrontier(spans...)
@@ -217,8 +228,7 @@ func createBenchmarkChangefeed(
 		s.ClusterSettings(), details, sf, encoder, sink, rowsFn, TestingKnobs{}, metrics)
 
 	ctx, cancel := context.WithCancel(ctx)
-	go func() { _ = poller.runUsingRangefeeds(ctx) }()
-	//go func() { _ = thUpdater.PollTableDescs(ctx) }()
+	go func() { _ = kvfeed.Run(ctx, kvfeedCfg) }()
 
 	errCh := make(chan error, 1)
 	var wg sync.WaitGroup

@@ -6,7 +6,7 @@
 //
 //     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
 
-package tablefeed
+package changefeedbase
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"

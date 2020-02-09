@@ -6,7 +6,7 @@
 //
 //     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
 
-package changefeedccl
+package kvfeed
 
 import (
 	"context"
@@ -25,51 +25,58 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
-type bufferEntry struct {
-	kv roachpb.KeyValue
-	// prevVal is set if the key had a non-tombstone value before the change
+type BufferEntry struct {
+	KV roachpb.KeyValue
+	// PrevVal is set if the key had a non-tombstone value before the change
 	// and the before value of each change was requested (optDiff).
-	prevVal  roachpb.Value
-	resolved *jobspb.ResolvedSpan
-	// backfillTimestamp overrides the timestamp of the schema that should be
-	// used to interpret this KV. If set and prevVal is provided, the previous
+	PrevVal  roachpb.Value
+	Resolved *jobspb.ResolvedSpan
+	// BackfillTimestamp overrides the timestamp of the schema that should be
+	// used to interpret this KV. If set and PrevVal is provided, the previous
 	// timestamp will be used to interpret the previous value.
 	//
 	// If unset (zero-valued), the KV's timestamp will be used to interpret both
 	// of the current and previous values instead.
-	backfillTimestamp hlc.Timestamp
-	// bufferGetTimestamp is the time this entry came out of the buffer.
-	bufferGetTimestamp time.Time
+	BackfillTimestamp hlc.Timestamp
+	// BufferGetTimestamp is the time this entry came out of the buffer.
+	BufferGetTimestamp time.Time
 }
 
-// buffer mediates between the changed data poller and the rest of the
+func bufferEntryTimestamp(e BufferEntry) hlc.Timestamp {
+	if e.KV.Key != nil {
+		return e.KV.Value.Timestamp
+	}
+	return e.Resolved.Timestamp
+}
+
+// buffer mediates between the changed data KVFeed and the rest of the
 // changefeed pipeline (which is backpressured all the way to the sink).
-type buffer struct {
-	entriesCh chan bufferEntry
+type Buffer struct {
+	entriesCh chan BufferEntry
 }
 
-func makeBuffer() *buffer {
-	return &buffer{entriesCh: make(chan bufferEntry)}
+func MakeBuffer() *Buffer {
+	return &Buffer{entriesCh: make(chan BufferEntry)}
 }
 
-// AddKV inserts a changed kv into the buffer. Individual keys must be added in
+// AddKV inserts a changed KV into the buffer. Individual keys must be added in
 // increasing mvcc order.
-func (b *buffer) AddKV(
+func (b *Buffer) AddKV(
 	ctx context.Context, kv roachpb.KeyValue, prevVal roachpb.Value, backfillTimestamp hlc.Timestamp,
 ) error {
-	return b.addEntry(ctx, bufferEntry{
-		kv:                kv,
-		prevVal:           prevVal,
-		backfillTimestamp: backfillTimestamp,
+	return b.addEntry(ctx, BufferEntry{
+		KV:                kv,
+		PrevVal:           prevVal,
+		BackfillTimestamp: backfillTimestamp,
 	})
 }
 
-// AddResolved inserts a resolved timestamp notification in the buffer.
-func (b *buffer) AddResolved(ctx context.Context, span roachpb.Span, ts hlc.Timestamp) error {
-	return b.addEntry(ctx, bufferEntry{resolved: &jobspb.ResolvedSpan{Span: span, Timestamp: ts}})
+// AddResolved inserts a Resolved timestamp notification in the buffer.
+func (b *Buffer) AddResolved(ctx context.Context, span roachpb.Span, ts hlc.Timestamp) error {
+	return b.addEntry(ctx, BufferEntry{Resolved: &jobspb.ResolvedSpan{Span: span, Timestamp: ts}})
 }
 
-func (b *buffer) addEntry(ctx context.Context, e bufferEntry) error {
+func (b *Buffer) addEntry(ctx context.Context, e BufferEntry) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -80,35 +87,35 @@ func (b *buffer) addEntry(ctx context.Context, e bufferEntry) error {
 
 // Get returns an entry from the buffer. They are handed out in an order that
 // (if it is maintained all the way to the sink) meets our external guarantees.
-func (b *buffer) Get(ctx context.Context) (bufferEntry, error) {
+func (b *Buffer) Get(ctx context.Context) (BufferEntry, error) {
 	select {
 	case <-ctx.Done():
-		return bufferEntry{}, ctx.Err()
+		return BufferEntry{}, ctx.Err()
 	case e := <-b.entriesCh:
-		e.bufferGetTimestamp = timeutil.Now()
+		e.BufferGetTimestamp = timeutil.Now()
 		return e, nil
 	}
 }
 
-// memBufferDefaultCapacity is the default capacity for a memBuffer for a single
+// MemBufferDefaultCapacity is the default capacity for a memBuffer for a single
 // changefeed.
 //
 // TODO(dan): It would be better if all changefeeds shared a single capacity
 // that was given by the operater at startup, like we do for RocksDB and SQL.
-var memBufferDefaultCapacity = envutil.EnvOrDefaultBytes(
+var MemBufferDefaultCapacity = envutil.EnvOrDefaultBytes(
 	"COCKROACH_CHANGEFEED_BUFFER_CAPACITY", 1<<30) // 1GB
 
 var memBufferColTypes = []types.T{
-	*types.Bytes, // kv.Key
-	*types.Bytes, // kv.Value
-	*types.Bytes, // kv.PrevValue
+	*types.Bytes, // KV.Key
+	*types.Bytes, // KV.Value
+	*types.Bytes, // KV.PrevValue
 	*types.Bytes, // span.Key
 	*types.Bytes, // span.EndKey
 	*types.Int,   // ts.WallTime
 	*types.Int,   // ts.Logical
 }
 
-// memBuffer is an in-memory buffer for changed KV and resolved timestamp
+// memBuffer is an in-memory buffer for changed KV and Resolved timestamp
 // events. It's size is limited only by the BoundAccount passed to the
 // constructor. memBuffer is only for use with single-producer single-consumer.
 type memBuffer struct {
@@ -143,7 +150,7 @@ func (b *memBuffer) Close(ctx context.Context) {
 	b.mu.Unlock()
 }
 
-// AddKV inserts a changed kv into the buffer. Individual keys must be added in
+// AddKV inserts a changed KV into the buffer. Individual keys must be added in
 // increasing mvcc order.
 func (b *memBuffer) AddKV(ctx context.Context, kv roachpb.KeyValue, prevVal roachpb.Value) error {
 	b.allocMu.Lock()
@@ -164,7 +171,7 @@ func (b *memBuffer) AddKV(ctx context.Context, kv roachpb.KeyValue, prevVal roac
 	return b.addRow(ctx, row)
 }
 
-// AddResolved inserts a resolved timestamp notification in the buffer.
+// AddResolved inserts a Resolved timestamp notification in the buffer.
 func (b *memBuffer) AddResolved(ctx context.Context, span roachpb.Span, ts hlc.Timestamp) error {
 	b.allocMu.Lock()
 	row := tree.Datums{
@@ -182,23 +189,23 @@ func (b *memBuffer) AddResolved(ctx context.Context, span roachpb.Span, ts hlc.T
 
 // Get returns an entry from the buffer. They are handed out in an order that
 // (if it is maintained all the way to the sink) meets our external guarantees.
-func (b *memBuffer) Get(ctx context.Context) (bufferEntry, error) {
+func (b *memBuffer) Get(ctx context.Context) (BufferEntry, error) {
 	row, err := b.getRow(ctx)
 	if err != nil {
-		return bufferEntry{}, err
+		return BufferEntry{}, err
 	}
-	e := bufferEntry{bufferGetTimestamp: timeutil.Now()}
+	e := BufferEntry{BufferGetTimestamp: timeutil.Now()}
 	ts := hlc.Timestamp{
 		WallTime: int64(*row[5].(*tree.DInt)),
 		Logical:  int32(*row[6].(*tree.DInt)),
 	}
 	if row[2] != tree.DNull {
-		e.prevVal = roachpb.Value{
+		e.PrevVal = roachpb.Value{
 			RawBytes: []byte(*row[2].(*tree.DBytes)),
 		}
 	}
 	if row[0] != tree.DNull {
-		e.kv = roachpb.KeyValue{
+		e.KV = roachpb.KeyValue{
 			Key: []byte(*row[0].(*tree.DBytes)),
 			Value: roachpb.Value{
 				RawBytes:  []byte(*row[1].(*tree.DBytes)),
@@ -207,7 +214,7 @@ func (b *memBuffer) Get(ctx context.Context) (bufferEntry, error) {
 		}
 		return e, nil
 	}
-	e.resolved = &jobspb.ResolvedSpan{
+	e.Resolved = &jobspb.ResolvedSpan{
 		Span: roachpb.Span{
 			Key:    []byte(*row[3].(*tree.DBytes)),
 			EndKey: []byte(*row[4].(*tree.DBytes)),

@@ -12,9 +12,9 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -177,6 +177,17 @@ func (tf *TableFeed) Start(ctx context.Context, g ctxgroup.Group) error {
 	if err := tf.primeInitialTableDescs(ctx); err != nil {
 		return err
 	}
+	// We want to initialize the table history which will pull the initial version
+	// and then begin polling.
+	//
+	// TODO(ajwerner): As written the polling will add table events forever.
+	// If there are a ton of table events we'll buffer them all in RAM. There are
+	// cases where this might be problematic. It could be mitigated with some
+	// memory monitoring. Probably better is to not poll eagerly but only poll if
+	// we don't have an event.
+	//
+	// After we add some sort of locking to prevent schema changes we should also
+	// only poll if we don't have a lease.
 	g.GoCtx(tf.pollTableHistory)
 	return nil
 }
@@ -202,7 +213,7 @@ func (tf *TableFeed) primeInitialTableDescs(ctx context.Context) error {
 	if err := tf.db.Txn(ctx, initialTableDescsFn); err != nil {
 		return err
 	}
-	return tf.ingestDescriptors(ctx, hlc.Timestamp{}, initialTableDescTs, initialDescs)
+	return tf.ingestDescriptors(ctx, hlc.Timestamp{}, initialTableDescTs, initialDescs, tf.validateTable)
 }
 
 func (tf *TableFeed) pollTableHistory(ctx context.Context) error {
@@ -228,7 +239,7 @@ func (tf *TableFeed) updateTableHistory(ctx context.Context, endTS hlc.Timestamp
 	if err != nil {
 		return err
 	}
-	return tf.ingestDescriptors(ctx, startTS, endTS, descs)
+	return tf.ingestDescriptors(ctx, startTS, endTS, descs, tf.validateTable)
 }
 
 // Peek returns all events which have not been popped which happen at or
@@ -335,13 +346,18 @@ func descLess(a, b *sqlbase.TableDescriptor) bool {
 // function and adjusts the high-water or error timestamp appropriately. It is
 // required that the descriptors represent a transactional kv read between the
 // two given timestamps.
+//
+// validateFn is exposed for testing, in production it is tf.validateTable.
 func (tf *TableFeed) ingestDescriptors(
-	ctx context.Context, startTS, endTS hlc.Timestamp, descs []*sqlbase.TableDescriptor,
+	ctx context.Context,
+	startTS, endTS hlc.Timestamp,
+	descs []*sqlbase.TableDescriptor,
+	validateFn func(ctx context.Context, desc *sqlbase.TableDescriptor) error,
 ) error {
 	sort.Slice(descs, func(i, j int) bool { return descLess(descs[i], descs[j]) })
 	var validateErr error
 	for _, desc := range descs {
-		if err := tf.validateTable(ctx, desc); validateErr == nil {
+		if err := validateFn(ctx, desc); validateErr == nil {
 			validateErr = err
 		}
 	}
@@ -388,6 +404,9 @@ func (tf *TableFeed) adjustTimestamps(startTS, endTS hlc.Timestamp, validateErr 
 	}
 	return nil
 }
+func (e Event) String() string {
+	return formatEvent(e)
+}
 
 func formatDesc(desc *sqlbase.TableDescriptor) string {
 	return fmt.Sprintf("%d:%d@%v", desc.ID, desc.Version, desc.ModificationTime)
@@ -397,19 +416,8 @@ func formatEvent(e Event) string {
 	return fmt.Sprintf("%v->%v", formatDesc(e.Before), formatDesc(e.After))
 }
 
-func formatEvents(events []Event) string {
-	var buf strings.Builder
-	for i, e := range events {
-		if i > 0 {
-			buf.WriteString(" ")
-		}
-		buf.WriteString(formatEvent(e))
-	}
-	return buf.String()
-}
-
 func (tf *TableFeed) validateTable(ctx context.Context, desc *sqlbase.TableDescriptor) error {
-	if err := ValidateTable(tf.targets, desc); err != nil {
+	if err := changefeedbase.ValidateTable(tf.targets, desc); err != nil {
 		return err
 	}
 	tf.mu.Lock()

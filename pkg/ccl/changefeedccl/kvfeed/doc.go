@@ -1,4 +1,4 @@
-// Copyright 2020 The Cockroach Authors.
+// Copyright 2018 The Cockroach Authors.
 //
 // Licensed as a CockroachDB Enterprise file under the Cockroach Community
 // License (the "License"); you may not use this file except in compliance with
@@ -6,10 +6,8 @@
 //
 //     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
 
-package changefeedccl
-
-import "context"
-
-func (p *poller) RunUsingRangefeeds(ctx context.Context) error {
-	return p.runUsingRangefeeds(ctx)
-}
+// Package kvfeed provides an abstraction to stream kvs to a buffer.
+//
+// The kvfeed coordinated performing logical backfills in the face of schema
+// changes and then running rangefeeds.
+package kvfeed

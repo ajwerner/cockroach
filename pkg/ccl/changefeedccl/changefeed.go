@@ -12,6 +12,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvfeed"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/tablefeed"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
@@ -51,9 +53,9 @@ type emitEntry struct {
 func kvsToRows(
 	leaseMgr *sql.LeaseManager,
 	details jobspb.ChangefeedDetails,
-	inputFn func(context.Context) (bufferEntry, error),
+	inputFn func(context.Context) (kvfeed.BufferEntry, error),
 ) func(context.Context) ([]emitEntry, error) {
-	_, withDiff := details.Opts[optDiff]
+	_, withDiff := details.Opts[changefeedbase.OptDiff]
 	rfCache := newRowFetcherCache(leaseMgr)
 
 	var kvs row.SpanKVFetcher
@@ -180,28 +182,28 @@ func kvsToRows(
 			if err != nil {
 				return nil, err
 			}
-			if input.kv.Key != nil {
+			if input.KV.Key != nil {
 				if log.V(3) {
-					log.Infof(ctx, "changed key %s %s", input.kv.Key, input.kv.Value.Timestamp)
+					log.Infof(ctx, "changed key %s %s", input.KV.Key, input.KV.Value.Timestamp)
 				}
-				schemaTimestamp := input.kv.Value.Timestamp
+				schemaTimestamp := input.KV.Value.Timestamp
 				prevSchemaTimestamp := schemaTimestamp
-				if input.backfillTimestamp != (hlc.Timestamp{}) {
-					schemaTimestamp = input.backfillTimestamp
+				if input.BackfillTimestamp != (hlc.Timestamp{}) {
+					schemaTimestamp = input.BackfillTimestamp
 					prevSchemaTimestamp = schemaTimestamp.Prev()
 				}
 				output, err = appendEmitEntryForKV(
-					ctx, output, input.kv, input.prevVal,
+					ctx, output, input.KV, input.PrevVal,
 					schemaTimestamp, prevSchemaTimestamp,
-					input.bufferGetTimestamp)
+					input.BufferGetTimestamp)
 				if err != nil {
 					return nil, err
 				}
 			}
-			if input.resolved != nil {
+			if input.Resolved != nil {
 				output = append(output, emitEntry{
-					resolved:           input.resolved,
-					bufferGetTimestamp: input.bufferGetTimestamp,
+					resolved:           input.Resolved,
+					bufferGetTimestamp: input.BufferGetTimestamp,
 				})
 			}
 			if output != nil {
@@ -318,7 +320,7 @@ func emitEntries(
 		// is not changing), then this is sufficient and we don't have to do
 		// anything fancy with timers.
 		var timeBetweenFlushes time.Duration
-		if r, ok := details.Opts[optResolvedTimestamps]; ok && r != `` {
+		if r, ok := details.Opts[changefeedbase.OptResolvedTimestamps]; ok && r != `` {
 			var err error
 			if timeBetweenFlushes, err = time.ParseDuration(r); err != nil {
 				return nil, err
