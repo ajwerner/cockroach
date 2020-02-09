@@ -12,10 +12,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/tablefeed"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
@@ -26,12 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/span"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-)
-
-var changefeedPollInterval = settings.RegisterNonNegativeDurationSetting(
-	"changefeed.experimental_poll_interval",
-	"polling interval for the prototype changefeed implementation",
-	1*time.Second,
 )
 
 const (
@@ -330,7 +324,7 @@ func emitEntries(
 				return nil, err
 			}
 		} else {
-			timeBetweenFlushes = changefeedPollInterval.Get(&settings.SV) / 5
+			timeBetweenFlushes = tablefeed.ChangefeedPollInterval.Get(&settings.SV) / 5
 		}
 		if len(resolvedSpans) == 0 || timeutil.Since(lastFlush) < timeBetweenFlushes {
 			return nil, nil

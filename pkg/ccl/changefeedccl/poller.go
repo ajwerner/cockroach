@@ -10,10 +10,10 @@ package changefeedccl
 
 import (
 	"context"
-	"sort"
 	"sync/atomic"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/tablefeed"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/internal/client"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
@@ -42,34 +42,23 @@ import (
 // Each poll (ie set of ExportRequests) are rate limited to be no more often
 // than the `changefeed.experimental_poll_interval` setting.
 type poller struct {
-	settings  *cluster.Settings
-	db        *client.DB
-	clock     *hlc.Clock
-	gossip    *gossip.Gossip
-	spans     []roachpb.Span
-	details   jobspb.ChangefeedDetails
-	buf       *buffer
-	tableHist *tableHistory
-	leaseMgr  *sql.LeaseManager
-	metrics   *Metrics
-	mm        *mon.BytesMonitor
+	settings         *cluster.Settings
+	db               *client.DB
+	clock            *hlc.Clock
+	gossip           *gossip.Gossip
+	spans            []roachpb.Span
+	details          jobspb.ChangefeedDetails
+	buf              *buffer
+	tableFeed        *tablefeed.TableFeed
+	leaseMgr         *sql.LeaseManager
+	metrics          *Metrics
+	mm               *mon.BytesMonitor
+	needsInitialScan bool
 
 	mu struct {
 		syncutil.Mutex
 		// highWater timestamp for exports processed by this poller so far.
 		highWater hlc.Timestamp
-		// scanBoundaries represent timestamps where the changefeed output process
-		// should pause and output a scan of *all keys* of the watched spans at the
-		// given timestamp. There are currently two situations where this occurs:
-		// the initial scan of the table when starting a new Changefeed, and when
-		// a backfilling schema change is marked as completed. This collection must
-		// be kept in sorted order (by timestamp ascending).
-		scanBoundaries []hlc.Timestamp
-		// previousTableVersion is a map from tableID to the most recent version
-		// of the table descriptor seen by the poller. This is needed to determine
-		// when a backilling mutation has successfully completed - this can only
-		// be determining by comparing a version to the previous version.
-		previousTableVersion map[sqlbase.ID]*sqlbase.TableDescriptor
 	}
 }
 
@@ -99,110 +88,192 @@ func makePoller(
 		metrics:  metrics,
 		mm:       mm,
 	}
-	p.mu.previousTableVersion = make(map[sqlbase.ID]*sqlbase.TableDescriptor)
-	// If no highWater is specified, set the highwater to the statement time
-	// and add a scanBoundary at the statement time to trigger an immediate output
-	// of the full table.
-	if highWater == (hlc.Timestamp{}) {
+	// TODO(ajwerner): It'd be nice to support an initial scan from a cursor position
+	// Doing so would not be hard, we'd just need an option.
+	if p.needsInitialScan = highWater == (hlc.Timestamp{}); p.needsInitialScan {
+		// If no highWater is specified, set the highwater to the statement time
+		// and add a scanBoundary at the statement time to trigger an immediate output
+		// of the full table.
 		p.mu.highWater = details.StatementTime
-		p.mu.scanBoundaries = append(p.mu.scanBoundaries, details.StatementTime)
 	} else {
 		p.mu.highWater = highWater
 	}
-	p.tableHist = makeTableHistory(p.validateTable, highWater)
-
+	tableEventsConfig := tablefeed.Config{
+		DB:               db,
+		Clock:            clock,
+		Settings:         settings,
+		Targets:          details.Targets,
+		LeaseManager:     leaseMgr,
+		FilterFunc:       defaultBackfillPolicy.ShouldFilter,
+		InitialHighWater: p.mu.highWater,
+	}
+	p.tableFeed = tablefeed.New(tableEventsConfig)
 	return p
 }
 
-// RunUsingRangeFeeds performs the same task as the normal Run method, but uses
+var defaultBackfillPolicy = BackfillPolicy{
+	AddColumn:  true,
+	DropColumn: true,
+}
+
+type BackfillPolicy struct {
+	AddColumn  bool
+	DropColumn bool
+	// ColumnRename bool
+}
+
+func (b BackfillPolicy) ShouldFilter(ctx context.Context, e tablefeed.Event) (bool, error) {
+	interestingEvent := (b.AddColumn && newColumnBackfillComplete(e)) ||
+		(b.DropColumn && hasNewColumnDropBackfillMutation(e))
+	return !interestingEvent, nil
+}
+
+// runUsingRangeFeeds performs the same task as the normal Run method, but uses
 // the experimental Rangefeed system to capture changes rather than the
 // poll-and-export method.  Note
-func (p *poller) RunUsingRangefeeds(ctx context.Context) error {
-	// Fetch the table descs as of the initial highWater and prime the table
-	// history with them. This addresses #41694 where we'd skip the rest of a
-	// backfill if the changefeed was paused/unpaused during it. The bug was that
-	// the changefeed wouldn't notice the table descriptor had changed (and thus
-	// we were in the backfill state) when it restarted.
-	if err := p.primeInitialTableDescs(ctx); err != nil {
-		return err
-	}
+func (p *poller) runUsingRangefeeds(ctx context.Context) error {
 
 	// Start polling tablehistory, which must be done concurrently with
 	// the individual rangefeed routines.
 	g := ctxgroup.WithContext(ctx)
-	g.GoCtx(p.pollTableHistory)
+
+	// We want to initialize the table history which will pull the initial version
+	// and then begin polling.
+	//
+	// TODO(ajwerner): As written the polling will add table events forever.
+	// If there are a ton of table events we'll buffer them all in RAM. There are
+	// cases where this might be problematic. It could be mitigated with some
+	// memory monitoring. Probably better is to not poll eagerly but only poll if
+	// we don't have an event.
+	//
+	// After we add some sort of locking to prevent schema changes we should also
+	// only poll if we don't have a lease.
+	if err := p.tableFeed.Start(ctx, g); err != nil {
+		return err
+	}
 	g.GoCtx(p.rangefeedImpl)
 	return g.Wait()
 }
 
-func (p *poller) primeInitialTableDescs(ctx context.Context) error {
-	p.mu.Lock()
-	initialTableDescTs := p.mu.highWater
-	p.mu.Unlock()
-	var initialDescs []*sqlbase.TableDescriptor
-	initialTableDescsFn := func(ctx context.Context, txn *client.Txn) error {
-		initialDescs = initialDescs[:0]
-		txn.SetFixedTimestamp(ctx, initialTableDescTs)
-		// Note that all targets are currently guaranteed to be tables.
-		for tableID := range p.details.Targets {
-			tableDesc, err := sqlbase.GetTableDescFromID(ctx, txn, tableID)
-			if err != nil {
-				return err
-			}
-			initialDescs = append(initialDescs, tableDesc)
-		}
-		return nil
-	}
-	if err := p.db.Txn(ctx, initialTableDescsFn); err != nil {
-		return err
-	}
-	return p.tableHist.IngestDescriptors(ctx, hlc.Timestamp{}, initialTableDescTs, initialDescs)
-}
-
 var errBoundaryReached = errors.New("scan boundary reached")
 
+// TODO(ajwerner): this should return the set of tables to scan.
+func (p *poller) needsScan(
+	ctx context.Context, isInitialScan bool,
+) (needsScan bool, scanTime hlc.Timestamp, _ error) {
+	p.mu.Lock()
+	highWater := p.mu.highWater
+	p.mu.Unlock()
+	scanTime = highWater.Next()
+
+	// We should check if there are events for us to process at our high water.
+	// We used to miss these
+
+	// This will only happen if we don't have a cursor.
+	// TODO(ajwerner): This should be instead based on a policy about whether we should do an
+	// initial scan and a boolean under the mutex as to whether we've done it.
+
+	// Another weird thing is that if this isn't the initial scan we really want
+	// to check highWater.Next().
+
+	// If we have a high water it means that we've seen all rows up to that
+	// we've seen all rows up to this one inclusive. If it's an initial scan
+	// we haven't seen any rows and we're saying we want to start at the current
+	// time.
+	events, err := p.tableFeed.Peek(ctx, scanTime)
+	defer func() {
+		log.Infof(ctx, "needsScan highWater %v, scanTime %v, initialScan %v, needsScan %v scanTime %v events %v", highWater, scanTime, isInitialScan && p.needsInitialScan, needsScan, scanTime, len(events))
+	}()
+
+	if err != nil {
+		return false, hlc.Timestamp{}, err
+	}
+	if isInitialScan && p.needsInitialScan {
+		return true, p.mu.highWater, nil
+	}
+	if len(events) > 0 {
+		// We should return true (and then the set of relevant targets) when we
+		// have an event. Given
+		for _, ev := range events {
+			if !scanTime.Equal(ev.After.ModificationTime) {
+				log.Fatalf(ctx, "found event in needsScan which did not occur at the scan time %v: %v",
+					scanTime, ev)
+			}
+		}
+		return true, scanTime, err
+	}
+	return false, hlc.Timestamp{}, nil
+}
+
 func (p *poller) rangefeedImpl(ctx context.Context) error {
+	// We might need to perform an initial scan - let's check
+	// Check if we need to do an initial scan.
+	_, withDiff := p.details.Opts[optDiff]
+
 	for i := 0; ; i++ {
+		initialScan := i == 0
+		needsScan, scanTime, err := p.needsScan(ctx, initialScan)
+		if err != nil {
+			return err
+		}
+		if needsScan {
+			backfillWithDiff := !(initialScan && p.needsInitialScan) && withDiff
+			if err := p.performScan(ctx, scanTime, backfillWithDiff); err != nil {
+				return err
+			}
+		}
+
+		// I think this should do something like process it's scans as necessary
+		// and then run the rangefeed until we hit an event or error.
+
+		// We need to do an initial scan
+
+		// When we first start up we want to generally either backfill all the
+		// tables from the beginning of time or not at all.
+
 		if err := p.rangefeedImplIter(ctx, i); err != nil {
 			return err
 		}
 	}
 }
 
-func (p *poller) rangefeedImplIter(ctx context.Context, i int) error {
-	// Determine whether to request the previous value of each update from
-	// RangeFeed based on whether the `diff` option is specified.
-	_, withDiff := p.details.Opts[optDiff]
-
-	p.mu.Lock()
-	lastHighwater := p.mu.highWater
-	p.mu.Unlock()
-	if err := p.tableHist.WaitForTS(ctx, lastHighwater); err != nil {
-		return err
-	}
-
+// TODO(ajwerner): This should take a set of targets so that we can backfill
+// just some tables.
+func (p *poller) performScan(
+	ctx context.Context, scanTime hlc.Timestamp, backfillWithDiff bool,
+) error {
 	spans, err := getSpansToProcess(ctx, p.db, p.spans)
 	if err != nil {
 		return err
 	}
-
-	// Perform a full scan if necessary - either an initial scan or a backfill
-	// Full scans are still performed using an Export operation.
-	initialScan := i == 0
-	backfillWithDiff := !initialScan && withDiff
-	var scanTime hlc.Timestamp
-	p.mu.Lock()
-	if len(p.mu.scanBoundaries) > 0 && p.mu.scanBoundaries[0].Equal(p.mu.highWater) {
-		// Perform a full scan of the latest value of all keys as of the
-		// boundary timestamp and consume the boundary.
-		scanTime = p.mu.scanBoundaries[0]
-		p.mu.scanBoundaries = p.mu.scanBoundaries[1:]
+	if err := p.exportSpansParallel(ctx, spans, scanTime, backfillWithDiff); err != nil {
+		return err
 	}
+	if _, err := p.tableFeed.Pop(ctx, scanTime); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.mu.highWater = scanTime
+	return nil
+}
+
+func (p *poller) rangefeedImplIter(ctx context.Context, i int) error {
+	// Determine whether to request the previous value of each update from
+	// RangeFeed based on whether the `diff` option is specified.
+	_, withDiff := p.details.Opts[optDiff]
+	p.mu.Lock()
+	lastHighwater := p.mu.highWater
 	p.mu.Unlock()
-	if scanTime != (hlc.Timestamp{}) {
-		if err := p.exportSpansParallel(ctx, spans, scanTime, backfillWithDiff); err != nil {
-			return err
-		}
+	if _, err := p.tableFeed.Peek(ctx, lastHighwater); err != nil {
+		return err
+	}
+
+	// NB: this might have just happened for the scan but it seems
+	// okay to do it again.
+	spans, err := getSpansToProcess(ctx, p.db, p.spans)
+	if err != nil {
+		return err
 	}
 
 	// Start rangefeeds, exit polling if we hit a resolved timestamp beyond
@@ -228,7 +299,7 @@ func (p *poller) rangefeedImplIter(ctx context.Context, i int) error {
 	// Specifically, when a schema change happens, we need a barrier where we
 	// flush out every change before the schema change timestamp before we start
 	// emitting any changes from after the schema change. The poller's
-	// `tableHist` is responsible for detecting and enforcing these (they queue
+	// `tableFeed` is responsible for detecting and enforcing these (they queue
 	// up in `p.scanBoundaries`), but the after-poller buffer doesn't have
 	// access to any of this state. A cleanup is in order.
 	memBuf := makeMemBuffer(p.mm.MakeBoundAccount(), p.metrics)
@@ -250,6 +321,7 @@ func (p *poller) rangefeedImplIter(ctx context.Context, i int) error {
 	for _, span := range p.spans {
 		span := span
 		frontier.Forward(span, rangeFeedStartTS)
+		_, withDiff := p.details.Opts[optDiff]
 		g.GoCtx(func(ctx context.Context) error {
 			return ds.RangeFeed(ctx, span, rangeFeedStartTS, withDiff, eventC)
 		})
@@ -286,62 +358,74 @@ func (p *poller) rangefeedImplIter(ctx context.Context, i int) error {
 			}
 		}
 	})
+
+	// scanBoundary represents an event on which the rangefeeds should be stopped
+	// for a backfill or due to failure.
+	var scanBoundary *tablefeed.Event
 	g.GoCtx(func(ctx context.Context) error {
+		var (
+			checkForScanBoundary = func(ts hlc.Timestamp) error {
+				if scanBoundary != nil {
+					return nil
+				}
+				nextEvents, err := p.tableFeed.Peek(ctx, ts)
+				if err != nil {
+					return err
+				}
+				// TODO(ajwerner): check the policy for table events
+				if len(nextEvents) > 0 {
+					scanBoundary = &nextEvents[0]
+				}
+				return nil
+			}
+			applyScanBoundary = func(e bufferEntry) (skipEvent, reachedBoundary bool) {
+				if scanBoundary == nil {
+					return false, false
+				}
+				if bufferEntryTimestamp(e).Less(scanBoundary.Timestamp()) {
+					return false, false
+				}
+				if isKV := e.kv.Key != nil; isKV {
+					return true, false
+				}
+				boundaryResolvedTimestamp := scanBoundary.Timestamp().Prev()
+				if e.resolved.Timestamp.LessEq(boundaryResolvedTimestamp) {
+					return false, false
+				}
+				frontier.Forward(e.resolved.Span, boundaryResolvedTimestamp)
+				return true, frontier.Frontier() == boundaryResolvedTimestamp
+			}
+			addEntry = func(e bufferEntry) error {
+				if isKV := e.kv.Key != nil; isKV {
+					return p.buf.AddKV(ctx, e.kv, e.prevVal, e.backfillTimestamp)
+				}
+				// TODO(ajwerner): technically this doesn't need to happen for most
+				// events - we just need to make sure we forward for events which are
+				// at scanBoundary.Prev(). The logic currently doesn't make this clean.
+				frontier.Forward(e.resolved.Span, e.resolved.Timestamp)
+				return p.buf.AddResolved(ctx, e.resolved.Span, e.resolved.Timestamp)
+			}
+		)
 		for {
 			e, err := memBuf.Get(ctx)
 			if err != nil {
 				return err
 			}
-			if e.kv.Key != nil {
-				if err := p.tableHist.WaitForTS(ctx, e.kv.Value.Timestamp); err != nil {
-					return err
-				}
-				pastBoundary := false
-				p.mu.Lock()
-				if len(p.mu.scanBoundaries) > 0 && p.mu.scanBoundaries[0].Less(e.kv.Value.Timestamp) {
-					// Ignore feed results beyond the next boundary; they will be retrieved when
-					// the feeds are restarted after the scan.
-					pastBoundary = true
-				}
-				p.mu.Unlock()
-				if pastBoundary {
-					continue
-				}
-				if err := p.buf.AddKV(ctx, e.kv, e.prevVal, e.backfillTimestamp); err != nil {
-					return err
-				}
-			} else if e.resolved != nil {
-				resolvedTS := e.resolved.Timestamp
-				boundaryBreak := false
-				// Make sure scan boundaries less than or equal to `resolvedTS` were
-				// added to the `scanBoundaries` list before proceeding.
-				if err := p.tableHist.WaitForTS(ctx, resolvedTS); err != nil {
-					return err
-				}
-				p.mu.Lock()
-				if len(p.mu.scanBoundaries) > 0 && p.mu.scanBoundaries[0].LessEq(resolvedTS) {
-					boundaryBreak = true
-					resolvedTS = p.mu.scanBoundaries[0]
-				}
-				p.mu.Unlock()
-				if boundaryBreak {
-					// A boundary here means we're about to do a full scan (backfill)
-					// at this timestamp, so at the changefeed level the boundary
-					// itself is not resolved. Skip emitting this resolved timestamp
-					// because we want to trigger the scan first before resolving its
-					// scan boundary timestamp.
-					resolvedTS = resolvedTS.Prev()
-					frontier.Forward(e.resolved.Span, resolvedTS)
-					if frontier.Frontier() == resolvedTS {
-						// All component rangefeeds are now at the boundary.
-						// Break out of the ctxgroup by returning a sentinel error.
-						return errBoundaryReached
-					}
-				} else {
-					if err := p.buf.AddResolved(ctx, e.resolved.Span, resolvedTS); err != nil {
-						return err
-					}
-				}
+			// Check for scanBoundary
+			if err := checkForScanBoundary(bufferEntryTimestamp(e)); err != nil {
+				return err
+			}
+			skipEntry, scanBoundaryReached := applyScanBoundary(e)
+			if scanBoundaryReached {
+				// All component rangefeeds are now at the boundary.
+				// Break out of the ctxgroup by returning a sentinel error.
+				return errBoundaryReached
+			}
+			if skipEntry {
+				continue
+			}
+			if err := addEntry(e); err != nil {
+				return err
 			}
 		}
 	})
@@ -352,11 +436,31 @@ func (p *poller) rangefeedImplIter(ctx context.Context, i int) error {
 	if err := g.Wait(); err != nil && err != errBoundaryReached {
 		return err
 	}
+	newHighWater := scanBoundary.Timestamp().Prev()
+	for _, sp := range spans {
+		frontier.Forward(sp, newHighWater)
+	}
 
 	p.mu.Lock()
-	p.mu.highWater = p.mu.scanBoundaries[0]
+	p.mu.highWater = newHighWater
 	p.mu.Unlock()
+
+	// TODO(ajwerner): iterate the spans and add a resolved timestamp at
+	// spanBoundary.Prev().
+
+	// Then, check the setting to return early.
+	// Need to fix the spanBoundaries to detect column renames.
+	// Need to also break on IMPORT INTO
+	// Essentially this scanBoundary needs some better abstraction.
+
 	return nil
+}
+
+func bufferEntryTimestamp(e bufferEntry) hlc.Timestamp {
+	if e.kv.Key != nil {
+		return e.kv.Value.Timestamp
+	}
+	return e.resolved.Timestamp
 }
 
 func getSpansToProcess(
@@ -409,6 +513,10 @@ func getSpansToProcess(
 func (p *poller) exportSpansParallel(
 	ctx context.Context, spans []roachpb.Span, ts hlc.Timestamp, withDiff bool,
 ) error {
+	//if log.V(2) {
+	log.Infof(ctx, "performing scan on %v at %v withDiff %v", spans, ts, withDiff)
+	//}
+
 	// Export requests for the various watched spans are executed in parallel,
 	// with a semaphore-enforced limit based on a cluster setting.
 	// The spans here generally correspond with range boundaries.
@@ -531,32 +639,6 @@ func (p *poller) slurpScanResponse(
 	return nil
 }
 
-func (p *poller) updateTableHistory(ctx context.Context, endTS hlc.Timestamp) error {
-	startTS := p.tableHist.HighWater()
-	if endTS.LessEq(startTS) {
-		return nil
-	}
-	descs, err := fetchTableDescriptorVersions(ctx, p.db, startTS, endTS, p.details.Targets)
-	if err != nil {
-		return err
-	}
-	return p.tableHist.IngestDescriptors(ctx, startTS, endTS, descs)
-}
-
-func (p *poller) pollTableHistory(ctx context.Context) error {
-	for {
-		if err := p.updateTableHistory(ctx, p.clock.Now()); err != nil {
-			return err
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(changefeedPollInterval.Get(&p.settings.SV)):
-		}
-	}
-}
-
 func allRangeDescriptors(ctx context.Context, txn *client.Txn) ([]roachpb.RangeDescriptor, error) {
 	rows, err := txn.Scan(ctx, keys.Meta2Prefix, keys.MetaMax, 0)
 	if err != nil {
@@ -583,59 +665,12 @@ func clusterNodeCount(g *gossip.Gossip) int {
 	return nodes
 }
 
-func (p *poller) validateTable(ctx context.Context, desc *sqlbase.TableDescriptor) error {
-	if err := validateChangefeedTable(p.details.Targets, desc); err != nil {
-		return err
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if lastVersion, ok := p.mu.previousTableVersion[desc.ID]; ok {
-		if desc.ModificationTime.Less(lastVersion.ModificationTime) {
-			return nil
-		}
-		if shouldAddScanBoundary(lastVersion, desc) {
-			boundaryTime := desc.GetModificationTime()
-			// Only mutations that happened after the changefeed started are
-			// interesting here.
-			if p.details.StatementTime.Less(boundaryTime) {
-				if boundaryTime.Less(p.mu.highWater) {
-					return errors.AssertionFailedf(
-						"error: detected table ID %d backfill completed at %s "+
-							"earlier than highwater timestamp %s",
-						errors.Safe(desc.ID),
-						errors.Safe(boundaryTime),
-						errors.Safe(p.mu.highWater),
-					)
-				}
-				p.mu.scanBoundaries = append(p.mu.scanBoundaries, boundaryTime)
-				sort.Slice(p.mu.scanBoundaries, func(i, j int) bool {
-					return p.mu.scanBoundaries[i].Less(p.mu.scanBoundaries[j])
-				})
-				// To avoid race conditions with the lease manager, at this point we force
-				// the manager to acquire the freshest descriptor of this table from the
-				// store. In normal operation, the lease manager returns the newest
-				// descriptor it knows about for the timestamp, assuming it's still
-				// allowed; without this explicit load, the lease manager might therefore
-				// return the previous version of the table, which is still technically
-				// allowed by the schema change system.
-				if err := p.leaseMgr.AcquireFreshestFromStore(ctx, desc.ID); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	p.mu.previousTableVersion[desc.ID] = desc
-	return nil
+func shouldAddScanBoundary(e tablefeed.Event) (res bool) {
+	return newColumnBackfillComplete(e) ||
+		hasNewColumnDropBackfillMutation(e)
 }
 
-func shouldAddScanBoundary(
-	lastVersion *sqlbase.TableDescriptor, desc *sqlbase.TableDescriptor,
-) (res bool) {
-	return newColumnBackfillComplete(lastVersion, desc) ||
-		hasNewColumnDropBackfillMutation(lastVersion, desc)
-}
-
-func hasNewColumnDropBackfillMutation(oldDesc, newDesc *sqlbase.TableDescriptor) (res bool) {
+func hasNewColumnDropBackfillMutation(e tablefeed.Event) (res bool) {
 	dropMutationExists := func(desc *sqlbase.TableDescriptor) bool {
 		for _, m := range desc.Mutations {
 			if m.Direction == sqlbase.DescriptorMutation_DROP &&
@@ -647,12 +682,12 @@ func hasNewColumnDropBackfillMutation(oldDesc, newDesc *sqlbase.TableDescriptor)
 	}
 	// Make sure that the old descriptor *doesn't* have the same mutation to avoid adding
 	// the same scan boundary more than once.
-	return !dropMutationExists(oldDesc) && dropMutationExists(newDesc)
+	return !dropMutationExists(e.Before) && dropMutationExists(e.After)
 }
 
-func newColumnBackfillComplete(oldDesc, newDesc *sqlbase.TableDescriptor) (res bool) {
-	return len(oldDesc.Columns) < len(newDesc.Columns) &&
-		oldDesc.HasColumnBackfillMutation() && !newDesc.HasColumnBackfillMutation()
+func newColumnBackfillComplete(e tablefeed.Event) (res bool) {
+	return len(e.Before.Columns) < len(e.After.Columns) &&
+		e.Before.HasColumnBackfillMutation() && !e.After.HasColumnBackfillMutation()
 }
 
 func fetchSpansForTargets(
