@@ -1670,7 +1670,8 @@ bins = \
   bin/uptodate \
   bin/urlcheck \
   bin/workload \
-  bin/zerosum
+  bin/zerosum \
+  bin/proxy
 
 testbins = \
   bin/logictest \
