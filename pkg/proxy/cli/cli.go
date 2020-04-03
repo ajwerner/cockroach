@@ -11,10 +11,12 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"github.com/cockroachdb/cockroach/pkg/proxy/server"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/spf13/cobra"
 )
 
@@ -37,22 +39,26 @@ var app = cobra.Command{
 
 var serverCfg server.Config
 
+// TODO(ajwerner): set up logging and flags to control it.
+
 func init() {
 	app.Flags().StringVar(&serverCfg.ListenAddr, "listen-addr",
 		"0.0.0.0:27327",
 		"address on which to listen for inbound cockroach connections")
-	app.Flags().StringSliceVar(&serverCfg.DownstreamJoinAddrs, "join-addr",
+	app.Flags().StringSliceVar(&serverCfg.JoinAddrs, "join-addr",
 		nil,
 		"addresses to connect to for discovery of cockroach gateway servers")
-	app.Flags().StringVar(&serverCfg.ClientCertsDir, "client-certs-dir",
-		"",
-		"path to a directory with client certificates for connecting to cockroach nodes")
-	app.Flags().StringVar(&serverCfg.NodeCertsDir, "node-certs-dir",
+	app.Flags().StringVar(&serverCfg.CertsDir, "certs-dir",
 		"",
 		"path to a directory with node certificates for terminating client connections")
 }
 
 func run(cmd *cobra.Command, args []string) error {
-	_, err := fmt.Fprintf(cmd.OutOrStdout(), "%v\n", serverCfg.String())
-	return err
+	log.LoggingToStderr(log.Severity_INFO)
+	s, err := server.New(serverCfg)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	return s.Run(ctx)
 }
