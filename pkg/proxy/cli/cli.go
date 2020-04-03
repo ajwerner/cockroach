@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/cockroachdb/cockroach/pkg/proxy/server"
 	"github.com/spf13/cobra"
 )
 
@@ -34,11 +35,24 @@ var app = cobra.Command{
 	Args:  cobra.NoArgs,
 }
 
+var serverCfg server.Config
+
 func init() {
-	// Set up flags.
+	app.Flags().StringVar(&serverCfg.ListenAddr, "listen-addr",
+		"0.0.0.0:27327",
+		"address on which to listen for inbound cockroach connections")
+	app.Flags().StringSliceVar(&serverCfg.DownstreamJoinAddrs, "join-addr",
+		nil,
+		"addresses to connect to for discovery of cockroach gateway servers")
+	app.Flags().StringVar(&serverCfg.ClientCertsDir, "client-certs-dir",
+		"",
+		"path to a directory with client certificates for connecting to cockroach nodes")
+	app.Flags().StringVar(&serverCfg.NodeCertsDir, "node-certs-dir",
+		"",
+		"path to a directory with node certificates for terminating client connections")
 }
 
 func run(cmd *cobra.Command, args []string) error {
-	_, err := fmt.Fprint(cmd.OutOrStdout(), "Hello, world\n")
+	_, err := fmt.Fprintf(cmd.OutOrStdout(), "%v\n", serverCfg.String())
 	return err
 }
