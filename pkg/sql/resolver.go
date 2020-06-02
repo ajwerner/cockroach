@@ -26,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
+	"github.com/kr/pretty"
 )
 
 var _ resolver.SchemaResolver = &planner{}
@@ -180,22 +181,25 @@ func (p *planner) ResolveTypeByID(ctx context.Context, id uint32) (*types.T, err
 func (p *planner) maybeHydrateTypesInDescriptor(
 	ctx context.Context, objDesc tree.NameResolutionResult,
 ) error {
-	typeLookup := func(id sqlbase.ID) (*tree.TypeName, *TypeDescriptor, error) {
-		return resolver.ResolveTypeDescByID(ctx, p.txn, p.ExecCfg().Codec, id)
-	}
 	// As of now, only {Mutable,Immutable}TableDescriptor have types.T that
 	// need to be hydrated.
+	var requiresMutable bool
+	var tableDesc *sqlbase.TableDescriptor
 	switch desc := objDesc.(type) {
 	case *sqlbase.MutableTableDescriptor:
-		if err := sqlbase.HydrateTypesInTableDescriptor(desc.TableDesc(), typeLookup); err != nil {
-			return err
-		}
-	case *sqlbase.ImmutableTableDescriptor:
-		if err := sqlbase.HydrateTypesInTableDescriptor(desc.TableDesc(), typeLookup); err != nil {
-			return err
-		}
+		requiresMutable, tableDesc = true, desc.TableDesc()
+	case *sqlbase.ImmutableTypeDescriptor:
+		requiresMutable, tableDesc = false, desc.TableDesc()
+	default:
+		return nil
+
 	}
-	return nil
+	return sqlbase.HydrateTypesInTableDescriptor(tableDesc, func(
+		id sqlbase.ID,
+	) (*tree.TypeName, sqlbase.TypeDescriptorInterface, error) {
+		return resolver.ResolveTypeDescByID(ctx, p.txn, p.ExecCfg().Codec, id,
+			tree.ObjectLookupFlags{RequireMutable: requiresMutable})
+	})
 }
 
 // ObjectLookupFlags is part of the resolver.SchemaResolver interface.
@@ -209,12 +213,12 @@ func (p *planner) ObjectLookupFlags(required, requireMutable bool) tree.ObjectLo
 // getDescriptorsFromTargetList fetches the descriptors for the targets.
 func getDescriptorsFromTargetList(
 	ctx context.Context, p *planner, targets tree.TargetList,
-) ([]sqlbase.DescriptorProto, error) {
+) ([]sqlbase.DescriptorInterface, error) {
 	if targets.Databases != nil {
 		if len(targets.Databases) == 0 {
 			return nil, errNoDatabase
 		}
-		descs := make([]sqlbase.DescriptorProto, 0, len(targets.Databases))
+		descs := make([]sqlbase.DescriptorInterface, 0, len(targets.Databases))
 		for _, database := range targets.Databases {
 			descriptor, err := p.ResolveUncachedDatabaseByName(ctx, string(database), true /*required*/)
 			if err != nil {
@@ -231,7 +235,7 @@ func getDescriptorsFromTargetList(
 	if len(targets.Tables) == 0 {
 		return nil, errNoTable
 	}
-	descs := make([]sqlbase.DescriptorProto, 0, len(targets.Tables))
+	descs := make([]sqlbase.DescriptorInterface, 0, len(targets.Tables))
 	for _, tableTarget := range targets.Tables {
 		tableGlob, err := tableTarget.NormalizeTablePattern()
 		if err != nil {
@@ -495,7 +499,7 @@ type internalLookupCtx struct {
 	dbNames map[sqlbase.ID]string
 	dbIDs   []sqlbase.ID
 	dbDescs map[sqlbase.ID]*DatabaseDescriptor
-	tbDescs map[sqlbase.ID]*TableDescriptor
+	tbDescs map[sqlbase.ID]*ImmutableTableDescriptor
 	tbIDs   []sqlbase.ID
 }
 
@@ -504,13 +508,9 @@ type internalLookupCtx struct {
 type tableLookupFn = *internalLookupCtx
 
 func newInternalLookupCtx(
-	descs []sqlbase.DescriptorProto, prefix *DatabaseDescriptor,
+	descs []sqlbase.Descriptor, prefix *DatabaseDescriptor,
 ) *internalLookupCtx {
-	wrappedDescs := make([]sqlbase.Descriptor, len(descs))
-	for i, desc := range descs {
-		wrappedDescs[i] = *sqlbase.WrapDescriptor(desc)
-	}
-	return newInternalLookupCtxFromDescriptors(wrappedDescs, prefix)
+	return newInternalLookupCtxFromDescriptors(descs, prefix)
 }
 
 func newInternalLookupCtxFromDescriptors(
@@ -518,10 +518,11 @@ func newInternalLookupCtxFromDescriptors(
 ) *internalLookupCtx {
 	dbNames := make(map[sqlbase.ID]string)
 	dbDescs := make(map[sqlbase.ID]*DatabaseDescriptor)
-	tbDescs := make(map[sqlbase.ID]*TableDescriptor)
+	tbDescs := make(map[sqlbase.ID]*ImmutableTableDescriptor)
 	var tbIDs, dbIDs []sqlbase.ID
 	// Record database descriptors for name lookups.
 	for _, desc := range descs {
+		fmt.Printf("desc %v", pretty.Sprint(desc))
 		if database := desc.GetDatabase(); database != nil {
 			dbNames[database.ID] = database.Name
 			dbDescs[database.ID] = database
@@ -529,7 +530,7 @@ func newInternalLookupCtxFromDescriptors(
 				dbIDs = append(dbIDs, database.ID)
 			}
 		} else if table := desc.Table(hlc.Timestamp{}); table != nil {
-			tbDescs[table.ID] = table
+			tbDescs[table.ID] = sqlbase.NewImmutableTableDescriptor(*table)
 			if prefix == nil || prefix.ID == table.ParentID {
 				// Only make the table visible for iteration if the prefix was included.
 				tbIDs = append(tbIDs, table.ID)
@@ -559,7 +560,7 @@ func (l *internalLookupCtx) getTableByID(id sqlbase.ID) (*TableDescriptor, error
 		return nil, sqlbase.NewUndefinedRelationError(
 			tree.NewUnqualifiedTableName(tree.Name(fmt.Sprintf("[%d]", id))))
 	}
-	return tb, nil
+	return tb.TableDesc(), nil
 }
 
 func (l *internalLookupCtx) getParentName(table *TableDescriptor) string {

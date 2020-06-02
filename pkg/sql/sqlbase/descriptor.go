@@ -10,7 +10,10 @@
 
 package sqlbase
 
-import "github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+import (
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+)
 
 // DescriptorInterface provides table information for results from a name
 // lookup.
@@ -35,4 +38,28 @@ type DescriptorInterface interface {
 	// TypeDesc returns the underlying type descriptor, or nil if the
 	// descriptor is not a type backed object.
 	TypeDesc() *TypeDescriptor
+
+	GetPrivileges() *PrivilegeDescriptor
+	GetID() ID
+	TypeName() string
+	GetName() string
+	GetAuditMode() TableDescriptor_AuditMode
+	DescriptorProto() *Descriptor
+}
+
+func UnwrapDescriptor(desc *Descriptor) DescriptorInterface {
+	if typDesc := desc.GetType(); typDesc != nil {
+		return NewImmutableTypeDescriptor(desc)
+	}
+	if tbDesc := desc.Table(hlc.Timestamp{}); tbDesc != nil {
+		// TODO(ajwerner): Fix the constructor here to take desc.
+		return NewImmutableTableDescriptor(*tbDesc)
+	}
+	if schemaDesc := desc.GetSchema(); schemaDesc != nil {
+		return schemaDesc
+	}
+	if dbDesc := desc.GetDatabase(); dbDesc != nil {
+		return dbDesc
+	}
+	panic("unknown descriptor type")
 }

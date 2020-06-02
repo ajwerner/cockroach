@@ -75,44 +75,13 @@ func ResolveSchemaID(
 	return true, schemaID, nil
 }
 
-// LookupDescriptorByID looks up the descriptor for `id` and returns it.
-// It can be a table or database descriptor.
-// Returns the descriptor (if found), a bool representing whether the
-// descriptor was found and an error if any.
-//
-// TODO(ajwerner): Understand the difference between this and GetDescriptorByID.
-func LookupDescriptorByID(
-	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, id sqlbase.ID,
-) (sqlbase.DescriptorProto, bool, error) {
-	var desc sqlbase.DescriptorProto
-	for _, lookupFn := range []func() (sqlbase.DescriptorProto, error){
-		func() (sqlbase.DescriptorProto, error) {
-			return sqlbase.GetTableDescFromID(ctx, txn, codec, id)
-		},
-		func() (sqlbase.DescriptorProto, error) {
-			return sqlbase.GetDatabaseDescFromID(ctx, txn, codec, id)
-		},
-	} {
-		var err error
-		desc, err = lookupFn()
-		if err != nil {
-			if errors.Is(err, sqlbase.ErrDescriptorNotFound) {
-				continue
-			}
-			return nil, false, err
-		}
-		return desc, true, nil
-	}
-	return nil, false, nil
-}
-
 // GetDescriptorByID looks up the descriptor for `id`, validates it.
 //
 // In most cases you'll want to use wrappers: `GetDatabaseDescByID` or
 // `getTableDescByID`.
 func GetDescriptorByID(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, id sqlbase.ID,
-) (sqlbase.DescriptorProto, error) {
+) (*sqlbase.Descriptor, error) {
 	log.Eventf(ctx, "fetching descriptor with ID %d", id)
 	descKey := sqlbase.MakeDescMetadataKey(codec, id)
 	desc := &sqlbase.Descriptor{}
@@ -129,14 +98,14 @@ func GetDescriptorByID(
 		if err := table.Validate(ctx, txn, codec); err != nil {
 			return nil, err
 		}
-		return table, nil
+		return desc, nil
 	case database != nil:
 		if err := database.Validate(); err != nil {
 			return nil, err
 		}
-		return database, nil
+		return desc, nil
 	case typ != nil:
-		return typ, nil
+		return desc, nil
 	default:
 		return nil, errors.AssertionFailedf("unknown proto: %s", desc.String())
 	}
@@ -163,7 +132,7 @@ func CountUserDescriptors(ctx context.Context, txn *kv.Txn, codec keys.SQLCodec)
 // GetAllDescriptors looks up and returns all available descriptors.
 func GetAllDescriptors(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec,
-) ([]sqlbase.DescriptorProto, error) {
+) ([]sqlbase.Descriptor, error) {
 	log.Eventf(ctx, "fetching all descriptors")
 	descsKey := sqlbase.MakeAllDescsMetadataKey(codec)
 	kvs, err := txn.Scan(ctx, descsKey, descsKey.PrefixEnd(), 0)
@@ -171,25 +140,11 @@ func GetAllDescriptors(
 		return nil, err
 	}
 
-	descs := make([]sqlbase.DescriptorProto, 0, len(kvs))
-	for _, kv := range kvs {
-		desc := &sqlbase.Descriptor{}
+	descs := make([]sqlbase.Descriptor, len(kvs))
+	for i, kv := range kvs {
+		desc := &descs[i]
 		if err := kv.ValueProto(desc); err != nil {
 			return nil, err
-		}
-		switch t := desc.Union.(type) {
-		case *sqlbase.Descriptor_Table:
-			table := desc.Table(kv.Value.Timestamp)
-			if err := table.MaybeFillInDescriptor(ctx, txn, codec); err != nil {
-				return nil, err
-			}
-			descs = append(descs, table)
-		case *sqlbase.Descriptor_Database:
-			descs = append(descs, desc.GetDatabase())
-		case *sqlbase.Descriptor_Type:
-			descs = append(descs, desc.GetType())
-		default:
-			return nil, errors.AssertionFailedf("Descriptor.Union has unexpected type %T", t)
 		}
 	}
 	return descs, nil
@@ -240,10 +195,10 @@ func WriteDescToBatch(
 	b *kv.Batch,
 	codec keys.SQLCodec,
 	descID sqlbase.ID,
-	desc sqlbase.DescriptorProto,
+	desc sqlbase.DescriptorInterface,
 ) (err error) {
 	descKey := sqlbase.MakeDescMetadataKey(codec, descID)
-	descDesc := sqlbase.WrapDescriptor(desc)
+	descDesc := desc.DescriptorProto()
 	if kvTrace {
 		log.VEventf(ctx, 2, "Put %s -> %s", descKey, descDesc)
 	}
@@ -301,8 +256,8 @@ func GetDatabaseDescByID(
 	if err != nil {
 		return nil, err
 	}
-	db, ok := desc.(*sqlbase.DatabaseDescriptor)
-	if !ok {
+	db := desc.GetDatabase()
+	if db == nil {
 		return nil, pgerror.Newf(pgcode.WrongObjectType,
 			"%q is not a database", desc.String())
 	}
@@ -319,6 +274,7 @@ func MustGetDatabaseDescByID(
 		return nil, err
 	}
 	if desc == nil {
+		// TODO(ajwerner): How does this case ever happen?
 		return nil, sqlbase.NewUndefinedDatabaseError(fmt.Sprintf("[%d]", id))
 	}
 	return desc, nil

@@ -1063,10 +1063,12 @@ func migrateSchemaChangeJobs(ctx context.Context, r runner, registry *jobs.Regis
 	//
 	// There are probably more efficient ways to do this part of the migration,
 	// but the current approach seemed like the most straightforward.
-	var allDescs []sqlbase.DescriptorProto
+	var allDescs []sqlbase.Descriptor
 	schemaChangeJobsForDesc := make(map[sqlbase.ID][]int64)
 	gcJobsForDesc := make(map[sqlbase.ID][]int64)
+	var getReadTimestamp func() hlc.Timestamp
 	if err := r.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		getReadTimestamp = txn.ReadTimestamp
 		descs, err := catalogkv.GetAllDescriptors(ctx, txn, r.codec)
 		if err != nil {
 			return err
@@ -1162,42 +1164,41 @@ func migrateSchemaChangeJobs(ctx context.Context, r runner, registry *jobs.Regis
 
 	log.Infof(ctx, "evaluating tables for creating jobs")
 	for _, desc := range allDescs {
-		switch desc := desc.(type) {
-		case *sqlbase.TableDescriptor:
-			if scJobs := schemaChangeJobsForDesc[desc.ID]; len(scJobs) > 0 {
-				log.VEventf(ctx, 3, "table %d has running schema change jobs %v, skipping", desc.ID, scJobs)
+		if tableDesc := desc.Table(getReadTimestamp()); tableDesc != nil {
+			if scJobs := schemaChangeJobsForDesc[tableDesc.ID]; len(scJobs) > 0 {
+				log.VEventf(ctx, 3, "table %d has running schema change jobs %v, skipping", tableDesc.ID, scJobs)
 				continue
-			} else if gcJobs := gcJobsForDesc[desc.ID]; len(gcJobs) > 0 {
-				log.VEventf(ctx, 3, "table %d has running GC jobs %v, skipping", desc.ID, gcJobs)
+			} else if gcJobs := gcJobsForDesc[tableDesc.ID]; len(gcJobs) > 0 {
+				log.VEventf(ctx, 3, "table %d has running GC jobs %v, skipping", tableDesc.ID, gcJobs)
 				continue
 			}
-			if !desc.Adding() && !desc.Dropped() && !desc.HasDrainingNames() {
+			if !tableDesc.Adding() && !tableDesc.Dropped() && !tableDesc.HasDrainingNames() {
 				log.VEventf(ctx, 3,
 					"table %d is not being added or dropped and does not have draining names, skipping",
-					desc.ID,
+					tableDesc.ID,
 				)
 				continue
 			}
 
 			if err := r.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-				key := schemaChangeJobMigrationKeyForTable(r.codec, desc.ID)
+				key := schemaChangeJobMigrationKeyForTable(r.codec, tableDesc.ID)
 				startTime := timeutil.Now().String()
 				if kv, err := txn.Get(ctx, key); err != nil {
 					return err
 				} else if kv.Exists() {
-					log.VEventf(ctx, 3, "table %d already processed in migration", desc.ID)
+					log.VEventf(ctx, 3, "table %d already processed in migration", tableDesc.ID)
 					return nil
 				}
-				if desc.Adding() || desc.HasDrainingNames() {
-					if err := createSchemaChangeJobForTable(txn, desc); err != nil {
+				if tableDesc.Adding() || tableDesc.HasDrainingNames() {
+					if err := createSchemaChangeJobForTable(txn, tableDesc); err != nil {
 						return err
 					}
-				} else if desc.Dropped() {
+				} else if tableDesc.Dropped() {
 					// Note that a table can be both in the DROP state and have draining
 					// names. In that case it was enough to just create a schema change
 					// job, as in the case above, because that job will itself create a
 					// GC job.
-					if err := createGCJobForTable(txn, desc); err != nil {
+					if err := createGCJobForTable(txn, tableDesc); err != nil {
 						return err
 					}
 				}
@@ -1208,9 +1209,8 @@ func migrateSchemaChangeJobs(ctx context.Context, r runner, registry *jobs.Regis
 			}); err != nil {
 				return err
 			}
-		case *sqlbase.DatabaseDescriptor:
-			// Do nothing.
 		}
+		// Do nothing.
 	}
 
 	return nil
