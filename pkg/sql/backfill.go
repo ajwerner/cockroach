@@ -1595,7 +1595,7 @@ func validateCheckInTxn(
 	if err != nil {
 		return err
 	}
-	return validateCheckExpr(ctx, semaCtx, check.Expr, tableDesc.TableDesc(), ie, txn)
+	return validateCheckExpr(ctx, semaCtx, check.Expr, tableDesc, ie, txn)
 }
 
 // validateFkInTxn validates foreign key constraints within the provided

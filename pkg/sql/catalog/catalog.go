@@ -15,6 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 )
 
+// Descriptor is an interface for retrieved catalog descriptors.
 type Descriptor = sqlbase.DescriptorInterface
 
 // VirtualSchemas is a collection of VirtualSchemas.

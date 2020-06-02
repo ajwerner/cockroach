@@ -105,6 +105,7 @@ func (l *LogicalSchemaAccessor) GetObjectDesc(
 			}
 			return nil, nil
 		}
+		// NB: This will return the same descriptor type regard
 		return desc.Desc(), nil
 	}
 	// Fallthrough.
