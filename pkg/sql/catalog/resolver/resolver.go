@@ -290,7 +290,6 @@ func ResolveTypeDescByID(
 	if err != nil {
 		return nil, nil, err
 	}
-
 	typDesc := rawDesc.GetType()
 	if typDesc == nil {
 		return nil, nil, errors.AssertionFailedf("%s was not a type descriptor", rawDesc)

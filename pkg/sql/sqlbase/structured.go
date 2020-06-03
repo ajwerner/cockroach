@@ -170,10 +170,11 @@ type MutableTableDescriptor struct {
 	ClusterVersion TableDescriptor
 }
 
+// DescriptorProto prepares desc for serialization.
 func (desc *TableDescriptor) DescriptorProto() *Descriptor {
-	// TODO(ajwerner): Copy over the metadata fields.
-	// TODO(ajwerner): This ultimately should be cleaner.
-	return WrapDescriptor(desc)
+	// TODO(ajwerner): Copy over the metadata fields. This method should not exist
+	// on the TableDescriptor itself but rather on the wrappers.
+	return wrapDescriptor(desc)
 }
 
 // ImmutableTableDescriptor is a custom type for TableDescriptors
@@ -3690,7 +3691,7 @@ func (desc *DatabaseDescriptor) NameResolutionResult() {}
 // TODO(ajwerner): Lift this into the DatabaseDescriptorInterface
 // implementations.
 func (desc *DatabaseDescriptor) DescriptorProto() *Descriptor {
-	return WrapDescriptor(desc)
+	return wrapDescriptor(desc)
 }
 
 // Validate validates that the database descriptor is well formed.
@@ -3715,11 +3716,16 @@ func (desc *DatabaseDescriptor) Validate() error {
 
 // GetID returns the ID of the descriptor.
 func (desc *Descriptor) GetID() ID {
+	// TODO(ajwerner): Adopt the DescriptorMeta.
 	switch t := desc.Union.(type) {
 	case *Descriptor_Table:
 		return t.Table.ID
 	case *Descriptor_Database:
 		return t.Database.ID
+	case *Descriptor_Type:
+		return t.Type.ID
+	case *Descriptor_Schema:
+		return t.Schema.ID
 	default:
 		return 0
 	}
@@ -4366,7 +4372,7 @@ func (desc *SchemaDescriptor) TypeDesc() *TypeDescriptor {
 // TODO(ajwerner): Lift this into the DatabaseDescriptorInterface
 // implementations.
 func (desc *SchemaDescriptor) DescriptorProto() *Descriptor {
-	return WrapDescriptor(desc)
+	return wrapDescriptor(desc)
 }
 
 // NameResolutionResult implements the ObjectDescriptor interface.

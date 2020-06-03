@@ -1668,7 +1668,6 @@ func forEachTableDescWithTableLookupInternal(
 	if err != nil {
 		return err
 	}
-	fmt.Println("yo descs", descs)
 	lCtx := newInternalLookupCtx(descs, dbContext)
 
 	if virtualOpts == virtualMany || virtualOpts == virtualOnce {

@@ -28,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -750,7 +751,7 @@ func (tc *Collection) GetAllDescriptors(
 		dbDescs := make(map[sqlbase.ID]*sqlbase.DatabaseDescriptor)
 		typDescs := make(map[sqlbase.ID]*sqlbase.TypeDescriptor)
 		for i := range descs {
-			desc := descs[i]
+			desc := &descs[i]
 			if dbDesc := desc.GetDatabase(); dbDesc != nil {
 				dbDescs[desc.GetID()] = dbDesc
 			} else if typDesc := desc.GetType(); typDesc != nil {
@@ -776,7 +777,7 @@ func (tc *Collection) GetAllDescriptors(
 			// Now hydrate all table descriptors.
 			for i := range descs {
 				desc := descs[i]
-				if tblDesc := desc.Table(txn.ReadTimestamp()); tblDesc != nil {
+				if tblDesc := desc.Table(hlc.Timestamp{}); tblDesc != nil {
 					if err := sqlbase.HydrateTypesInTableDescriptor(tblDesc, typeLookup); err != nil {
 						// If we ran into an error hydrating the types, that means that we
 						// have some sort of corrupted descriptor state. Rather than disable

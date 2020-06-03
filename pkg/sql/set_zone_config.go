@@ -652,9 +652,14 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 		hasNewSubzones := !deleteZone && index != nil
 		execConfig := params.extendedEvalCtx.ExecCfg
 		zoneToWrite := partialZone
-
+		// TODO(ajwerner): This is extremely fragile because we accept a nil table
+		// all the way down here.
+		var tableDesc *sqlbase.TableDescriptor
+		if table != nil {
+			tableDesc = table.TableDesc()
+		}
 		n.run.numAffected, err = writeZoneConfig(params.ctx, params.p.txn,
-			targetID, table.TableDesc(), zoneToWrite, execConfig, hasNewSubzones)
+			targetID, tableDesc, zoneToWrite, execConfig, hasNewSubzones)
 		if err != nil {
 			return err
 		}

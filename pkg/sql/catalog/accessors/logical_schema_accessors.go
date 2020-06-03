@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
-	"github.com/cockroachdb/errors"
 )
 
 // This file provides reference implementations of the schema accessor
@@ -105,9 +104,8 @@ func (l *LogicalSchemaAccessor) GetObjectDesc(
 				return nil, sqlbase.NewUndefinedObjectError(obj, flags.DesiredObjectKind)
 			}
 			return nil, nil
-		} else if flags.RequireMutable {
-			return nil, errors.AssertionFailedf("cannot acquire mutable desc for table %q.%q.%q %v", db, schema, object, flags)
 		}
+		// NB: This will return the same descriptor type regard
 		return desc.Desc(), nil
 	}
 	// Fallthrough.

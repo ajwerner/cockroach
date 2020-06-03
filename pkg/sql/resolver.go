@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
-	"github.com/kr/pretty"
 )
 
 var _ resolver.SchemaResolver = &planner{}
@@ -188,15 +187,14 @@ func (p *planner) maybeHydrateTypesInDescriptor(
 	switch desc := objDesc.(type) {
 	case *sqlbase.MutableTableDescriptor:
 		requiresMutable, tableDesc = true, desc.TableDesc()
-	case *sqlbase.ImmutableTypeDescriptor:
+	case *sqlbase.ImmutableTableDescriptor:
 		requiresMutable, tableDesc = false, desc.TableDesc()
 	default:
 		return nil
-
 	}
 	return sqlbase.HydrateTypesInTableDescriptor(tableDesc, func(
 		id sqlbase.ID,
-	) (*tree.TypeName, sqlbase.TypeDescriptorInterface, error) {
+	) (n *tree.TypeName, di sqlbase.TypeDescriptorInterface, err error) {
 		return resolver.ResolveTypeDescByID(ctx, p.txn, p.ExecCfg().Codec, id,
 			tree.ObjectLookupFlags{RequireMutable: requiresMutable})
 	})
@@ -521,8 +519,8 @@ func newInternalLookupCtxFromDescriptors(
 	tbDescs := make(map[sqlbase.ID]*ImmutableTableDescriptor)
 	var tbIDs, dbIDs []sqlbase.ID
 	// Record database descriptors for name lookups.
-	for _, desc := range descs {
-		fmt.Printf("desc %v", pretty.Sprint(desc))
+	for i := range descs {
+		desc := &descs[i]
 		if database := desc.GetDatabase(); database != nil {
 			dbNames[database.ID] = database.Name
 			dbDescs[database.ID] = database

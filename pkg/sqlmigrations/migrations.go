@@ -1066,9 +1066,7 @@ func migrateSchemaChangeJobs(ctx context.Context, r runner, registry *jobs.Regis
 	var allDescs []sqlbase.Descriptor
 	schemaChangeJobsForDesc := make(map[sqlbase.ID][]int64)
 	gcJobsForDesc := make(map[sqlbase.ID][]int64)
-	var getReadTimestamp func() hlc.Timestamp
 	if err := r.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		getReadTimestamp = txn.ReadTimestamp
 		descs, err := catalogkv.GetAllDescriptors(ctx, txn, r.codec)
 		if err != nil {
 			return err
@@ -1164,7 +1162,7 @@ func migrateSchemaChangeJobs(ctx context.Context, r runner, registry *jobs.Regis
 
 	log.Infof(ctx, "evaluating tables for creating jobs")
 	for _, desc := range allDescs {
-		if tableDesc := desc.Table(getReadTimestamp()); tableDesc != nil {
+		if tableDesc := desc.Table(hlc.Timestamp{}); tableDesc != nil {
 			if scJobs := schemaChangeJobsForDesc[tableDesc.ID]; len(scJobs) > 0 {
 				log.VEventf(ctx, 3, "table %d has running schema change jobs %v, skipping", tableDesc.ID, scJobs)
 				continue
@@ -1468,14 +1466,14 @@ func migrationKey(codec keys.SQLCodec, migration migrationDescriptor) roachpb.Ke
 	return append(codec.MigrationKeyPrefix(), roachpb.RKey(migration.name)...)
 }
 
-func createSystemTable(ctx context.Context, r runner, desc sqlbase.TableDescriptor) error {
+func createSystemTable(ctx context.Context, r runner, desc sqlbase.TableDescriptorInterface) error {
 	// We install the table at the KV layer so that we can choose a known ID in
 	// the reserved ID space. (The SQL layer doesn't allow this.)
 	err := r.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		b := txn.NewBatch()
 		tKey := sqlbase.MakePublicTableNameKey(ctx, r.settings, desc.GetParentID(), desc.GetName())
 		b.CPut(tKey.Key(r.codec), desc.GetID(), nil)
-		b.CPut(sqlbase.MakeDescMetadataKey(r.codec, desc.GetID()), sqlbase.WrapDescriptor(&desc), nil)
+		b.CPut(sqlbase.MakeDescMetadataKey(r.codec, desc.GetID()), desc.DescriptorProto(), nil)
 		if err := txn.SetSystemConfigTrigger(); err != nil {
 			return err
 		}
@@ -1560,7 +1558,7 @@ func createNewSystemNamespaceDescriptor(ctx context.Context, r runner) error {
 			sqlbase.NamespaceTable.GetParentID(), sqlbase.NamespaceTableName)
 		b.Put(nameKey.Key(r.codec), sqlbase.NamespaceTable.GetID())
 		b.Put(sqlbase.MakeDescMetadataKey(
-			r.codec, sqlbase.NamespaceTable.GetID()), sqlbase.WrapDescriptor(&sqlbase.NamespaceTable))
+			r.codec, sqlbase.NamespaceTable.GetID()), sqlbase.NamespaceTable.DescriptorProto())
 		return txn.Run(ctx, b)
 	})
 }

@@ -89,7 +89,7 @@ func GetDescriptorByID(
 	if err != nil {
 		return nil, err
 	}
-	table, database, typ := desc.Table(ts), desc.GetDatabase(), desc.GetType()
+	table, database, typ, schema := desc.Table(ts), desc.GetDatabase(), desc.GetType(), desc.GetSchema()
 	switch {
 	case table != nil:
 		if err := table.MaybeFillInDescriptor(ctx, txn, codec); err != nil {
@@ -106,8 +106,10 @@ func GetDescriptorByID(
 		return desc, nil
 	case typ != nil:
 		return desc, nil
+	case schema != nil:
+		return desc, nil
 	default:
-		return nil, errors.AssertionFailedf("unknown proto: %s", desc.String())
+		return nil, nil
 	}
 }
 
@@ -145,6 +147,11 @@ func GetAllDescriptors(
 		desc := &descs[i]
 		if err := kv.ValueProto(desc); err != nil {
 			return nil, err
+		}
+		if table := desc.Table(kv.Value.Timestamp); table != nil {
+			if err := table.Validate(ctx, txn, codec); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return descs, nil
@@ -217,10 +224,10 @@ func WriteNewDescToBatch(
 	b *kv.Batch,
 	codec keys.SQLCodec,
 	tableID sqlbase.ID,
-	desc sqlbase.DescriptorProto,
+	desc sqlbase.BaseDescriptorInterface,
 ) (err error) {
 	descKey := sqlbase.MakeDescMetadataKey(codec, tableID)
-	descDesc := sqlbase.WrapDescriptor(desc)
+	descDesc := desc.DescriptorProto()
 	if kvTrace {
 		log.VEventf(ctx, 2, "CPut %s -> %s", descKey, descDesc)
 	}

@@ -277,7 +277,7 @@ CREATE TABLE crdb_internal.tables (
 			// Note: we do not use forEachTableDesc() here because we want to
 			// include added and dropped descriptors.
 			for _, desc := range descs {
-				table := desc.Table(p.txn.ReadTimestamp())
+				table := desc.Table(hlc.Timestamp{})
 				if table == nil || p.CheckAnyPrivilege(ctx, sqlbase.NewImmutableTableDescriptor(*table)) != nil {
 					continue
 				}
@@ -335,7 +335,7 @@ CREATE TABLE crdb_internal.schema_changes (
 		// Note: we do not use forEachTableDesc() here because we want to
 		// include added and dropped descriptors.
 		for _, desc := range descs {
-			table := desc.Table(p.txn.ReadTimestamp())
+			table := desc.Table(hlc.Timestamp{})
 			if table == nil || p.CheckAnyPrivilege(ctx, sqlbase.NewImmutableTableDescriptor(*table)) != nil {
 				continue
 			}

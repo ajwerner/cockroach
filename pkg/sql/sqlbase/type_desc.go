@@ -1,3 +1,13 @@
+// Copyright 2020 The Cockroach Authors.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
 package sqlbase
 
 import (
@@ -33,8 +43,13 @@ func GetTypeDescFromID(
 // TypeDescriptorInterface will eventually be called typedesc.Descriptor.
 // It is implemented by (Imm|M)utableTypeDescriptor.
 type TypeDescriptorInterface interface {
+	BaseDescriptorInterface
+	TypeDesc() *TypeDescriptor
 	HydrateTypeInfoWithName(typ *types.T, name *tree.TypeName) error
 }
+
+var _ TypeDescriptorInterface = (*ImmutableTypeDescriptor)(nil)
+var _ TypeDescriptorInterface = (*MutableTypeDescriptor)(nil)
 
 // MakeSimpleAliasTypeDescriptor creates a type descriptor that is an alias
 // for the input type. It is intended to be used as an intermediate for name
@@ -70,6 +85,12 @@ type typeDescriptor struct {
 // MutableTypeDescriptor is a custom type for TypeDescriptors undergoing
 // any types of modifications.
 type MutableTypeDescriptor struct {
+
+	// TODO(ajwerner): Decide whether we're okay embedding the
+	// ImmutableTypeDescriptor or whether we should be embedding some other base
+	// struct that implements the various methods. For now we have the trap that
+	// the code really wants direct field access and moving all access to
+	// getters on an interface is a bigger task.
 	ImmutableTypeDescriptor
 
 	// ClusterVersion represents the version of the type descriptor read
@@ -121,14 +142,15 @@ func makeImmutableTypeDescriptor(desc *Descriptor) ImmutableTypeDescriptor {
 	return m
 }
 
+// DescriptorProto returns a Descriptor for serialization.
 func (desc *TypeDescriptor) DescriptorProto() *Descriptor {
 
 	// TODO(ajwerner): Copy over the metadata fields.
 	// TODO(ajwerner): This ultimately should be cleaner.
-	return WrapDescriptor(desc)
+	return wrapDescriptor(desc)
 }
 
-// TODO(ajwerner): Change the reciever of these methods to the
+// TODO(ajwerner): Change the receiver of these methods to the
 // ImmutableTypeDescriptor.
 //
 // In many ways it seems better if these methods were just the getters from

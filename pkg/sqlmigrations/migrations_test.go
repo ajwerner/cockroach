@@ -538,7 +538,7 @@ func TestCreateSystemTable(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	ctx := context.Background()
 
-	table := sqlbase.NamespaceTable
+	table := sqlbase.NewMutableExistingTableDescriptor(sqlbase.NamespaceTable.TableDescriptor)
 	table.ID = keys.MaxReservedDescID
 
 	prevPrivileges, ok := sqlbase.SystemAllowedPrivileges[table.ID]
@@ -555,7 +555,7 @@ func TestCreateSystemTable(t *testing.T) {
 	table.Name = "dummy"
 	nameKey := sqlbase.NewPublicTableKey(table.ParentID, table.Name).Key(keys.SystemSQLCodec)
 	descKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, table.ID)
-	descVal := sqlbase.WrapDescriptor(&table)
+	descVal := table.DescriptorProto()
 
 	mt := makeMigrationTest(ctx, t)
 	defer mt.close(ctx)
