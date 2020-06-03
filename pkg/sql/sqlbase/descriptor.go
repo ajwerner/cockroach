@@ -16,6 +16,15 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
+// MakeInitialDescriptorMeta constructs the DescriptorMeta for a new Descriptor.
+func MakeInitialDescriptorMeta(id ID, name string) DescriptorMeta {
+	return DescriptorMeta{
+		ID:      id,
+		Name:    name,
+		Version: 1,
+	}
+}
+
 // DescriptorInterface provides table information for results from a name
 // lookup.
 //
@@ -75,7 +84,7 @@ func UnwrapDescriptor(desc *Descriptor) DescriptorInterface {
 		return schemaDesc
 	}
 	if dbDesc := desc.GetDatabase(); dbDesc != nil {
-		return dbDesc
+		return NewImmutableDatabaseDescriptor(desc)
 	}
 	panic(errors.Errorf("unknown descriptor type %+v", desc))
 }

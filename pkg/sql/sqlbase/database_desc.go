@@ -13,7 +13,6 @@ package sqlbase
 import (
 	"fmt"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -35,35 +34,60 @@ type ImmutableDatabaseDescriptor struct {
 	DatabaseDescriptor
 }
 
-// MakeImmutableDatabaseDescriptor constructs a DatabaseDescriptor from an AST node.
-func MakeImmutableDatabaseDescriptor(id ID, p *tree.CreateDatabase) ImmutableDatabaseDescriptor {
-	return makeImmutableDatabaseDesc(DescriptorMeta{
-		Name: string(p.Name),
-		ID:   id,
-	}, DatabaseDescriptor{
-		Privileges: NewDefaultPrivilegeDescriptor(),
-	})
+// MutableDatabaseDescriptor is a mutable reference to a DatabaseDescriptor.
+//
+// TODO(ajwerner): Today this isn't actually ever mutated but rather exists for
+// a future where we anticipate having a mutable copy of database descriptors.
+// There's a large amount of space to question this `Mutable|Immutable` version
+// of each descriptor type. Maybe it makes no sense but we're running with it
+// for the moment.
+type MutableDatabaseDescriptor struct {
+	ImmutableDatabaseDescriptor
+
+	ClusterVersion *ImmutableDatabaseDescriptor
 }
 
-func makeImmutableDatabaseDesc(
+// NewImmutableDatabaseDescriptor makes a new database descriptor.
+func NewImmutableDatabaseDescriptor(desc *Descriptor) *ImmutableDatabaseDescriptor {
+	// TODO(ajwerner): Upgrade the meta. This will mean copying from the underlying
+	// desc as necessary.
+	ret := newImmutableDatabaseDesc(desc.DescriptorMeta, *desc.GetDatabase())
+	return ret
+}
+
+// NewMutableDatabaseDescriptor creates a new MutableDatabaseDescriptor. The
+// version of the returned descriptor will be the successor of the descriptor
+// from which it was constructed.
+func NewMutableDatabaseDescriptor(
+	mutationOf *ImmutableDatabaseDescriptor,
+) *MutableDatabaseDescriptor {
+	mut := &MutableDatabaseDescriptor{
+		ImmutableDatabaseDescriptor: *mutationOf,
+		ClusterVersion:              mutationOf,
+	}
+	mut.meta.Version++
+	return mut
+}
+
+// NewInitialDatabaseDescriptor constructs a new DatabaseDescriptor for an
+// initial version from an id and name.
+func NewInitialDatabaseDescriptor(id ID, name string) *ImmutableDatabaseDescriptor {
+	return newImmutableDatabaseDesc(
+		MakeInitialDescriptorMeta(id, name),
+		DatabaseDescriptor{
+			Privileges: NewDefaultPrivilegeDescriptor(),
+		})
+}
+
+func newImmutableDatabaseDesc(
 	meta DescriptorMeta, desc DatabaseDescriptor,
-) ImmutableDatabaseDescriptor {
+) *ImmutableDatabaseDescriptor {
 	// TODO(ajwerner): At a certain point we shouldn't need to write to the
 	// deprecated fields and we can just clear them out. We'll always need to
 	// read from them to deal with backups.
 	//
 	// TODO(ajwerner): Rename the DescriptorMeta fields on the DatabaseDescriptor
 	// to Deprecated*.
-	if meta.ID == 0 && desc.ID == 0 {
-		panic(errors.Errorf("cannot construct a DatabaseDescriptor without an ID"))
-	} else if meta.ID == 0 {
-		meta.ID = desc.ID
-	} else if desc.ID == 0 {
-		desc.ID = meta.ID
-	} else if desc.ID != meta.ID {
-		panic(errors.Errorf("cannot construct a DatabaseDescriptor with mismatched IDs: %d in meta != %d in desc",
-			log.Safe(meta.ID), log.Safe(desc.ID)))
-	}
 	if meta.Name == "" && desc.Name == "" {
 		panic(errors.Errorf("cannot construct a DatabaseDescriptor without an ID"))
 	} else if meta.Name == "" {
@@ -75,29 +99,30 @@ func makeImmutableDatabaseDesc(
 			meta.Name, desc.Name))
 	}
 
+	if meta.ID == 0 && desc.ID == 0 {
+		// NB: The only database we allow to have a zero ID is the system database.
+		if meta.Name != SystemDatabaseName {
+			panic(errors.Errorf("cannot construct a DatabaseDescriptor without an ID"))
+		}
+	} else if meta.ID == 0 {
+		meta.ID = desc.ID
+	} else if desc.ID == 0 {
+		desc.ID = meta.ID
+	} else if desc.ID != meta.ID {
+		panic(errors.Errorf("cannot construct a DatabaseDescriptor with mismatched IDs: %d in meta != %d in desc",
+			log.Safe(meta.ID), log.Safe(desc.ID)))
+	}
+
 	// TODO(ajwerner): rinse and repeat for all of the fields in meta.
 	// Let's seriously hope we can get away with not ever putting those fields
 	// into the SchemaDescriptor and TypeDescriptor so we don't have to deal with
 	// the very long (possibly forever) backup migration.
-	return ImmutableDatabaseDescriptor{meta: meta, DatabaseDescriptor: desc}
-}
-
-// NewImmutableDatabaseDescriptor makes a new database descriptor.
-func NewImmutableDatabaseDescriptor(desc *Descriptor) *ImmutableDatabaseDescriptor {
-	// TODO(ajwerner): Upgrade the meta. This will mean copying from the underlying
-	// desc as necessary.
-	ret := makeImmutableDatabaseDesc(desc.DescriptorMeta, *desc.GetDatabase())
-	return &ret
+	return &ImmutableDatabaseDescriptor{meta: meta, DatabaseDescriptor: desc}
 }
 
 // TypeName returns the plain type of this descriptor.
 func (desc *DatabaseDescriptor) TypeName() string {
 	return "database"
-}
-
-// SetName implements the DescriptorProto interface.
-func (desc *DatabaseDescriptor) SetName(name string) {
-	desc.Name = name
 }
 
 // DatabaseDesc implements the ObjectDescriptor interface.
@@ -121,11 +146,28 @@ func (desc *DatabaseDescriptor) TypeDesc() *TypeDescriptor {
 }
 
 // NameResolutionResult implements the ObjectDescriptor interface.
-func (desc *DatabaseDescriptor) NameResolutionResult() {}
+func (desc *ImmutableDatabaseDescriptor) NameResolutionResult() {}
 
 // DescriptorProto wraps a DatabaseDescriptor in a Descriptor.
-func (desc *DatabaseDescriptor) DescriptorProto() *Descriptor {
-	return wrapDescriptor(desc)
+func (desc *ImmutableDatabaseDescriptor) DescriptorProto() *Descriptor {
+	return &Descriptor{
+		DescriptorMeta: desc.meta,
+		Union: &Descriptor_Database{
+			Database: &desc.DatabaseDescriptor,
+		},
+	}
+}
+
+// SetName sets the name on the descriptor.
+func (desc *MutableDatabaseDescriptor) SetName(name string) {
+	desc.Name = name
+	desc.meta.Name = name
+}
+
+// SetID sets the id on the descriptor.
+func (desc *MutableDatabaseDescriptor) SetID(id ID) {
+	desc.ID = id
+	desc.meta.ID = id
 }
 
 // Validate validates that the database descriptor is well formed.

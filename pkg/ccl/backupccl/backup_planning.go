@@ -350,7 +350,8 @@ func backupPlanHook(
 		var tables []sqlbase.TableDescriptorInterface
 		for _, desc := range targetDescs {
 			if dbDesc := desc.GetDatabase(); dbDesc != nil {
-				if err := p.CheckPrivilege(ctx, dbDesc, privilege.SELECT); err != nil {
+				db := sqlbase.NewImmutableDatabaseDescriptor(&desc)
+				if err := p.CheckPrivilege(ctx, db, privilege.SELECT); err != nil {
 					return err
 				}
 			}

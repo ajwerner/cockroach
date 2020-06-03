@@ -258,7 +258,7 @@ func GetDatabaseID(
 // found" condition to return an error, use mustGetDatabaseDescByID() instead.
 func GetDatabaseDescByID(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, id sqlbase.ID,
-) (*sqlbase.DatabaseDescriptor, error) {
+) (*sqlbase.ImmutableDatabaseDescriptor, error) {
 	desc, err := GetDescriptorByID(ctx, txn, codec, id)
 	if err != nil {
 		return nil, err
@@ -268,14 +268,14 @@ func GetDatabaseDescByID(
 		return nil, pgerror.Newf(pgcode.WrongObjectType,
 			"%q is not a database", desc.String())
 	}
-	return db, nil
+	return sqlbase.NewImmutableDatabaseDescriptor(desc), nil
 }
 
 // MustGetDatabaseDescByID looks up the database descriptor given its ID,
 // returning an error if the descriptor is not found.
 func MustGetDatabaseDescByID(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, id sqlbase.ID,
-) (*sqlbase.DatabaseDescriptor, error) {
+) (*sqlbase.ImmutableDatabaseDescriptor, error) {
 	desc, err := GetDatabaseDescByID(ctx, txn, codec, id)
 	if err != nil {
 		return nil, err
@@ -293,7 +293,7 @@ func MustGetDatabaseDescByID(
 // rather than making a round trip for each ID.
 func GetDatabaseDescriptorsFromIDs(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, ids []sqlbase.ID,
-) ([]*sqlbase.DatabaseDescriptor, error) {
+) ([]*sqlbase.ImmutableDatabaseDescriptor, error) {
 	b := txn.NewBatch()
 	for _, id := range ids {
 		key := sqlbase.MakeDescMetadataKey(codec, id)
@@ -302,7 +302,7 @@ func GetDatabaseDescriptorsFromIDs(
 	if err := txn.Run(ctx, b); err != nil {
 		return nil, err
 	}
-	results := make([]*sqlbase.DatabaseDescriptor, 0, len(ids))
+	results := make([]*sqlbase.ImmutableDatabaseDescriptor, 0, len(ids))
 	for i := range b.Results {
 		result := &b.Results[i]
 		if result.Err != nil {
@@ -326,7 +326,7 @@ func GetDatabaseDescriptorsFromIDs(
 				desc.String(),
 			)
 		}
-		results = append(results, db)
+		results = append(results, sqlbase.NewImmutableDatabaseDescriptor(desc))
 	}
 	return results, nil
 }
