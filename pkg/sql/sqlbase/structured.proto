@@ -1096,7 +1096,6 @@ message TypeDescriptor {
 
   // alias is the types.T that this descriptor is an alias for.
   optional sql.sem.types.T alias = 7;
-
 }
 
 // SchemaDescriptor represents a physical schema and is stored in a structured

@@ -1458,7 +1458,7 @@ CREATE TABLE pg_catalog.pg_enum (
 			// Generate a row for each member of the enum. We don't represent enums
 			// internally using floats for ordering like Postgres, so just pick a
 			// float entry for the rows.
-			typOID := tree.NewDOid(tree.DInt(types.StableTypeIDToOID(uint32(typDesc.ID))))
+			typOID := tree.NewDOid(tree.DInt(types.StableTypeIDToOID(uint32(typDesc.GetID()))))
 			for i, member := range typDesc.EnumMembers {
 				if err := addRow(
 					h.EnumEntryOid(typOID, member.PhysicalRepresentation),
@@ -2747,7 +2747,7 @@ CREATE TABLE pg_catalog.pg_type (
 
 				return forEachTypeDesc(ctx, p, dbContext, func(_ *sqlbase.ImmutableDatabaseDescriptor, _ string, typDesc *sqlbase.ImmutableTypeDescriptor) error {
 					typ, err := typDesc.MakeTypesT(
-						tree.NewUnqualifiedTypeName(tree.Name(typDesc.Name)),
+						tree.NewUnqualifiedTypeName(tree.Name(typDesc.GetName())),
 						p.makeTypeLookupFn(ctx),
 					)
 					if err != nil {
