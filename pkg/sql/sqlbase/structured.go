@@ -3673,6 +3673,8 @@ func (desc *Descriptor) GetID() ID {
 	case *Descriptor_Table:
 		return t.Table.ID
 	case *Descriptor_Database:
+		// TODO(ajwerner): Find all of the deserialization points so that this never
+		// happens.
 		return t.Database.ID
 	case *Descriptor_Type:
 		return t.Type.ID
@@ -3692,6 +3694,8 @@ func (desc *Descriptor) GetName() string {
 		return t.Database.Name
 	case *Descriptor_Type:
 		return t.Type.Name
+	case *Descriptor_Schema:
+		return t.Schema.Name
 	default:
 		return ""
 	}

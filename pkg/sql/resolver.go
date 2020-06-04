@@ -161,6 +161,7 @@ func (p *planner) ResolveType(
 	}
 	tn := tree.MakeTypeNameFromPrefix(prefix, tree.Name(name.Object()))
 	tdesc := desc.(*sqlbase.ImmutableTypeDescriptor)
+
 	return tdesc.MakeTypesT(&tn, p.makeTypeLookupFn(ctx))
 }
 
