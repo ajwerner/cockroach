@@ -63,9 +63,9 @@ func TestDatabaseDescriptor(t *testing.T) {
 	dbDesc := &sqlbase.Descriptor{
 		Union: &sqlbase.Descriptor_Database{
 			Database: &sqlbase.DatabaseDescriptor{
-				Name:       "sentinel",
-				ID:         sqlbase.ID(expectedCounter),
-				Privileges: &sqlbase.PrivilegeDescriptor{},
+				DeprecatedName: "sentinel",
+				DeprecatedID:   sqlbase.ID(expectedCounter),
+				Privileges:     &sqlbase.PrivilegeDescriptor{},
 			},
 		},
 	}

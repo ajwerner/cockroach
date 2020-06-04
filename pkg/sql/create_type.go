@@ -62,7 +62,7 @@ func resolveNewTypeName(
 	}
 
 	// Disallow type creation in the system database.
-	if db.ID == keys.SystemDatabaseID {
+	if db.GetID() == keys.SystemDatabaseID {
 		return nil, nil, errors.New("cannot create a type in the system database")
 	}
 
@@ -78,11 +78,11 @@ func getCreateTypeParams(
 	params runParams, name *tree.TypeName, db *sqlbase.ImmutableDatabaseDescriptor,
 ) (sqlbase.DescriptorKey, sqlbase.ID, error) {
 	// TODO (rohany): This should be named object key.
-	typeKey := sqlbase.MakePublicTableNameKey(params.ctx, params.ExecCfg().Settings, db.ID, name.Type())
+	typeKey := sqlbase.MakePublicTableNameKey(params.ctx, params.ExecCfg().Settings, db.GetID(), name.Type())
 	// As of now, we can only create types in the public schema.
 	schemaID := sqlbase.ID(keys.PublicSchemaID)
 	exists, collided, err := sqlbase.LookupObjectID(
-		params.ctx, params.p.txn, params.ExecCfg().Codec, db.ID, schemaID, name.Type())
+		params.ctx, params.p.txn, params.ExecCfg().Codec, db.GetID(), schemaID, name.Type())
 	if err == nil && exists {
 		// Try and see what kind of object we collided with.
 		desc, err := catalogkv.GetDescriptorByID(params.ctx, params.p.txn, params.ExecCfg().Codec, collided)
@@ -126,7 +126,7 @@ func (p *planner) createArrayType(
 			params.ctx,
 			params.p.txn,
 			params.ExecCfg().Codec,
-			db.ID,
+			db.GetID(),
 			schemaID,
 			arrayTypeName,
 		)
@@ -138,7 +138,7 @@ func (p *planner) createArrayType(
 			arrayTypeKey = sqlbase.MakePublicTableNameKey(
 				params.ctx,
 				params.ExecCfg().Settings,
-				db.ID,
+				db.GetID(),
 				arrayTypeName,
 			)
 			break
@@ -167,7 +167,7 @@ func (p *planner) createArrayType(
 	// TODO(ajwerner): This is getting fixed up in a later commit to deal with
 	// meta, just hold on.
 	arrayTypDesc := sqlbase.NewMutableCreatedTypeDescriptor(&sqlbase.TypeDescriptor{
-		ParentID:       db.ID,
+		ParentID:       db.GetID(),
 		ParentSchemaID: keys.PublicSchemaID,
 		Name:           arrayTypeName,
 		ID:             id,
@@ -241,7 +241,7 @@ func (p *planner) createEnum(params runParams, n *tree.CreateType) error {
 	//  there if id + oidext.CockroachPredefinedOIDMax overflows past the
 	//  maximum uint32 value.
 	typeDesc := sqlbase.NewMutableCreatedTypeDescriptor(&sqlbase.TypeDescriptor{
-		ParentID:       db.ID,
+		ParentID:       db.GetID(),
 		ParentSchemaID: keys.PublicSchemaID,
 		Name:           typeName.Type(),
 		ID:             id,

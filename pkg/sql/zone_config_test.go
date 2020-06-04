@@ -43,9 +43,9 @@ func forceNewConfig(t testing.TB, s *server.TestServer) *config.SystemConfig {
 	configDesc := &sqlbase.Descriptor{
 		Union: &sqlbase.Descriptor_Database{
 			Database: &sqlbase.DatabaseDescriptor{
-				Name:       "sentinel",
-				ID:         configID,
-				Privileges: &sqlbase.PrivilegeDescriptor{},
+				DeprecatedName: "sentinel",
+				DeprecatedID:   configID,
+				Privileges:     &sqlbase.PrivilegeDescriptor{},
 			},
 		},
 	}
