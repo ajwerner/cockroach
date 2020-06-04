@@ -83,7 +83,7 @@ type MutableTypeDescriptor struct {
 
 	// ClusterVersion represents the version of the type descriptor read
 	// from the store.
-	ClusterVersion ImmutableTypeDescriptor
+	ClusterVersion *ImmutableTypeDescriptor
 }
 
 // ImmutableTypeDescriptor is a custom type for wrapping TypeDescriptors
@@ -110,7 +110,7 @@ func NewMutableCreatedTypeDescriptor(desc *TypeDescriptor) *MutableTypeDescripto
 func NewMutableExistingTypeDescriptor(desc *TypeDescriptor) *MutableTypeDescriptor {
 	return &MutableTypeDescriptor{
 		ImmutableTypeDescriptor: makeImmutableTypeDescriptor(protoutil.Clone(desc).(*TypeDescriptor)),
-		ClusterVersion:          makeImmutableTypeDescriptor(desc),
+		ClusterVersion:          NewImmutableTypeDescriptor(desc),
 	}
 }
 
@@ -126,11 +126,12 @@ func makeImmutableTypeDescriptor(desc *TypeDescriptor) ImmutableTypeDescriptor {
 }
 
 // DescriptorProto returns a Descriptor for serialization.
-func (desc *TypeDescriptor) DescriptorProto() *Descriptor {
-
-	// TODO(ajwerner): Copy over the metadata fields.
-	// TODO(ajwerner): This ultimately should be cleaner.
-	return wrapDescriptor(desc)
+func (desc *ImmutableTypeDescriptor) DescriptorProto() *Descriptor {
+	return &Descriptor{
+		Union: &Descriptor_Type{
+			Type: &desc.TypeDescriptor,
+		},
+	}
 }
 
 // TODO(ajwerner): Change the receiver of these methods to the
