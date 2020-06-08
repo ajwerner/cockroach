@@ -111,7 +111,7 @@ func GetDescriptorByID(
 	case typ != nil:
 		return sqlbase.NewImmutableTypeDescriptor(typ), nil
 	case schema != nil:
-		return schema, nil
+		return sqlbase.NewImmutableSchemaDescriptor(desc), nil
 	default:
 		return nil, nil
 	}
