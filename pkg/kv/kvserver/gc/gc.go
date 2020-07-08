@@ -278,10 +278,12 @@ func processReplicatedKeyRange(
 	var (
 		batchGCKeys           []roachpb.GCRequest_GCKey
 		batchGCKeysBytes      int64
+		keyBytesForThisKey    int64
+		versionsForThisKey    int
 		haveGarbageForThisKey bool
 		gcTimestampForThisKey hlc.Timestamp
-		sentBatchForThisKey   bool
 	)
+	const versionsForClearRange = 64
 	it := makeGCIterator(desc, snap)
 	defer it.close()
 	for ; ; it.step() {
@@ -302,30 +304,36 @@ func processReplicatedKeyRange(
 		isNewest := s.curIsNewest()
 		if isGarbage(threshold, s.cur, s.next, isNewest) {
 			keyBytes := int64(s.cur.Key.EncodedSize())
-			batchGCKeysBytes += keyBytes
+			versionsForThisKey++
+			keyBytesForThisKey += keyBytes
 			haveGarbageForThisKey = true
 			gcTimestampForThisKey = s.cur.Key.Timestamp
 			info.AffectedVersionsKeyBytes += keyBytes
 			info.AffectedVersionsValBytes += int64(len(s.cur.Value))
 		}
-		if affected := isNewest && (sentBatchForThisKey || haveGarbageForThisKey); affected {
+		if affected := isNewest && haveGarbageForThisKey; affected {
 			info.NumKeysAffected++
 		}
-		shouldSendBatch := batchGCKeysBytes >= KeyVersionChunkBytes
-		if shouldSendBatch || isNewest && haveGarbageForThisKey {
+		var shouldSendBatch bool
+		if isNewest && haveGarbageForThisKey {
+			info.NumKeysAffected++
 			alloc, s.cur.Key.Key = alloc.Copy(s.cur.Key.Key, 0)
+			useClearRange := versionsForThisKey > versionsForClearRange
 			batchGCKeys = append(batchGCKeys, roachpb.GCRequest_GCKey{
-				Key:       s.cur.Key.Key,
-				Timestamp: gcTimestampForThisKey,
+				Key:           s.cur.Key.Key,
+				Timestamp:     gcTimestampForThisKey,
+				UseClearRange: useClearRange,
 			})
+			if useClearRange {
+				batchGCKeysBytes += 2 * int64(len(s.cur.Key.Key))
+			} else {
+				batchGCKeysBytes += keyBytesForThisKey
+			}
+			shouldSendBatch = batchGCKeysBytes >= KeyVersionChunkBytes
+			versionsForThisKey = 0
+			keyBytesForThisKey = 0
 			haveGarbageForThisKey = false
 			gcTimestampForThisKey = hlc.Timestamp{}
-
-			// Mark that we sent a batch for this key so we know that we had garbage
-			// even if it turns out that there's no more garbage for this key.
-			// We want to count a key as affected once even if we paginate the
-			// deletion of its versions.
-			sentBatchForThisKey = shouldSendBatch && !isNewest
 		}
 		if shouldSendBatch {
 			if err := gcer.GC(ctx, batchGCKeys); err != nil {

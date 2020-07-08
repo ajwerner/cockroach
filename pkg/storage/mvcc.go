@@ -3183,7 +3183,7 @@ func MVCCGarbageCollect(
 		inlinedValue := meta.IsInline()
 		implicitMeta := iter.UnsafeKey().IsValue()
 		// First, check whether all values of the key are being deleted.
-		//
+		//Garbage
 		// Note that we naively can't terminate GC'ing keys loop early if we
 		// enter this branch, as it will update the stats under the provision
 		// that the (implicit or explicit) meta key (and thus all versions) are
@@ -3222,19 +3222,18 @@ func MVCCGarbageCollect(
 			iter.Next()
 		}
 
-		// TODO(tschottdorf): Can't we just Seek() to a key with timestamp
-		// gcKey.Timestamp to avoid potentially cycling through a large prefix
-		// of versions we can't GC? The batching mechanism in the GC queue sends
-		// requests susceptible to that happening when there are lots of versions.
-		// A minor complication there will be that we need to know the first non-
-		// deletable value's timestamp (for prevNanos).
-
 		// Now, iterate through all values, GC'ing ones which have expired.
 		// For GCBytesAge, this requires keeping track of the previous key's
 		// timestamp (prevNanos). See ComputeStatsGo for a more easily digested
 		// and better commented version of this logic.
 
 		prevNanos := timestamp.WallTime
+		iter.SeekGE(MVCCKey{Key: gcKey.Key, Timestamp: gcKey.Timestamp.Next()})
+		if ok, err := iter.Valid(); err != nil {
+			return err
+		} else if ok && iter.UnsafeKey().Key.Equal(gcKey.Key) {
+			prevNanos = iter.UnsafeKey().Timestamp.WallTime
+		}
 		for ; ; iter.Next() {
 			if ok, err := iter.Valid(); err != nil {
 				return err
@@ -3248,28 +3247,36 @@ func MVCCGarbageCollect(
 			if !unsafeIterKey.IsValue() {
 				break
 			}
-			if unsafeIterKey.Timestamp.LessEq(gcKey.Timestamp) {
-				if ms != nil {
-					// FIXME: use prevNanos instead of unsafeIterKey.Timestamp, except
-					// when it's a deletion.
-					valSize := int64(len(iter.UnsafeValue()))
+			if ms != nil {
+				// FIXME: use prevNanos instead of unsafeIterKey.Timestamp, except
+				// when it's a deletion.
+				valSize := int64(len(iter.UnsafeValue()))
 
-					// A non-deletion becomes non-live when its newer neighbor shows up.
-					// A deletion tombstone becomes non-live right when it is created.
-					fromNS := prevNanos
-					if valSize == 0 {
-						fromNS = unsafeIterKey.Timestamp.WallTime
-					}
-
-					ms.Add(updateStatsOnGC(gcKey.Key, MVCCVersionTimestampSize,
-						valSize, nil, fromNS))
+				// A non-deletion becomes non-live when its newer neighbor shows up.
+				// A deletion tombstone becomes non-live right when it is created.
+				fromNS := prevNanos
+				if valSize == 0 {
+					fromNS = unsafeIterKey.Timestamp.WallTime
 				}
-				count++
+
+				ms.Add(updateStatsOnGC(gcKey.Key, MVCCVersionTimestampSize,
+					valSize, nil, fromNS))
+			}
+			count++
+			if true {
 				if err := rw.Clear(unsafeIterKey); err != nil {
 					return err
 				}
 			}
-			prevNanos = unsafeIterKey.Timestamp.WallTime
+			prevNanos = iter.UnsafeKey().Timestamp.WallTime
+		}
+		if false {
+			if err := rw.ClearRange(
+				MVCCKey{Key: gcKey.Key, Timestamp: gcKey.Timestamp},
+				MVCCKey{Key: gcKey.Key, Timestamp: hlc.Timestamp{}.Next()},
+			); err != nil {
+				return err
+			}
 		}
 	}
 
