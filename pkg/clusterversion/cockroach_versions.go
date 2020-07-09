@@ -72,6 +72,7 @@ const (
 	VersionClientRangeInfosOnBatchResponse
 	VersionNodeMembershipStatus
 	VersionRangeStatsRespHasDesc
+	VersionClearRangeForGC
 
 	// Add new versions here (step one of two).
 )
@@ -541,9 +542,16 @@ var versionsSingleton = keyedVersions([]keyedVersion{
 		Version: roachpb.Version{Major: 20, Minor: 1, Unstable: 11},
 	},
 	{
+
 		// VersionRangeStatsRespHasDesc adds the RangeStatsResponse.RangeInfo field.
 		Key:     VersionRangeStatsRespHasDesc,
 		Version: roachpb.Version{Major: 20, Minor: 1, Unstable: 12},
+	},
+	{
+		// VersionClearRangeForGC gates the usage of UseClearRange in the
+		// GCRequest_GCKey proto. See comment on proto definition for more details.
+		Key:     VersionClearRangeForGC,
+		Version: roachpb.Version{Major: 20, Minor: 1, Unstable: 13},
 	},
 
 	// Add new versions here (step two of two).
