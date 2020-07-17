@@ -1460,6 +1460,8 @@ func TestParse(t *testing.T) {
 		{`BACKUP DATABASE foo TO ($1, $2)`},
 		{`BACKUP DATABASE foo TO ($1, $2) INCREMENTAL FROM 'baz'`},
 
+		{`BACKUP TENANT 36 TO 'bar'`},
+
 		{`RESTORE TABLE foo FROM 'bar'`},
 		{`EXPLAIN RESTORE TABLE foo FROM 'bar'`},
 		{`RESTORE TABLE foo FROM $1`},
@@ -1477,6 +1479,8 @@ func TestParse(t *testing.T) {
 		{`RESTORE DATABASE foo FROM $1, ($2, $3)`},
 		{`RESTORE DATABASE foo FROM ($1, $2), ($3, $4)`},
 		{`RESTORE DATABASE foo FROM ($1, $2), ($3, $4) AS OF SYSTEM TIME '1'`},
+
+		{`RESTORE TENANT 36 FROM ($1, $2) AS OF SYSTEM TIME '1'`},
 
 		{`BACKUP TABLE foo TO 'bar' WITH revision_history, detached`},
 		{`RESTORE TABLE foo FROM 'bar' WITH key1, key2 = 'value'`},
@@ -2905,6 +2909,49 @@ DETAIL: source SQL:
 EXPLAIN EXECUTE a
         ^
 HINT: try \h EXPLAIN`,
+		},
+		{
+			`EXPLAIN ANALYZE (PLAN) SELECT 1`,
+			`at or near "EOF": syntax error: EXPLAIN ANALYZE cannot be used with PLAN
+DETAIL: source SQL:
+EXPLAIN ANALYZE (PLAN) SELECT 1
+                               ^`,
+		},
+		{
+			`EXPLAIN (ANALYZE, PLAN) SELECT 1`,
+			`at or near "analyze": syntax error
+DETAIL: source SQL:
+EXPLAIN (ANALYZE, PLAN) SELECT 1
+         ^
+HINT: try \h <SELECTCLAUSE>`,
+		},
+		{
+			`EXPLAIN ANALYZE (OPT) SELECT 1`,
+			`at or near "EOF": syntax error: EXPLAIN ANALYZE cannot be used with OPT
+DETAIL: source SQL:
+EXPLAIN ANALYZE (OPT) SELECT 1
+                              ^`,
+		},
+		{
+			`EXPLAIN ANALYZE (VEC) SELECT 1`,
+			`at or near "EOF": syntax error: EXPLAIN ANALYZE cannot be used with VEC
+DETAIL: source SQL:
+EXPLAIN ANALYZE (VEC) SELECT 1
+                              ^`,
+		},
+		{
+			`EXPLAIN (DEBUG) SELECT 1`,
+			`at or near "EOF": syntax error: DEBUG flag can only be used with EXPLAIN ANALYZE
+DETAIL: source SQL:
+EXPLAIN (DEBUG) SELECT 1
+                        ^`,
+		},
+		{
+			`EXPLAIN (PLAN, DEBUG) SELECT 1`,
+			`at or near "EOF": syntax error: DEBUG flag can only be used with EXPLAIN ANALYZE
+DETAIL: source SQL:
+EXPLAIN (PLAN, DEBUG) SELECT 1
+                              ^`,
 		},
 		{
 			`SELECT $0`,

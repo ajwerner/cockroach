@@ -449,6 +449,10 @@ func (fj *FullJoinExpr) initUnexportedFields(mem *Memo) {
 	initJoinMultiplicity(fj)
 }
 
+func (sj *SemiJoinExpr) initUnexportedFields(mem *Memo) {
+	initJoinMultiplicity(sj)
+}
+
 func (lj *LookupJoinExpr) initUnexportedFields(mem *Memo) {
 	// lookupProps are initialized as necessary by the logical props builder.
 }
@@ -473,6 +477,7 @@ type joinWithMultiplicity interface {
 var _ joinWithMultiplicity = &InnerJoinExpr{}
 var _ joinWithMultiplicity = &LeftJoinExpr{}
 var _ joinWithMultiplicity = &FullJoinExpr{}
+var _ joinWithMultiplicity = &SemiJoinExpr{}
 
 func (ij *InnerJoinExpr) setMultiplicity(multiplicity props.JoinMultiplicity) {
 	ij.multiplicity = multiplicity
@@ -496,6 +501,14 @@ func (fj *FullJoinExpr) setMultiplicity(multiplicity props.JoinMultiplicity) {
 
 func (fj *FullJoinExpr) getMultiplicity() props.JoinMultiplicity {
 	return fj.multiplicity
+}
+
+func (sj *SemiJoinExpr) setMultiplicity(multiplicity props.JoinMultiplicity) {
+	sj.multiplicity = multiplicity
+}
+
+func (sj *SemiJoinExpr) getMultiplicity() props.JoinMultiplicity {
+	return sj.multiplicity
 }
 
 // WindowFrame denotes the definition of a window frame for an individual
@@ -576,6 +589,15 @@ func (s *ScanPrivate) UsesPartialIndex(md *opt.Metadata) bool {
 	return IsPartialIndex(tabMeta, s.Index)
 }
 
+// PartialIndexPredicate returns the FiltersExpr representing the predicate of
+// the partial index that the scan uses. If the scan does not use a partial
+// index, this function panics. UsesPartialIndex should be called first to
+// determine if the scan operates over a partial index.
+func (s *ScanPrivate) PartialIndexPredicate(md *opt.Metadata) FiltersExpr {
+	tabMeta := md.TableMeta(s.Table)
+	return PartialIndexPredicate(tabMeta, s.Index)
+}
+
 // NeedResults returns true if the mutation operator can return the rows that
 // were mutated.
 func (m *MutationPrivate) NeedResults() bool {
@@ -618,7 +640,7 @@ func (m *MutationPrivate) MapToInputCols(tabCols opt.ColSet) opt.ColSet {
 // AddEquivTableCols adds an FD to the given set that declares an equivalence
 // between each table column and its corresponding input column.
 func (m *MutationPrivate) AddEquivTableCols(md *opt.Metadata, fdset *props.FuncDepSet) {
-	for i, n := 0, md.Table(m.Table).DeletableColumnCount(); i < n; i++ {
+	for i, n := 0, md.Table(m.Table).ColumnCount(); i < n; i++ {
 		t := m.Table.ColumnID(i)
 		id := m.MapToInputID(t)
 		if id != 0 {

@@ -3164,7 +3164,7 @@ func MVCCGarbageCollect(
 
 	var count int64
 	defer func(begin time.Time) {
-		log.Eventf(ctx, "done with GC evaluation for %d keys at %.2f keys/sec. Deleted %d entries",
+		log.VEventf(ctx, 2, "done with GC evaluation for %d keys at %.2f keys/sec. Deleted %d entries",
 			len(keys), float64(len(keys))*1e9/float64(timeutil.Since(begin)), count)
 	}(timeutil.Now())
 
@@ -3188,6 +3188,7 @@ func MVCCGarbageCollect(
 		UpperBound: keys[len(keys)-1].Key.Next(),
 	})
 	defer iter.Close()
+	supportsPrev := iter.SupportsPrev()
 
 	// Iterate through specified GC keys.
 	meta := &enginepb.MVCCMetadata{}
@@ -3244,29 +3245,42 @@ func MVCCGarbageCollect(
 
 		// For GCBytesAge, this requires keeping track of the previous key's
 		// timestamp (prevNanos). See ComputeStatsGo for a more easily digested
-		// and better commented version of this logic.
+		// and better commented version of this logic. The below block will set
+		// prevNanos to the appropriate value and position the iterator at the
+		// first garbage version.
 		prevNanos := timestamp.WallTime
 		{
-			// If there are a large number of versions which are not garbage,
-			// iterating through all of them is very inefficient. However, if there
-			// are few, SeekLT is inefficient. Try to step the iterator a few times
-			// to find the predecessor of gcKey before resorting to seeking.
-			//
-			// In a synthetic benchmark where there is one version of garbage and one
-			// not, this optimization showed a 50% improvement. More importantly,
-			// this optimization mitigated the overhead of the Seek approach when
-			// almost all of the versions are garbage.
+
 			var foundPrevNanos bool
 			{
-				const nextsBeforeSeek = 4
-				for i := 0; i < nextsBeforeSeek; i++ {
+				// If reverse iteration is supported (supportsPrev), we'll step the
+				// iterator a few time before attempting to seek.
+				var foundNextKey bool
+
+				// If there are a large number of versions which are not garbage,
+				// iterating through all of them is very inefficient. However, if there
+				// are few, SeekLT is inefficient. MVCCGarbageCollect will try to step
+				// the iterator a few times to find the predecessor of gcKey before
+				// resorting to seeking.
+				//
+				// In a synthetic benchmark where there is one version of garbage and
+				// one not, this optimization showed a 50% improvement. More
+				// importantly, this optimization mitigated the overhead of the Seek
+				// approach when almost all of the versions are garbage.
+				const nextsBeforeSeekLT = 4
+				for i := 0; !supportsPrev || i < nextsBeforeSeekLT; i++ {
+					if i > 0 {
+						iter.Next()
+					}
 					if ok, err := iter.Valid(); err != nil {
 						return err
 					} else if !ok {
+						foundNextKey = true
 						break
 					}
 					unsafeIterKey := iter.UnsafeKey()
 					if !unsafeIterKey.Key.Equal(encKey.Key) {
+						foundNextKey = true
 						break
 					}
 					if unsafeIterKey.Timestamp.LessEq(gcKey.Timestamp) {
@@ -3274,7 +3288,11 @@ func MVCCGarbageCollect(
 						break
 					}
 					prevNanos = unsafeIterKey.Timestamp.WallTime
-					iter.Next()
+				}
+
+				// We have nothing to GC for this key if we found the next key.
+				if foundNextKey {
+					continue
 				}
 			}
 
@@ -3282,6 +3300,10 @@ func MVCCGarbageCollect(
 			// its predecessor. Seek to the predecessor to find the right value for
 			// prevNanos and position the iterator on the gcKey.
 			if !foundPrevNanos {
+				if !supportsPrev {
+					log.Fatalf(ctx, "failed to find first garbage key without"+
+						"support for reverse iteration")
+				}
 				gcKeyMVCC := MVCCKey{Key: gcKey.Key, Timestamp: gcKey.Timestamp}
 				iter.SeekLT(gcKeyMVCC)
 				if ok, err := iter.Valid(); err != nil {
@@ -3328,10 +3350,19 @@ func MVCCGarbageCollect(
 					valSize, nil, fromNS))
 			}
 			count++
-			if err := rw.Clear(unsafeIterKey); err != nil {
-				return err
+			if !gcKey.UseClearRange {
+				if err := rw.Clear(unsafeIterKey); err != nil {
+					return err
+				}
 			}
 			prevNanos = unsafeIterKey.Timestamp.WallTime
+		}
+		if gcKey.UseClearRange {
+			start := MVCCKey{Key: gcKey.Key, Timestamp: gcKey.Timestamp}
+			end := MVCCKey{Key: gcKey.Key, Timestamp: hlc.Timestamp{WallTime: 1}}
+			if err := rw.ClearRange(start, end); err != nil {
+				return err
+			}
 		}
 	}
 

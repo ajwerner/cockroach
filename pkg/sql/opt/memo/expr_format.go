@@ -499,7 +499,6 @@ func (f *ExprFmtCtx) formatRelational(e RelExpr, tp treeprinter.Node) {
 			f.formatMutationCols(e, tp, "insert-mapping:", t.InsertCols, t.Table)
 			f.formatColList(e, tp, "check columns:", t.CheckCols)
 			f.formatColList(e, tp, "partial index put columns:", t.PartialIndexPutCols)
-			f.formatColList(e, tp, "partial index del columns:", t.PartialIndexDelCols)
 			f.formatMutationCommon(tp, &t.MutationPrivate)
 		}
 
@@ -511,6 +510,8 @@ func (f *ExprFmtCtx) formatRelational(e RelExpr, tp treeprinter.Node) {
 			f.formatColList(e, tp, "fetch columns:", t.FetchCols)
 			f.formatMutationCols(e, tp, "update-mapping:", t.UpdateCols, t.Table)
 			f.formatColList(e, tp, "check columns:", t.CheckCols)
+			f.formatColList(e, tp, "partial index put columns:", t.PartialIndexPutCols)
+			f.formatColList(e, tp, "partial index del columns:", t.PartialIndexDelCols)
 			f.formatMutationCommon(tp, &t.MutationPrivate)
 		}
 
@@ -538,6 +539,7 @@ func (f *ExprFmtCtx) formatRelational(e RelExpr, tp treeprinter.Node) {
 				tp.Child("columns: <none>")
 			}
 			f.formatColList(e, tp, "fetch columns:", t.FetchCols)
+			f.formatColList(e, tp, "partial index del columns:", t.PartialIndexDelCols)
 			f.formatMutationCommon(tp, &t.MutationPrivate)
 		}
 
@@ -646,7 +648,7 @@ func (f *ExprFmtCtx) formatRelational(e RelExpr, tp treeprinter.Node) {
 
 		if join, ok := e.(joinWithMultiplicity); ok {
 			mult := join.getMultiplicity()
-			if s := mult.String(); s != "" {
+			if s := mult.Format(e.Op()); s != "" {
 				tp.Childf("multiplicity: %s", s)
 			}
 		}

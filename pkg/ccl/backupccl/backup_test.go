@@ -32,6 +32,7 @@ import (
 
 	"github.com/cockroachdb/cockroach-go/crdb"
 	"github.com/cockroachdb/cockroach/pkg/base"
+	_ "github.com/cockroachdb/cockroach/pkg/ccl/kvccl"
 	_ "github.com/cockroachdb/cockroach/pkg/ccl/partitionccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/config"
@@ -4100,19 +4101,17 @@ func TestProtectedTimestampsDuringBackup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	allowResponse := make(chan struct{})
+	allowRequest := make(chan struct{})
 	dir, dirCleanupFn := testutils.TempDir(t)
 	defer dirCleanupFn()
 	params := base.TestClusterArgs{}
 	params.ServerArgs.ExternalIODir = dir
 	params.ServerArgs.Knobs.Store = &kvserver.StoreTestingKnobs{
-		TestingResponseFilter: func(
-			ctx context.Context, ba roachpb.BatchRequest, br *roachpb.BatchResponse,
-		) *roachpb.Error {
-			for _, ru := range br.Responses {
+		TestingRequestFilter: func(ctx context.Context, ba roachpb.BatchRequest) *roachpb.Error {
+			for _, ru := range ba.Requests {
 				switch ru.GetInner().(type) {
-				case *roachpb.ExportResponse, *roachpb.ImportResponse:
-					<-allowResponse
+				case *roachpb.ExportRequest:
+					<-allowRequest
 				}
 			}
 			return nil
@@ -4127,9 +4126,9 @@ func TestProtectedTimestampsDuringBackup(t *testing.T) {
 	conn := tc.ServerConn(0)
 	runner := sqlutils.MakeSQLRunner(conn)
 	runner.Exec(t, "CREATE TABLE foo (k INT PRIMARY KEY, v BYTES)")
-	close(allowResponse)
+	close(allowRequest)
 	runner.Exec(t, `BACKUP TABLE FOO TO 'nodelocal://0/foo'`) // create a base backup.
-	allowResponse = make(chan struct{})
+	allowRequest = make(chan struct{})
 	runner.Exec(t, "SET CLUSTER SETTING kv.protectedts.poll_interval = '100ms';")
 	runner.Exec(t, "ALTER TABLE foo CONFIGURE ZONE USING gc.ttlseconds = 1;")
 	rRand, _ := randutil.NewPseudoRand()
@@ -4141,16 +4140,13 @@ func TestProtectedTimestampsDuringBackup(t *testing.T) {
 	writeGarbage(3, 10)
 	rowCount := runner.QueryStr(t, "SELECT * FROM foo")
 
-	go func() {
-		// N.B. We use the conn rather than the runner here since the test may
-		// finish before the job finishes. The test will finish as soon as the
-		// timestamp is no longer protected. If the test starts tearing down the
-		// cluster before the backup job is done, the test may still fail when the
-		// backup fails. This test does not particularly care if the BACKUP
-		// completes with a success or failure, as long as the timestamp is released
-		// shortly after the BACKUP is unblocked.
-		_, _ = conn.Exec(`BACKUP TABLE FOO TO 'nodelocal://0/foo-inc' INCREMENTAL FROM 'nodelocal://0/foo'`) // ignore error.
-	}()
+	g, _ := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		// If BACKUP does not protect the timestamp, the ExportRequest will
+		// throw an error and fail the backup.
+		_, err := conn.Exec(`BACKUP TABLE FOO TO 'nodelocal://0/foo-inc' INCREMENTAL FROM 'nodelocal://0/foo'`)
+		return err
+	})
 
 	var jobID string
 	testutils.SucceedsSoon(t, func() error {
@@ -4186,7 +4182,7 @@ func TestProtectedTimestampsDuringBackup(t *testing.T) {
 	gcTable(true /* skipShouldQueue */)
 
 	// Unblock the blocked backup request.
-	close(allowResponse)
+	close(allowRequest)
 
 	runner.CheckQueryResultsRetry(t, "SELECT * FROM foo", rowCount)
 
@@ -4204,6 +4200,7 @@ func TestProtectedTimestampsDuringBackup(t *testing.T) {
 		}
 		return nil
 	})
+	require.NoError(t, g.Wait())
 }
 
 func getFirstStoreReplica(
@@ -4221,4 +4218,118 @@ func getFirstStoreReplica(
 		return nil
 	})
 	return store, repl
+}
+
+// Ensure that backing up and restoring tenants succeeds.
+func TestBackupRestoreTenant(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	const numAccounts = 1
+	ctx, tc, systemDB, dir, cleanupFn := BackupRestoreTestSetup(t, singleNode, numAccounts, InitNone)
+	defer cleanupFn()
+	srv := tc.Server(0)
+
+	// Setup a few tenants, each with a different table.
+	conn10 := serverutils.StartTenant(t, srv, base.TestTenantArgs{TenantID: roachpb.MakeTenantID(10), TenantInfo: []byte("ten")})
+	defer conn10.Close()
+	tenant10 := sqlutils.MakeSQLRunner(conn10)
+	tenant10.Exec(t, `CREATE DATABASE foo; CREATE TABLE foo.bar(i int primary key); INSERT INTO foo.bar VALUES (110), (210)`)
+
+	conn11 := serverutils.StartTenant(t, srv, base.TestTenantArgs{TenantID: roachpb.MakeTenantID(11)})
+	defer conn11.Close()
+	tenant11 := sqlutils.MakeSQLRunner(conn11)
+	tenant11.Exec(t, `CREATE DATABASE foo; CREATE TABLE foo.baz(i int primary key); INSERT INTO foo.baz VALUES (111), (211)`)
+
+	conn20 := serverutils.StartTenant(t, srv, base.TestTenantArgs{TenantID: roachpb.MakeTenantID(20)})
+	defer conn20.Close()
+	tenant20 := sqlutils.MakeSQLRunner(conn20)
+	tenant20.Exec(t, `CREATE DATABASE foo; CREATE TABLE foo.qux(i int primary key); INSERT INTO foo.qux VALUES (120), (220)`)
+
+	var ts1, ts2 string
+	systemDB.QueryRow(t, `SELECT cluster_logical_timestamp()`).Scan(&ts1)
+	tenant10.Exec(t, `UPDATE foo.bar SET i = i + 10000`)
+	tenant10.Exec(t, `CREATE TABLE foo.bar2(i int primary key); INSERT INTO foo.bar2 VALUES (1010), (2010)`)
+	systemDB.QueryRow(t, `SELECT cluster_logical_timestamp()`).Scan(&ts2)
+
+	// BACKUP tenant 10 at ts1, before they created bar2.
+	systemDB.Exec(t, `BACKUP TENANT 10 TO 'nodelocal://1/t10' AS OF SYSTEM TIME `+ts1)
+
+	// Incrementtally backup tenant 10 again, capturing up to ts2.
+	systemDB.Exec(t, `BACKUP TENANT 10 TO 'nodelocal://1/t10' AS OF SYSTEM TIME `+ts2)
+
+	systemDB.Exec(t, `BACKUP TENANT 11 TO 'nodelocal://1/t11'`)
+	systemDB.Exec(t, `BACKUP TENANT 20 TO 'nodelocal://1/t20'`)
+
+	// TODO(dt): test destroying a tenant and RESTORE'ing over a destroyed tenant
+	// once tenant destruction actually clears their key-space. See #48775.
+
+	t.Run("non-existent", func(t *testing.T) {
+		systemDB.ExpectErr(t, "tenant 1 does not exist", `BACKUP TENANT 1 TO 'nodelocal://1/t1'`)
+		systemDB.ExpectErr(t, "tenant 21 does not exist", `BACKUP TENANT 21 TO 'nodelocal://1/t20'`)
+		systemDB.ExpectErr(t, "tenant 21 not in backup", `RESTORE TENANT 21 FROM 'nodelocal://1/t20'`)
+		systemDB.ExpectErr(t, "file does not exist", `RESTORE TENANT 21 FROM 'nodelocal://1/t21'`)
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		systemDB.ExpectErr(t, "invalid tenant ID", `BACKUP TENANT 0 TO 'nodelocal://1/z'`)
+		systemDB.ExpectErr(t, "tenant 1 does not exist", `BACKUP TENANT 1 TO 'nodelocal://1/z'`)
+		systemDB.ExpectErr(t, "syntax error", `BACKUP TENANT system TO 'nodelocal://1/z'`)
+	})
+
+	t.Run("restore-tenant10-to-latest", func(t *testing.T) {
+		restoreTC := testcluster.StartTestCluster(
+			t, singleNode, base.TestClusterArgs{ServerArgs: base.TestServerArgs{ExternalIODir: dir}},
+		)
+		defer restoreTC.Stopper().Stop(ctx)
+		restoreDB := sqlutils.MakeSQLRunner(restoreTC.Conns[0])
+
+		restoreDB.CheckQueryResults(t, `select * from system.tenants`, [][]string{})
+		restoreDB.Exec(t, `RESTORE TENANT 10 FROM 'nodelocal://1/t10'`)
+		restoreDB.CheckQueryResults(t, `select * from system.tenants`, [][]string{{"10", "true", "ten"}})
+
+		restoreConn10 := serverutils.StartTenant(
+			t, restoreTC.Server(0), base.TestTenantArgs{TenantID: roachpb.MakeTenantID(10), Existing: true},
+		)
+		defer restoreConn10.Close()
+		restoreTenant10 := sqlutils.MakeSQLRunner(restoreConn10)
+
+		restoreTenant10.CheckQueryResults(t, `select * from foo.bar`, tenant10.QueryStr(t, `select * from foo.bar`))
+		restoreTenant10.CheckQueryResults(t, `select * from foo.bar2`, tenant10.QueryStr(t, `select * from foo.bar2`))
+	})
+
+	t.Run("restore-tenant10-to-ts1", func(t *testing.T) {
+		restoreTC := testcluster.StartTestCluster(
+			t, singleNode, base.TestClusterArgs{ServerArgs: base.TestServerArgs{ExternalIODir: dir}},
+		)
+		defer restoreTC.Stopper().Stop(ctx)
+		restoreDB := sqlutils.MakeSQLRunner(restoreTC.Conns[0])
+
+		restoreDB.Exec(t, `RESTORE TENANT 10 FROM 'nodelocal://1/t10' AS OF SYSTEM TIME `+ts1)
+
+		restoreConn10 := serverutils.StartTenant(
+			t, restoreTC.Server(0), base.TestTenantArgs{TenantID: roachpb.MakeTenantID(10), Existing: true},
+		)
+		defer restoreConn10.Close()
+		restoreTenant10 := sqlutils.MakeSQLRunner(restoreConn10)
+
+		restoreTenant10.CheckQueryResults(t, `select * from foo.bar`, tenant10.QueryStr(t, `select * from foo.bar AS OF SYSTEM TIME `+ts1))
+	})
+
+	t.Run("restore-tenant20-to-latest", func(t *testing.T) {
+		restoreTC := testcluster.StartTestCluster(
+			t, singleNode, base.TestClusterArgs{ServerArgs: base.TestServerArgs{ExternalIODir: dir}},
+		)
+		defer restoreTC.Stopper().Stop(ctx)
+		restoreDB := sqlutils.MakeSQLRunner(restoreTC.Conns[0])
+
+		restoreDB.Exec(t, `RESTORE TENANT 20 FROM 'nodelocal://1/t20'`)
+
+		restoreConn20 := serverutils.StartTenant(
+			t, restoreTC.Server(0), base.TestTenantArgs{TenantID: roachpb.MakeTenantID(20), Existing: true},
+		)
+		defer restoreConn20.Close()
+		restoreTenant20 := sqlutils.MakeSQLRunner(restoreConn20)
+
+		restoreTenant20.CheckQueryResults(t, `select * from foo.qux`, tenant20.QueryStr(t, `select * from foo.qux`))
+	})
 }

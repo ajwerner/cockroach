@@ -304,22 +304,22 @@ func getDescriptorsFromTargetList(
 // reverse of the Resolve() functions.
 func (p *planner) getQualifiedTableName(
 	ctx context.Context, desc *sqlbase.TableDescriptor,
-) (string, error) {
+) (*tree.TableName, error) {
 	dbDesc, err := sqlbase.GetDatabaseDescFromID(ctx, p.txn, p.ExecCfg().Codec, desc.ParentID)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	schemaID := desc.GetParentSchemaID()
 	schemaName, err := resolver.ResolveSchemaNameByID(ctx, p.txn, p.ExecCfg().Codec, desc.ParentID, schemaID)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	tbName := tree.MakeTableNameWithSchema(
 		tree.Name(dbDesc.GetName()),
 		tree.Name(schemaName),
 		tree.Name(desc.Name),
 	)
-	return tbName.String(), nil
+	return &tbName, nil
 }
 
 // findTableContainingIndex returns the descriptor of a table
@@ -670,6 +670,18 @@ func getTableAsTableName(
 	tableName = tree.MakeTableName(tree.Name(tableDbDesc.GetName()), tree.Name(table.Name))
 	tableName.ExplicitSchema = tableDbDesc.GetName() != dbPrefix
 	return tableName, nil
+}
+
+// ResolveMutableTypeDescriptor resolves a type descriptor for mutable access.
+func (p *planner) ResolveMutableTypeDescriptor(
+	ctx context.Context, name *tree.UnresolvedObjectName, required bool,
+) (*sqlbase.MutableTypeDescriptor, error) {
+	tn, desc, err := resolver.ResolveMutableType(ctx, p, name, required)
+	if err != nil {
+		return nil, err
+	}
+	name.SetAnnotation(&p.semaCtx.Annotations, tn)
+	return desc, nil
 }
 
 // The versions below are part of the work for #34240.
