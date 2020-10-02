@@ -39,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnwait"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server"
@@ -1232,6 +1233,12 @@ func (t *logicTest) setUser(user string) func() {
 }
 
 func (t *logicTest) setup(cfg testClusterConfig, serverArgs TestServerArgs) {
+	t.cleanupFuncs = append(t.cleanupFuncs, func(duration time.Duration) func() {
+		txnwait.TxnLivenessThreshold = duration * 5
+		return func() {
+			txnwait.TxnLivenessThreshold = duration
+		}
+	}(txnwait.TxnLivenessThreshold))
 	t.cfg = cfg
 	// TODO(pmattis): Add a flag to make it easy to run the tests against a local
 	// MySQL or Postgres instance.
