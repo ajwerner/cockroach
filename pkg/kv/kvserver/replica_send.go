@@ -323,6 +323,12 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 			r.recordBatchForLoadBasedSplitting(ctx, ba, latchSpans)
 		}
 
+		if !ba.IsAdmin() {
+			if err := r.store.rateLimiter.Wait(ctx); err != nil {
+				return nil, roachpb.NewError(err)
+			}
+		}
+
 		// Acquire latches to prevent overlapping requests from executing until
 		// this request completes. After latching, wait on any conflicting locks
 		// to ensure that the request has full isolation during evaluation. This
@@ -351,6 +357,7 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 				return nil, pErr
 			}
 		}
+
 
 		br, g, pErr = fn(r, ctx, ba, status, g)
 		if pErr == nil {

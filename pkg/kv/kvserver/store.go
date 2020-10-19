@@ -149,6 +149,11 @@ var queueAdditionOnSystemConfigUpdateBurst = settings.RegisterNonNegativeIntSett
 	"the burst rate at which the store will add all replicas to the split and merge queue due to system config gossip",
 	32)
 
+var rateLimit = settings.RegisterFloatSetting(
+	"kv.store.rate_limit",
+	"a rate limit",
+	1000)
+
 // raftLeadershipTransferTimeout limits the amount of time a drain command
 // waits for lease transfers.
 var raftLeadershipTransferWait = func() *settings.DurationSetting {
@@ -426,6 +431,7 @@ type Store struct {
 	txnWaitMetrics     *txnwait.Metrics
 	sstSnapshotStorage SSTSnapshotStorage
 	protectedtsCache   protectedts.Cache
+	rateLimiter        *rate.Limiter
 
 	// gossipRangeCountdown and leaseRangeCountdown are countdowns of
 	// changes to range and leaseholder counts, after which the store
@@ -801,12 +807,16 @@ func NewStore(
 		log.Fatalf(ctx, "invalid store configuration: %+v", &cfg)
 	}
 	s := &Store{
-		cfg:      cfg,
-		db:       cfg.DB, // TODO(tschottdorf): remove redundancy.
-		engine:   eng,
-		nodeDesc: nodeDesc,
-		metrics:  newStoreMetrics(cfg.HistogramWindowInterval),
+		cfg:         cfg,
+		db:          cfg.DB, // TODO(tschottdorf): remove redundancy.
+		engine:      eng,
+		nodeDesc:    nodeDesc,
+		metrics:     newStoreMetrics(cfg.HistogramWindowInterval),
+		rateLimiter: rate.NewLimiter(rate.Limit(rateLimit.Get(&cfg.Settings.SV)), 2),
 	}
+	rateLimit.SetOnChange(&cfg.Settings.SV, func() {
+		s.rateLimiter.SetLimit(rate.Limit(rateLimit.Get(&cfg.Settings.SV)))
+	})
 	if cfg.RPCContext != nil {
 		s.allocator = MakeAllocator(cfg.StorePool, cfg.RPCContext.RemoteClocks.Latency)
 	} else {
