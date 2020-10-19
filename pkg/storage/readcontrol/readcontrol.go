@@ -24,6 +24,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
+type RuntimeStats interface {
+	// GetCPUCombinedPercentNorm returns the recent user+system cpu usage,
+	// normalized to 0-1 by number of cores.
+	GetCPUCombinedPercentNorm() float64
+}
+
 // Controller gates access for read requests based on quality of service.
 type Controller struct {
 	metrics             Metrics
@@ -31,6 +37,7 @@ type Controller struct {
 	admissionController *admission.Controller
 	readQuota           *quotapool.IntPool
 	quotaStats          quotaStats
+	runtimeStats        RuntimeStats
 
 	// The below variables control the current state of the controller.
 	// Acessed with atomics!
@@ -69,6 +76,10 @@ const longMeasurementPeriod = 5 * time.Minute
 const shortMeasurementPeriod = 2 * time.Second
 
 func (c *Controller) overloadSignal(cur qos.Level) (overloaded bool, lim qos.Level) {
+	if c.runtimeStats.GetCPUCombinedPercentNorm() > .90 {
+		return true, qos.Level{Class: qos.ClassHigh, Shard: 0}
+	}
+	return false, qos.Level{Class: qos.ClassHigh, Shard: 0}
 	requests, avg, min, max, handleReady := c.quotaStats.WaitStats(true)
 	qLen := int64(c.readQuota.Len())
 	var longLat, shortLat, shortCount, longCount float64
@@ -169,7 +180,10 @@ func sqrt(v int64) int64 {
 // TODO(ajwerner): properly plumb admission control configuration.
 // TODO(ajwerner): plumb through read quota configuration
 func (c *Controller) Initialize(
-	ctx context.Context, settings *cluster.Settings, summary *metric.WindowedSummary,
+	ctx context.Context,
+	settings *cluster.Settings,
+	summary *metric.WindowedSummary,
+	stats RuntimeStats,
 ) {
 	baseLimit := int64(2 * runtime.NumCPU())
 	queueSizeFunc := sqrt
@@ -188,6 +202,7 @@ func (c *Controller) Initialize(
 		queueSizeFunc:  queueSizeFunc,
 		baseLimit:      baseLimit,
 		latencySummary: summary,
+		runtimeStats:   stats,
 	}
 	admissionCfg := admission.Config{
 		Name:               "read",

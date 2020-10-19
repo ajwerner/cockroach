@@ -421,6 +421,9 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 	// Similarly for execCfg.
 	var execCfg sql.ExecutorConfig
 
+	s.runtime = status.NewRuntimeStatSampler(ctx, s.clock)
+	s.registry.AddMetricStruct(s.runtime)
+
 	// TODO(bdarnell): make StoreConfig configurable.
 	storeCfg := storage.StoreConfig{
 		DefaultZoneConfig:       &s.cfg.DefaultZoneConfig,
@@ -444,6 +447,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 		LogRangeEvents:          s.cfg.EventLogEnabled,
 		RangeDescriptorCache:    s.distSender.RangeDescriptorCache(),
 		TimeSeriesDataStore:     s.tsDB,
+		RuntimeStats:            s.runtime,
 
 		// Initialize the closed timestamp subsystem. Note that it won't
 		// be ready until it is .Start()ed, but the grpc server can be
@@ -474,9 +478,6 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 
 	s.recorder = status.NewMetricsRecorder(s.clock, s.nodeLiveness, s.rpcContext, s.gossip, st)
 	s.registry.AddMetricStruct(s.rpcContext.RemoteClocks.Metrics())
-
-	s.runtime = status.NewRuntimeStatSampler(ctx, s.clock)
-	s.registry.AddMetricStruct(s.runtime)
 
 	s.node = NewNode(
 		storeCfg, s.recorder, s.registry, s.stopper,

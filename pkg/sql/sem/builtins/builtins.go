@@ -3376,7 +3376,7 @@ var powImpls = makeBuiltin(defProps(),
 )
 
 var (
-	jsonNullDString    = tree.NewDString("null")
+	jsonNullDString    = tree.NewDString(
 	jsonStringDString  = tree.NewDString("string")
 	jsonNumberDString  = tree.NewDString("number")
 	jsonBooleanDString = tree.NewDString("boolean")

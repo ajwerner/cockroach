@@ -717,6 +717,8 @@ type StoreConfig struct {
 	// gossiped store capacity values which need be exceeded before the store will
 	// gossip immediately without waiting for the periodic gossip interval.
 	GossipWhenCapacityDeltaExceedsFraction float64
+
+	RuntimeStats readcontrol.RuntimeStats
 }
 
 // ConsistencyTestingKnobs is a BatchEvalTestingKnobs struct used to control the
@@ -814,7 +816,7 @@ func NewStore(
 	s.raftEntryCache = raftentry.NewCache(cfg.RaftEntryCacheSize)
 	s.metrics.registry.AddMetricStruct(s.raftEntryCache.Metrics())
 
-	s.readControl.Initialize(ctx, cfg.Settings, s.metrics.ReadLatencySummary)
+	s.readControl.Initialize(ctx, cfg.Settings, s.metrics.ReadLatencySummary, s.cfg.RuntimeStats)
 	s.metrics.registry.AddMetricStruct(s.readControl.Metrics())
 
 	s.coalescedMu.Lock()
