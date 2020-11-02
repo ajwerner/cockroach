@@ -12,6 +12,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
@@ -19,7 +20,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -29,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/pebble"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPebbleTimeBoundPropCollector(t *testing.T) {
@@ -124,7 +129,7 @@ func TestPebbleIterReuse(t *testing.T) {
 		}
 	}
 
-	iter1 := batch.NewIterator(IterOptions{LowerBound: []byte{40}, UpperBound: []byte{50}})
+	iter1 := batch.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{LowerBound: []byte{40}, UpperBound: []byte{50}})
 	valuesCount := 0
 	// Seek to a value before the lower bound. Identical to seeking to the lower bound.
 	iter1.SeekGE(MVCCKey{Key: []byte{30}})
@@ -152,7 +157,7 @@ func TestPebbleIterReuse(t *testing.T) {
 	// is lower than the previous iterator's lower bound. This should still result
 	// in the right amount of keys being returned; the lower bound from the
 	// previous iterator should get zeroed.
-	iter2 := batch.NewIterator(IterOptions{UpperBound: []byte{10}})
+	iter2 := batch.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: []byte{10}})
 	valuesCount = 0
 	iter1.SeekGE(MVCCKey{Key: []byte{0}})
 	for ; ; iter2.Next() {
@@ -271,6 +276,25 @@ func TestPebbleSeparatorSuccessor(t *testing.T) {
 		})
 	}
 
+}
+
+func TestPebbleDiskSlowEmit(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	settings := cluster.MakeTestingClusterSettings()
+	MaxSyncDurationFatalOnExceeded.Override(&settings.SV, false)
+	p := newPebbleInMem(context.Background(), roachpb.Attributes{}, 1<<20, settings)
+	defer p.Close()
+
+	require.Equal(t, uint64(0), p.diskSlowCount)
+	require.Equal(t, uint64(0), p.diskStallCount)
+	p.eventListener.DiskSlow(pebble.DiskSlowInfo{Duration: 1 * time.Second})
+	require.Equal(t, uint64(1), p.diskSlowCount)
+	require.Equal(t, uint64(0), p.diskStallCount)
+	p.eventListener.DiskSlow(pebble.DiskSlowInfo{Duration: 70 * time.Second})
+	require.Equal(t, uint64(1), p.diskSlowCount)
+	require.Equal(t, uint64(1), p.diskStallCount)
 }
 
 func BenchmarkMVCCKeyCompare(b *testing.B) {

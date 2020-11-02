@@ -20,14 +20,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/stringarena"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 // distinct is the physical processor implementation of the DISTINCT relational operator.
@@ -40,8 +38,12 @@ type distinct struct {
 	lastGroupKey     rowenc.EncDatumRow
 	arena            stringarena.Arena
 	seen             map[string]struct{}
-	orderedCols      []uint32
-	distinctCols     util.FastIntSet
+	distinctCols     struct {
+		// ordered and nonOrdered are such that their union determines the set
+		// of distinct columns and their intersection is empty.
+		ordered    []uint32
+		nonOrdered []uint32
+	}
 	memAcc           mon.BoundAccount
 	datumAlloc       rowenc.DatumAlloc
 	scratch          []byte
@@ -53,7 +55,7 @@ type distinct struct {
 // sortedDistinct is a specialized distinct that can be used when all of the
 // distinct columns are also ordered.
 type sortedDistinct struct {
-	distinct
+	*distinct
 }
 
 var _ execinfra.Processor = &distinct{}
@@ -81,52 +83,36 @@ func newDistinct(
 		return nil, errors.AssertionFailedf("0 distinct columns specified for distinct processor")
 	}
 
-	var distinctCols, orderedCols util.FastIntSet
-	allSorted := true
-
-	for _, col := range spec.OrderedColumns {
-		orderedCols.Add(int(col))
-	}
+	nonOrderedCols := make([]uint32, 0, len(spec.DistinctColumns)-len(spec.OrderedColumns))
 	for _, col := range spec.DistinctColumns {
-		if !orderedCols.Contains(int(col)) {
-			allSorted = false
+		ordered := false
+		for _, ordCol := range spec.OrderedColumns {
+			if col == ordCol {
+				ordered = true
+				break
+			}
 		}
-		distinctCols.Add(int(col))
-	}
-	if !orderedCols.SubsetOf(distinctCols) {
-		return nil, errors.AssertionFailedf("ordered cols must be a subset of distinct cols")
+		if !ordered {
+			nonOrderedCols = append(nonOrderedCols, col)
+		}
 	}
 
 	ctx := flowCtx.EvalCtx.Ctx()
 	memMonitor := execinfra.NewMonitor(ctx, flowCtx.EvalCtx.Mon, "distinct-mem")
 	d := &distinct{
 		input:            input,
-		orderedCols:      spec.OrderedColumns,
-		distinctCols:     distinctCols,
 		memAcc:           memMonitor.MakeBoundAccount(),
 		types:            input.OutputTypes(),
 		nullsAreDistinct: spec.NullsAreDistinct,
 		errorOnDup:       spec.ErrorOnDup,
 	}
+	d.distinctCols.ordered = spec.OrderedColumns
+	d.distinctCols.nonOrdered = nonOrderedCols
 
 	var returnProcessor execinfra.RowSourcedProcessor = d
-	if allSorted {
+	if len(nonOrderedCols) == 0 {
 		// We can use the faster sortedDistinct processor.
-		// TODO(asubiotto): We should have a distinctBase, rather than making a copy
-		// of a distinct processor.
-		sd := &sortedDistinct{
-			distinct: distinct{
-				input:            input,
-				orderedCols:      spec.OrderedColumns,
-				distinctCols:     distinctCols,
-				memAcc:           memMonitor.MakeBoundAccount(),
-				types:            input.OutputTypes(),
-				nullsAreDistinct: spec.NullsAreDistinct,
-				errorOnDup:       spec.ErrorOnDup,
-			},
-		}
-		// Set d to the new distinct copy for further initialization.
-		d = &sd.distinct
+		sd := &sortedDistinct{distinct: d}
 		returnProcessor = sd
 	}
 
@@ -148,7 +134,7 @@ func newDistinct(
 	// So we have to set up the account here.
 	d.arena = stringarena.Make(&d.memAcc)
 
-	if sp := opentracing.SpanFromContext(ctx); sp != nil && tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(ctx); sp != nil && sp.IsRecording() {
 		d.input = newInputStatCollector(d.input)
 		d.FinishTrace = d.outputStatsToTrace
 	}
@@ -172,7 +158,7 @@ func (d *distinct) matchLastGroupKey(row rowenc.EncDatumRow) (bool, error) {
 	if !d.haveLastGroupKey {
 		return false, nil
 	}
-	for _, colIdx := range d.orderedCols {
+	for _, colIdx := range d.distinctCols.ordered {
 		res, err := d.lastGroupKey[colIdx].Compare(
 			d.types[colIdx], &d.datumAlloc, d.EvalCtx, &row[colIdx],
 		)
@@ -195,16 +181,14 @@ func (d *distinct) matchLastGroupKey(row rowenc.EncDatumRow) (bool, error) {
 func (d *distinct) encode(appendTo []byte, row rowenc.EncDatumRow) ([]byte, error) {
 	var err error
 	foundNull := false
-	for i, datum := range row {
-		// Ignore columns that are not in the distinctCols, as if we are
-		// post-processing to strip out column Y, we cannot include it as
-		// (X1, Y1) and (X1, Y2) will appear as distinct rows, but if we are
-		// stripping out Y, we do not want (X1) and (X1) to be in the results.
-		if !d.distinctCols.Contains(i) {
-			continue
-		}
-
-		appendTo, err = datum.Fingerprint(d.types[i], &d.datumAlloc, appendTo)
+	for _, colIdx := range d.distinctCols.nonOrdered {
+		datum := row[colIdx]
+		// We might allocate tree.Datums when hashing the row, so we'll ask the
+		// fingerprint to account for them. Note that even though we're losing
+		// the references to the row (and to the newly allocated datums)
+		// shortly, it'll likely take some time before GC reclaims that memory,
+		// so we choose the over-accounting route to be safe.
+		appendTo, err = datum.Fingerprint(d.Ctx, d.types[colIdx], &d.datumAlloc, appendTo, &d.memAcc)
 		if err != nil {
 			return nil, err
 		}
@@ -391,9 +375,9 @@ func (d *distinct) outputStatsToTrace() {
 	if !ok {
 		return
 	}
-	if sp := opentracing.SpanFromContext(d.Ctx); sp != nil {
-		tracing.SetSpanStats(
-			sp, &DistinctStats{InputStats: is, MaxAllocatedMem: d.MemMonitor.MaximumBytes()},
+	if sp := tracing.SpanFromContext(d.Ctx); sp != nil {
+		sp.SetSpanStats(
+			&DistinctStats{InputStats: is, MaxAllocatedMem: d.MemMonitor.MaximumBytes()},
 		)
 	}
 }

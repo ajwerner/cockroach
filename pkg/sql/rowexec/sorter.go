@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 // sorter sorts the input rows according to the specified ordering.
@@ -55,7 +54,7 @@ func (s *sorterBase) init(
 	opts execinfra.ProcStateOpts,
 ) error {
 	ctx := flowCtx.EvalCtx.Ctx()
-	if sp := opentracing.SpanFromContext(ctx); sp != nil && tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(ctx); sp != nil && sp.IsRecording() {
 		input = newInputStatCollector(input)
 		s.FinishTrace = s.outputStatsToTrace
 	}
@@ -163,9 +162,8 @@ func (s *sorterBase) outputStatsToTrace() {
 	if !ok {
 		return
 	}
-	if sp := opentracing.SpanFromContext(s.Ctx); sp != nil {
-		tracing.SetSpanStats(
-			sp,
+	if sp := tracing.SpanFromContext(s.Ctx); sp != nil {
+		sp.SetSpanStats(
 			&SorterStats{
 				InputStats:       is,
 				MaxAllocatedMem:  s.MemMonitor.MaximumBytes(),
@@ -311,11 +309,6 @@ func (s *sortAllProcessor) fill() (ok bool, _ error) {
 	return true, nil
 }
 
-// ConsumerDone is part of the RowSource interface.
-func (s *sortAllProcessor) ConsumerDone() {
-	s.input.ConsumerDone()
-}
-
 // ConsumerClosed is part of the RowSource interface.
 func (s *sortAllProcessor) ConsumerClosed() {
 	// The consumer is done, Next() will not be called again.
@@ -429,11 +422,6 @@ func (s *sortTopKProcessor) Start(ctx context.Context) context.Context {
 	s.i = s.rows.NewFinalIterator(ctx)
 	s.i.Rewind()
 	return ctx
-}
-
-// ConsumerDone is part of the RowSource interface.
-func (s *sortTopKProcessor) ConsumerDone() {
-	s.input.ConsumerDone()
 }
 
 // ConsumerClosed is part of the RowSource interface.

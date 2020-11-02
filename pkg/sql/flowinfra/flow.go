@@ -17,11 +17,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/mutations"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 type flowStatus int
@@ -178,6 +179,17 @@ func (f *FlowBase) Setup(
 	ctx, f.ctxCancel = contextutil.WithCancel(ctx)
 	f.ctxDone = ctx.Done()
 	f.spec = spec
+
+	mutationsTestingMaxBatchSize := int64(0)
+	if f.FlowCtx.Cfg.Settings != nil {
+		mutationsTestingMaxBatchSize = mutations.MutationsTestingMaxBatchSize.Get(&f.FlowCtx.Cfg.Settings.SV)
+	}
+	if mutationsTestingMaxBatchSize != 0 {
+		mutations.SetMaxBatchSizeForTests(int(mutationsTestingMaxBatchSize))
+	} else {
+		mutations.ResetMaxBatchSizeForTests()
+	}
+
 	return ctx, nil
 }
 
@@ -444,7 +456,7 @@ func (f *FlowBase) Cleanup(ctx context.Context) {
 	if log.V(1) {
 		log.Infof(ctx, "cleaning up")
 	}
-	sp := opentracing.SpanFromContext(ctx)
+	sp := tracing.SpanFromContext(ctx)
 	// Local flows do not get registered.
 	if !f.IsLocal() && f.status != FlowNotStarted {
 		f.flowRegistry.UnregisterFlow(f.ID)

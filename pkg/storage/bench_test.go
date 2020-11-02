@@ -57,7 +57,6 @@ func BenchmarkMVCCGarbageCollect(b *testing.B) {
 		name   string
 		create engineMaker
 	}{
-		{"rocksdb", setupMVCCInMemRocksDB},
 		{"pebble", setupMVCCInMemPebble},
 	}
 
@@ -106,7 +105,6 @@ func BenchmarkExportToSst(b *testing.B) {
 		name   string
 		create engineMaker
 	}{
-		{"rocksdb", setupMVCCRocksDB},
 		{"pebble", setupMVCCPebble},
 	}
 
@@ -172,14 +170,14 @@ func loadTestData(dir string, numKeys, numBatches, batchTimeSpan, valueBytes int
 		exists = false
 	}
 
-	eng, err := NewRocksDB(
-		RocksDBConfig{
+	eng, err := NewPebble(
+		context.Background(),
+		PebbleConfig{
 			StorageConfig: base.StorageConfig{
 				Settings: cluster.MakeTestingClusterSettings(),
 				Dir:      dir,
 			},
 		},
-		RocksDBCache{},
 	)
 	if err != nil {
 		return nil, err
@@ -410,7 +408,7 @@ func runMVCCScan(ctx context.Context, b *testing.B, emk engineMaker, opts benchS
 		// Pull all of the sstables into the RocksDB cache in order to make the
 		// timings more stable. Otherwise, the first run will be penalized pulling
 		// data into the cache while later runs will not.
-		iter := eng.NewIterator(IterOptions{UpperBound: roachpb.KeyMax})
+		iter := eng.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: roachpb.KeyMax})
 		_, _ = iter.ComputeStats(roachpb.KeyMin, roachpb.KeyMax, 0)
 		iter.Close()
 	}
@@ -715,46 +713,6 @@ func runMVCCBatchTimeSeries(ctx context.Context, b *testing.B, emk engineMaker, 
 	b.StopTimer()
 }
 
-// runMVCCMerge merges value into numKeys separate keys.
-func runMVCCMerge(
-	ctx context.Context, b *testing.B, emk engineMaker, value *roachpb.Value, numKeys int,
-) {
-	eng := emk(b, fmt.Sprintf("merge_%d", numKeys))
-	defer eng.Close()
-
-	// Precompute keys so we don't waste time formatting them at each iteration.
-	keys := make([]roachpb.Key, numKeys)
-	for i := 0; i < numKeys; i++ {
-		keys[i] = roachpb.Key(fmt.Sprintf("key-%d", i))
-	}
-
-	b.ResetTimer()
-
-	ts := hlc.Timestamp{}
-	// Use parallelism if specified when test is run.
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			ms := enginepb.MVCCStats{}
-			ts.Logical++
-			err := MVCCMerge(ctx, eng, &ms, keys[rand.Intn(numKeys)], ts, *value)
-			if err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-	b.StopTimer()
-
-	// Read values out to force merge.
-	for _, key := range keys {
-		val, _, err := MVCCGet(ctx, eng, key, hlc.Timestamp{}, MVCCGetOptions{})
-		if err != nil {
-			b.Fatal(err)
-		} else if val == nil {
-			continue
-		}
-	}
-}
-
 // runMVCCGetMergedValue reads merged values for numKeys separate keys and mergesPerKey
 // operands per key.
 func runMVCCGetMergedValue(
@@ -871,7 +829,7 @@ func runClearRange(
 	//
 	// TODO(benesch): when those hacks are removed, don't bother computing the
 	// first key and simply ClearRange(NilKey, MVCCKeyMax).
-	iter := eng.NewIterator(IterOptions{UpperBound: roachpb.KeyMax})
+	iter := eng.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: roachpb.KeyMax})
 	defer iter.Close()
 	iter.SeekGE(NilKey)
 	if ok, err := iter.Valid(); !ok {
@@ -914,7 +872,7 @@ func runMVCCComputeStats(ctx context.Context, b *testing.B, emk engineMaker, val
 	var stats enginepb.MVCCStats
 	var err error
 	for i := 0; i < b.N; i++ {
-		iter := eng.NewIterator(IterOptions{UpperBound: roachpb.KeyMax})
+		iter := eng.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: roachpb.KeyMax})
 		stats, err = iter.ComputeStats(roachpb.KeyMin, roachpb.KeyMax, 0)
 		iter.Close()
 		if err != nil {
@@ -1068,10 +1026,6 @@ func runBatchApplyBatchRepr(
 		if err := batch.ApplyBatchRepr(repr, false /* sync */); err != nil {
 			b.Fatal(err)
 		}
-		if r, ok := batch.(*rocksDBBatch); ok {
-			// Ensure mutations are flushed for RocksDB indexed batches.
-			r.flushMutations()
-		}
 		batch.Close()
 	}
 
@@ -1111,7 +1065,7 @@ func runExportToSst(
 	for i := 0; i < b.N; i++ {
 		startTS := hlc.Timestamp{WallTime: int64(numRevisions / 2)}
 		endTS := hlc.Timestamp{WallTime: int64(numRevisions + 2)}
-		_, _, _, err := engine.ExportToSst(roachpb.KeyMin, roachpb.KeyMax, startTS, endTS, exportAllRevisions, 0 /* targetSize */, 0 /* maxSize */, IterOptions{
+		_, _, _, err := engine.ExportMVCCToSst(roachpb.KeyMin, roachpb.KeyMax, startTS, endTS, exportAllRevisions, 0 /* targetSize */, 0 /* maxSize */, IterOptions{
 			LowerBound: roachpb.KeyMin,
 			UpperBound: roachpb.KeyMax,
 		})

@@ -52,6 +52,8 @@ type kvBatchFetcher interface {
 	// version - both must be handled by calling code.
 	nextBatch(ctx context.Context) (ok bool, kvs []roachpb.KeyValue,
 		batchResponse []byte, origSpan roachpb.Span, err error)
+
+	close(ctx context.Context)
 }
 
 type tableInfo struct {
@@ -654,7 +656,7 @@ func (rf *Fetcher) StartScanFrom(ctx context.Context, f kvBatchFetcher) error {
 	if rf.kvFetcher != nil {
 		rf.kvFetcher.Close(ctx)
 	}
-	rf.kvFetcher = newKVFetcher(f, rf.mon)
+	rf.kvFetcher = newKVFetcher(f)
 	// Retrieve the first key.
 	_, err := rf.NextKey(ctx)
 	return err
@@ -802,8 +804,10 @@ func (rf *Fetcher) prettyEncDatums(types []*types.T, vals []rowenc.EncDatum) str
 	var buf strings.Builder
 	for i, v := range vals {
 		if err := v.EnsureDecoded(types[i], rf.alloc); err != nil {
-			buf.WriteString("error decoding: ")
+			buf.WriteString("/{error decoding: ")
 			buf.WriteString(err.Error())
+			buf.WriteByte('}')
+			continue
 		}
 		buf.WriteByte('/')
 		buf.WriteString(v.Datum.String())

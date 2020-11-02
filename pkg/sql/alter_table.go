@@ -37,7 +37,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
-	"github.com/gogo/protobuf/proto"
 )
 
 type alterTableNode struct {
@@ -46,8 +45,7 @@ type alterTableNode struct {
 	// statsData is populated with data for "alter table inject statistics"
 	// commands - the JSON stats expressions.
 	// It is parallel with n.Cmds (for the inject stats commands).
-	statsData    map[int]tree.TypedExpr
-	hasOwnership bool
+	statsData map[int]tree.TypedExpr
 }
 
 // AlterTable applies a schema change on a table.
@@ -73,18 +71,11 @@ func (p *planner) AlterTable(ctx context.Context, n *tree.AlterTable) (planNode,
 		return newZeroNode(nil /* columns */), nil
 	}
 
-	hasOwnership, err := p.HasOwnership(ctx, tableDesc)
-	if err != nil {
-		return nil, err
-	}
-
-	if !hasOwnership {
-		// This check for CREATE privilege is kept for backwards compatibility.
-		if err := p.CheckPrivilege(ctx, tableDesc, privilege.CREATE); err != nil {
-			return nil, pgerror.Newf(pgcode.InsufficientPrivilege,
-				"must be owner of table %s or have CREATE privilege on table %s",
-				tree.Name(tableDesc.GetName()), tree.Name(tableDesc.GetName()))
-		}
+	// This check for CREATE privilege is kept for backwards compatibility.
+	if err := p.CheckPrivilege(ctx, tableDesc, privilege.CREATE); err != nil {
+		return nil, pgerror.Newf(pgcode.InsufficientPrivilege,
+			"must be owner of table %s or have CREATE privilege on table %s",
+			tree.Name(tableDesc.GetName()), tree.Name(tableDesc.GetName()))
 	}
 
 	n.HoistAddColumnConstraints()
@@ -110,10 +101,9 @@ func (p *planner) AlterTable(ctx context.Context, n *tree.AlterTable) (planNode,
 	}
 
 	return &alterTableNode{
-		n:            n,
-		tableDesc:    tableDesc,
-		statsData:    statsData,
-		hasOwnership: hasOwnership,
+		n:         n,
+		tableDesc: tableDesc,
+		statsData: statsData,
 	}, nil
 }
 
@@ -172,6 +162,11 @@ func (n *alterTableNode) startExec(params runParams) error {
 		case *tree.AlterTableAddConstraint:
 			switch d := t.ConstraintDef.(type) {
 			case *tree.UniqueConstraintTableDef:
+				if d.WithoutIndex {
+					return pgerror.New(pgcode.FeatureNotSupported,
+						"unique constraints without an index are not yet supported",
+					)
+				}
 				if d.PrimaryKey {
 					// We only support "adding" a primary key when we are using the
 					// default rowid primary index or if a DROP PRIMARY KEY statement
@@ -265,12 +260,11 @@ func (n *alterTableNode) startExec(params runParams) error {
 				// If there are any FKs, we will need to update the table descriptor of the
 				// depended-on table (to register this table against its DependedOnBy field).
 				// This descriptor must be looked up uncached, and we'll allow FK dependencies
-				// on tables that were just added. See the comment at the start of
-				// the global-scope resolveFK().
+				// on tables that were just added. See the comment at the start of ResolveFK().
 				// TODO(vivek): check if the cache can be used.
 				var err error
 				params.p.runWithOptions(resolveFlags{skipCache: true}, func() {
-					// Check whether the table is empty, and pass the result to resolveFK(). If
+					// Check whether the table is empty, and pass the result to ResolveFK(). If
 					// the table is empty, then resolveFK will automatically add the necessary
 					// index for a fk constraint if the index does not exist.
 					span := n.tableDesc.PrimaryIndexSpan(params.ExecCfg().Codec)
@@ -285,7 +279,17 @@ func (n *alterTableNode) startExec(params runParams) error {
 					} else {
 						tableState = NonEmptyTable
 					}
-					err = params.p.resolveFK(params.ctx, n.tableDesc, d, affected, tableState, t.ValidationBehavior)
+					err = ResolveFK(
+						params.ctx,
+						params.p.txn,
+						params.p,
+						n.tableDesc,
+						d,
+						affected,
+						tableState,
+						t.ValidationBehavior,
+						params.p.EvalContext(),
+					)
 				})
 				if err != nil {
 					return err
@@ -323,7 +327,17 @@ func (n *alterTableNode) startExec(params runParams) error {
 
 		case *tree.AlterTableDropColumn:
 			if params.SessionData().SafeUpdates {
-				return pgerror.DangerousStatementf("ALTER TABLE DROP COLUMN will remove all data in that column")
+				err := pgerror.DangerousStatementf("ALTER TABLE DROP COLUMN will " +
+					"remove all data in that column")
+				if !params.extendedEvalCtx.TxnImplicit {
+					err = errors.WithIssueLink(err, errors.IssueLink{
+						IssueURL: "https://github.com/cockroachdb/cockroach/issues/46541",
+						Detail: "when used in an explicit transaction combined with other " +
+							"schema changes to the same table, DROP COLUMN can result in data " +
+							"loss if one of the other schema change fails or is canceled",
+					})
+				}
+				return err
 			}
 
 			colToDrop, dropped, err := n.tableDesc.FindColumnByName(t.Column)
@@ -669,10 +683,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 			if err != nil {
 				return err
 			}
-			descriptorChanged = descriptorChanged || !proto.Equal(
-				&n.tableDesc.PrimaryIndex.Partitioning,
-				&partitioning,
-			)
+			descriptorChanged = descriptorChanged || !n.tableDesc.PrimaryIndex.Partitioning.Equal(&partitioning)
 			err = deleteRemovedPartitionZoneConfigs(
 				params.ctx, params.p.txn,
 				n.tableDesc, &n.tableDesc.PrimaryIndex, &n.tableDesc.PrimaryIndex.Partitioning,
@@ -777,7 +788,7 @@ func (n *alterTableNode) startExec(params runParams) error {
 		}
 
 		// Allocate IDs now, so new IDs are available to subsequent commands
-		if err := n.tableDesc.AllocateIDs(); err != nil {
+		if err := n.tableDesc.AllocateIDs(params.ctx); err != nil {
 			return err
 		}
 	}
@@ -823,8 +834,11 @@ func (n *alterTableNode) startExec(params runParams) error {
 			User                string
 			MutationID          uint32
 			CascadeDroppedViews []string
-		}{params.p.ResolvedName(n.n.Table).FQString(), n.n.String(),
-			params.SessionData().User, uint32(mutationID), droppedViews},
+		}{
+			params.p.ResolvedName(n.n.Table).FQString(),
+			n.n.String(),
+			params.SessionData().User().Normalized(),
+			uint32(mutationID), droppedViews},
 	)
 }
 
@@ -854,14 +868,17 @@ func (n *alterTableNode) Close(context.Context)        {}
 // addIndexMutationWithSpecificPrimaryKey adds an index mutation into the given table descriptor, but sets up
 // the index with ExtraColumnIDs from the given index, rather than the table's primary key.
 func addIndexMutationWithSpecificPrimaryKey(
-	table *tabledesc.Mutable, toAdd *descpb.IndexDescriptor, primary *descpb.IndexDescriptor,
+	ctx context.Context,
+	table *tabledesc.Mutable,
+	toAdd *descpb.IndexDescriptor,
+	primary *descpb.IndexDescriptor,
 ) error {
 	// Reset the ID so that a call to AllocateIDs will set up the index.
 	toAdd.ID = 0
 	if err := table.AddIndexMutation(toAdd, descpb.DescriptorMutation_ADD); err != nil {
 		return err
 	}
-	if err := table.AllocateIDs(); err != nil {
+	if err := table.AllocateIDs(ctx); err != nil {
 		return err
 	}
 	// Use the columns in the given primary index to construct this indexes ExtraColumnIDs list.
@@ -1128,7 +1145,7 @@ func (p *planner) removeColumnComment(
 		ctx,
 		"delete-column-comment",
 		p.txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		"DELETE FROM system.comments WHERE type=$1 AND object_id=$2 AND sub_id=$3",
 		keys.ColumnCommentType,
 		tableID,
@@ -1181,26 +1198,39 @@ func (p *planner) updateFKBackReferenceName(
 // alterTableOwner sets the owner of the table to newOwner and returns true if the descriptor
 // was updated.
 func (p *planner) alterTableOwner(
-	ctx context.Context, n *alterTableNode, newOwner string,
+	ctx context.Context, n *alterTableNode, newOwner security.SQLUsername,
 ) (bool, error) {
-	desc := n.tableDesc
-	privs := desc.GetPrivileges()
-
-	if err := p.checkCanAlterToNewOwner(ctx, desc, privs, newOwner, n.hasOwnership); err != nil {
-		return false, err
-	}
-
-	// Ensure the new owner has CREATE privilege on the table's schema.
-	if err := p.canCreateOnSchema(ctx, desc.GetParentSchemaID(), newOwner); err != nil {
-		return false, err
-	}
+	privs := n.tableDesc.GetPrivileges()
 
 	// If the owner we want to set to is the current owner, do a no-op.
-	if newOwner == privs.Owner {
+	if newOwner == privs.Owner() {
 		return false, nil
 	}
 
-	privs.SetOwner(newOwner)
+	if err := p.checkCanAlterTableAndSetNewOwner(ctx, n.tableDesc, newOwner); err != nil {
+		return false, err
+	}
 
 	return true, nil
+}
+
+// checkCanAlterTableAndSetNewOwner handles privilege checking and setting new owner.
+// Called in ALTER TABLE and REASSIGN OWNED BY.
+func (p *planner) checkCanAlterTableAndSetNewOwner(
+	ctx context.Context, desc *tabledesc.Mutable, newOwner security.SQLUsername,
+) error {
+	if err := p.checkCanAlterToNewOwner(ctx, desc, newOwner); err != nil {
+		return err
+	}
+
+	// Ensure the new owner has CREATE privilege on the table's schema.
+	if err := p.canCreateOnSchema(
+		ctx, desc.GetParentSchemaID(), desc.ParentID, newOwner, checkPublicSchema); err != nil {
+		return err
+	}
+
+	privs := desc.GetPrivileges()
+	privs.SetOwner(newOwner)
+
+	return nil
 }

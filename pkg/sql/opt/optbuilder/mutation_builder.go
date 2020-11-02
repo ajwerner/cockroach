@@ -254,9 +254,10 @@ func (mb *mutationBuilder) buildInputForUpdate(
 	scanScope := mb.b.buildScan(
 		mb.b.addTable(mb.tab, &mb.alias),
 		tableOrdinals(mb.tab, columnKinds{
-			includeMutations: true,
-			includeSystem:    true,
-			includeVirtual:   false,
+			includeMutations:       true,
+			includeSystem:          true,
+			includeVirtualInverted: false,
+			includeVirtualComputed: false,
 		}),
 		indexFlags,
 		noRowLocking,
@@ -315,12 +316,10 @@ func (mb *mutationBuilder) buildInputForUpdate(
 		// key columns.
 		primaryIndex := mb.tab.Index(cat.PrimaryIndex)
 		for i := 0; i < primaryIndex.KeyColumnCount(); i++ {
-			pkCol := mb.outScope.cols[primaryIndex.Column(i).Ordinal()]
-
 			// If the primary key column is hidden, then we don't need to use it
 			// for the distinct on.
-			if !pkCol.hidden {
-				pkCols.Add(pkCol.id)
+			if col := primaryIndex.Column(i); !col.IsHidden() {
+				pkCols.Add(mb.fetchColIDs[col.Ordinal()])
 			}
 		}
 
@@ -366,9 +365,10 @@ func (mb *mutationBuilder) buildInputForDelete(
 	scanScope := mb.b.buildScan(
 		mb.b.addTable(mb.tab, &mb.alias),
 		tableOrdinals(mb.tab, columnKinds{
-			includeMutations: true,
-			includeSystem:    true,
-			includeVirtual:   false,
+			includeMutations:       true,
+			includeSystem:          true,
+			includeVirtualInverted: false,
+			includeVirtualComputed: false,
 		}),
 		indexFlags,
 		noRowLocking,
@@ -565,7 +565,7 @@ func (mb *mutationBuilder) addSynthesizedCols(colIDs opt.ColList, addCol func(co
 			continue
 		}
 		// Skip system and virtual columns.
-		if kind == cat.System || kind == cat.Virtual {
+		if kind == cat.System || kind.IsVirtual() {
 			continue
 		}
 		// Skip columns that are already specified.
@@ -743,6 +743,7 @@ func (mb *mutationBuilder) addCheckConstraintCols() {
 	if mb.tab.CheckCount() != 0 {
 		projectionsScope := mb.outScope.replace()
 		projectionsScope.appendColumnsFromScope(mb.outScope)
+		mutationCols := mb.mutationColumnIDs()
 
 		for i, n := 0, mb.tab.CheckCount(); i < n; i++ {
 			expr, err := parser.ParseExpr(mb.tab.Check(i).Constraint)
@@ -756,13 +757,37 @@ func (mb *mutationBuilder) addCheckConstraintCols() {
 
 			// TODO(ridwanmsharif): Maybe we can avoid building constraints here
 			// and instead use the constraints stored in the table metadata.
-			mb.b.buildScalar(texpr, mb.outScope, projectionsScope, scopeCol, nil)
-			mb.checkColIDs[i] = scopeCol.id
+			referencedCols := &opt.ColSet{}
+			mb.b.buildScalar(texpr, mb.outScope, projectionsScope, scopeCol, referencedCols)
+
+			// Synthesized check columns are only necessary if the columns
+			// referenced in the check expression are being mutated. If they are
+			// not being mutated, we do not add the newly built column to
+			// checkColIDs. This allows pruning normalization rules to remove
+			// the unnecessary projected column.
+			if referencedCols.Intersects(mutationCols) {
+				mb.checkColIDs[i] = scopeCol.id
+			}
 		}
 
 		mb.b.constructProjectForScope(mb.outScope, projectionsScope)
 		mb.outScope = projectionsScope
 	}
+}
+
+// mutationColumnIDs returns the set of all column IDs that will be mutated.
+func (mb *mutationBuilder) mutationColumnIDs() opt.ColSet {
+	cols := opt.ColSet{}
+	for _, col := range mb.insertColIDs {
+		cols.Add(col)
+	}
+	for _, col := range mb.updateColIDs {
+		cols.Add(col)
+	}
+	for _, col := range mb.upsertColIDs {
+		cols.Add(col)
+	}
+	return cols
 }
 
 // projectPartialIndexPutCols builds a Project that synthesizes boolean output

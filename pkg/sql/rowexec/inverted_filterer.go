@@ -17,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedexpr"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedidx"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -26,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 // invertedFilterState represents the state of the processor.
@@ -67,7 +67,6 @@ type invertedFilterer struct {
 
 var _ execinfra.Processor = &invertedFilterer{}
 var _ execinfra.RowSource = &invertedFilterer{}
-var _ execinfrapb.MetadataSource = &invertedFilterer{}
 var _ execinfra.OpNode = &invertedFilterer{}
 
 const invertedFiltererProcName = "inverted filterer"
@@ -88,13 +87,6 @@ func newInvertedFilterer(
 		},
 	}
 
-	// TODO(sumeer): for expressions that only involve unions, and the output
-	// does not need to be in key-order, we should incrementally output after
-	// de-duping. It will reduce the container memory/disk by 2x.
-
-	// Prepare inverted evaluator for later evaluation.
-	ifr.invertedEval.init()
-
 	// The RowContainer columns are the PK columns, that are the columns
 	// other than the inverted column. The output has the same types as
 	// the input.
@@ -113,7 +105,7 @@ func newInvertedFilterer(
 			InputsToDrain: []execinfra.RowSource{ifr.input},
 			TrailingMetaCallback: func(ctx context.Context) []execinfrapb.ProducerMetadata {
 				ifr.close()
-				return ifr.generateMeta(ctx)
+				return nil
 			},
 		},
 	); err != nil {
@@ -133,10 +125,32 @@ func newInvertedFilterer(
 		ifr.diskMonitor,
 	)
 
-	if sp := opentracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && sp.IsRecording() {
 		ifr.input = newInputStatCollector(ifr.input)
 		ifr.FinishTrace = ifr.outputStatsToTrace
 	}
+
+	if spec.PreFiltererSpec != nil {
+		semaCtx := flowCtx.TypeResolverFactory.NewSemaContext(flowCtx.EvalCtx.Txn)
+		var exprHelper execinfrapb.ExprHelper
+		colTypes := []*types.T{spec.PreFiltererSpec.Type}
+		if err := exprHelper.Init(spec.PreFiltererSpec.Expression, colTypes, semaCtx, ifr.EvalCtx); err != nil {
+			return nil, err
+		}
+		preFilterer, preFiltererState, err := invertedidx.NewBoundPreFilterer(
+			spec.PreFiltererSpec.Type, exprHelper.Expr)
+		if err != nil {
+			return nil, err
+		}
+		ifr.invertedEval.filterer = preFilterer
+		ifr.invertedEval.preFilterState = append(ifr.invertedEval.preFilterState, preFiltererState)
+	}
+	// TODO(sumeer): for expressions that only involve unions, and the output
+	// does not need to be in key-order, we should incrementally output after
+	// de-duping. It will reduce the container memory/disk by 2x.
+
+	// Prepare inverted evaluator for later evaluation.
+	ifr.invertedEval.init()
 
 	return ifr, nil
 }
@@ -306,9 +320,8 @@ func (ifr *invertedFilterer) outputStatsToTrace() {
 	if !ok {
 		return
 	}
-	if sp := opentracing.SpanFromContext(ifr.Ctx); sp != nil {
-		tracing.SetSpanStats(
-			sp,
+	if sp := tracing.SpanFromContext(ifr.Ctx); sp != nil {
+		sp.SetSpanStats(
 			&InvertedFiltererStats{
 				InputStats:       is,
 				MaxAllocatedMem:  ifr.MemMonitor.MaximumBytes(),
@@ -316,18 +329,6 @@ func (ifr *invertedFilterer) outputStatsToTrace() {
 			},
 		)
 	}
-}
-
-func (ifr *invertedFilterer) generateMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
-	if tfs := execinfra.GetLeafTxnFinalState(ctx, ifr.FlowCtx.Txn); tfs != nil {
-		return []execinfrapb.ProducerMetadata{{LeafTxnFinalState: tfs}}
-	}
-	return nil
-}
-
-// DrainMeta is part of the MetadataSource interface.
-func (ifr *invertedFilterer) DrainMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
-	return ifr.generateMeta(ctx)
 }
 
 // ChildCount is part of the execinfra.OpNode interface.

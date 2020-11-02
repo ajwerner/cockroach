@@ -76,7 +76,7 @@ func (n *dropIndexNode) startExec(params runParams) error {
 	telemetry.Inc(sqltelemetry.SchemaChangeDropCounter("index"))
 
 	if n.n.Concurrently {
-		params.p.SendClientNotice(
+		params.p.BufferClientNotice(
 			params.ctx,
 			pgnotice.Newf("CONCURRENTLY is not required as all indexes are dropped concurrently"),
 		)
@@ -158,19 +158,15 @@ func (n *dropIndexNode) dropShardColumnAndConstraint(
 	tableDesc.AddColumnMutation(shardColDesc, descpb.DescriptorMutation_DROP)
 	for i := range tableDesc.Columns {
 		if tableDesc.Columns[i].ID == shardColDesc.ID {
-			tmp := tableDesc.Columns[:0]
-			for j, col := range tableDesc.Columns {
-				if i == j {
-					continue
-				}
-				tmp = append(tmp, col)
-			}
-			tableDesc.Columns = tmp
+			// Note the third slice parameter which will force a copy of the backing
+			// array if the column being removed is not the last column.
+			tableDesc.Columns = append(tableDesc.Columns[:i:i],
+				tableDesc.Columns[i+1:]...)
 			break
 		}
 	}
 
-	if err := tableDesc.AllocateIDs(); err != nil {
+	if err := tableDesc.AllocateIDs(params.ctx); err != nil {
 		return err
 	}
 	mutationID := tableDesc.ClusterVersion.NextMutationID
@@ -498,7 +494,11 @@ func (p *planner) dropIndexByName(
 		}
 	}
 	if !found {
-		return fmt.Errorf("index %q in the middle of being added, try again later", idxName)
+		return pgerror.Newf(
+			pgcode.ObjectNotInPrerequisiteState,
+			"index %q in the middle of being added, try again later",
+			idxName,
+		)
 	}
 
 	if err := p.removeIndexComment(ctx, tableDesc.ID, idx.ID); err != nil {
@@ -514,7 +514,7 @@ func (p *planner) dropIndexByName(
 	if err := p.writeSchemaChange(ctx, tableDesc, mutationID, jobDesc); err != nil {
 		return err
 	}
-	p.SendClientNotice(
+	p.BufferClientNotice(
 		ctx,
 		errors.WithHint(
 			pgnotice.Newf("the data for dropped indexes is reclaimed asynchronously"),
@@ -537,7 +537,7 @@ func (p *planner) dropIndexByName(
 			User                string
 			MutationID          uint32
 			CascadeDroppedViews []string
-		}{tn.FQString(), string(idxName), jobDesc, p.SessionData().User, uint32(mutationID),
+		}{tn.FQString(), string(idxName), jobDesc, p.User().Normalized(), uint32(mutationID),
 			droppedViews},
 	)
 }

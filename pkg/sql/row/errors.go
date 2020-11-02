@@ -95,12 +95,12 @@ func NewUniquenessConstraintViolationError(
 			"duplicate key value: decoding err=%s", err)
 	}
 
-	return pgerror.Newf(pgcode.UniqueViolation,
+	return pgerror.WithConstraintName(pgerror.Newf(pgcode.UniqueViolation,
 		"duplicate key value (%s)=(%s) violates unique constraint %q",
 		strings.Join(names, ","),
 		strings.Join(values, ","),
 		index.Name,
-	)
+	), index.Name)
 }
 
 // NewLockNotAvailableError creates an error that represents an inability to
@@ -231,3 +231,5 @@ func DecodeRowInfo(
 	}
 	return index, names, values, nil
 }
+
+func (f *singleKVFetcher) close(context.Context) {}

@@ -23,7 +23,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
@@ -87,7 +86,7 @@ func (p *planner) createDatabase(
 		return nil, false, err
 	}
 
-	desc := dbdesc.NewInitial(id, string(database.Name), p.SessionData().User)
+	desc := dbdesc.NewInitial(id, string(database.Name), p.SessionData().User())
 	if err := p.createDescriptorWithID(ctx, dKey.Key(p.ExecCfg().Codec), id, desc, nil, jobDesc); err != nil {
 		return nil, true, err
 	}
@@ -163,7 +162,7 @@ func (p *planner) createDescriptorWithID(
 		}
 	case *tabledesc.Mutable:
 		isTable = true
-		if err := desc.ValidateTable(); err != nil {
+		if err := desc.ValidateTable(ctx); err != nil {
 			return err
 		}
 		if err := p.Descriptors().AddUncommittedDescriptor(mutDesc); err != nil {
@@ -173,12 +172,8 @@ func (p *planner) createDescriptorWithID(
 		if err := desc.Validate(); err != nil {
 			return err
 		}
-		if p.Descriptors().DatabaseLeasingUnsupported() {
-			p.Descriptors().AddUncommittedDatabaseDeprecated(desc.Name, desc.ID, descs.DBCreated)
-		} else {
-			if err := p.Descriptors().AddUncommittedDescriptor(mutDesc); err != nil {
-				return err
-			}
+		if err := p.Descriptors().AddUncommittedDescriptor(mutDesc); err != nil {
+			return err
 		}
 	case *schemadesc.Mutable:
 		if err := p.Descriptors().AddUncommittedDescriptor(mutDesc); err != nil {

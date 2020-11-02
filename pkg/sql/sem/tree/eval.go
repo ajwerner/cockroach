@@ -31,8 +31,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -380,6 +382,24 @@ func ArrayContains(ctx *EvalContext, haystack *DArray, needles *DArray) (*DBool,
 		}
 	}
 	return DBoolTrue, nil
+}
+
+// JSONExistsAny return true if any value in dArray is exist in the json
+func JSONExistsAny(_ *EvalContext, json DJSON, dArray *DArray) (*DBool, error) {
+	// TODO(justin): this can be optimized.
+	for _, k := range dArray.Array {
+		if k == DNull {
+			continue
+		}
+		e, err := json.JSON.Exists(string(MustBeDString(k)))
+		if err != nil {
+			return nil, err
+		}
+		if e {
+			return DBoolTrue, nil
+		}
+	}
+	return DBoolFalse, nil
 }
 
 func initArrayToArrayConcatenation() {
@@ -2398,21 +2418,8 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 		&CmpOp{
 			LeftType:  types.Jsonb,
 			RightType: types.StringArray,
-			Fn: func(_ *EvalContext, left Datum, right Datum) (Datum, error) {
-				// TODO(justin): this can be optimized.
-				for _, k := range MustBeDArray(right).Array {
-					if k == DNull {
-						continue
-					}
-					e, err := left.(*DJSON).JSON.Exists(string(MustBeDString(k)))
-					if err != nil {
-						return nil, err
-					}
-					if e {
-						return DBoolTrue, nil
-					}
-				}
-				return DBoolFalse, nil
+			Fn: func(ctx *EvalContext, left Datum, right Datum) (Datum, error) {
+				return JSONExistsAny(ctx, MustBeDJSON(left), MustBeDArray(right))
 			},
 			Volatility: VolatilityImmutable,
 		},
@@ -3027,8 +3034,9 @@ type EvalSessionAccessor interface {
 // interface only work on the gateway node (i.e. not from
 // distributed processors).
 type ClientNoticeSender interface {
-	// SendClientNotice sends a notice out-of-band to the client.
-	SendClientNotice(ctx context.Context, notice error)
+	// BufferClientNotice buffers the notice to send to the client.
+	// This is flushed before the connection is closed.
+	BufferClientNotice(ctx context.Context, notice pgnotice.Notice)
 }
 
 // InternalExecutor is a subset of sqlutil.InternalExecutor (which, in turn, is
@@ -3107,11 +3115,16 @@ type SequenceOperators interface {
 type TenantOperator interface {
 	// CreateTenant attempts to install a new tenant in the system. It returns
 	// an error if the tenant already exists.
-	CreateTenant(ctx context.Context, tenantID uint64, tenantInfo []byte) error
+	CreateTenant(ctx context.Context, tenantID uint64) error
 
 	// DestroyTenant attempts to uninstall an existing tenant from the system.
 	// It returns an error if the tenant does not exist.
 	DestroyTenant(ctx context.Context, tenantID uint64) error
+
+	// GCTenant attempts to garbage collect a DROP tenant from the system. Upon
+	// success it also removes the tenant record.
+	// It returns an error if the tenant does not exist.
+	GCTenant(ctx context.Context, tenantID uint64) error
 }
 
 // EvalContextTestingKnobs contains test knobs.
@@ -3287,11 +3300,13 @@ func MakeTestingEvalContext(st *cluster.Settings) EvalContext {
 // EvalContext so do not start or close the memory monitor.
 func MakeTestingEvalContextWithMon(st *cluster.Settings, monitor *mon.BytesMonitor) EvalContext {
 	ctx := EvalContext{
-		Codec:       keys.SystemSQLCodec,
-		Txn:         &kv.Txn{},
-		SessionData: &sessiondata.SessionData{VectorizeMode: sessiondata.VectorizeOn},
-		Settings:    st,
-		NodeID:      base.TestingIDContainer,
+		Codec: keys.SystemSQLCodec,
+		Txn:   &kv.Txn{},
+		SessionData: &sessiondata.SessionData{SessionData: sessiondatapb.SessionData{
+			VectorizeMode: sessiondatapb.VectorizeOn,
+		}},
+		Settings: st,
+		NodeID:   base.TestingIDContainer,
 	}
 	monitor.Start(context.Background(), nil /* pool */, mon.MakeStandaloneBudget(math.MaxInt64))
 	ctx.Mon = monitor
@@ -3487,10 +3502,7 @@ func (ctx *EvalContext) SetStmtTimestamp(ts time.Time) {
 
 // GetLocation returns the session timezone.
 func (ctx *EvalContext) GetLocation() *time.Location {
-	if ctx.SessionData == nil || ctx.SessionData.DataConversion.Location == nil {
-		return time.UTC
-	}
-	return ctx.SessionData.DataConversion.Location
+	return ctx.SessionData.GetLocation()
 }
 
 // Ctx returns the session's context.
@@ -3609,7 +3621,7 @@ func (expr *CaseExpr) Eval(ctx *EvalContext) (Datum, error) {
 // pgSignatureRegexp matches a Postgres function type signature, capturing the
 // name of the function into group 1.
 // e.g. function(a, b, c) or function( a )
-var pgSignatureRegexp = regexp.MustCompile(`^\s*([\w\.]+)\s*\((?:(?:\s*\w+\s*,)*\s*\w+)?\s*\)\s*$`)
+var pgSignatureRegexp = regexp.MustCompile(`^\s*([\w\."]+)\s*\((?:(?:\s*[\w"]+\s*,)*\s*[\w"]+)?\s*\)\s*$`)
 
 // regTypeInfo contains details on a pg_catalog table that has a reg* type.
 type regTypeInfo struct {

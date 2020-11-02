@@ -158,6 +158,50 @@ var testCases = []testCase{
 		},
 	},
 	{
+		name: "Protect - unlimited bytes",
+		ops: []op{
+			protectOp{spans: tableSpans(42)},
+			funcOp(func(ctx context.Context, t *testing.T, tCtx *testContext) {
+				_, err := tCtx.tc.ServerConn(0).Exec("SET CLUSTER SETTING kv.protectedts.max_bytes = $1", 0)
+				require.NoError(t, err)
+			}),
+			protectOp{
+				spans: append(tableSpans(1, 2),
+					func() roachpb.Span {
+						s := tableSpan(3)
+						s.EndKey = append(s.EndKey, bytes.Repeat([]byte{'a'}, 2<<20 /* 2 MiB */)...)
+						return s
+					}()),
+			},
+			protectOp{
+				spans: tableSpans(1, 2),
+			},
+		},
+	},
+	{
+		name: "Protect - unlimited spans",
+		ops: []op{
+			protectOp{spans: tableSpans(42)},
+			funcOp(func(ctx context.Context, t *testing.T, tCtx *testContext) {
+				_, err := tCtx.tc.ServerConn(0).Exec("SET CLUSTER SETTING kv.protectedts.max_spans = $1", 0)
+				require.NoError(t, err)
+			}),
+			protectOp{
+				spans: func() []roachpb.Span {
+					const lotsOfSpans = 1 << 15
+					spans := make([]roachpb.Span, lotsOfSpans)
+					for i := 0; i < lotsOfSpans; i++ {
+						spans[i] = tableSpan(uint32(i))
+					}
+					return spans
+				}(),
+			},
+			protectOp{
+				spans: tableSpans(1, 2),
+			},
+		},
+	},
+	{
 		name: "GetRecord - does not exist",
 		ops: []op{
 			funcOp(func(ctx context.Context, t *testing.T, tCtx *testContext) {
@@ -447,7 +491,7 @@ func TestCorruptData(t *testing.T) {
 		ie := tc.Server(0).InternalExecutor().(sqlutil.InternalExecutor)
 		affected, err := ie.ExecEx(
 			ctx, "corrupt-data", nil, /* txn */
-			sessiondata.InternalExecutorOverride{User: security.NodeUser},
+			sessiondata.InternalExecutorOverride{User: security.NodeUserName()},
 			"UPDATE system.protected_ts_records SET spans = $1 WHERE id = $2",
 			[]byte("junk"), rec.ID.String())
 		require.NoError(t, err)
@@ -497,7 +541,7 @@ func TestCorruptData(t *testing.T) {
 		ie := tc.Server(0).InternalExecutor().(sqlutil.InternalExecutor)
 		affected, err := ie.ExecEx(
 			ctx, "corrupt-data", nil, /* txn */
-			sessiondata.InternalExecutorOverride{User: security.NodeUser},
+			sessiondata.InternalExecutorOverride{User: security.NodeUserName()},
 			"UPDATE system.protected_ts_records SET ts = $1 WHERE id = $2",
 			d.String(), rec.ID.String())
 		require.NoError(t, err)

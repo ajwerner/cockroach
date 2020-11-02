@@ -29,6 +29,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/build"
+	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/security/securitytest"
@@ -105,7 +106,10 @@ func createTestCerts(certsDir string) (cleanup func() error) {
 	}
 
 	for _, a := range assets {
-		securitytest.RestrictedCopy(nil, a, certsDir, filepath.Base(a))
+		_, err := securitytest.RestrictedCopy(a, certsDir, filepath.Base(a))
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	return func() error {
@@ -155,7 +159,7 @@ func newCLITest(params cliTestParams) cliTest {
 		log.Infof(context.Background(), "SQL listener at %s", c.ServingSQLAddr())
 	}
 
-	baseCfg.User = security.NodeUser
+	baseCfg.User = security.NodeUserName()
 
 	// Ensure that CLI error messages and anything meant for the
 	// original stderr is redirected to stdout, where it can be
@@ -299,31 +303,16 @@ func captureOutput(f func()) (out string, err error) {
 	return
 }
 
-func isSQLCommand(args []string) bool {
-	if len(args) == 0 {
-		return false
+func isSQLCommand(args []string) (bool, error) {
+	cmd, _, err := cockroachCmd.Find(args)
+	if err != nil {
+		return false, err
 	}
-	switch args[0] {
-	case "sql", "dump", "workload", "nodelocal", "userfile", "statement-diag":
-		return true
-	case "node":
-		if len(args) == 1 {
-			return false
-		}
-		switch args[1] {
-		case "status", "ls":
-			return true
-		default:
-			return false
-		}
-	case "debug":
-		if len(args) < 3 {
-			return false
-		}
-		return args[1] == "doctor" && args[2] == "cluster"
-	default:
-		return false
+	// We use --echo-sql as a marker of SQL-only commands.
+	if f := flagSetForCmd(cmd).Lookup(cliflags.EchoSQL.Name); f != nil {
+		return true, nil
 	}
+	return false, nil
 }
 
 func (c cliTest) RunWithArgs(origArgs []string) {
@@ -333,7 +322,9 @@ func (c cliTest) RunWithArgs(origArgs []string) {
 		args := append([]string(nil), origArgs[:1]...)
 		if c.TestServer != nil {
 			addr := c.ServingRPCAddr()
-			if isSQLCommand(origArgs) {
+			if isSQL, err := isSQLCommand(origArgs); err != nil {
+				return err
+			} else if isSQL {
 				addr = c.ServingSQLAddr()
 			}
 			h, p, err := net.SplitHostPort(addr)
@@ -487,18 +478,18 @@ func Example_demo() {
 	// 123
 	// 123
 	// demo startrek -e show databases
-	// database_name
-	// defaultdb
-	// postgres
-	// startrek
-	// system
+	// database_name	owner
+	// defaultdb	root
+	// postgres	root
+	// startrek	demo
+	// system	node
 	// demo startrek -e show databases --format=table
-	//   database_name
-	// -----------------
-	//   defaultdb
-	//   postgres
-	//   startrek
-	//   system
+	//   database_name | owner
+	// ----------------+--------
+	//   defaultdb     | root
+	//   postgres      | root
+	//   startrek      | demo
+	//   system        | node
 	// (4 rows)
 	// demo -e CREATE USER test WITH PASSWORD 'testpass'
 	// CREATE ROLE
@@ -559,11 +550,11 @@ func Example_sql() {
 	// x	y
 	// 42	69
 	// sql --execute=show databases
-	// database_name
-	// defaultdb
-	// postgres
-	// system
-	// t
+	// database_name	owner
+	// defaultdb	root
+	// postgres	root
+	// system	node
+	// t	root
 	// sql -e select 1 as "1"; select 2 as "2"
 	// 1
 	// 1
@@ -638,7 +629,7 @@ func Example_sql_format() {
 	// INSERT 1
 	// sql -e select * from t.times
 	// bare	withtz
-	// 2016-01-25 10:10:10+00:00	2016-01-25 15:10:10+00:00
+	// 2016-01-25 10:10:10+00:00:00	2016-01-25 15:10:10+00:00:00
 }
 
 func Example_sql_column_labels() {
@@ -1374,16 +1365,18 @@ func Example_misc_table() {
 	//     hai
 	// (1 row)
 	// sql --format=table -e explain select s, 'foo' from t.t
-	//     tree    |     field     | description
-	// ------------+---------------+--------------
-	//             | distribution  | full
-	//             | vectorized    | false
-	//   render    |               |
-	//    └── scan |               |
-	//             | missing stats |
-	//             | table         | t@primary
-	//             | spans         | FULL SCAN
-	// (7 rows)
+	//            info
+	// --------------------------
+	//   distribution: full
+	//   vectorized: false
+	//
+	//   • render
+	//   │
+	//   └── • scan
+	//         missing stats
+	//         table: t@primary
+	//         spans: FULL SCAN
+	// (9 rows)
 }
 
 func Example_cert() {
@@ -1400,8 +1393,7 @@ func Example_cert() {
 	// cert create-client Ομηρος
 	// cert create-client 0foo
 	// cert create-client ,foo
-	// ERROR: failed to generate client certificate and key: username ",foo" invalid
-	// SQLSTATE: 42602
+	// ERROR: failed to generate client certificate and key: username is invalid
 	// HINT: Usernames are case insensitive, must start with a letter, digit or underscore, may contain letters, digits, dashes, periods, or underscores, and must not exceed 63 characters.
 }
 
@@ -1426,6 +1418,7 @@ Available Commands:
 
   nodelocal         upload and delete nodelocal files
   userfile          upload, list and delete user scoped files
+  import            import a db or table from a local PGDUMP or MYSQLDUMP file
   demo              open a demo sql shell
   gen               generate auxiliary files
   version           output version information
@@ -2059,4 +2052,76 @@ func Example_dump_no_visible_columns() {
 	// dump defaultdb
 	// CREATE TABLE public.t (FAMILY "primary" (rowid)
 	// );
+}
+
+// Example_read_from_file tests the -f parameter.
+// The input file contains a mix of client-side and
+// server-side commands to ensure that both are supported with -f.
+func Example_read_from_file() {
+	c := newCLITest(cliTestParams{})
+	defer c.cleanup()
+
+	c.RunWithArgs([]string{"sql", "-e", "select 1", "-f", "testdata/inputfile.sql"})
+	c.RunWithArgs([]string{"sql", "-f", "testdata/inputfile.sql"})
+
+	// Output:
+	// sql -e select 1 -f testdata/inputfile.sql
+	// ERROR: unsupported combination: --execute and --file
+	// sql -f testdata/inputfile.sql
+	// SET
+	// CREATE TABLE
+	// > INSERT INTO test(s) VALUES ('hello'), ('world');
+	// INSERT 2
+	// > SELECT * FROM test;
+	// s
+	// hello
+	// world
+	// > SELECT undefined;
+	// ERROR: column "undefined" does not exist
+	// SQLSTATE: 42703
+	// ERROR: column "undefined" does not exist
+	// SQLSTATE: 42703
+}
+
+// Example_includes tests the \i command.
+func Example_includes() {
+	c := newCLITest(cliTestParams{})
+	defer c.cleanup()
+
+	c.RunWithArgs([]string{"sql", "-f", "testdata/i_twolevels1.sql"})
+	c.RunWithArgs([]string{"sql", "-f", "testdata/i_multiline.sql"})
+	c.RunWithArgs([]string{"sql", "-f", "testdata/i_stopmiddle.sql"})
+	c.RunWithArgs([]string{"sql", "-f", "testdata/i_maxrecursion.sql"})
+
+	// Output:
+	// sql -f testdata/i_twolevels1.sql
+	// > SELECT 123;
+	// ?column?
+	// 123
+	// > SELECT 789;
+	// ?column?
+	// 789
+	// ?column?
+	// 456
+	// sql -f testdata/i_multiline.sql
+	// ERROR: at or near "\": syntax error
+	// SQLSTATE: 42601
+	// DETAIL: source SQL:
+	// SELECT -- incomplete statement, \i invalid
+	// \i testdata/i_twolevels2.sql
+	// ^
+	// HINT: try \h SELECT
+	// ERROR: at or near "\": syntax error
+	// SQLSTATE: 42601
+	// DETAIL: source SQL:
+	// SELECT -- incomplete statement, \i invalid
+	// \i testdata/i_twolevels2.sql
+	// ^
+	// HINT: try \h SELECT
+	// sql -f testdata/i_stopmiddle.sql
+	// ?column?
+	// 123
+	// sql -f testdata/i_maxrecursion.sql
+	// \i: too many recursion levels (max 10)
+	// ERROR: testdata/i_maxrecursion.sql: testdata/i_maxrecursion.sql: testdata/i_maxrecursion.sql: testdata/i_maxrecursion.sql: testdata/i_maxrecursion.sql: testdata/i_maxrecursion.sql: testdata/i_maxrecursion.sql: testdata/i_maxrecursion.sql: testdata/i_maxrecursion.sql: testdata/i_maxrecursion.sql: \i: too many recursion levels (max 10)
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -191,8 +192,8 @@ type DummyClientNoticeSender struct{}
 
 var _ tree.ClientNoticeSender = &DummyClientNoticeSender{}
 
-// SendClientNotice is part of the tree.ClientNoticeSender interface.
-func (c *DummyClientNoticeSender) SendClientNotice(context.Context, error) {}
+// BufferClientNotice is part of the tree.ClientNoticeSender interface.
+func (c *DummyClientNoticeSender) BufferClientNotice(context.Context, pgnotice.Notice) {}
 
 // DummyTenantOperator implements the tree.TenantOperator interface.
 type DummyTenantOperator struct{}
@@ -203,11 +204,16 @@ var errEvalTenant = pgerror.New(pgcode.ScalarOperationCannotRunWithoutFullSessio
 	"cannot evaluate tenant operation in this context")
 
 // CreateTenant is part of the tree.TenantOperator interface.
-func (c *DummyTenantOperator) CreateTenant(_ context.Context, _ uint64, _ []byte) error {
+func (c *DummyTenantOperator) CreateTenant(_ context.Context, _ uint64) error {
 	return errors.WithStack(errEvalTenant)
 }
 
 // DestroyTenant is part of the tree.TenantOperator interface.
 func (c *DummyTenantOperator) DestroyTenant(_ context.Context, _ uint64) error {
+	return errors.WithStack(errEvalTenant)
+}
+
+// GCTenant is part of the tree.TenantOperator interface.
+func (c *DummyTenantOperator) GCTenant(_ context.Context, _ uint64) error {
 	return errors.WithStack(errEvalTenant)
 }

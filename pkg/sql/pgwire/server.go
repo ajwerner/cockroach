@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -29,7 +30,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
@@ -193,7 +193,7 @@ type ServerMetrics struct {
 	BytesOutCount  *metric.Counter
 	Conns          *metric.Gauge
 	NewConns       *metric.Counter
-	ConnMemMetrics sql.MemoryMetrics
+	ConnMemMetrics sql.BaseMemoryMetrics
 	SQLMemMetrics  sql.MemoryMetrics
 }
 
@@ -205,7 +205,7 @@ func makeServerMetrics(
 		BytesOutCount:  metric.NewCounter(MetaBytesOut),
 		Conns:          metric.NewGauge(MetaConns),
 		NewConns:       metric.NewCounter(MetaNewConns),
-		ConnMemMetrics: sql.MakeMemMetrics("conns", histogramWindow),
+		ConnMemMetrics: sql.MakeBaseMemMetrics("conns", histogramWindow),
 		SQLMemMetrics:  sqlMemMetrics,
 	}
 }
@@ -240,8 +240,14 @@ func MakeServer(
 	}
 	server.sqlMemoryPool = mon.NewMonitor("sql",
 		mon.MemoryResource,
-		server.metrics.SQLMemMetrics.CurBytesCount,
-		server.metrics.SQLMemMetrics.MaxBytesHist,
+		// Note that we don't report metrics on this monitor. The reason for this is
+		// that we report metrics on the sum of all the child monitors of this pool.
+		// This monitor is the "main sql" monitor. It's a child of the root memory
+		// monitor. Its children are the sql monitors for each new connection. The
+		// sum of those children, plus the extra memory in the "conn" monitor below,
+		// is more than enough metrics information about the monitors.
+		nil, /* curCount */
+		nil, /* maxHist */
 		0, noteworthySQLMemoryUsageBytes, st)
 	server.sqlMemoryPool.Start(context.Background(), parentMemoryMonitor, mon.BoundAccount{})
 	server.SQLServer = sql.NewServer(executorConfig, server.sqlMemoryPool)
@@ -512,12 +518,7 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn, socketType Socket
 	if version == versionCancel {
 		// The cancel message is rather peculiar: it is sent without
 		// authentication, always over an unencrypted channel.
-		//
-		// Since we don't support this, close the door in the client's
-		// face. Make a note of that use in telemetry.
-		telemetry.Inc(sqltelemetry.CancelRequestCounter)
-		_ = conn.Close()
-		return nil
+		return handleCancel(conn)
 	}
 
 	// If the server is shutting down, terminate the connection early.
@@ -546,6 +547,14 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn, socketType Socket
 	switch version {
 	case version30:
 		// Normal SQL connection. Proceed normally below.
+
+	case versionCancel:
+		// The PostgreSQL protocol definition says that cancel payloads
+		// must be sent *prior to upgrading the connection to use TLS*.
+		// Yet, we've found clients in the wild that send the cancel
+		// after the TLS handshake, for example at
+		// https://github.com/cockroachlabs/support/issues/600.
+		return handleCancel(conn)
 
 	default:
 		// We don't know this protocol.
@@ -590,6 +599,14 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn, socketType Socket
 	return nil
 }
 
+func handleCancel(conn net.Conn) error {
+	// Since we don't support this, close the door in the client's
+	// face. Make a note of that use in telemetry.
+	telemetry.Inc(sqltelemetry.CancelRequestCounter)
+	_ = conn.Close()
+	return nil
+}
+
 // parseClientProvidedSessionParameters reads the incoming k/v pairs
 // in the startup message into a sql.SessionArgs struct.
 func parseClientProvidedSessionParameters(
@@ -623,8 +640,11 @@ func parseClientProvidedSessionParameters(
 		// Load the parameter.
 		switch key {
 		case "user":
-			// Unicode-normalize and case-fold the username.
-			args.User = tree.Name(value).Normalize()
+			// In CockroachDB SQL, unlike in PostgreSQL, usernames are
+			// case-insensitive. Therefore we need to normalize the username
+			// here, so that further lookups for authentication have the correct
+			// identifier.
+			args.User, _ = security.MakeSQLUsernameFromUserInput(value, security.UsernameValidation)
 
 		case "results_buffer_size":
 			if args.ConnResultsBufferSize, err = humanizeutil.ParseBytes(value); err != nil {

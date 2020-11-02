@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
@@ -42,7 +43,7 @@ func TestMysqldumpDataReader(t *testing.T) {
 	files := getMysqldumpTestdata(t)
 
 	ctx := context.Background()
-	table := descForTable(t, `CREATE TABLE simple (i INT PRIMARY KEY, s text, b bytea)`, 10, 20, NoFKs)
+	table := descForTable(ctx, t, `CREATE TABLE simple (i INT PRIMARY KEY, s text, b bytea)`, 10, 20, NoFKs)
 	tables := map[string]*execinfrapb.ReadImportDataSpec_ImportTable{"simple": {Desc: table.TableDesc()}}
 
 	kvCh := make(chan row.KVBatch, 10)
@@ -117,7 +118,7 @@ func readMysqlCreateFrom(
 	}
 	defer f.Close()
 
-	tbl, err := readMysqlCreateTable(context.Background(), f, testEvalCtx, nil, id, expectedParent, name, fks, map[descpb.ID]int64{})
+	tbl, err := readMysqlCreateTable(context.Background(), f, testEvalCtx, nil, id, expectedParent, name, fks, map[descpb.ID]int64{}, security.RootUserName())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,11 +128,12 @@ func readMysqlCreateFrom(
 func TestMysqldumpSchemaReader(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	ctx := context.Background()
 
 	files := getMysqldumpTestdata(t)
 
-	simpleTable := descForTable(t, readFile(t, `simple.cockroach-schema.sql`), expectedParent, 52, NoFKs)
-	referencedSimple := descForTable(t, readFile(t, `simple.cockroach-schema.sql`), expectedParent, 52, NoFKs)
+	simpleTable := descForTable(ctx, t, readFile(t, `simple.cockroach-schema.sql`), expectedParent, 52, NoFKs)
+	referencedSimple := descForTable(ctx, t, readFile(t, `simple.cockroach-schema.sql`), expectedParent, 52, NoFKs)
 	fks := fkHandler{
 		allowed: true,
 		resolver: fkResolver(map[string]*tabledesc.Mutable{
@@ -146,14 +148,14 @@ func TestMysqldumpSchemaReader(t *testing.T) {
 	})
 
 	t.Run("second", func(t *testing.T) {
-		secondTable := descForTable(t, readFile(t, `second.cockroach-schema.sql`), expectedParent, 53, fks)
+		secondTable := descForTable(ctx, t, readFile(t, `second.cockroach-schema.sql`), expectedParent, 53, fks)
 		expected := secondTable
 		got := readMysqlCreateFrom(t, files.second, "", 53, fks)
 		compareTables(t, expected.TableDesc(), got)
 	})
 
 	t.Run("everything", func(t *testing.T) {
-		expected := descForTable(t, readFile(t, `everything.cockroach-schema.sql`), expectedParent, 53, NoFKs)
+		expected := descForTable(ctx, t, readFile(t, `everything.cockroach-schema.sql`), expectedParent, 53, NoFKs)
 		got := readMysqlCreateFrom(t, files.everything, "", 53, NoFKs)
 		compareTables(t, expected.TableDesc(), got)
 	})
@@ -166,7 +168,7 @@ func TestMysqldumpSchemaReader(t *testing.T) {
 
 	t.Run("third-in-multi", func(t *testing.T) {
 		skip := fkHandler{allowed: true, skip: true, resolver: make(fkResolver)}
-		expected := descForTable(t, readFile(t, `third.cockroach-schema.sql`), expectedParent, 52, skip)
+		expected := descForTable(ctx, t, readFile(t, `third.cockroach-schema.sql`), expectedParent, 52, skip)
 		got := readMysqlCreateFrom(t, files.wholeDB, "third", 51, skip)
 		compareTables(t, expected.TableDesc(), got)
 	})

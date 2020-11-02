@@ -16,7 +16,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/lex"
+	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -837,6 +837,17 @@ func (sc *SemaContext) checkFunctionUsage(expr *FuncExpr, def *FunctionDefinitio
 	return nil
 }
 
+// NewContextDependentOpsNotAllowedError creates an error for the case when
+// context-dependent operators are not allowed in the given context.
+func NewContextDependentOpsNotAllowedError(context string) error {
+	// The code FeatureNotSupported is a bit misleading here,
+	// because we probably can't support the feature at all. However
+	// this error code matches PostgreSQL's in the same conditions.
+	return pgerror.Newf(pgcode.FeatureNotSupported,
+		"context-dependent operators are not allowed in %s", context,
+	)
+}
+
 // checkVolatility checks whether an operator with the given volatility is
 // allowed in the current context.
 func (sc *SemaContext) checkVolatility(v Volatility) error {
@@ -854,13 +865,7 @@ func (sc *SemaContext) checkVolatility(v Volatility) error {
 		}
 	case VolatilityStable:
 		if sc.Properties.required.rejectFlags&RejectStableOperators != 0 {
-			// The code FeatureNotSupported is a bit misleading here,
-			// because we probably can't support the feature at all. However
-			// this error code matches PostgreSQL's in the same conditions.
-			return pgerror.Newf(pgcode.FeatureNotSupported,
-				"context-dependent operators are not allowed in %s",
-				sc.Properties.required.context,
-			)
+			return NewContextDependentOpsNotAllowedError(sc.Properties.required.context)
 		}
 	}
 	return nil
@@ -1414,7 +1419,7 @@ func (expr *Tuple) TypeCheck(
 	if len(expr.Labels) > 0 {
 		labels = make([]string, len(expr.Labels))
 		for i := range expr.Labels {
-			labels[i] = lex.NormalizeName(expr.Labels[i])
+			labels[i] = lexbase.NormalizeName(expr.Labels[i])
 		}
 	}
 	expr.typ = types.MakeLabeledTuple(contents, labels)

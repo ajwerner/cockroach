@@ -13,7 +13,6 @@ import (
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
-	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -358,9 +357,10 @@ func descriptorsMatchingTargets(
 			if !found {
 				return ret, doesNotExistErr
 			}
-			tableDesc := descI.(catalog.TableDescriptor)
-			// If tableDesc is nil, then we resolved a type instead, so error out.
-			if tableDesc == nil {
+			tableDesc, isTable := descI.(catalog.TableDescriptor)
+			// If the type assertion didn't work, then we resolved a type instead, so
+			// error out.
+			if !isTable {
 				return ret, doesNotExistErr
 			}
 
@@ -699,7 +699,7 @@ func loadAllDescs(
 		ctx,
 		func(ctx context.Context, txn *kv.Txn) (err error) {
 			txn.SetFixedTimestamp(ctx, asOf)
-			allDescs, err = catalogkv.GetAllDescriptors(ctx, txn, keys.SystemSQLCodec)
+			allDescs, err = catalogkv.GetAllDescriptors(ctx, txn, keys.SystemSQLCodec, true /* validate */)
 			return err
 		}); err != nil {
 		return nil, err
@@ -759,10 +759,7 @@ func fullClusterTargets(
 	fullClusterDescs := make([]catalog.Descriptor, 0, len(allDescs))
 	fullClusterDBs := make([]*dbdesc.Immutable, 0)
 
-	systemTablesToBackup := make(map[string]struct{}, len(fullClusterSystemTables))
-	for _, tableName := range fullClusterSystemTables {
-		systemTablesToBackup[tableName] = struct{}{}
-	}
+	systemTablesToBackup := getSystemTablesToIncludeInClusterBackup()
 
 	for _, desc := range allDescs {
 		switch desc := desc.(type) {
@@ -835,7 +832,7 @@ func CheckObjectExists(
 
 func fullClusterTargetsRestore(
 	allDescs []catalog.Descriptor, lastBackupManifest BackupManifest,
-) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, []jobspb.RestoreDetails_Tenant, error) {
+) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, []descpb.TenantInfo, error) {
 	fullClusterDescs, fullClusterDBs, err := fullClusterTargets(allDescs)
 	if err != nil {
 		return nil, nil, nil, err
@@ -854,10 +851,7 @@ func fullClusterTargetsRestore(
 	}
 
 	// Restore all tenants during full-cluster restore.
-	var tenants []jobspb.RestoreDetails_Tenant
-	for _, tenant := range lastBackupManifest.Tenants {
-		tenants = append(tenants, jobspb.RestoreDetails_Tenant{ID: tenant.ID, Info: tenant.Info})
-	}
+	tenants := lastBackupManifest.Tenants
 
 	return filteredDescs, filteredDBs, tenants, nil
 }
@@ -869,7 +863,7 @@ func selectTargets(
 	targets tree.TargetList,
 	descriptorCoverage tree.DescriptorCoverage,
 	asOf hlc.Timestamp,
-) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, []jobspb.RestoreDetails_Tenant, error) {
+) ([]catalog.Descriptor, []catalog.DatabaseDescriptor, []descpb.TenantInfo, error) {
 	allDescs, lastBackupManifest := loadSQLDescsFromBackupsAtTime(backupManifests, asOf)
 
 	if descriptorCoverage == tree.AllDescriptors {
@@ -881,7 +875,7 @@ func selectTargets(
 			// TODO(dt): for now it is zero-or-one but when that changes, we should
 			// either keep it sorted or build a set here.
 			if tenant.ID == targets.Tenant.ToUint64() {
-				return nil, nil, []jobspb.RestoreDetails_Tenant{{ID: tenant.ID, Info: tenant.Info}}, nil
+				return nil, nil, []descpb.TenantInfo{tenant}, nil
 			}
 		}
 		return nil, nil, nil, errors.Errorf("tenant %d not in backup", targets.Tenant.ToUint64())

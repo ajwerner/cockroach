@@ -51,6 +51,7 @@ func initCLIDefaults() {
 	setDemoContextDefaults()
 	setStmtDiagContextDefaults()
 	setAuthContextDefaults()
+	setImportContextDefaults()
 
 	initPreFlagsDefaults()
 
@@ -195,7 +196,7 @@ func setCliContextDefaults() {
 	cliCtx.allowUnencryptedClientPassword = false
 }
 
-// sqlCtx captures the command-line parameters of the `sql` command.
+// sqlCtx captures the configuration of the `sql` command.
 // See below for defaults.
 var sqlCtx = struct {
 	*cliContext
@@ -204,7 +205,13 @@ var sqlCtx = struct {
 	setStmts statementsValue
 
 	// execStmts is a list of statements to execute.
+	// Only valid if inputFile is empty.
 	execStmts statementsValue
+
+	// inputFile is the file to read from.
+	// If empty, os.Stdin is used.
+	// Only valid if execStmts is empty.
+	inputFile string
 
 	// repeatDelay indicates that the execStmts should be "watched"
 	// at the specified time interval. Zero disables
@@ -229,6 +236,22 @@ var sqlCtx = struct {
 
 	// Determines whether to display server execution timings in the CLI.
 	enableServerExecutionTimings bool
+
+	// Determine whether to show raw durations.
+	verboseTimings bool
+
+	// Determines whether to stop the client upon encountering an error.
+	errExit bool
+
+	// Determines whether to perform client-side syntax checking.
+	checkSyntax bool
+
+	// autoTrace, when non-empty, encloses the executed statements
+	// by suitable SET TRACING and SHOW TRACE FOR SESSION statements.
+	autoTrace string
+
+	// The string used to produce the value of fullPrompt.
+	customPromptPattern string
 }{cliContext: &cliCtx}
 
 // setSQLContextDefaults set the default values in sqlCtx.  This
@@ -237,12 +260,18 @@ var sqlCtx = struct {
 func setSQLContextDefaults() {
 	sqlCtx.setStmts = nil
 	sqlCtx.execStmts = nil
+	sqlCtx.inputFile = ""
 	sqlCtx.repeatDelay = 0
 	sqlCtx.safeUpdates = false
 	sqlCtx.showTimes = false
 	sqlCtx.debugMode = false
 	sqlCtx.echo = false
 	sqlCtx.enableServerExecutionTimings = false
+	sqlCtx.verboseTimings = false
+	sqlCtx.errExit = false
+	sqlCtx.checkSyntax = false
+	sqlCtx.autoTrace = ""
+	sqlCtx.customPromptPattern = defaultPromptPattern
 }
 
 // zipCtx captures the command-line parameters of the `zip` command.
@@ -535,6 +564,17 @@ var stmtDiagCtx struct {
 
 func setStmtDiagContextDefaults() {
 	stmtDiagCtx.all = false
+}
+
+// importCtx captures the command-line parameters of the 'import' command.
+var importCtx struct {
+	maxRowSize      int
+	skipForeignKeys bool
+}
+
+func setImportContextDefaults() {
+	importCtx.maxRowSize = 512 * (1 << 10) // 512 KiB
+	importCtx.skipForeignKeys = false
 }
 
 // GetServerCfgStores provides direct public access to the StoreSpecList inside

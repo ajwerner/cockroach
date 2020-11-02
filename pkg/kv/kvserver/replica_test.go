@@ -55,10 +55,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/limit"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -66,16 +66,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
+	"github.com/cockroachdb/redact"
 	"github.com/gogo/protobuf/proto"
 	"github.com/kr/pretty"
-	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
 	"go.etcd.io/etcd/raft/tracker"
 	"golang.org/x/net/trace"
-	"golang.org/x/time/rate"
 )
 
 // allSpans is a SpanSet that covers *everything* for use in tests that don't
@@ -228,8 +227,7 @@ func (tc *testContext) StartWithStoreConfigAndVersion(
 		tc.gossip = gossip.NewTest(1, rpcContext, server, stopper, metric.NewRegistry(), cfg.DefaultZoneConfig)
 	}
 	if tc.engine == nil {
-		tc.engine = storage.NewInMem(context.Background(), storage.DefaultStorageEngine,
-			roachpb.Attributes{Attrs: []string{"dc1", "mem"}}, 1<<20)
+		tc.engine = storage.NewInMem(context.Background(), roachpb.Attributes{Attrs: []string{"dc1", "mem"}}, 1<<20)
 		stopper.AddCloser(tc.engine)
 	}
 	if tc.transport == nil {
@@ -1428,36 +1426,108 @@ func TestReplicaLeaseRejectUnknownRaftNodeID(t *testing.T) {
 	}
 }
 
-// TestReplicaDrainLease makes sure that no new leases are granted when
-// the Store is draining.
+// Test that draining nodes only take the lease if they're the leader.
 func TestReplicaDrainLease(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	tc := testContext{}
-	stopper := stop.NewStopper()
-	defer stopper.Stop(context.Background())
-	tc.Start(t, stopper)
-
-	// Acquire initial lease.
 	ctx := context.Background()
-	status, pErr := tc.repl.redirectOnOrAcquireLease(ctx)
-	if pErr != nil {
-		t.Fatal(pErr)
+	clusterArgs := base.TestClusterArgs{
+		ReplicationMode: base.ReplicationManual,
+		ServerArgs: base.TestServerArgs{
+			Knobs: base.TestingKnobs{
+				NodeLiveness: NodeLivenessTestingKnobs{
+					// This test waits for an epoch-based lease to expire, so we're setting the
+					// liveness duration as low as possible while still keeping the test stable.
+					LivenessDuration: 2000 * time.Millisecond,
+					RenewalDuration:  1000 * time.Millisecond,
+				},
+				Store: &StoreTestingKnobs{
+					// We eliminate clock offsets in order to eliminate the stasis period of
+					// leases. Otherwise we'd need to make leases longer.
+					MaxOffset: time.Nanosecond,
+				},
+			},
+		},
 	}
+	tc := serverutils.StartNewTestCluster(t, 2, clusterArgs)
+	defer tc.Stopper().Stop(ctx)
+	rngKey := tc.ScratchRange(t)
+	tc.AddReplicasOrFatal(t, rngKey, tc.Target(1))
 
-	tc.store.SetDraining(true, nil /* reporter */)
-	tc.repl.mu.Lock()
-	pErr = <-tc.repl.requestLeaseLocked(ctx, status).C()
-	tc.repl.mu.Unlock()
-	_, ok := pErr.GetDetail().(*roachpb.NotLeaseHolderError)
-	if !ok {
-		t.Fatalf("expected NotLeaseHolderError, not %v", pErr)
-	}
-	tc.store.SetDraining(false, nil /* reporter */)
-	// Newly undrained, leases work again.
-	if _, pErr := tc.repl.redirectOnOrAcquireLease(ctx); pErr != nil {
-		t.Fatal(pErr)
-	}
+	s1 := tc.Server(0)
+	s2 := tc.Server(1)
+	store1, err := s1.GetStores().(*Stores).GetStore(s1.GetFirstStoreID())
+	require.NoError(t, err)
+	store2, err := s2.GetStores().(*Stores).GetStore(s2.GetFirstStoreID())
+	require.NoError(t, err)
+
+	rd := tc.LookupRangeOrFatal(t, rngKey)
+	r1, err := store1.GetReplica(rd.RangeID)
+	require.NoError(t, err)
+	status := r1.currentLeaseStatus(ctx)
+	require.True(t, status.Lease.OwnedBy(store1.StoreID()), "someone else got the lease: %s", status)
+	// We expect the lease to be valid, but don't check that because, under race, it might have
+	// expired already.
+
+	// Stop n1's heartbeats and wait for the lease to expire.
+
+	log.Infof(ctx, "test: suspending heartbeats for n1")
+	cleanup := s1.NodeLiveness().(*NodeLiveness).PauseAllHeartbeatsForTest()
+	defer cleanup()
+
+	require.NoError(t, err)
+	testutils.SucceedsSoon(t, func() error {
+		status := r1.currentLeaseStatus(ctx)
+		require.True(t, status.Lease.OwnedBy(store1.StoreID()), "someone else got the lease: %s", status)
+		if status.State == kvserverpb.LeaseState_VALID {
+			return errors.New("lease still valid")
+		}
+		// We need to wait for the stasis state to pass too; during stasis other
+		// replicas can't take the lease.
+		if status.State == kvserverpb.LeaseState_STASIS {
+			return errors.New("lease still in stasis")
+		}
+		return nil
+	})
+
+	require.Equal(t, r1.RaftStatus().Lead, uint64(r1.ReplicaID()),
+		"expected leadership to still be on the first replica")
+
+	// Mark the stores as draining. We'll then start checking how acquiring leases
+	// behaves while draining.
+	store1.draining.Store(true)
+	store2.draining.Store(true)
+
+	r2, err := store2.GetReplica(rd.RangeID)
+	require.NoError(t, err)
+	// Check that a draining replica that's not the leader does NOT take the
+	// lease.
+	_, pErr := r2.redirectOnOrAcquireLease(ctx)
+	require.NotNil(t, pErr)
+	require.IsType(t, &roachpb.NotLeaseHolderError{}, pErr.GetDetail())
+
+	// Now transfer the leadership from r1 to r2 and check that r1 can now acquire
+	// the lease.
+
+	// Initiate the leadership transfer.
+	r1.mu.Lock()
+	r1.mu.internalRaftGroup.TransferLeader(uint64(r2.ReplicaID()))
+	r1.mu.Unlock()
+	// Run the range through the Raft scheduler, otherwise the leadership messages
+	// doesn't get sent because the range is quiesced.
+	store1.EnqueueRaftUpdateCheck(r1.RangeID)
+
+	// Wait for the leadership transfer to happen.
+	testutils.SucceedsSoon(t, func() error {
+		if r2.RaftStatus().SoftState.RaftState != raft.StateLeader {
+			return errors.Newf("r1 not yet leader")
+		}
+		return nil
+	})
+
+	// Check that r2 can now acquire the lease.
+	_, pErr = r2.redirectOnOrAcquireLease(ctx)
+	require.NoError(t, pErr.GoError())
 }
 
 // TestReplicaGossipFirstRange verifies that the first range gossips its
@@ -2849,7 +2919,7 @@ func TestReplicaTSCacheForwardsIntentTS(t *testing.T) {
 			if _, pErr := tc.SendWrappedWith(roachpb.Header{Txn: txnOld}, &pArgs); pErr != nil {
 				t.Fatal(pErr)
 			}
-			iter := tc.engine.NewIterator(storage.IterOptions{Prefix: true})
+			iter := tc.engine.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{Prefix: true})
 			defer iter.Close()
 			mvccKey := storage.MakeMVCCMetadataKey(key)
 			iter.SeekGE(mvccKey)
@@ -6280,7 +6350,7 @@ func TestMerge(t *testing.T) {
 	if err := resp.Value.GetProto(&actual); err != nil {
 		t.Fatal(err)
 	}
-	if !proto.Equal(&actual, &expected) {
+	if !actual.Equal(&expected) {
 		t.Errorf("Get did not return expected value: %v != %v", actual, expected)
 	}
 }
@@ -9936,7 +10006,9 @@ func TestReplicaServersideRefreshes(t *testing.T) {
 		// Regression test for #31870.
 		snap := tc.engine.NewSnapshot()
 		defer snap.Close()
-		res, err := tc.repl.sha512(context.Background(), *tc.repl.Desc(), tc.engine, nil /* diff */, roachpb.ChecksumMode_CHECK_FULL, limit.NewLimiter(rate.Inf))
+		res, err := tc.repl.sha512(context.Background(), *tc.repl.Desc(), tc.engine,
+			nil /* diff */, roachpb.ChecksumMode_CHECK_FULL,
+			quotapool.NewRateLimiter("ConsistencyQueue", quotapool.Limit(math.MaxFloat64), math.MaxInt64))
 		if err != nil {
 			return hlc.Timestamp{}, err
 		}
@@ -12485,11 +12557,11 @@ func TestLaterReproposalsDoNotReuseContext(t *testing.T) {
 
 	// Hold the RaftLock to encourage the reproposals to occur in the same batch.
 	tc.repl.RaftLock()
-	sp := tracer.StartRootSpan("replica send", logtags.FromContext(ctx), tracing.RecordableSpan)
-	tracedCtx := opentracing.ContextWithSpan(ctx, sp)
+	sp := tracer.StartSpan("replica send", tracing.WithCtxLogTags(ctx), tracing.WithForceRealSpan())
+	tracedCtx := tracing.ContextWithSpan(ctx, sp)
 	// Go out of our way to enable recording so that expensive logging is enabled
 	// for this context.
-	tracing.StartRecording(sp, tracing.SingleNodeRecording)
+	sp.StartRecording(tracing.SingleNodeRecording)
 	ch, _, _, pErr := tc.repl.evalAndPropose(tracedCtx, &ba, allSpansGuard(), &lease)
 	if pErr != nil {
 		t.Fatal(pErr)
@@ -12972,12 +13044,13 @@ func TestRangeUnavailableMessage(t *testing.T) {
 		1: IsLiveMapEntry{IsLive: true},
 	}
 	rs := raft.Status{}
-	act := rangeUnavailableMessage(desc, lm, &rs, &ba, dur)
-	const exp = `have been waiting 60.00s for proposing command RequestLease [/Min,/Min).
+	var s redact.StringBuilder
+	rangeUnavailableMessage(&s, desc, lm, &rs, &ba, dur)
+	const exp = `have been waiting 60.00s for proposing command RequestLease [‹/Min›,‹/Min›).
 This range is likely unavailable.
 Please submit this message to Cockroach Labs support along with the following information:
 
-Descriptor:  r10:{-} [(n1,s10):1, (n2,s20):2, next=3, gen=0]
+Descriptor:  r10:‹{a-z}› [(n1,s10):1, (n2,s20):2, next=3, gen=0]
 Live:        (n1,s10):1
 Non-live:    (n2,s20):2
 Raft Status: {"id":"0","term":0,"vote":"0","commit":0,"lead":"0","raftState":"StateFollower","applied":0,"progress":{},"leadtransferee":"0"}
@@ -12989,8 +13062,9 @@ support contract. Otherwise, please open an issue at:
 
   https://github.com/cockroachdb/cockroach/issues/new/choose
 `
-
-	require.Equal(t, exp, act)
+	act := s.RedactableString()
+	t.Log(act)
+	require.EqualValues(t, exp, act)
 }
 
 // Test that, depending on the request's ClientRangeInfo, descriptor and lease

@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
@@ -636,17 +635,35 @@ func (s *ScanPrivate) IsLocking() bool {
 // UsesPartialIndex returns true if the ScanPrivate indicates a scan over a
 // partial index.
 func (s *ScanPrivate) UsesPartialIndex(md *opt.Metadata) bool {
+	if s.Index == cat.PrimaryIndex {
+		// Primary index is always non-partial; skip making the catalog calls.
+		return false
+	}
 	_, isPartialIndex := md.Table(s.Table).Index(s.Index).Predicate()
 	return isPartialIndex
 }
 
 // PartialIndexPredicate returns the FiltersExpr representing the predicate of
 // the partial index that the scan uses. If the scan does not use a partial
-// index, this function panics. UsesPartialIndex should be called first to
-// determine if the scan operates over a partial index.
+// index or if a partial index predicate was not built for this index, this
+// function panics. UsesPartialIndex should be called first to determine if the
+// scan operates over a partial index.
 func (s *ScanPrivate) PartialIndexPredicate(md *opt.Metadata) FiltersExpr {
 	tabMeta := md.TableMeta(s.Table)
-	return PartialIndexPredicate(tabMeta, s.Index)
+	p, ok := tabMeta.PartialIndexPredicates[s.Index]
+	if !ok {
+		// A partial index predicate expression was not built for the
+		// partial index.
+		panic(errors.AssertionFailedf("partial index predicate not found for %s", tabMeta.Table.Index(s.Index).Name()))
+	}
+	return *p.(*FiltersExpr)
+}
+
+// UsesPartialIndex returns true if the the LookupJoinPrivate looks-up via a
+// partial index.
+func (lj *LookupJoinPrivate) UsesPartialIndex(md *opt.Metadata) bool {
+	_, isPartialIndex := md.Table(lj.Table).Index(lj.Index).Predicate()
+	return isPartialIndex
 }
 
 // NeedResults returns true if the mutation operator can return the rows that
@@ -748,20 +765,7 @@ func (prj *ProjectExpr) initUnexportedFields(mem *Memo) {
 			// This does not necessarily hold for "composite" types like decimals or
 			// collated strings. For example if d is a decimal, d::TEXT can have
 			// different values for equal values of d, like 1 and 1.0.
-			//
-			// We only add the FD if composite types are not involved.
-			//
-			// TODO(radu): add an allowlist of expressions/operators that are ok, like
-			// arithmetic.
-			composite := false
-			for i, ok := from.Next(0); ok; i, ok = from.Next(i + 1) {
-				typ := mem.Metadata().ColumnMeta(i).Type
-				if colinfo.HasCompositeKeyEncoding(typ) {
-					composite = true
-					break
-				}
-			}
-			if !composite {
+			if !CanBeCompositeSensitive(mem.Metadata(), item.Element) {
 				prj.internalFuncDeps.AddSynthesizedCol(from, item.Col)
 			}
 		}
@@ -897,18 +901,6 @@ func OutputColumnIsAlwaysNull(e RelExpr, col opt.ColumnID) bool {
 	return false
 }
 
-// PartialIndexPredicate returns the FiltersExpr representing the partial index
-// predicate at the given index ordinal. If the index at the ordinal is not a
-// partial index, this function panics. cat.Index.Predicate should be used first
-// to determine if the index is a partial index.
-//
-// Note that TableMeta.PartialIndexPredicates is not initialized for mutation
-// queries. This function will panic in the context of a mutation.
-func PartialIndexPredicate(tabMeta *opt.TableMeta, ord cat.IndexOrdinal) FiltersExpr {
-	p := tabMeta.PartialIndexPredicates[ord]
-	return *p.(*FiltersExpr)
-}
-
 // FKCascades stores metadata necessary for building cascading queries.
 type FKCascades []FKCascade
 
@@ -923,17 +915,18 @@ type FKCascade struct {
 	Builder CascadeBuilder
 
 	// WithID identifies the buffer for the mutation input in the original
-	// expression tree.
+	// expression tree. 0 if the cascade does not require input.
 	WithID opt.WithID
 
 	// OldValues are column IDs from the mutation input that correspond to the
 	// old values of the modified rows. The list maps 1-to-1 to foreign key
-	// columns.
+	// columns. Empty if the cascade does not require input.
 	OldValues opt.ColList
 
 	// NewValues are column IDs from the mutation input that correspond to the
 	// new values of the modified rows. The list maps 1-to-1 to foreign key columns.
-	// It is empty if the mutation is a deletion.
+	// It is empty if the mutation is a deletion. Empty if the cascade does not
+	// require input.
 	NewValues opt.ColList
 }
 
@@ -953,6 +946,9 @@ type CascadeBuilder interface {
 	//
 	// The method does not mutate any captured state; it is ok to call Build
 	// concurrently (e.g. if the plan it originates from is cached and reused).
+	//
+	// Some cascades (delete fast path) don't require an input binding. In that
+	// case binding is 0, bindingProps is nil, and oldValues/newValues are empty.
 	//
 	// Note: factory is always *norm.Factory; it is an interface{} only to avoid
 	// circular package dependencies.

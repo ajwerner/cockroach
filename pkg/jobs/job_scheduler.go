@@ -88,7 +88,8 @@ SELECT
 FROM %s S
 WHERE next_run < %s
 ORDER BY random()
-%s`, env.SystemJobsTableName(), CreatedByScheduledJobs,
+%s 
+FOR UPDATE`, env.SystemJobsTableName(), CreatedByScheduledJobs,
 		StatusSucceeded, StatusCanceled, StatusFailed,
 		env.ScheduledJobsTableName(), env.NowExpr(), limitClause)
 }
@@ -115,6 +116,7 @@ const recheckRunningAfter = 1 * time.Minute
 type loopStats struct {
 	rescheduleWait, rescheduleSkip, started int64
 	readyToRun, jobsRunning                 int64
+	malformed                               int64
 }
 
 func (s *loopStats) updateMetrics(m *SchedulerMetrics) {
@@ -123,6 +125,7 @@ func (s *loopStats) updateMetrics(m *SchedulerMetrics) {
 	m.NumRunning.Update(s.jobsRunning)
 	m.RescheduleSkip.Update(s.rescheduleSkip)
 	m.RescheduleWait.Update(s.rescheduleWait)
+	m.NumMalformedSchedules.Update(s.malformed)
 }
 
 func (s *jobScheduler) processSchedule(
@@ -173,8 +176,9 @@ func (s *jobScheduler) processSchedule(
 
 	// Grab job executor and execute the job.
 	log.Infof(ctx,
-		"Starting job for schedule %d (%s); next run scheduled for %s",
-		schedule.ScheduleID(), schedule.ScheduleLabel(), schedule.NextRun())
+		"Starting job for schedule %d (%q); scheduled to run at %s; next run scheduled for %s",
+		schedule.ScheduleID(), schedule.ScheduleLabel(),
+		schedule.ScheduledRunTime(), schedule.NextRun())
 
 	if err := executor.ExecuteJob(ctx, s.JobExecutionConfig, s.env, schedule, txn); err != nil {
 		return errors.Wrapf(err, "executing schedule %d", schedule.ScheduleID())
@@ -213,7 +217,7 @@ func newLoopStats(
 		readyToRunStmt, numRunningJobsStmt)
 
 	datums, err := ex.QueryRowEx(ctx, "scheduler-stats", txn,
-		sessiondata.InternalExecutorOverride{User: security.NodeUser},
+		sessiondata.InternalExecutorOverride{User: security.NodeUserName()},
 		statsStmt)
 	if err != nil {
 		return nil, err
@@ -279,7 +283,7 @@ func (s *jobScheduler) executeSchedules(
 	rows, cols, err := s.InternalExecutor.QueryWithCols(
 		ctx, "find-scheduled-jobs",
 		txn,
-		sessiondata.InternalExecutorOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		findSchedulesStmt)
 
 	if err != nil {
@@ -289,7 +293,7 @@ func (s *jobScheduler) executeSchedules(
 	for _, row := range rows {
 		schedule, numRunning, err := s.unmarshalScheduledJob(row, cols)
 		if err != nil {
-			s.metrics.NumBadSchedules.Inc(1)
+			stats.malformed++
 			log.Errorf(ctx, "error parsing schedule: %+v", row)
 			continue
 		}
@@ -297,12 +301,12 @@ func (s *jobScheduler) executeSchedules(
 		if processErr := withSavePoint(ctx, txn, func() error {
 			return s.processSchedule(ctx, schedule, numRunning, stats, txn)
 		}); processErr != nil {
-			if errors.HasType(err, (*savePointError)(nil)) {
+			if errors.HasType(processErr, (*savePointError)(nil)) {
 				return errors.Wrapf(err, "savepoint error for schedule %d", schedule.ScheduleID())
 			}
 
 			// Failed to process schedule.
-			s.metrics.NumBadSchedules.Inc(1)
+			s.metrics.NumErrSchedules.Inc(1)
 			log.Errorf(ctx,
 				"error processing schedule %d: %+v", schedule.ScheduleID(), processErr)
 

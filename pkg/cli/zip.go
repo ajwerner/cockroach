@@ -12,6 +12,7 @@ package cli
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -77,6 +78,7 @@ var debugZipTablesPerCluster = []string{
 	"crdb_internal.schema_changes",
 	"crdb_internal.partitions",
 	"crdb_internal.zones",
+	"crdb_internal.invalid_objects",
 }
 
 // Tables collected from each node in a debug zip.
@@ -336,6 +338,17 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		if err := dumpTableDataForZip(z, sqlConn, timeout, base, table, selectClause); err != nil {
 			return errors.Wrapf(err, "fetching %s", table)
+		}
+	}
+
+	{
+		var doctorData bytes.Buffer
+		fmt.Printf("doctor examining cluster...")
+		if err := runClusterDoctor(nil, nil, sqlConn, &doctorData, timeout); err != nil {
+			return err
+		}
+		if err := z.createRawOrError(reportsPrefix+"/doctor.txt", doctorData.Bytes(), err); err != nil {
+			return err
 		}
 	}
 

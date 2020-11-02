@@ -17,6 +17,7 @@ import "gogoproto/gogo.proto";
 import "roachpb/data.proto";
 import "roachpb/io-formats.proto";
 import "sql/catalog/descpb/structured.proto";
+import "sql/catalog/descpb/tenant.proto";
 import "util/hlc/timestamp.proto";
 
 message Lease {
@@ -152,11 +153,7 @@ message RestoreDetails {
   // Like TypeDescs, it does not include existing schema descriptors in the
   // cluster that backed up schemas are remapped to.
   repeated sqlbase.SchemaDescriptor schema_descs = 15;
-  message Tenant {
-    uint64 id = 1 [(gogoproto.customname) = "ID"];
-    bytes info = 2;
-  }
-  repeated Tenant tenants = 13 [(gogoproto.nullable) = false];
+  repeated sqlbase.TenantInfo tenants = 13 [(gogoproto.nullable) = false];
 
   string override_db = 6 [(gogoproto.customname) = "OverrideDB"];
 
@@ -216,6 +213,8 @@ message ImportDetails {
 
   bool prepare_complete = 12;
   bool tables_published = 13;
+
+  bool parse_bundle_schema = 14;
 
   // ProtectedTimestampRecord is the ID of the protected timestamp record
   // corresponding to this job. While the job ought to clean up the record
@@ -494,7 +493,7 @@ message Payload {
   string description = 1;
   // If empty, the description is assumed to be the statement.
   string statement = 16;
-  string username = 2;
+  string username_proto = 2 [(gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/security.SQLUsernameProto"];
   // For consistency with the SQL timestamp type, which has microsecond
   // precision, we avoid the timestamp.Timestamp WKT, which has nanosecond
   // precision, and use microsecond integers directly.

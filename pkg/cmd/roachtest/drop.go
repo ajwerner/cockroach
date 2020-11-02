@@ -37,8 +37,7 @@ func registerDrop(r *testRegistry) {
 		m := newMonitor(ctx, c, c.Range(1, nodes))
 		m.Go(func(ctx context.Context) error {
 			t.WorkerStatus("importing TPCC fixture")
-			c.Run(ctx, c.Node(1), fmt.Sprintf(
-				"./workload fixtures load tpcc --warehouses=%d --db tpcc {pgurl:1}", warehouses))
+			c.Run(ctx, c.Node(1), tpccImportCmd(warehouses))
 
 			// Don't open the DB connection until after the data has been imported.
 			// Otherwise the ALTER TABLE query below might fail to find the
@@ -88,7 +87,7 @@ func registerDrop(r *testRegistry) {
 
 				t.l.Printf("Node %d space used: %s\n", j, humanizeutil.IBytes(int64(size)))
 
-				// Return if the size of the directory is less than 100mb
+				// Return if the size of the directory is less than expected.
 				if size < initDiskSpace {
 					t.Fatalf("Node %d space used: %s less than %s", j, humanizeutil.IBytes(int64(size)),
 						humanizeutil.IBytes(int64(initDiskSpace)))
@@ -160,9 +159,7 @@ func registerDrop(r *testRegistry) {
 
 	warehouses := 100
 	numNodes := 9
-
-	// 1GB
-	initDiskSpace := int(1e9)
+	initDiskSpace := 256 << 20 // 256 MB
 
 	r.Add(testSpec{
 		Name:       fmt.Sprintf("drop/tpcc/w=%d,nodes=%d", warehouses, numNodes),
@@ -175,9 +172,7 @@ func registerDrop(r *testRegistry) {
 			if local {
 				numNodes = 4
 				warehouses = 1
-
-				// 100 MB
-				initDiskSpace = 1e8
+				initDiskSpace = 5 << 20 // 5 MB
 				fmt.Printf("running with w=%d,nodes=%d in local mode\n", warehouses, numNodes)
 			}
 			runDrop(ctx, t, c, warehouses, numNodes, initDiskSpace)

@@ -39,7 +39,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/shuffle"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/gogo/protobuf/proto"
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/require"
 )
@@ -79,22 +78,15 @@ var (
 	}...)
 )
 
-// createTestRocksDBEngine returns a new in-memory RocksDB engine with 1MB of
-// storage capacity.
-func createTestRocksDBEngine() Engine {
-	return newRocksDBInMem(roachpb.Attributes{}, 1<<20)
-}
-
 // createTestPebbleEngine returns a new in-memory Pebble storage engine.
 func createTestPebbleEngine() Engine {
-	return newPebbleInMem(context.Background(), roachpb.Attributes{}, 1<<20)
+	return newPebbleInMem(context.Background(), roachpb.Attributes{}, 1<<20, nil /* settings */)
 }
 
 var mvccEngineImpls = []struct {
 	name   string
 	create func() Engine
 }{
-	{"rocksdb", createTestRocksDBEngine},
 	{"pebble", createTestPebbleEngine},
 }
 
@@ -118,7 +110,7 @@ func (n mvccKeys) Swap(i, j int)      { n[i], n[j] = n[j], n[i] }
 func (n mvccKeys) Less(i, j int) bool { return n[i].Less(n[j]) }
 
 // mvccGetGo is identical to MVCCGet except that it uses mvccGetInternal
-// instead of the C++ Iterator.MVCCGet. It is used to test mvccGetInternal
+// instead of the C++ MVCCIterator.MVCCGet. It is used to test mvccGetInternal
 // which is used by mvccPutInternal to avoid Cgo crossings. Simply using the
 // C++ MVCCGet in mvccPutInternal causes a significant performance hit to
 // conditional put operations.
@@ -129,7 +121,7 @@ func mvccGetGo(
 		return nil, nil, emptyKeyError()
 	}
 
-	iter := reader.NewIterator(IterOptions{Prefix: true})
+	iter := reader.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{Prefix: true})
 	defer iter.Close()
 
 	buf := newGetBuffer()
@@ -874,7 +866,7 @@ func TestMVCCDeleteMissingKey(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Verify nothing is written to the engine.
-			if val, err := engine.Get(mvccKey(testKey1)); err != nil || val != nil {
+			if val, err := engine.MVCCGet(mvccKey(testKey1)); err != nil || val != nil {
 				t.Fatalf("expected no mvcc metadata after delete of a missing key; got %q: %+v", val, err)
 			}
 		})
@@ -1177,7 +1169,7 @@ func TestMVCCGetInconsistent(t *testing.T) {
 	}
 }
 
-// TestMVCCGetProtoInconsistent verifies the behavior of GetProto with
+// TestMVCCGetProtoInconsistent verifies the behavior of MVCCGetProto with
 // consistent set to false.
 func TestMVCCGetProtoInconsistent(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -1326,7 +1318,7 @@ func TestMVCCInvalidateIterator(t *testing.T) {
 
 					{
 						// Seek the iter to a valid position.
-						iter := batch.NewIterator(iterOptions)
+						iter := batch.NewMVCCIterator(MVCCKeyAndIntentsIterKind, iterOptions)
 						iter.SeekGE(MakeMVCCMetadataKey(key))
 						iter.Close()
 					}
@@ -1340,7 +1332,7 @@ func TestMVCCInvalidateIterator(t *testing.T) {
 					case "findSplitKey":
 						_, err = MVCCFindSplitKey(ctx, batch, roachpb.RKeyMin, roachpb.RKeyMax, 64<<20)
 					case "computeStats":
-						iter := batch.NewIterator(iterOptions)
+						iter := batch.NewMVCCIterator(MVCCKeyAndIntentsIterKind, iterOptions)
 						_, err = iter.ComputeStats(roachpb.KeyMin, roachpb.KeyMax, 0)
 						iter.Close()
 					}
@@ -1349,7 +1341,7 @@ func TestMVCCInvalidateIterator(t *testing.T) {
 					}
 
 					// Verify that the iter is invalid.
-					iter := batch.NewIterator(iterOptions)
+					iter := batch.NewMVCCIterator(MVCCKeyAndIntentsIterKind, iterOptions)
 					defer iter.Close()
 					if ok, _ := iter.Valid(); ok {
 						t.Fatalf("iterator should not be valid")
@@ -1401,7 +1393,7 @@ func TestMVCCPutAfterBatchIterCreate(t *testing.T) {
 				ReadTimestamp: hlc.Timestamp{WallTime: 10},
 				MaxTimestamp:  hlc.Timestamp{WallTime: 10},
 			}
-			iter := batch.NewIterator(IterOptions{
+			iter := batch.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{
 				LowerBound: testKey1,
 				UpperBound: testKey5,
 			})
@@ -1874,9 +1866,9 @@ func TestMVCCDeleteRange(t *testing.T) {
 			kvs := []roachpb.KeyValue{}
 			if _, err = MVCCIterate(
 				ctx, engine, keyMin, keyMax, hlc.Timestamp{WallTime: 2}, MVCCScanOptions{Tombstones: true},
-				func(kv roachpb.KeyValue) (bool, error) {
+				func(kv roachpb.KeyValue) error {
 					kvs = append(kvs, kv)
-					return false, nil
+					return nil
 				},
 			); err != nil {
 				t.Fatal(err)
@@ -2586,7 +2578,7 @@ func computeStats(
 	t *testing.T, reader Reader, from, to roachpb.Key, nowNanos int64,
 ) enginepb.MVCCStats {
 	t.Helper()
-	iter := reader.NewIterator(IterOptions{UpperBound: to})
+	iter := reader.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: to})
 	defer iter.Close()
 	s, err := ComputeStatsGo(iter, from, to, nowNanos)
 	if err != nil {
@@ -3477,7 +3469,7 @@ func TestMVCCAbortTxn(t *testing.T) {
 			} else if value != nil {
 				t.Fatalf("expected the value to be empty: %s", value)
 			}
-			if meta, err := engine.Get(mvccKey(testKey1)); err != nil {
+			if meta, err := engine.MVCCGet(mvccKey(testKey1)); err != nil {
 				t.Fatal(err)
 			} else if len(meta) != 0 {
 				t.Fatalf("expected no more MVCCMetadata, got: %s", meta)
@@ -3516,7 +3508,7 @@ func TestMVCCAbortTxnWithPreviousVersion(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if meta, err := engine.Get(mvccKey(testKey1)); err != nil {
+			if meta, err := engine.MVCCGet(mvccKey(testKey1)); err != nil {
 				t.Fatal(err)
 			} else if len(meta) != 0 {
 				t.Fatalf("expected no more MVCCMetadata, got: %s", meta)
@@ -4916,7 +4908,7 @@ func TestMVCCGarbageCollect(t *testing.T) {
 			}
 
 			// Verify aggregated stats match computed stats after GC.
-			iter := engine.NewIterator(IterOptions{UpperBound: roachpb.KeyMax})
+			iter := engine.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: roachpb.KeyMax})
 			defer iter.Close()
 			for _, mvccStatsTest := range mvccStatsTests {
 				t.Run(mvccStatsTest.name, func(t *testing.T) {
@@ -5025,9 +5017,11 @@ type readWriterReturningSeekLTTrackingIterator struct {
 	ReadWriter
 }
 
-// NewIterator injects a seekLTTrackingIterator over the engine's real iterator.
-func (rw *readWriterReturningSeekLTTrackingIterator) NewIterator(opts IterOptions) Iterator {
-	rw.it.Iterator = rw.ReadWriter.NewIterator(opts)
+// NewMVCCIterator injects a seekLTTrackingIterator over the engine's real iterator.
+func (rw *readWriterReturningSeekLTTrackingIterator) NewMVCCIterator(
+	iterKind MVCCIterKind, opts IterOptions,
+) MVCCIterator {
+	rw.it.MVCCIterator = rw.ReadWriter.NewMVCCIterator(iterKind, opts)
 	return &rw.it
 }
 
@@ -5035,12 +5029,12 @@ func (rw *readWriterReturningSeekLTTrackingIterator) NewIterator(opts IterOption
 // called.
 type seekLTTrackingIterator struct {
 	seekLTCalled int
-	Iterator
+	MVCCIterator
 }
 
 func (it *seekLTTrackingIterator) SeekLT(k MVCCKey) {
 	it.seekLTCalled++
-	it.Iterator.SeekLT(k)
+	it.MVCCIterator.SeekLT(k)
 }
 
 // TestMVCCGarbageCollectUsesSeekLTAppropriately ensures that the garbage
@@ -5065,7 +5059,7 @@ func TestMVCCGarbageCollectUsesSeekLTAppropriately(t *testing.T) {
 	engineBatchIteratorSupportsPrev := func(engine Engine) bool {
 		batch := engine.NewBatch()
 		defer batch.Close()
-		it := batch.NewIterator(IterOptions{
+		it := batch.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{
 			UpperBound: keys.UserTableDataMin,
 			LowerBound: keys.MaxKey,
 		})
@@ -5237,12 +5231,52 @@ func TestResolveIntentWithLowerEpoch(t *testing.T) {
 			// Check that the intent was not cleared.
 			metaKey := mvccKey(testKey1)
 			meta := &enginepb.MVCCMetadata{}
-			ok, _, _, err := engine.GetProto(metaKey, meta)
+			ok, _, _, err := engine.MVCCGetProto(metaKey, meta)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !ok {
 				t.Fatal("intent should not be cleared by resolve intent request with lower epoch")
+			}
+		})
+	}
+}
+
+// TestTimeSeriesMVCCStats ensures that merge operations
+// result in an expected increase in timeseries data.
+func TestTimeSeriesMVCCStats(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	for _, engineImpl := range mvccEngineImpls {
+		t.Run(engineImpl.name, func(t *testing.T) {
+			engine := engineImpl.create()
+			defer engine.Close()
+			var ms = enginepb.MVCCStats{}
+
+			// Perform a sequence of merges on the same key
+			// and record the MVCC stats for it.
+			if err := MVCCMerge(ctx, engine, &ms, testKey1, hlc.Timestamp{Logical: 1}, tsvalue1); err != nil {
+				t.Fatal(err)
+			}
+			firstMS := ms
+
+			if err := MVCCMerge(ctx, engine, &ms, testKey1, hlc.Timestamp{Logical: 1}, tsvalue1); err != nil {
+				t.Fatal(err)
+			}
+			secondMS := ms
+
+			// Ensure timeseries metrics increase as expected.
+			expectedMS := firstMS
+			expectedMS.LiveBytes += int64(len(tsvalue1.RawBytes))
+			expectedMS.ValBytes += int64(len(tsvalue1.RawBytes))
+
+			if secondMS.LiveBytes != expectedMS.LiveBytes {
+				t.Fatalf("second merged LiveBytes value %v differed from expected LiveBytes value %v", secondMS.LiveBytes, expectedMS.LiveBytes)
+			}
+			if secondMS.ValBytes != expectedMS.ValBytes {
+				t.Fatalf("second merged ValBytes value %v differed from expected ValBytes value %v", secondMS.LiveBytes, expectedMS.LiveBytes)
 			}
 		})
 	}
@@ -5299,7 +5333,7 @@ func TestMVCCTimeSeriesPartialMerge(t *testing.T) {
 				}
 			}
 
-			if first, second := vals[0], vals[1]; !proto.Equal(first, second) {
+			if first, second := vals[0], vals[1]; !first.Equal(second) {
 				var firstTS, secondTS roachpb.InternalTimeSeriesData
 				if err := first.GetProto(&firstTS); err != nil {
 					t.Fatal(err)

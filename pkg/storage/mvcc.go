@@ -17,6 +17,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -24,10 +25,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -40,6 +44,15 @@ const (
 	// MVCCVersionTimestampSize is the size of the timestamp portion of MVCC
 	// version keys (used to update stats).
 	MVCCVersionTimestampSize int64 = 12
+	// RecommendedMaxOpenFiles is the recommended value for RocksDB's
+	// max_open_files option.
+	RecommendedMaxOpenFiles = 10000
+	// MinimumMaxOpenFiles is the minimum value that RocksDB's max_open_files
+	// option can be set to. While this should be set as high as possible, the
+	// minimum total for a single store node must be under 2048 for Windows
+	// compatibility. See:
+	// https://wpdev.uservoice.com/forums/266908-command-prompt-console-bash-on-ubuntu-on-windo/suggestions/17310124-add-ability-to-change-max-number-of-open-files-for
+	MinimumMaxOpenFiles = 1700
 )
 
 var (
@@ -50,6 +63,23 @@ var (
 	NilKey = MVCCKey{}
 )
 
+var minWALSyncInterval = settings.RegisterDurationSetting(
+	"rocksdb.min_wal_sync_interval",
+	"minimum duration between syncs of the RocksDB WAL",
+	0*time.Millisecond,
+)
+
+var rocksdbConcurrency = envutil.EnvOrDefaultInt(
+	"COCKROACH_ROCKSDB_CONCURRENCY", func() int {
+		// Use up to min(numCPU, 4) threads for background RocksDB compactions per
+		// store.
+		const max = 4
+		if n := runtime.NumCPU(); n <= max {
+			return n
+		}
+		return max
+	}())
+
 // MakeValue returns the inline value.
 func MakeValue(meta enginepb.MVCCMetadata) roachpb.Value {
 	return roachpb.Value{RawBytes: meta.RawBytes}
@@ -59,6 +89,10 @@ func MakeValue(meta enginepb.MVCCMetadata) roachpb.Value {
 // transaction.
 func IsIntentOf(meta *enginepb.MVCCMetadata, txn *roachpb.Transaction) bool {
 	return meta.Txn != nil && txn != nil && meta.Txn.ID == txn.ID
+}
+
+func emptyKeyError() error {
+	return errors.Errorf("attempted access to empty key")
 }
 
 // MVCCKey is a versioned key, distinguished from roachpb.Key with the addition
@@ -232,12 +266,12 @@ func updateStatsForInline(
 }
 
 // updateStatsOnMerge updates metadata stats while merging inlined
-// values. Unfortunately, we're unable to keep accurate stats on merge
-// as the actual details of the merge play out asynchronously during
-// compaction. Instead, we undercount by adding only the size of the
-// value.Bytes byte slice (an estimated 12 bytes for timestamp,
-// included in valSize by caller). These errors are corrected during
-// splits and merges.
+// values. Unfortunately, we're unable to keep accurate stats on merges as the
+// actual details of the merge play out asynchronously during compaction. We
+// actually undercount by only adding the size of the value.RawBytes byte slice
+// (and eliding MVCCVersionTimestampSize, corresponding to the metadata overhead,
+// even for the very "first" write). These errors are corrected during splits and
+// merges.
 func updateStatsOnMerge(key roachpb.Key, valSize, nowNanos int64) enginepb.MVCCStats {
 	var ms enginepb.MVCCStats
 	sys := isSysLocal(key)
@@ -747,6 +781,14 @@ func (opts *MVCCGetOptions) validate() error {
 	return nil
 }
 
+func newMVCCIterator(reader Reader, inlineMeta bool, opts IterOptions) MVCCIterator {
+	iterKind := MVCCKeyAndIntentsIterKind
+	if inlineMeta {
+		iterKind = MVCCKeyIterKind
+	}
+	return reader.NewMVCCIterator(iterKind, opts)
+}
+
 // MVCCGet returns the most recent value for the specified key whose timestamp
 // is less than or equal to the supplied timestamp. If no such value exists, nil
 // is returned instead.
@@ -774,13 +816,17 @@ func (opts *MVCCGetOptions) validate() error {
 func MVCCGet(
 	ctx context.Context, reader Reader, key roachpb.Key, timestamp hlc.Timestamp, opts MVCCGetOptions,
 ) (*roachpb.Value, *roachpb.Intent, error) {
-	iter := reader.NewIterator(IterOptions{Prefix: true})
+	iter := newMVCCIterator(reader, timestamp.IsEmpty(), IterOptions{Prefix: true})
 	defer iter.Close()
 	return mvccGet(ctx, iter, key, timestamp, opts)
 }
 
 func mvccGet(
-	ctx context.Context, iter Iterator, key roachpb.Key, timestamp hlc.Timestamp, opts MVCCGetOptions,
+	ctx context.Context,
+	iter MVCCIterator,
+	key roachpb.Key,
+	timestamp hlc.Timestamp,
+	opts MVCCGetOptions,
 ) (value *roachpb.Value, intent *roachpb.Intent, err error) {
 	if len(key) == 0 {
 		return nil, nil, emptyKeyError()
@@ -790,11 +836,6 @@ func mvccGet(
 	}
 	if err := opts.validate(); err != nil {
 		return nil, nil, err
-	}
-
-	// If the iterator has a specialized implementation, defer to that.
-	if mvccIter, ok := iter.(MVCCIterator); ok && mvccIter.MVCCOpsSpecialized() {
-		return mvccIter.MVCCGet(key, timestamp, opts)
 	}
 
 	mvccScanner := pebbleMVCCScannerPool.Get().(*pebbleMVCCScanner)
@@ -888,7 +929,7 @@ func MVCCGetAsTxn(
 // used by the Blind{Put,ConditionalPut} operations to avoid seeking when the
 // metadata is known not to exist.
 func mvccGetMetadata(
-	iter Iterator, metaKey MVCCKey, meta *enginepb.MVCCMetadata,
+	iter MVCCIterator, metaKey MVCCKey, meta *enginepb.MVCCMetadata,
 ) (ok bool, keyBytes, valBytes int64, err error) {
 	if iter == nil {
 		return false, 0, 0, nil
@@ -946,7 +987,7 @@ const (
 // BenchmarkMVCCConditionalPut_RocksDB/Replace.
 func mvccGetInternal(
 	_ context.Context,
-	iter Iterator,
+	iter MVCCIterator,
 	metaKey MVCCKey,
 	timestamp hlc.Timestamp,
 	consistent bool,
@@ -1198,10 +1239,10 @@ func MVCCPut(
 ) error {
 	// If we're not tracking stats for the key and we're writing a non-versioned
 	// key we can utilize a blind put to avoid reading any existing value.
-	var iter Iterator
+	var iter MVCCIterator
 	blind := ms == nil && timestamp == (hlc.Timestamp{})
 	if !blind {
-		iter = rw.NewIterator(IterOptions{Prefix: true})
+		iter = rw.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{Prefix: true})
 		defer iter.Close()
 	}
 	return mvccPutUsingIter(ctx, rw, iter, ms, key, timestamp, value, txn, nil /* valueFn */)
@@ -1243,7 +1284,7 @@ func MVCCDelete(
 	timestamp hlc.Timestamp,
 	txn *roachpb.Transaction,
 ) error {
-	iter := rw.NewIterator(IterOptions{Prefix: true})
+	iter := newMVCCIterator(rw, timestamp.IsEmpty(), IterOptions{Prefix: true})
 	defer iter.Close()
 
 	return mvccPutUsingIter(ctx, rw, iter, ms, key, timestamp, noValue, txn, nil /* valueFn */)
@@ -1252,13 +1293,13 @@ func MVCCDelete(
 var noValue = roachpb.Value{}
 
 // mvccPutUsingIter sets the value for a specified key using the provided
-// Iterator. The function takes a value and a valueFn, only one of which
+// MVCCIterator. The function takes a value and a valueFn, only one of which
 // should be provided. If the valueFn is nil, value's raw bytes will be set
 // for the key, else the bytes provided by the valueFn will be used.
 func mvccPutUsingIter(
 	ctx context.Context,
 	writer Writer,
-	iter Iterator,
+	iter MVCCIterator,
 	ms *enginepb.MVCCStats,
 	key roachpb.Key,
 	timestamp hlc.Timestamp,
@@ -1288,7 +1329,7 @@ func mvccPutUsingIter(
 // the result of calling valueFn on the data read at readTS.
 func maybeGetValue(
 	ctx context.Context,
-	iter Iterator,
+	iter MVCCIterator,
 	metaKey MVCCKey,
 	value []byte,
 	exists bool,
@@ -1315,6 +1356,35 @@ func maybeGetValue(
 	return valueFn(exVal)
 }
 
+// MVCCScanDecodeKeyValue decodes a key/value pair returned in an MVCCScan
+// "batch" (this is not the RocksDB batch repr format), returning both the
+// key/value and the suffix of data remaining in the batch.
+func MVCCScanDecodeKeyValue(repr []byte) (key MVCCKey, value []byte, orepr []byte, err error) {
+	k, ts, value, orepr, err := enginepb.ScanDecodeKeyValue(repr)
+	return MVCCKey{k, ts}, value, orepr, err
+}
+
+// MVCCScanDecodeKeyValues decodes all key/value pairs returned in one or more
+// MVCCScan "batches" (this is not the RocksDB batch repr format). The provided
+// function is called for each key/value pair.
+func MVCCScanDecodeKeyValues(repr [][]byte, fn func(key MVCCKey, rawBytes []byte) error) error {
+	var k MVCCKey
+	var rawBytes []byte
+	var err error
+	for _, data := range repr {
+		for len(data) > 0 {
+			k, rawBytes, data, err = MVCCScanDecodeKeyValue(data)
+			if err != nil {
+				return err
+			}
+			if err = fn(k, rawBytes); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // replayTransactionalWrite performs a transactional write under the assumption
 // that the transactional write was already executed before. Essentially a replay.
 // Since transactions should be idempotent, we must be particularly careful
@@ -1333,7 +1403,7 @@ func maybeGetValue(
 func replayTransactionalWrite(
 	ctx context.Context,
 	writer Writer,
-	iter Iterator,
+	iter MVCCIterator,
 	meta *enginepb.MVCCMetadata,
 	ms *enginepb.MVCCStats,
 	key roachpb.Key,
@@ -1452,7 +1522,7 @@ func replayTransactionalWrite(
 func mvccPutInternal(
 	ctx context.Context,
 	writer Writer,
-	iter Iterator,
+	iter MVCCIterator,
 	ms *enginepb.MVCCStats,
 	key roachpb.Key,
 	timestamp hlc.Timestamp,
@@ -1855,7 +1925,7 @@ func MVCCIncrement(
 	txn *roachpb.Transaction,
 	inc int64,
 ) (int64, error) {
-	iter := rw.NewIterator(IterOptions{Prefix: true})
+	iter := newMVCCIterator(rw, timestamp.IsEmpty(), IterOptions{Prefix: true})
 	defer iter.Close()
 
 	var int64Val int64
@@ -1927,7 +1997,7 @@ func MVCCConditionalPut(
 	allowIfDoesNotExist CPutMissingBehavior,
 	txn *roachpb.Transaction,
 ) error {
-	iter := rw.NewIterator(IterOptions{Prefix: true})
+	iter := newMVCCIterator(rw, timestamp.IsEmpty(), IterOptions{Prefix: true})
 	defer iter.Close()
 
 	return mvccConditionalPutUsingIter(ctx, rw, iter, ms, key, timestamp, value, expVal, allowIfDoesNotExist, txn)
@@ -1959,7 +2029,7 @@ func MVCCBlindConditionalPut(
 func mvccConditionalPutUsingIter(
 	ctx context.Context,
 	writer Writer,
-	iter Iterator,
+	iter MVCCIterator,
 	ms *enginepb.MVCCStats,
 	key roachpb.Key,
 	timestamp hlc.Timestamp,
@@ -2005,7 +2075,7 @@ func MVCCInitPut(
 	failOnTombstones bool,
 	txn *roachpb.Transaction,
 ) error {
-	iter := rw.NewIterator(IterOptions{Prefix: true})
+	iter := newMVCCIterator(rw, timestamp.IsEmpty(), IterOptions{Prefix: true})
 	defer iter.Close()
 	return mvccInitPutUsingIter(ctx, rw, iter, ms, key, timestamp, value, failOnTombstones, txn)
 }
@@ -2034,7 +2104,7 @@ func MVCCBlindInitPut(
 func mvccInitPutUsingIter(
 	ctx context.Context,
 	rw ReadWriter,
-	iter Iterator,
+	iter MVCCIterator,
 	ms *enginepb.MVCCStats,
 	key roachpb.Key,
 	timestamp hlc.Timestamp,
@@ -2110,7 +2180,7 @@ func MVCCMerge(
 	if err == nil {
 		if err = rw.Merge(metaKey, data); err == nil && ms != nil {
 			ms.Add(updateStatsOnMerge(
-				key, int64(len(rawBytes))+MVCCVersionTimestampSize, timestamp.WallTime))
+				key, int64(len(rawBytes)), timestamp.WallTime))
 		}
 	}
 	buf.release()
@@ -2207,7 +2277,10 @@ func MVCCClearTimeRange(
 	// for deletion, allowing us to quickly skip over swaths of uninteresting
 	// keys, but then use a normal iteration to actually do the delete including
 	// updating the live key stats correctly.
-	it := rw.NewIterator(IterOptions{LowerBound: key, UpperBound: endKey})
+	//
+	// Intents must be seen so that an error can be returned. We never delete an
+	// intent here.
+	it := rw.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{LowerBound: key, UpperBound: endKey})
 	defer it.Close()
 
 	var clearedMetaKey MVCCKey
@@ -2333,7 +2406,7 @@ func MVCCDeleteRange(
 	}
 
 	buf := newPutBuffer()
-	iter := rw.NewIterator(IterOptions{Prefix: true})
+	iter := newMVCCIterator(rw, timestamp.IsEmpty(), IterOptions{Prefix: true})
 
 	for i := range res.KVs {
 		err = mvccPutInternal(
@@ -2359,7 +2432,7 @@ func MVCCDeleteRange(
 
 func mvccScanToBytes(
 	ctx context.Context,
-	iter Iterator,
+	iter MVCCIterator,
 	key, endKey roachpb.Key,
 	timestamp hlc.Timestamp,
 	opts MVCCScanOptions,
@@ -2373,11 +2446,6 @@ func mvccScanToBytes(
 	if opts.MaxKeys < 0 || opts.TargetBytes < 0 {
 		resumeSpan := &roachpb.Span{Key: key, EndKey: endKey}
 		return MVCCScanResult{ResumeSpan: resumeSpan}, nil
-	}
-
-	// If the iterator has a specialized implementation, defer to that.
-	if mvccIter, ok := iter.(MVCCIterator); ok && mvccIter.MVCCOpsSpecialized() {
-		return mvccIter.MVCCScan(key, endKey, timestamp, opts)
 	}
 
 	mvccScanner := pebbleMVCCScannerPool.Get().(*pebbleMVCCScanner)
@@ -2422,11 +2490,11 @@ func mvccScanToBytes(
 	return res, nil
 }
 
-// mvccScanToKvs converts the raw key/value pairs returned by Iterator.MVCCScan
+// mvccScanToKvs converts the raw key/value pairs returned by MVCCIterator.MVCCScan
 // into a slice of roachpb.KeyValues.
 func mvccScanToKvs(
 	ctx context.Context,
-	iter Iterator,
+	iter MVCCIterator,
 	key, endKey roachpb.Key,
 	timestamp hlc.Timestamp,
 	opts MVCCScanOptions,
@@ -2574,7 +2642,7 @@ func MVCCScan(
 	timestamp hlc.Timestamp,
 	opts MVCCScanOptions,
 ) (MVCCScanResult, error) {
-	iter := reader.NewIterator(IterOptions{LowerBound: key, UpperBound: endKey})
+	iter := newMVCCIterator(reader, timestamp.IsEmpty(), IterOptions{LowerBound: key, UpperBound: endKey})
 	defer iter.Close()
 	return mvccScanToKvs(ctx, iter, key, endKey, timestamp, opts)
 }
@@ -2587,7 +2655,7 @@ func MVCCScanToBytes(
 	timestamp hlc.Timestamp,
 	opts MVCCScanOptions,
 ) (MVCCScanResult, error) {
-	iter := reader.NewIterator(IterOptions{LowerBound: key, UpperBound: endKey})
+	iter := newMVCCIterator(reader, timestamp.IsEmpty(), IterOptions{LowerBound: key, UpperBound: endKey})
 	defer iter.Close()
 	return mvccScanToBytes(ctx, iter, key, endKey, timestamp, opts)
 }
@@ -2627,9 +2695,10 @@ func MVCCIterate(
 	key, endKey roachpb.Key,
 	timestamp hlc.Timestamp,
 	opts MVCCScanOptions,
-	f func(roachpb.KeyValue) (bool, error),
+	f func(roachpb.KeyValue) error,
 ) ([]roachpb.Intent, error) {
-	iter := reader.NewIterator(IterOptions{LowerBound: key, UpperBound: endKey})
+	iter := newMVCCIterator(
+		reader, timestamp.IsEmpty(), IterOptions{LowerBound: key, UpperBound: endKey})
 	defer iter.Close()
 
 	var intents []roachpb.Intent
@@ -2652,12 +2721,11 @@ func MVCCIterate(
 		}
 
 		for i := range res.KVs {
-			done, err := f(res.KVs[i])
-			if err != nil {
+			if err := f(res.KVs[i]); err != nil {
+				if iterutil.Done(err) {
+					return intents, nil
+				}
 				return nil, err
-			}
-			if done {
-				return intents, nil
 			}
 		}
 
@@ -2702,7 +2770,7 @@ func MVCCIterate(
 func MVCCResolveWriteIntent(
 	ctx context.Context, rw ReadWriter, ms *enginepb.MVCCStats, intent roachpb.LockUpdate,
 ) (bool, error) {
-	iterAndBuf := GetBufUsingIter(rw.NewIterator(IterOptions{Prefix: true}))
+	iterAndBuf := GetBufUsingIter(rw.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{Prefix: true}))
 	ok, err := MVCCResolveWriteIntentUsingIter(ctx, rw, iterAndBuf, ms, intent)
 	// Using defer would be more convenient, but it is measurably slower.
 	iterAndBuf.Cleanup()
@@ -2730,7 +2798,7 @@ func MVCCResolveWriteIntentUsingIter(
 // unsafeNextVersion positions the iterator at the successor to latestKey. If this value
 // exists and is a version of the same key, returns the UnsafeKey() and UnsafeValue() of that
 // key-value pair along with `true`.
-func unsafeNextVersion(iter Iterator, latestKey MVCCKey) (MVCCKey, []byte, bool, error) {
+func unsafeNextVersion(iter MVCCIterator, latestKey MVCCKey) (MVCCKey, []byte, bool, error) {
 	// Compute the next possible mvcc value for this key.
 	nextKey := latestKey.Next()
 	iter.SeekGE(nextKey)
@@ -2750,7 +2818,7 @@ func unsafeNextVersion(iter Iterator, latestKey MVCCKey) (MVCCKey, []byte, bool,
 func mvccResolveWriteIntent(
 	ctx context.Context,
 	rw ReadWriter,
-	iter Iterator,
+	iter MVCCIterator,
 	ms *enginepb.MVCCStats,
 	intent roachpb.LockUpdate,
 	buf *putBuffer,
@@ -3070,16 +3138,17 @@ func mvccMaybeRewriteIntentHistory(
 // reuse without the callers needing to know the particulars.
 type IterAndBuf struct {
 	buf  *putBuffer
-	iter Iterator
+	iter MVCCIterator
 }
 
-// GetIterAndBuf returns an IterAndBuf for passing into various MVCC* methods.
+// GetIterAndBuf returns an IterAndBuf for passing into various MVCC* methods
+// that need to see intents.
 func GetIterAndBuf(reader Reader, opts IterOptions) IterAndBuf {
-	return GetBufUsingIter(reader.NewIterator(opts))
+	return GetBufUsingIter(reader.NewMVCCIterator(MVCCKeyAndIntentsIterKind, opts))
 }
 
 // GetBufUsingIter returns an IterAndBuf using the supplied iterator.
-func GetBufUsingIter(iter Iterator) IterAndBuf {
+func GetBufUsingIter(iter MVCCIterator) IterAndBuf {
 	return IterAndBuf{
 		buf:  newPutBuffer(),
 		iter: iter,
@@ -3214,7 +3283,7 @@ func MVCCGarbageCollect(
 
 	// Bound the iterator appropriately for the set of keys we'll be garbage
 	// collecting.
-	iter := rw.NewIterator(IterOptions{
+	iter := rw.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{
 		LowerBound: keys[0].Key,
 		UpperBound: keys[len(keys)-1].Key.Next(),
 	})
@@ -3401,7 +3470,7 @@ func MVCCFindSplitKey(
 		key = roachpb.RKey(keys.LocalMax)
 	}
 
-	it := reader.NewIterator(IterOptions{UpperBound: endKey.AsRawKey()})
+	it := reader.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: endKey.AsRawKey()})
 	defer it.Close()
 
 	// We want to avoid splitting at the first key in the range because that
@@ -3511,7 +3580,7 @@ func willOverflow(a, b int64) bool {
 // implemented in c++, so iter.ComputeStats will save several cgo calls per kv
 // processed. (Plus, on equal footing, the c++ implementation is slightly
 // faster.) ComputeStatsGo is here for codepaths that have a pure-go
-// implementation of SimpleIterator.
+// implementation of SimpleMVCCIterator.
 //
 // When optional callbacks are specified, they are invoked for each physical
 // key-value pair (i.e. not for implicit meta records), and iteration is aborted
@@ -3521,7 +3590,7 @@ func willOverflow(a, b int64) bool {
 //
 // This implementation must match engine/db.cc:MVCCComputeStatsInternal.
 func ComputeStatsGo(
-	iter SimpleIterator,
+	iter SimpleMVCCIterator,
 	start, end roachpb.Key,
 	nowNanos int64,
 	callbacks ...func(MVCCKey, []byte) error,
@@ -3696,6 +3765,11 @@ func computeCapacity(path string, maxSizeBytes int64) (roachpb.StoreCapacity, er
 			Available: maxSizeBytes,
 		}, nil
 	}
+	var err error
+	// Eval directory if it is a symbolic links.
+	if dir, err = filepath.EvalSymlinks(dir); err != nil {
+		return roachpb.StoreCapacity{}, err
+	}
 	if err := fileSystemUsage.Get(dir); err != nil {
 		return roachpb.StoreCapacity{}, err
 	}
@@ -3714,7 +3788,7 @@ func computeCapacity(path string, maxSizeBytes int64) (roachpb.StoreCapacity, er
 	// Find the total size of all the files in the r.dir and all its
 	// subdirectories.
 	var totalUsedBytes int64
-	if errOuter := filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
+	if errOuter := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			// This can happen if rocksdb removes files out from under us - just keep
 			// going to get the best estimate we can.
@@ -3774,7 +3848,7 @@ func computeCapacity(path string, maxSizeBytes int64) (roachpb.StoreCapacity, er
 // is not considered a collision and we continue iteration from the next key in
 // the existing data.
 func checkForKeyCollisionsGo(
-	existingIter Iterator, sstData []byte, start, end roachpb.Key,
+	existingIter MVCCIterator, sstData []byte, start, end roachpb.Key,
 ) (enginepb.MVCCStats, error) {
 	var skippedKVStats enginepb.MVCCStats
 	sstIter, err := NewMemSSTIterator(sstData, false)

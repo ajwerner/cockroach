@@ -19,6 +19,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/scheduledjobs"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
@@ -32,17 +34,19 @@ import (
 )
 
 const (
-	optFirstRun              = "first_run"
-	optOnExecFailure         = "on_execution_failure"
-	optOnPreviousRunning     = "on_previous_running"
-	optIgnoreExistingBackups = "ignore_existing_backups"
+	optFirstRun                = "first_run"
+	optOnExecFailure           = "on_execution_failure"
+	optOnPreviousRunning       = "on_previous_running"
+	optIgnoreExistingBackups   = "ignore_existing_backups"
+	optUpdatesLastBackupMetric = "updates_cluster_last_backup_time_metric"
 )
 
 var scheduledBackupOptionExpectValues = map[string]sql.KVStringOptValidate{
-	optFirstRun:              sql.KVStringOptRequireValue,
-	optOnExecFailure:         sql.KVStringOptRequireValue,
-	optOnPreviousRunning:     sql.KVStringOptRequireValue,
-	optIgnoreExistingBackups: sql.KVStringOptRequireNoValue,
+	optFirstRun:                sql.KVStringOptRequireValue,
+	optOnExecFailure:           sql.KVStringOptRequireValue,
+	optOnPreviousRunning:       sql.KVStringOptRequireValue,
+	optIgnoreExistingBackups:   sql.KVStringOptRequireNoValue,
+	optUpdatesLastBackupMetric: sql.KVStringOptRequireNoValue,
 }
 
 // scheduledBackupEval is a representation of tree.ScheduledBackup, prepared
@@ -64,6 +68,7 @@ type scheduledBackupEval struct {
 	// backup statement in the schedule.
 	destination          func() ([]string, error)
 	encryptionPassphrase func() (string, error)
+	kmsURIs              func() ([]string, error)
 }
 
 func parseOnError(onError string, details *jobspb.ScheduleDetails) error {
@@ -242,6 +247,21 @@ func doCreateBackupSchedules(
 		backupNode.Options.EncryptionPassphrase = tree.NewDString(pw)
 	}
 
+	// Evaluate encryption KMS URIs if set.
+	// Only one of encryption passphrase and KMS URI should be set, but this check
+	// is done during backup planning so we do not need to worry about it here.
+	var kmsURIs []string
+	if eval.kmsURIs != nil {
+		kmsURIs, err = eval.kmsURIs()
+		if err != nil {
+			return errors.Wrapf(err, "failed to evaluate backup kms_uri")
+		}
+		for _, kmsURI := range kmsURIs {
+			backupNode.Options.EncryptionKMSURI = append(backupNode.Options.EncryptionKMSURI,
+				tree.NewDString(kmsURI))
+		}
+	}
+
 	// Evaluate required backup destinations.
 	destinations, err := eval.destination()
 	if err != nil {
@@ -283,6 +303,17 @@ func doCreateBackupSchedules(
 		}
 	}
 
+	_, updateMetricOnSuccess := scheduleOptions[optUpdatesLastBackupMetric]
+
+	if updateMetricOnSuccess {
+		// NB: as of 20.2, schedule creation requires admin so this is duplicative
+		// but in the future we might relax so you can schedule anything that you
+		// can backup, but then this cluster-wide metric should be admin-only.
+		if err := p.RequireAdminRole(ctx, optUpdatesLastBackupMetric); err != nil {
+			return err
+		}
+	}
+
 	evalCtx := &p.ExtendedEvalContext().EvalContext
 	firstRun, err := scheduleFirstRun(evalCtx, scheduleOptions)
 	if err != nil {
@@ -303,7 +334,7 @@ func doCreateBackupSchedules(
 		backupNode.AppendToLatest = true
 		inc, err := makeBackupSchedule(
 			env, p.User(), scheduleLabel,
-			incRecurrence, details, unpauseOnSuccessID, backupNode)
+			incRecurrence, details, unpauseOnSuccessID, updateMetricOnSuccess, backupNode)
 
 		if err != nil {
 			return err
@@ -315,7 +346,8 @@ func doCreateBackupSchedules(
 		if err := inc.Create(ctx, ex, p.ExtendedEvalContext().Txn); err != nil {
 			return err
 		}
-		if err := emitSchedule(inc, tree.AsString(backupNode), resultsCh); err != nil {
+		if err := emitSchedule(inc, backupNode, destinations, nil /* incrementalFrom */, kmsURIs,
+			resultsCh); err != nil {
 			return err
 		}
 		unpauseOnSuccessID = inc.ScheduleID()
@@ -323,10 +355,9 @@ func doCreateBackupSchedules(
 
 	// Create FULL backup schedule.
 	backupNode.AppendToLatest = false
-	fullBackupStmt := tree.AsString(backupNode)
 	full, err := makeBackupSchedule(
 		env, p.User(), scheduleLabel,
-		fullRecurrence, details, unpauseOnSuccessID, backupNode)
+		fullRecurrence, details, unpauseOnSuccessID, updateMetricOnSuccess, backupNode)
 	if err != nil {
 		return err
 	}
@@ -346,7 +377,9 @@ func doCreateBackupSchedules(
 	if err := full.Create(ctx, ex, p.ExtendedEvalContext().Txn); err != nil {
 		return err
 	}
-	return emitSchedule(full, fullBackupStmt, resultsCh)
+	collectScheduledBackupTelemetry(incRecurrence, firstRun, fullRecurrencePicked, details)
+	return emitSchedule(full, backupNode, destinations, nil /* incrementalFrom */, kmsURIs,
+		resultsCh)
 }
 
 // checkForExistingBackupsInCollection checks that there are no existing backups
@@ -393,11 +426,12 @@ func checkForExistingBackupsInCollection(
 
 func makeBackupSchedule(
 	env scheduledjobs.JobSchedulerEnv,
-	owner string,
+	owner security.SQLUsername,
 	label string,
 	recurrence *scheduleRecurrence,
 	details jobspb.ScheduleDetails,
 	unpauseOnSuccess int64,
+	updateLastMetricOnSuccess bool,
 	backupNode *tree.Backup,
 ) (*jobs.ScheduledJob, error) {
 	sj := jobs.NewScheduledJob(env)
@@ -405,7 +439,10 @@ func makeBackupSchedule(
 	sj.SetOwner(owner)
 
 	// Prepare arguments for scheduled backup execution.
-	args := &ScheduledBackupExecutionArgs{UnpauseOnSuccess: unpauseOnSuccess}
+	args := &ScheduledBackupExecutionArgs{
+		UnpauseOnSuccess:        unpauseOnSuccess,
+		UpdatesLastBackupMetric: updateLastMetricOnSuccess,
+	}
 	if backupNode.AppendToLatest {
 		args.BackupType = ScheduledBackupExecutionArgs_INCREMENTAL
 	} else {
@@ -433,7 +470,12 @@ func makeBackupSchedule(
 	return sj, nil
 }
 
-func emitSchedule(sj *jobs.ScheduledJob, backupStmt string, resultsCh chan<- tree.Datums) error {
+func emitSchedule(
+	sj *jobs.ScheduledJob,
+	backupNode *tree.Backup,
+	to, incrementalFrom, kmsURIs []string,
+	resultsCh chan<- tree.Datums,
+) error {
 	var nextRun tree.Datum
 	status := "ACTIVE"
 	if sj.IsPaused() {
@@ -450,13 +492,19 @@ func emitSchedule(sj *jobs.ScheduledJob, backupStmt string, resultsCh chan<- tre
 		nextRun = next
 	}
 
+	redactedBackupNode, err := GetRedactedBackupNode(backupNode, to, incrementalFrom, kmsURIs, "",
+		false /* hasBeenPlanned */)
+	if err != nil {
+		return err
+	}
+
 	resultsCh <- tree.Datums{
 		tree.NewDInt(tree.DInt(sj.ScheduleID())),
 		tree.NewDString(sj.ScheduleLabel()),
 		tree.NewDString(status),
 		nextRun,
 		tree.NewDString(sj.ScheduleExpr()),
-		tree.NewDString(backupStmt),
+		tree.NewDString(tree.AsString(redactedBackupNode)),
 	}
 	return nil
 }
@@ -552,17 +600,59 @@ func makeScheduledBackupEval(
 			return nil, err
 		}
 	}
+
+	if schedule.BackupOptions.EncryptionKMSURI != nil {
+		eval.kmsURIs, err = p.TypeAsStringArray(ctx, tree.Exprs(schedule.BackupOptions.EncryptionKMSURI),
+			scheduleBackupOp)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return eval, nil
 }
 
 // scheduledBackupHeader is the header for "CREATE SCHEDULE..." statements results.
 var scheduledBackupHeader = colinfo.ResultColumns{
 	{Name: "schedule_id", Typ: types.Int},
-	{Name: "name", Typ: types.String},
+	{Name: "label", Typ: types.String},
 	{Name: "status", Typ: types.String},
 	{Name: "first_run", Typ: types.TimestampTZ},
 	{Name: "schedule", Typ: types.String},
 	{Name: "backup_stmt", Typ: types.String},
+}
+
+func collectScheduledBackupTelemetry(
+	incRecurrence *scheduleRecurrence,
+	firstRun *time.Time,
+	fullRecurrencePicked bool,
+	details jobspb.ScheduleDetails,
+) {
+	telemetry.Count("scheduled-backup.create.success")
+	if incRecurrence != nil {
+		telemetry.Count("scheduled-backup.incremental")
+	}
+	if firstRun != nil {
+		telemetry.Count("scheduled-backup.first-run-picked")
+	}
+	if fullRecurrencePicked {
+		telemetry.Count("scheduled-backup.full-recurrence-picked")
+	}
+	switch details.Wait {
+	case jobspb.ScheduleDetails_WAIT:
+		telemetry.Count("scheduled-backup.wait-policy.wait")
+	case jobspb.ScheduleDetails_NO_WAIT:
+		telemetry.Count("scheduled-backup.wait-policy.no-wait")
+	case jobspb.ScheduleDetails_SKIP:
+		telemetry.Count("scheduled-backup.wait-policy.skip")
+	}
+	switch details.OnError {
+	case jobspb.ScheduleDetails_RETRY_SCHED:
+		telemetry.Count("scheduled-backup.error-policy.retry-schedule")
+	case jobspb.ScheduleDetails_RETRY_SOON:
+		telemetry.Count("scheduled-backup.error-policy.retry-soon")
+	case jobspb.ScheduleDetails_PAUSE_SCHED:
+		telemetry.Count("scheduled-backup.error-policy.pause-schedule")
+	}
 }
 
 func createBackupScheduleHook(
@@ -578,7 +668,13 @@ func createBackupScheduleHook(
 	}
 
 	fn := func(ctx context.Context, _ []sql.PlanNode, resultsCh chan<- tree.Datums) error {
-		return doCreateBackupSchedules(ctx, p, eval, resultsCh)
+		err := doCreateBackupSchedules(ctx, p, eval, resultsCh)
+		if err != nil {
+			telemetry.Count("scheduled-backup.create.failed")
+			return err
+		}
+
+		return nil
 	}
 	return fn, scheduledBackupHeader, nil, false, nil
 }

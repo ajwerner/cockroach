@@ -141,7 +141,7 @@ var tpccMeta = workload.Meta{
 	Name: `tpcc`,
 	Description: `TPC-C simulates a transaction processing workload` +
 		` using a rich schema of multiple tables`,
-	Version:      `2.1.0`,
+	Version:      `2.2.0`,
 	PublicFacing: true,
 	New: func() workload.Generator {
 		g := &tpcc{}
@@ -162,9 +162,6 @@ var tpccMeta = workload.Meta{
 			`workers`:            {RuntimeOnly: true},
 			`conns`:              {RuntimeOnly: true},
 			`expensive-checks`:   {RuntimeOnly: true, CheckConsistencyOnly: true},
-			// We set runtime only to true for deprecated-fk-indexes so that it
-			// doesn't appear in the fixture name output.
-			`deprecated-fk-indexes`: {RuntimeOnly: true},
 		}
 
 		g.flags.Uint64Var(&g.seed, `seed`, 1, `Random number generator seed`)
@@ -448,6 +445,7 @@ func (w *tpcc) Tables() []workload.Table {
 				return []interface{}{(i + 1) * numWarehousesPerRange}
 			},
 		)),
+		Stats: w.tpccWarehouseStats(),
 	}
 	district := workload.Table{
 		Name: `district`,
@@ -466,6 +464,7 @@ func (w *tpcc) Tables() []workload.Table {
 				return []interface{}{(i + 1) * numWarehousesPerRange, 0}
 			},
 		)),
+		Stats: w.tpccDistrictStats(),
 	}
 	customer := workload.Table{
 		Name: `customer`,
@@ -497,6 +496,7 @@ func (w *tpcc) Tables() []workload.Table {
 				return []interface{}{(i + 1) * numWarehousesPerRange}
 			},
 		)),
+		Stats: w.tpccHistoryStats(),
 	}
 	order := workload.Table{
 		Name: `order`,
@@ -509,6 +509,7 @@ func (w *tpcc) Tables() []workload.Table {
 			NumBatches: numOrdersPerWarehouse * w.warehouses,
 			FillBatch:  w.tpccOrderInitialRowBatch,
 		},
+		Stats: w.tpccOrderStats(),
 	}
 	newOrder := workload.Table{
 		Name:   `new_order`,
@@ -539,9 +540,9 @@ func (w *tpcc) Tables() []workload.Table {
 		Schema: maybeAddInterleaveSuffix(
 			w.interleaved,
 			maybeAddFkSuffix(
-				w.fks,
+				w.deprecatedFkIndexes,
 				tpccStockSchemaBase,
-				tpccStockSchemaFkSuffix,
+				deprecatedTpccStockSchemaFkSuffix,
 			),
 			tpccStockSchemaInterleaveSuffix,
 		),

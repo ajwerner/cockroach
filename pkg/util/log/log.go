@@ -19,7 +19,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	opentracing "github.com/opentracing/opentracing-go"
 )
 
 func init() {
@@ -87,7 +86,7 @@ func Infof(ctx context.Context, format string, args ...interface{}) {
 // message. Arguments are handled in the manner of fmt.Printf; a newline is
 // appended.
 func VInfof(ctx context.Context, level Level, format string, args ...interface{}) {
-	if V(level) {
+	if VDepth(level, 1) {
 		logDepth(ctx, 1, Severity_INFO, format, args)
 	}
 }
@@ -215,8 +214,8 @@ func V(level Level) bool {
 // }
 //
 func ExpensiveLogEnabled(ctx context.Context, level Level) bool {
-	if sp := opentracing.SpanFromContext(ctx); sp != nil {
-		if tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(ctx); sp != nil {
+		if sp.IsRecording() {
 			return true
 		}
 	}

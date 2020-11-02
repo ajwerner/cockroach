@@ -50,10 +50,6 @@ func (p *planner) createDropDatabaseJob(
 	for _, t := range typesToDrop {
 		typeIDs = append(typeIDs, t.ID)
 	}
-	formatVersion := jobspb.DatabaseJobFormatVersion
-	if p.Descriptors().DatabaseLeasingUnsupported() {
-		formatVersion--
-	}
 	jobRecord := jobs.Record{
 		Description:   jobDesc,
 		Username:      p.User(),
@@ -63,7 +59,7 @@ func (p *planner) createDropDatabaseJob(
 			DroppedTables:     tableDropDetails,
 			DroppedTypes:      typeIDs,
 			DroppedDatabaseID: databaseID,
-			FormatVersion:     formatVersion,
+			FormatVersion:     jobspb.DatabaseJobFormatVersion,
 		},
 		Progress: jobspb.SchemaChangeProgress{},
 	}
@@ -82,16 +78,12 @@ func (p *planner) createDropDatabaseJob(
 func (p *planner) createNonDropDatabaseChangeJob(
 	ctx context.Context, databaseID descpb.ID, jobDesc string,
 ) error {
-	formatVersion := jobspb.DatabaseJobFormatVersion
-	if p.Descriptors().DatabaseLeasingUnsupported() {
-		formatVersion--
-	}
 	jobRecord := jobs.Record{
 		Description: jobDesc,
 		Username:    p.User(),
 		Details: jobspb.SchemaChangeDetails{
 			DescID:        databaseID,
-			FormatVersion: formatVersion,
+			FormatVersion: jobspb.DatabaseJobFormatVersion,
 		},
 		Progress: jobspb.SchemaChangeProgress{},
 	}
@@ -285,7 +277,7 @@ func (p *planner) writeTableDescToBatch(
 		}
 	}
 
-	if err := tableDesc.ValidateTable(); err != nil {
+	if err := tableDesc.ValidateTable(ctx); err != nil {
 		return errors.AssertionFailedf("table descriptor is not valid: %s\n%v", err, tableDesc)
 	}
 

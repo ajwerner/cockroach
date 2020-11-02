@@ -147,6 +147,11 @@ func (im *Implicator) Init(f *norm.Factory, md *opt.Metadata, evalCtx *tree.Eval
 	im.evalCtx = evalCtx
 }
 
+// ClearCache empties the Implicator's constraint cache.
+func (im *Implicator) ClearCache() {
+	im.constraintCache = nil
+}
+
 // FiltersImplyPredicate attempts to prove that a partial index predicate is
 // implied by the given filters. If implication is proven, the function returns
 // the remaining filters (which when applied on top of a partial index scan,
@@ -513,6 +518,19 @@ func (im *Implicator) atomImpliesAtom(
 		im.cacheConstraint(pred, predSet, predTight)
 	}
 
+	// If e is a contradiction, it represents an empty set of rows. The empty
+	// set is contained by all sets, so a contradiction implies all predicates.
+	if eSet == constraint.Contradiction {
+		return true
+	}
+
+	// If pred is a contradiction, it represents an empty set of rows. The only
+	// set contained by the empty set is itself (handled in the conditional
+	// above). No other filters imply a contradiction.
+	if predSet == constraint.Contradiction {
+		return false
+	}
+
 	// If either set has more than one constraint, then constraints cannot be
 	// used to prove containment. This happens when an expression has more than
 	// one variable. For example:
@@ -698,8 +716,12 @@ func (im *Implicator) warmCache(filters memo.FiltersExpr) {
 func (im *Implicator) simplifyFiltersExpr(
 	e memo.FiltersExpr, exactMatches exprSet,
 ) memo.FiltersExpr {
-	filters := make(memo.FiltersExpr, 0, len(e))
+	// If exactMatches is empty, then e cannot be simplified.
+	if exactMatches.empty() {
+		return e
+	}
 
+	filters := make(memo.FiltersExpr, 0, len(e))
 	for i := range e {
 		// If an entire FiltersItem exists in exactMatches, don't add it to the
 		// output filters.
@@ -815,6 +837,11 @@ func (s exprSet) addIf(e opt.Expr, fn func() bool) {
 	if s != nil && fn() {
 		s[e] = struct{}{}
 	}
+}
+
+// empty returns true if the set is nil or empty.
+func (s exprSet) empty() bool {
+	return len(s) == 0
 }
 
 // contains returns true if the set is non-nil and the given expression exists

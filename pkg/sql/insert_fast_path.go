@@ -36,18 +36,10 @@ var insertFastPathNodePool = sync.Pool{
 	},
 }
 
-// Check that exec.InsertFastPathMaxRows does not exceed the default
-// maxInsertBatchSize.
-func init() {
-	if maxInsertBatchSize < exec.InsertFastPathMaxRows {
-		panic("decrease exec.InsertFastPathMaxRows")
-	}
-}
-
 // insertFastPathNode is a faster implementation of inserting values in a table
 // and performing FK checks. It is used when all the foreign key checks can be
 // performed via a direct lookup in an index, and when the input is VALUES of
-// limited size (at most exec.InsertFastPathMaxRows).
+// limited size (at most mutations.MaxBatchSize).
 type insertFastPathNode struct {
 	// input values, similar to a valuesNode.
 	input [][]tree.TypedExpr

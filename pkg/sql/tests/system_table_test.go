@@ -31,7 +31,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/datadriven"
-	"github.com/gogo/protobuf/proto"
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/require"
 )
@@ -66,7 +65,7 @@ func TestInitialKeys(t *testing.T) {
 			keys.SystemDatabaseID,
 			keys.MaxReservedDescID,
 			"CREATE TABLE system.x (val INTEGER PRIMARY KEY)",
-			descpb.NewDefaultPrivilegeDescriptor(security.NodeUser),
+			descpb.NewDefaultPrivilegeDescriptor(security.NodeUserName()),
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -159,6 +158,7 @@ func TestInitialKeysAndSplits(t *testing.T) {
 func TestSystemTableLiterals(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	ctx := context.Background()
 	type testcase struct {
 		id     descpb.ID
 		schema string
@@ -203,9 +203,9 @@ func TestSystemTableLiterals(t *testing.T) {
 		if err != nil {
 			t.Fatalf("test: %+v, err: %v", test, err)
 		}
-		require.NoError(t, gen.ValidateTable())
+		require.NoError(t, gen.ValidateTable(ctx))
 
-		if !proto.Equal(test.pkg.TableDesc(), gen.TableDesc()) {
+		if !test.pkg.TableDesc().Equal(gen.TableDesc()) {
 			diff := strings.Join(pretty.Diff(test.pkg.TableDesc(), gen.TableDesc()), "\n")
 			t.Errorf("%s table descriptor generated from CREATE TABLE statement does not match "+
 				"hardcoded table descriptor:\n%s", test.pkg.Name, diff)

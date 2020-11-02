@@ -52,6 +52,7 @@ func makeIndexDescriptor(name string, columnNames []string) descpb.IndexDescript
 
 func TestAllocateIDs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
 
 	desc := NewCreatedMutable(descpb.TableDescriptor{
 		ParentID: keys.MinUserDescID,
@@ -72,10 +73,10 @@ func TestAllocateIDs(t *testing.T) {
 				return idx
 			}(),
 		},
-		Privileges:    descpb.NewDefaultPrivilegeDescriptor(security.AdminRole),
+		Privileges:    descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()),
 		FormatVersion: descpb.FamilyFormatVersion,
 	})
-	if err := desc.AllocateIDs(); err != nil {
+	if err := desc.AllocateIDs(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -113,7 +114,7 @@ func TestAllocateIDs(t *testing.T) {
 				ColumnDirections: []descpb.IndexDescriptor_Direction{descpb.IndexDescriptor_ASC},
 				EncodingType:     descpb.PrimaryIndexEncoding},
 		},
-		Privileges:     descpb.NewDefaultPrivilegeDescriptor(security.AdminRole),
+		Privileges:     descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()),
 		NextColumnID:   4,
 		NextFamilyID:   1,
 		NextIndexID:    5,
@@ -126,7 +127,7 @@ func TestAllocateIDs(t *testing.T) {
 		t.Fatalf("expected %s, but found %s", a, b)
 	}
 
-	if err := desc.AllocateIDs(); err != nil {
+	if err := desc.AllocateIDs(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(expected, desc) {
@@ -138,6 +139,8 @@ func TestAllocateIDs(t *testing.T) {
 
 func TestValidateTableDesc(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+
+	ctx := context.Background()
 
 	testData := []struct {
 		err  string
@@ -646,7 +649,7 @@ func TestValidateTableDesc(t *testing.T) {
 	for i, d := range testData {
 		t.Run(d.err, func(t *testing.T) {
 			desc := NewImmutable(d.desc)
-			if err := desc.ValidateTable(); err == nil {
+			if err := desc.ValidateTable(ctx); err == nil {
 				t.Errorf("%d: expected \"%s\", but found success: %+v", i, d.err, d.desc)
 			} else if d.err != err.Error() && "internal error: "+d.err != err.Error() {
 				t.Errorf("%d: expected \"%s\", but found \"%+v\"", i, d.err, err)
@@ -976,7 +979,7 @@ func TestValidateCrossTableReferences(t *testing.T) {
 		descs := catalog.MapDescGetter{}
 		descs[1] = dbdesc.NewImmutable(descpb.DatabaseDescriptor{ID: 1})
 		for _, otherDesc := range test.otherDescs {
-			otherDesc.Privileges = descpb.NewDefaultPrivilegeDescriptor(security.AdminRole)
+			otherDesc.Privileges = descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName())
 			descs[otherDesc.ID] = NewImmutable(otherDesc)
 		}
 		desc := NewImmutable(test.desc)
@@ -1323,7 +1326,7 @@ func TestMaybeUpgradeFormatVersion(t *testing.T) {
 				Columns: []descpb.ColumnDescriptor{
 					{ID: 1, Name: "foo"},
 				},
-				Privileges: descpb.NewDefaultPrivilegeDescriptor("root"),
+				Privileges: descpb.NewDefaultPrivilegeDescriptor(security.RootUserName()),
 			},
 			expUpgrade: true,
 			verify: func(i int, desc *Immutable) {
@@ -1339,7 +1342,7 @@ func TestMaybeUpgradeFormatVersion(t *testing.T) {
 				Columns: []descpb.ColumnDescriptor{
 					{ID: 1, Name: "foo"},
 				},
-				Privileges: descpb.NewDefaultPrivilegeDescriptor("root"),
+				Privileges: descpb.NewDefaultPrivilegeDescriptor(security.RootUserName()),
 			},
 			expUpgrade: false,
 			verify:     nil,
@@ -1359,6 +1362,8 @@ func TestMaybeUpgradeFormatVersion(t *testing.T) {
 }
 
 func TestUnvalidateConstraints(t *testing.T) {
+	ctx := context.Background()
+
 	desc := NewCreatedMutable(descpb.TableDescriptor{
 		Name:     "test",
 		ParentID: descpb.ID(1),
@@ -1368,7 +1373,7 @@ func TestUnvalidateConstraints(t *testing.T) {
 			{Name: "c", Type: types.Int}},
 		FormatVersion: descpb.FamilyFormatVersion,
 		Indexes:       []descpb.IndexDescriptor{makeIndexDescriptor("d", []string{"b", "a"})},
-		Privileges:    descpb.NewDefaultPrivilegeDescriptor(security.AdminRole),
+		Privileges:    descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName()),
 		OutboundFKs: []descpb.ForeignKeyConstraint{
 			{
 				Name:              "fk",
@@ -1377,7 +1382,7 @@ func TestUnvalidateConstraints(t *testing.T) {
 			},
 		},
 	})
-	if err := desc.AllocateIDs(); err != nil {
+	if err := desc.AllocateIDs(ctx); err != nil {
 		t.Fatal(err)
 	}
 	lookup := func(_ descpb.ID) (catalog.TableDescriptor, error) {
@@ -1505,6 +1510,7 @@ func TestDefaultExprNil(t *testing.T) {
 		}
 		// Test and verify that the default expressions of the column descriptors
 		// are all nil.
+		// nolint:descriptormarshal
 		for _, col := range desc.GetTable().Columns {
 			if col.DefaultExpr != nil {
 				t.Errorf("expected Column Default Expression to be 'nil', got %s instead.", *col.DefaultExpr)

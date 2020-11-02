@@ -34,9 +34,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/bufalloc"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/limit"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
@@ -159,7 +159,7 @@ func (r *Replica) CheckConsistency(
 		}
 
 		if isQueue {
-			log.Errorf(ctx, "%v", buf.RedactableString())
+			log.Errorf(ctx, "%v", &buf)
 		}
 		res.Detail += buf.String()
 	} else {
@@ -570,12 +570,12 @@ func (r *Replica) sha512(
 	snap storage.Reader,
 	snapshot *roachpb.RaftSnapshotData,
 	mode roachpb.ChecksumMode,
-	limiter *limit.LimiterBurstDisabled,
+	limiter *quotapool.RateLimiter,
 ) (*replicaHash, error) {
 	statsOnly := mode == roachpb.ChecksumMode_CHECK_STATS
 
 	// Iterate over all the data in the range.
-	iter := snap.NewIterator(storage.IterOptions{UpperBound: desc.EndKey.AsRawKey()})
+	iter := snap.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: desc.EndKey.AsRawKey()})
 	defer iter.Close()
 
 	var alloc bufalloc.ByteAllocator
@@ -586,7 +586,7 @@ func (r *Replica) sha512(
 
 	visitor := func(unsafeKey storage.MVCCKey, unsafeValue []byte) error {
 		// Rate Limit the scan through the range
-		if err := limiter.WaitN(ctx, len(unsafeKey.Key)+len(unsafeValue)); err != nil {
+		if err := limiter.WaitN(ctx, int64(len(unsafeKey.Key)+len(unsafeValue))); err != nil {
 			return err
 		}
 
@@ -632,6 +632,12 @@ func (r *Replica) sha512(
 	// In statsOnly mode, we hash only the RangeAppliedState. In regular mode, hash
 	// all of the replicated key space.
 	if !statsOnly {
+		// TODO(sumeer): remember that this caller of MakeReplicatedKeyRanges does
+		// not want the lock table ranges since it has already considered the
+		// intents earlier in this function. By the time we have replicated locks
+		// other than exclusive locks, we will probably not have any interleaved
+		// intents so we could stop using MVCCKeyAndIntentsIterKind above and
+		// consider all locks here.
 		for _, span := range rditer.MakeReplicatedKeyRanges(&desc) {
 			spanMS, err := storage.ComputeStatsGo(
 				iter, span.Start.Key, span.End.Key, 0 /* nowNanos */, visitor,

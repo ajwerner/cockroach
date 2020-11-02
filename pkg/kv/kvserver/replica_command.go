@@ -71,7 +71,7 @@ func maybeDescriptorChangedError(
 		if !detail.ActualValue.IsPresent() {
 			return true, nil
 		} else if err := detail.ActualValue.GetProto(&actualDesc); err == nil &&
-			desc.RangeID == actualDesc.RangeID && !desc.Equal(actualDesc) {
+			desc.RangeID == actualDesc.RangeID && !desc.Equal(&actualDesc) {
 			return true, &actualDesc
 		}
 	}
@@ -1928,7 +1928,6 @@ func (r *Replica) sendSnapshot(
 	}
 	if err := r.store.cfg.Transport.SendSnapshot(
 		ctx,
-		&r.store.cfg.RaftConfig,
 		r.store.allocator.storePool,
 		req,
 		snap,
@@ -1993,7 +1992,6 @@ func checkDescsEqual(desc *roachpb.RangeDescriptor) func(*roachpb.RangeDescripto
 		if desc2 != nil {
 			desc2.Replicas() // for sorting side-effect
 		}
-
 		return desc.Equal(desc2)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/geo/geoindex"
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
@@ -26,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/unique"
 	"github.com/cockroachdb/errors"
 )
@@ -770,7 +772,7 @@ func EncodeInvertedIndexKeys(
 	if !geoindex.IsEmptyConfig(&index.GeoConfig) {
 		return EncodeGeoInvertedIndexTableKeys(val, keyPrefix, index)
 	}
-	return EncodeInvertedIndexTableKeys(val, keyPrefix)
+	return EncodeInvertedIndexTableKeys(val, keyPrefix, index.Version)
 }
 
 // EncodeInvertedIndexTableKeys produces one inverted index key per element in
@@ -780,16 +782,26 @@ func EncodeInvertedIndexKeys(
 // not guaranteed to be round-trippable during decoding. If the input Datum
 // is (SQL) NULL, no inverted index keys will be produced, because inverted
 // indexes cannot and do not need to satisfy the predicate col IS NULL.
-func EncodeInvertedIndexTableKeys(val tree.Datum, inKey []byte) (key [][]byte, err error) {
+//
+// This function does not return keys for empty arrays unless the version is at
+// least descpb.EmptyArraysInInvertedIndexesVersion. (Note that this only
+// applies to arrays, not JSONs. This function returns keys for all non-null
+// JSONs regardless of the version.)
+func EncodeInvertedIndexTableKeys(
+	val tree.Datum, inKey []byte, version descpb.IndexDescriptorVersion,
+) (key [][]byte, err error) {
 	if val == tree.DNull {
 		return nil, nil
 	}
 	datum := tree.UnwrapDatum(nil, val)
 	switch val.ResolvedType().Family() {
 	case types.JsonFamily:
+		// We do not need to pass the version for JSON types, since all prior
+		// versions of JSON inverted indexes include keys for empty objects and
+		// arrays.
 		return json.EncodeInvertedIndexKeys(inKey, val.(*tree.DJSON).JSON)
 	case types.ArrayFamily:
-		return encodeArrayInvertedIndexTableKeys(val.(*tree.DArray), inKey)
+		return encodeArrayInvertedIndexTableKeys(val.(*tree.DArray), inKey, version)
 	}
 	return nil, errors.AssertionFailedf("trying to apply inverted index to unsupported type %s", datum.ResolvedType())
 }
@@ -797,8 +809,18 @@ func EncodeInvertedIndexTableKeys(val tree.Datum, inKey []byte) (key [][]byte, e
 // encodeArrayInvertedIndexTableKeys returns a list of inverted index keys for
 // the given input array, one per entry in the array. The input inKey is
 // prefixed to all returned keys.
-// N.B.: This won't return any keys for
-func encodeArrayInvertedIndexTableKeys(val *tree.DArray, inKey []byte) (key [][]byte, err error) {
+//
+// This function does not return keys for empty arrays unless the version is at
+// least descpb.EmptyArraysInInvertedIndexesVersion.
+func encodeArrayInvertedIndexTableKeys(
+	val *tree.DArray, inKey []byte, version descpb.IndexDescriptorVersion,
+) (key [][]byte, err error) {
+	if val.Array.Len() == 0 {
+		if version >= descpb.EmptyArraysInInvertedIndexesVersion {
+			return [][]byte{encoding.EncodeEmptyArray(inKey)}, nil
+		}
+	}
+
 	outKeys := make([][]byte, 0, len(val.Array))
 	for i := range val.Array {
 		d := val.Array[i]
@@ -1225,6 +1247,7 @@ func writeColumnValues(
 // value (passed as a parameter so the caller can reuse between rows) and is
 // expected to be the same length as indexes.
 func EncodeSecondaryIndexes(
+	ctx context.Context,
 	codec keys.SQLCodec,
 	tableDesc catalog.TableDescriptor,
 	indexes []*descpb.IndexDescriptor,
@@ -1232,10 +1255,17 @@ func EncodeSecondaryIndexes(
 	values []tree.Datum,
 	secondaryIndexEntries []IndexEntry,
 	includeEmpty bool,
+	indexBoundAccount mon.BoundAccount,
 ) ([]IndexEntry, error) {
 	if len(secondaryIndexEntries) > 0 {
 		panic("Length of secondaryIndexEntries was non-zero")
 	}
+
+	if indexBoundAccount.Monitor() == nil {
+		panic("Memory monitor passed to EncodeSecondaryIndexes was nil")
+	}
+	const sizeOfIndexEntry = int64(unsafe.Sizeof(IndexEntry{}))
+
 	for i := range indexes {
 		entries, err := EncodeSecondaryIndex(codec, tableDesc, indexes[i], colMap, values, includeEmpty)
 		if err != nil {
@@ -1244,6 +1274,26 @@ func EncodeSecondaryIndexes(
 		// Normally, each index will have exactly one entry. However, inverted
 		// indexes can have 0 or >1 entries, as well as secondary indexes which
 		// store columns from multiple column families.
+		//
+		// The memory monitor has already accounted for cap(secondaryIndexEntries).
+		// If the number of index entries are going to cause the
+		// secondaryIndexEntries buffer to re-slice, then it will very likely double
+		// in capacity. Therefore, we must account for another
+		// cap(secondaryIndexEntries) in the index memory account.
+		if cap(secondaryIndexEntries)-len(secondaryIndexEntries) < len(entries) {
+			if err := indexBoundAccount.Grow(ctx, sizeOfIndexEntry*int64(cap(secondaryIndexEntries))); err != nil {
+				return nil, errors.Wrap(err, "failed to re-slice index entries buffer")
+			}
+		}
+
+		// The index keys can be large and so we must account for them in the index
+		// memory account.
+		for _, index := range entries {
+			if err := indexBoundAccount.Grow(ctx, int64(len(index.Key))); err != nil {
+				return nil, errors.Wrap(err, "failed to allocate space for index keys")
+			}
+		}
+
 		secondaryIndexEntries = append(secondaryIndexEntries, entries...)
 	}
 	return secondaryIndexEntries, nil

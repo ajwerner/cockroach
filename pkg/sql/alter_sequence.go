@@ -54,7 +54,9 @@ func (n *alterSequenceNode) startExec(params runParams) error {
 	telemetry.Inc(sqltelemetry.SchemaChangeAlterCounter("sequence"))
 	desc := n.seqDesc
 
-	err := assignSequenceOptions(desc.SequenceOpts, n.n.Options, false /* setDefaults */, &params, desc.GetID())
+	err := assignSequenceOptions(
+		desc.SequenceOpts, n.n.Options, false /* setDefaults */, &params, desc.GetID(), desc.ParentID,
+	)
 	if err != nil {
 		return err
 	}
@@ -78,7 +80,10 @@ func (n *alterSequenceNode) startExec(params runParams) error {
 			SequenceName string
 			Statement    string
 			User         string
-		}{params.p.ResolvedName(n.n.Name).FQString(), n.n.String(), params.SessionData().User},
+		}{
+			params.p.ResolvedName(n.n.Name).FQString(),
+			n.n.String(),
+			params.SessionData().User().Normalized()},
 	)
 }
 

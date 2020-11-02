@@ -37,24 +37,15 @@ import (
 	"github.com/kr/pretty"
 )
 
-// createTestRocksDBEngine returns a new in-memory RocksDB engine with 1MB of
-// storage capacity.
-func createTestRocksDBEngine() storage.Engine {
-	return storage.NewInMem(context.Background(),
-		enginepb.EngineTypeRocksDB, roachpb.Attributes{}, 1<<20)
-}
-
 // createTestPebbleEngine returns a new in-memory Pebble storage engine.
 func createTestPebbleEngine() storage.Engine {
-	return storage.NewInMem(context.Background(),
-		enginepb.EngineTypePebble, roachpb.Attributes{}, 1<<20)
+	return storage.NewInMem(context.Background(), roachpb.Attributes{}, 1<<20)
 }
 
 var engineImpls = []struct {
 	name   string
 	create func() storage.Engine
 }{
-	{"rocksdb", createTestRocksDBEngine},
 	{"pebble", createTestPebbleEngine},
 }
 
@@ -399,7 +390,7 @@ func TestAddSSTableMVCCStats(t *testing.T) {
 			// stats. Make sure recomputing from scratch gets the same answer as
 			// applying the diff to the stats
 			beforeStats := func() enginepb.MVCCStats {
-				iter := e.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
+				iter := e.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
 				defer iter.Close()
 				beforeStats, err := storage.ComputeStatsGo(iter, roachpb.KeyMin, roachpb.KeyMax, 10)
 				if err != nil {
@@ -450,7 +441,7 @@ func TestAddSSTableMVCCStats(t *testing.T) {
 			}
 
 			afterStats := func() enginepb.MVCCStats {
-				iter := e.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
+				iter := e.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
 				defer iter.Close()
 				afterStats, err := storage.ComputeStatsGo(iter, roachpb.KeyMin, roachpb.KeyMax, 10)
 				if err != nil {

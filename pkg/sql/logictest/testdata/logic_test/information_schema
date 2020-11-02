@@ -13,31 +13,32 @@ CREATE TABLE information_schema.t (x INT)
 query error database "information_schema" does not exist
 DROP DATABASE information_schema
 
-query TTTI
+query TTTTI
 SHOW TABLES FROM information_schema
 ----
-information_schema  administrable_role_authorizations  table  NULL
-information_schema  applicable_roles                   table  NULL
-information_schema  check_constraints                  table  NULL
-information_schema  column_privileges                  table  NULL
-information_schema  column_udt_usage                   table  NULL
-information_schema  columns                            table  NULL
-information_schema  constraint_column_usage            table  NULL
-information_schema  enabled_roles                      table  NULL
-information_schema  key_column_usage                   table  NULL
-information_schema  parameters                         table  NULL
-information_schema  referential_constraints            table  NULL
-information_schema  role_table_grants                  table  NULL
-information_schema  routines                           table  NULL
-information_schema  schema_privileges                  table  NULL
-information_schema  schemata                           table  NULL
-information_schema  sequences                          table  NULL
-information_schema  statistics                         table  NULL
-information_schema  table_constraints                  table  NULL
-information_schema  table_privileges                   table  NULL
-information_schema  tables                             table  NULL
-information_schema  user_privileges                    table  NULL
-information_schema  views                              table  NULL
+information_schema  administrable_role_authorizations  table  NULL  NULL
+information_schema  applicable_roles                   table  NULL  NULL
+information_schema  check_constraints                  table  NULL  NULL
+information_schema  column_privileges                  table  NULL  NULL
+information_schema  column_udt_usage                   table  NULL  NULL
+information_schema  columns                            table  NULL  NULL
+information_schema  constraint_column_usage            table  NULL  NULL
+information_schema  enabled_roles                      table  NULL  NULL
+information_schema  key_column_usage                   table  NULL  NULL
+information_schema  parameters                         table  NULL  NULL
+information_schema  referential_constraints            table  NULL  NULL
+information_schema  role_table_grants                  table  NULL  NULL
+information_schema  routines                           table  NULL  NULL
+information_schema  schema_privileges                  table  NULL  NULL
+information_schema  schemata                           table  NULL  NULL
+information_schema  sequences                          table  NULL  NULL
+information_schema  statistics                         table  NULL  NULL
+information_schema  table_constraints                  table  NULL  NULL
+information_schema  table_privileges                   table  NULL  NULL
+information_schema  tables                             table  NULL  NULL
+information_schema  type_privileges                    table  NULL  NULL
+information_schema  user_privileges                    table  NULL  NULL
+information_schema  views                              table  NULL  NULL
 
 # Verify that the name is not special for databases.
 
@@ -113,39 +114,40 @@ TRUNCATE TABLE information_schema.tables
 
 # Verify information_schema handles reflection correctly.
 
-query T
+query TT
 SHOW DATABASES
 ----
-defaultdb
-postgres
-system
-test
+defaultdb  root
+postgres   root
+system     node
+test       root
 
-query TTTI
+query TTTTI
 SHOW TABLES FROM test.information_schema
 ----
-information_schema  administrable_role_authorizations  table  NULL
-information_schema  applicable_roles                   table  NULL
-information_schema  check_constraints                  table  NULL
-information_schema  column_privileges                  table  NULL
-information_schema  column_udt_usage                   table  NULL
-information_schema  columns                            table  NULL
-information_schema  constraint_column_usage            table  NULL
-information_schema  enabled_roles                      table  NULL
-information_schema  key_column_usage                   table  NULL
-information_schema  parameters                         table  NULL
-information_schema  referential_constraints            table  NULL
-information_schema  role_table_grants                  table  NULL
-information_schema  routines                           table  NULL
-information_schema  schema_privileges                  table  NULL
-information_schema  schemata                           table  NULL
-information_schema  sequences                          table  NULL
-information_schema  statistics                         table  NULL
-information_schema  table_constraints                  table  NULL
-information_schema  table_privileges                   table  NULL
-information_schema  tables                             table  NULL
-information_schema  user_privileges                    table  NULL
-information_schema  views                              table  NULL
+information_schema  administrable_role_authorizations  table  NULL  NULL
+information_schema  applicable_roles                   table  NULL  NULL
+information_schema  check_constraints                  table  NULL  NULL
+information_schema  column_privileges                  table  NULL  NULL
+information_schema  column_udt_usage                   table  NULL  NULL
+information_schema  columns                            table  NULL  NULL
+information_schema  constraint_column_usage            table  NULL  NULL
+information_schema  enabled_roles                      table  NULL  NULL
+information_schema  key_column_usage                   table  NULL  NULL
+information_schema  parameters                         table  NULL  NULL
+information_schema  referential_constraints            table  NULL  NULL
+information_schema  role_table_grants                  table  NULL  NULL
+information_schema  routines                           table  NULL  NULL
+information_schema  schema_privileges                  table  NULL  NULL
+information_schema  schemata                           table  NULL  NULL
+information_schema  sequences                          table  NULL  NULL
+information_schema  statistics                         table  NULL  NULL
+information_schema  table_constraints                  table  NULL  NULL
+information_schema  table_privileges                   table  NULL  NULL
+information_schema  tables                             table  NULL  NULL
+information_schema  type_privileges                    table  NULL  NULL
+information_schema  user_privileges                    table  NULL  NULL
+information_schema  views                              table  NULL  NULL
 
 query TT colnames
 SHOW CREATE TABLE information_schema.tables
@@ -157,8 +159,7 @@ information_schema.tables  CREATE TABLE information_schema.tables (
                            table_name STRING NOT NULL,
                            table_type STRING NOT NULL,
                            is_insertable_into STRING NOT NULL,
-                           version INT8 NULL,
-                           INDEX tables_table_name_idx (table_name ASC) STORING (table_catalog, table_schema, table_type, is_insertable_into, version)
+                           version INT8 NULL
 )
 
 query TTBTTTB colnames
@@ -236,6 +237,7 @@ crdb_internal       gossip_liveness
 crdb_internal       gossip_network
 crdb_internal       gossip_nodes
 crdb_internal       index_columns
+crdb_internal       invalid_objects
 crdb_internal       jobs
 crdb_internal       kv_node_status
 crdb_internal       kv_store_status
@@ -281,6 +283,7 @@ information_schema  statistics
 information_schema  table_constraints
 information_schema  table_privileges
 information_schema  tables
+information_schema  type_privileges
 information_schema  user_privileges
 information_schema  views
 pg_catalog          pg_aggregate
@@ -388,6 +391,7 @@ gossip_liveness
 gossip_network
 gossip_nodes
 index_columns
+invalid_objects
 jobs
 kv_node_status
 kv_store_status
@@ -433,6 +437,7 @@ statistics
 table_constraints
 table_privileges
 tables
+type_privileges
 user_privileges
 views
 pg_aggregate
@@ -511,6 +516,16 @@ query T
 SET DATABASE = test; SELECT table_name FROM information_schema.tables WHERE table_schema = 'other_db'
 ----
 
+# Check that tables from other schemas are found
+query TT rowsort
+CREATE SCHEMA myschema;
+CREATE TABLE myschema.abc();
+CREATE TABLE abc();
+SELECT table_schema, table_name FROM information_schema.tables WHERE table_name = 'abc';
+----
+myschema  abc
+public    abc
+
 # Check that filtering works.
 query T
 SELECT table_name FROM other_db.information_schema.tables WHERE table_name > 't'  ORDER BY 1 DESC
@@ -519,6 +534,7 @@ zones
 xyz
 views
 user_privileges
+type_privileges
 tables
 tables
 table_row_statistics
@@ -548,6 +564,7 @@ system         crdb_internal       gossip_liveness                    SYSTEM VIE
 system         crdb_internal       gossip_network                     SYSTEM VIEW  NO                  1
 system         crdb_internal       gossip_nodes                       SYSTEM VIEW  NO                  1
 system         crdb_internal       index_columns                      SYSTEM VIEW  NO                  1
+system         crdb_internal       invalid_objects                    SYSTEM VIEW  NO                  1
 system         crdb_internal       jobs                               SYSTEM VIEW  NO                  1
 system         crdb_internal       kv_node_status                     SYSTEM VIEW  NO                  1
 system         crdb_internal       kv_store_status                    SYSTEM VIEW  NO                  1
@@ -593,6 +610,7 @@ system         information_schema  statistics                         SYSTEM VIE
 system         information_schema  table_constraints                  SYSTEM VIEW  NO                  1
 system         information_schema  table_privileges                   SYSTEM VIEW  NO                  1
 system         information_schema  tables                             SYSTEM VIEW  NO                  1
+system         information_schema  type_privileges                    SYSTEM VIEW  NO                  1
 system         information_schema  user_privileges                    SYSTEM VIEW  NO                  1
 system         information_schema  views                              SYSTEM VIEW  NO                  1
 system         pg_catalog          pg_aggregate                       SYSTEM VIEW  NO                  1
@@ -1073,24 +1091,24 @@ SELECT *
 FROM information_schema.table_constraints
 ORDER BY TABLE_NAME, CONSTRAINT_TYPE, CONSTRAINT_NAME
 ----
-constraint_catalog  constraint_schema  constraint_name          table_catalog  table_schema  table_name  constraint_type  is_deferrable  initially_deferred
-constraint_db       public             541687103_59_1_not_null  constraint_db  public        t1          CHECK            NO             NO
-constraint_db       public             c2                       constraint_db  public        t1          CHECK            NO             NO
-constraint_db       public             check_a                  constraint_db  public        t1          CHECK            NO             NO
-constraint_db       public             primary                  constraint_db  public        t1          PRIMARY KEY      NO             NO
-constraint_db       public             t1_a_key                 constraint_db  public        t1          UNIQUE           NO             NO
-constraint_db       public             541687103_60_2_not_null  constraint_db  public        t2          CHECK            NO             NO
-constraint_db       public             fk                       constraint_db  public        t2          FOREIGN KEY      NO             NO
+constraint_catalog  constraint_schema  constraint_name           table_catalog  table_schema  table_name  constraint_type  is_deferrable  initially_deferred
+constraint_db       public             3753077756_62_1_not_null  constraint_db  public        t1          CHECK            NO             NO
+constraint_db       public             c2                        constraint_db  public        t1          CHECK            NO             NO
+constraint_db       public             check_a                   constraint_db  public        t1          CHECK            NO             NO
+constraint_db       public             primary                   constraint_db  public        t1          PRIMARY KEY      NO             NO
+constraint_db       public             t1_a_key                  constraint_db  public        t1          UNIQUE           NO             NO
+constraint_db       public             3753077756_63_2_not_null  constraint_db  public        t2          CHECK            NO             NO
+constraint_db       public             fk                        constraint_db  public        t2          FOREIGN KEY      NO             NO
 
 query TTTT colnames
 SELECT *
 FROM information_schema.check_constraints
 ORDER BY CONSTRAINT_CATALOG, CONSTRAINT_NAME
 ----
-constraint_catalog  constraint_schema  constraint_name          check_clause
-constraint_db       public             541687103_59_1_not_null  p IS NOT NULL
-constraint_db       public             c2                       ((a < 99:::INT8))
-constraint_db       public             check_a                  ((a > 4:::INT8))
+constraint_catalog  constraint_schema  constraint_name           check_clause
+constraint_db       public             3753077756_62_1_not_null  p IS NOT NULL
+constraint_db       public             c2                        ((a < 99:::INT8))
+constraint_db       public             check_a                   ((a > 4:::INT8))
 
 query TTTTTTT colnames
 SELECT *
@@ -1114,10 +1132,10 @@ USING (constraint_catalog, constraint_schema, constraint_name)
 WHERE tc.table_schema in ('public')
 ORDER BY tc.table_schema, tc.table_name, cc.constraint_name
 ----
-table_schema  table_name  constraint_name          check_clause
-public        t1          541687103_59_1_not_null  p IS NOT NULL
-public        t1          c2                       ((a < 99:::INT8))
-public        t1          check_a                  ((a > 4:::INT8))
+table_schema  table_name  constraint_name           check_clause
+public        t1          3753077756_62_1_not_null  p IS NOT NULL
+public        t1          c2                        ((a < 99:::INT8))
+public        t1          check_a                   ((a > 4:::INT8))
 
 statement ok
 DROP DATABASE constraint_db CASCADE
@@ -1655,6 +1673,7 @@ NULL     public   system         crdb_internal       gossip_liveness            
 NULL     public   system         crdb_internal       gossip_network                     SELECT          NULL          YES
 NULL     public   system         crdb_internal       gossip_nodes                       SELECT          NULL          YES
 NULL     public   system         crdb_internal       index_columns                      SELECT          NULL          YES
+NULL     public   system         crdb_internal       invalid_objects                    SELECT          NULL          YES
 NULL     public   system         crdb_internal       jobs                               SELECT          NULL          YES
 NULL     public   system         crdb_internal       kv_node_status                     SELECT          NULL          YES
 NULL     public   system         crdb_internal       kv_store_status                    SELECT          NULL          YES
@@ -1700,6 +1719,7 @@ NULL     public   system         information_schema  statistics                 
 NULL     public   system         information_schema  table_constraints                  SELECT          NULL          YES
 NULL     public   system         information_schema  table_privileges                   SELECT          NULL          YES
 NULL     public   system         information_schema  tables                             SELECT          NULL          YES
+NULL     public   system         information_schema  type_privileges                    SELECT          NULL          YES
 NULL     public   system         information_schema  user_privileges                    SELECT          NULL          YES
 NULL     public   system         information_schema  views                              SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_aggregate                       SELECT          NULL          YES
@@ -2032,6 +2052,7 @@ NULL     public   system         crdb_internal       gossip_liveness            
 NULL     public   system         crdb_internal       gossip_network                     SELECT          NULL          YES
 NULL     public   system         crdb_internal       gossip_nodes                       SELECT          NULL          YES
 NULL     public   system         crdb_internal       index_columns                      SELECT          NULL          YES
+NULL     public   system         crdb_internal       invalid_objects                    SELECT          NULL          YES
 NULL     public   system         crdb_internal       jobs                               SELECT          NULL          YES
 NULL     public   system         crdb_internal       kv_node_status                     SELECT          NULL          YES
 NULL     public   system         crdb_internal       kv_store_status                    SELECT          NULL          YES
@@ -2077,6 +2098,7 @@ NULL     public   system         information_schema  statistics                 
 NULL     public   system         information_schema  table_constraints                  SELECT          NULL          YES
 NULL     public   system         information_schema  table_privileges                   SELECT          NULL          YES
 NULL     public   system         information_schema  tables                             SELECT          NULL          YES
+NULL     public   system         information_schema  type_privileges                    SELECT          NULL          YES
 NULL     public   system         information_schema  user_privileges                    SELECT          NULL          YES
 NULL     public   system         information_schema  views                              SELECT          NULL          YES
 NULL     public   system         pg_catalog          pg_aggregate                       SELECT          NULL          YES
@@ -2892,6 +2914,32 @@ statement ok
 CREATE TYPE typ1 AS ENUM ('hello');
 CREATE TYPE typ2 AS ENUM ('bye');
 CREATE TABLE tb_enum_cols (x typ1, y INT, z typ2, w typ2)
+
+query TTTTT colnames
+SELECT * FROM information_schema.type_privileges WHERE type_name IN ('int', 'typ2')
+----
+grantee  type_catalog  type_schema  type_name  privilege_type
+root     test          pg_catalog   int        ALL
+admin    test          pg_catalog   int        ALL
+public   test          pg_catalog   int        USAGE
+admin    test          public       typ2       ALL
+public   test          public       typ2       USAGE
+root     test          public       typ2       ALL
+
+statement ok
+GRANT ALL ON TYPE typ2 TO testuser
+
+query TTTTT colnames
+SELECT * FROM information_schema.type_privileges WHERE type_name IN ('int', 'typ2')
+----
+grantee   type_catalog  type_schema  type_name  privilege_type
+root      test          pg_catalog   int        ALL
+admin     test          pg_catalog   int        ALL
+public    test          pg_catalog   int        USAGE
+admin     test          public       typ2       ALL
+public    test          public       typ2       USAGE
+root      test          public       typ2       ALL
+testuser  test          public       typ2       ALL
 
 query TTTTTTT colnames
 SELECT * FROM information_schema.column_udt_usage

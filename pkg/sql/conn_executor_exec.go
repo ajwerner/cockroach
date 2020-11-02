@@ -13,7 +13,6 @@ package sql
 import (
 	"context"
 	"fmt"
-	"hash/fnv"
 	"runtime/pprof"
 	"strings"
 	"time"
@@ -25,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/paramparse"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -33,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
@@ -42,7 +43,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 // execStmt executes one statement by dispatching according to the current
@@ -355,7 +355,7 @@ func (ex *connExecutor) execStmtInOpenState(
 		p.collectBundle = true
 		tr := ex.server.cfg.AmbientCtx.Tracer
 		origCtx := ctx
-		var sp opentracing.Span
+		var sp *tracing.Span
 		ctx, sp = tracing.StartSnowballTrace(ctx, tr, "traced statement")
 		// TODO(radu): consider removing this if/when #46164 is addressed.
 		p.extendedEvalCtx.Context = ctx
@@ -363,7 +363,7 @@ func (ex *connExecutor) execStmtInOpenState(
 			// Record the statement information that we've collected.
 			// Note that in case of implicit transactions, the trace contains the auto-commit too.
 			sp.Finish()
-			trace := tracing.GetRecording(sp)
+			trace := sp.GetRecording()
 			ie := p.extendedEvalCtx.InternalExecutor.(*InternalExecutor)
 			placeholders := p.extendedEvalCtx.Placeholders
 			if finishCollectionDiagnostics != nil {
@@ -385,7 +385,7 @@ func (ex *connExecutor) execStmtInOpenState(
 
 	if ex.server.cfg.TestingKnobs.WithStatementTrace != nil {
 		tr := ex.server.cfg.AmbientCtx.Tracer
-		var sp opentracing.Span
+		var sp *tracing.Span
 		ctx, sp = tracing.StartSnowballTrace(ctx, tr, stmt.SQL)
 		// TODO(radu): consider removing this if/when #46164 is addressed.
 		p.extendedEvalCtx.Context = ctx
@@ -400,7 +400,9 @@ func (ex *connExecutor) execStmtInOpenState(
 		return ev, payload, nil
 	}
 
-	if ex.sessionData.StmtTimeout > 0 {
+	// We exempt `SET` statements from the statement timeout, particularly so as
+	// not to block the `SET statement_timeout` command itself.
+	if ex.sessionData.StmtTimeout > 0 && stmt.AST.StatementTag() != "SET" {
 		timerDuration := ex.sessionData.StmtTimeout - timeutil.Since(ex.phaseTimes[sessionQueryReceived])
 		// There's no need to proceed with execution if the timer has already expired.
 		if timerDuration < 0 {
@@ -662,6 +664,7 @@ func (ex *connExecutor) execStmtInOpenState(
 			}
 			return ev, payload, nil
 		}
+		log.VEventf(ctx, 2, "push detected for non-refreshable txn but auto-retry not possible")
 	}
 	// No event was generated.
 	return nil, nil, nil
@@ -987,7 +990,7 @@ func (ex *connExecutor) execWithDistSQLEngine(
 
 	if len(planner.curPlan.subqueryPlans) != 0 {
 		if !ex.server.cfg.DistSQLPlanner.PlanAndRunSubqueries(
-			ctx, planner, evalCtxFactory, planner.curPlan.subqueryPlans, recv, distribute,
+			ctx, planner, evalCtxFactory, planner.curPlan.subqueryPlans, recv,
 		) {
 			return recv.stats, recv.commErr
 		}
@@ -1006,7 +1009,7 @@ func (ex *connExecutor) execWithDistSQLEngine(
 	}
 
 	ex.server.cfg.DistSQLPlanner.PlanAndRunCascadesAndChecks(
-		ctx, planner, evalCtxFactory, &planner.curPlan.planComponents, recv, distribute,
+		ctx, planner, evalCtxFactory, &planner.curPlan.planComponents, recv,
 	)
 
 	return recv.stats, recv.commErr
@@ -1268,7 +1271,7 @@ func (ex *connExecutor) runSetTracing(
 
 	modes := make([]string, len(n.Values))
 	for i, v := range n.Values {
-		v = unresolvedNameToStrVal(v)
+		v = paramparse.UnresolvedNameToStrVal(v)
 		var strMode string
 		switch val := v.(type) {
 		case *tree.StrVal:
@@ -1428,7 +1431,7 @@ func (ex *connExecutor) recordTransactionStart() (onTxnFinish func(txnEvent), on
 	ex.phaseTimes[sessionTransactionReceived] = ex.phaseTimes[sessionQueryReceived]
 	ex.phaseTimes[sessionFirstStartExecTransaction] = timeutil.Now()
 	ex.phaseTimes[sessionMostRecentStartExecTransaction] = ex.phaseTimes[sessionFirstStartExecTransaction]
-	ex.extraTxnState.transactionStatementsHash = fnv.New128()
+	ex.extraTxnState.transactionStatementsHash = util.MakeFNV64()
 	ex.extraTxnState.transactionStatementIDs = nil
 	ex.extraTxnState.numRows = 0
 
@@ -1439,7 +1442,7 @@ func (ex *connExecutor) recordTransactionStart() (onTxnFinish func(txnEvent), on
 	onTxnRestart = func() {
 		ex.phaseTimes[sessionMostRecentStartExecTransaction] = timeutil.Now()
 		ex.extraTxnState.transactionStatementIDs = nil
-		ex.extraTxnState.transactionStatementsHash = fnv.New128()
+		ex.extraTxnState.transactionStatementsHash = util.MakeFNV64()
 		ex.extraTxnState.numRows = 0
 	}
 	return onTxnFinish, onTxnRestart
@@ -1454,10 +1457,8 @@ func (ex *connExecutor) recordTransaction(ev txnEvent, implicit bool, txnStart t
 	txnRetryLat := ex.phaseTimes.getTransactionRetryLatency()
 	commitLat := ex.phaseTimes.getCommitLatency()
 
-	key := txnKey(fmt.Sprintf("%x", ex.extraTxnState.transactionStatementsHash.Sum(nil)))
-
 	ex.statsCollector.recordTransaction(
-		key,
+		txnKey(ex.extraTxnState.transactionStatementsHash.Sum()),
 		txnTime.Seconds(),
 		ev,
 		implicit,

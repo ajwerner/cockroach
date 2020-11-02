@@ -38,7 +38,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -1091,15 +1090,6 @@ func TestFailedSnapshotFillsReservation(t *testing.T) {
 func TestConcurrentRaftSnapshots(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	// This test relies on concurrently waiting for a value to change in the
-	// underlying engine(s). Since the teeing engine does not respond well to
-	// value mismatches, whether transient or permanent, skip this test if the
-	// teeing engine is being used. See
-	// https://github.com/cockroachdb/cockroach/issues/42656 for more context.
-	if storage.DefaultStorageEngine == enginepb.EngineTypeTeePebbleRocksDB {
-		skip.IgnoreLint(t, "disabled on teeing engine")
-	}
-
 	mtc := &multiTestContext{
 		// This test was written before the multiTestContext started creating many
 		// system ranges at startup, and hasn't been update to take that into
@@ -1242,158 +1232,6 @@ func TestReplicateAfterRemoveAndSplit(t *testing.T) {
 	// to store 2 will cause the obsolete replica to be GC'd allowing a
 	// subsequent replication to succeed.
 	mtc.stores[2].SetReplicaGCQueueActive(true)
-}
-
-// Test various mechanism for refreshing pending commands.
-func TestRefreshPendingCommands(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	// In this scenario, three different mechanisms detect the need to repropose
-	// commands. Test that each one is sufficient individually. We have this
-	// redundancy because some mechanisms respond with lower latency than others,
-	// but each has some scenarios (not currently tested) in which it is
-	// insufficient on its own. In addition, there is a fourth reproposal
-	// mechanism (reasonNewLeaderOrConfigChange) which is not relevant to this
-	// scenario.
-	//
-	// We don't test with only reasonNewLeader because that mechanism is less
-	// robust than refreshing due to snapshot or ticks. In particular, it is
-	// possible for node 3 to propose the RequestLease command and have that
-	// command executed by the other nodes but to never see the execution locally
-	// because it is caught up by applying a snapshot.
-	testCases := map[string]kvserver.StoreTestingKnobs{
-		"reasonSnapshotApplied": {
-			DisableRefreshReasonNewLeader: true,
-			DisableRefreshReasonTicks:     true,
-		},
-		"reasonTicks": {
-			DisableRefreshReasonNewLeader:       true,
-			DisableRefreshReasonSnapshotApplied: true,
-		},
-	}
-	for name, c := range testCases {
-		t.Run(name, func(t *testing.T) {
-			sc := kvserver.TestStoreConfig(nil)
-			sc.TestingKnobs = c
-			// Disable periodic gossip tasks which can move the range 1 lease
-			// unexpectedly.
-			sc.TestingKnobs.DisablePeriodicGossips = true
-			sc.Clock = nil // manual clock
-			mtc := &multiTestContext{
-				storeConfig: &sc,
-				// This test was written before the multiTestContext started creating
-				// many system ranges at startup, and hasn't been update to take that
-				// into account.
-				startWithSingleRange: true,
-			}
-			defer mtc.Stop()
-			mtc.Start(t, 3)
-
-			const rangeID = roachpb.RangeID(1)
-			mtc.replicateRange(rangeID, 1, 2)
-
-			// Put some data in the range so we'll have something to test for.
-			incArgs := incrementArgs([]byte("a"), 5)
-			if _, err := kv.SendWrapped(context.Background(), mtc.stores[0].TestSender(), incArgs); err != nil {
-				t.Fatal(err)
-			}
-
-			// Wait for all nodes to catch up.
-			mtc.waitForValues(roachpb.Key("a"), []int64{5, 5, 5})
-
-			// Stop node 2; while it is down write some more data.
-			mtc.stopStore(2)
-
-			if _, err := kv.SendWrapped(context.Background(), mtc.stores[0].TestSender(), incArgs); err != nil {
-				t.Fatal(err)
-			}
-
-			// Get the last increment's log index.
-			repl, err := mtc.stores[0].GetReplica(1)
-			if err != nil {
-				t.Fatal(err)
-			}
-			index, err := repl.GetLastIndex()
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			// Truncate the log at index+1 (log entries < N are removed, so this includes
-			// the increment).
-			truncArgs := truncateLogArgs(index+1, rangeID)
-			if _, err := kv.SendWrapped(context.Background(), mtc.stores[0].TestSender(), truncArgs); err != nil {
-				t.Fatal(err)
-			}
-
-			// Stop and restart node 0 in order to make sure that any in-flight Raft
-			// messages have been sent.
-			mtc.stopStore(0)
-			mtc.restartStore(0)
-
-			////////////////////////////////////////////////////////////////////
-			// We want store 2 to take the lease later, so we'll drain the other
-			// stores and expire the lease.
-			////////////////////////////////////////////////////////////////////
-
-			// Disable node liveness heartbeats which can reacquire leases when we're
-			// trying to expire them. We pause liveness heartbeats here after node 0
-			// was restarted (which creates a new NodeLiveness).
-			pauseNodeLivenessHeartbeatLoops(mtc)
-
-			// Start draining stores 0 and 1 to prevent them from grabbing any new
-			// leases.
-			mtc.advanceClock(context.Background())
-			var wg sync.WaitGroup
-			for i := 0; i < 2; i++ {
-				wg.Add(1)
-				go func(i int) {
-					mtc.stores[i].SetDraining(true, nil /* reporter */)
-					wg.Done()
-				}(i)
-			}
-
-			// Wait for the stores 0 and 1 to have entered draining mode, and then
-			// advance the clock. Advancing the clock will leave the liveness records
-			// of draining nodes in an expired state, so the SetDraining() call above
-			// will be able to terminate.
-			draining := false
-			for !draining {
-				draining = true
-				for i := 0; i < 2; i++ {
-					draining = draining && mtc.stores[i].IsDraining()
-				}
-				// Allow this loop to be preempted. Failure to do so can cause a
-				// deadlock because a non-preemptible loop will prevent GC from
-				// starting which in turn will cause all other goroutines to be stuck
-				// as soon as they are called on to assist the GC (this shows up as
-				// goroutines stuck in "GC assist wait"). With all of the other
-				// goroutines stuck, nothing will be able to set mtc.stores[i].draining
-				// to true.
-				//
-				// See #18554.
-				runtime.Gosched()
-			}
-			mtc.advanceClock(context.Background())
-
-			wg.Wait()
-
-			// Restart node 2 and wait for the snapshot to be applied. Note that
-			// waitForValues reads directly from the engine and thus isn't executing
-			// a Raft command.
-			mtc.restartStore(2)
-			mtc.waitForValues(roachpb.Key("a"), []int64{10, 10, 10})
-
-			// Send an increment to the restarted node. If we don't refresh pending
-			// commands appropriately, the range lease command will not get
-			// re-proposed when we discover the new leader.
-			if _, err := kv.SendWrapped(context.Background(), mtc.stores[2].TestSender(), incArgs); err != nil {
-				t.Fatal(err)
-			}
-
-			mtc.waitForValues(roachpb.Key("a"), []int64{15, 15, 15})
-		})
-	}
 }
 
 // Test that when a Raft group is not able to establish a quorum, its Raft log
@@ -1741,14 +1579,6 @@ func TestChangeReplicasDescriptorInvariant(t *testing.T) {
 func TestProgressWithDownNode(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	// This test relies on concurrently waiting for a value to change in the
-	// underlying engine(s). Since the teeing engine does not respond well to
-	// value mismatches, whether transient or permanent, skip this test if the
-	// teeing engine is being used. See
-	// https://github.com/cockroachdb/cockroach/issues/42656 for more context.
-	if storage.DefaultStorageEngine == enginepb.EngineTypeTeePebbleRocksDB {
-		skip.IgnoreLint(t, "disabled on teeing engine")
-	}
 	mtc := &multiTestContext{
 		// This test was written before the multiTestContext started creating many
 		// system ranges at startup, and hasn't been update to take that into
@@ -1916,14 +1746,6 @@ func runReplicateRestartAfterTruncation(t *testing.T, removeBeforeTruncateAndReA
 }
 
 func testReplicaAddRemove(t *testing.T, addFirst bool) {
-	// This test relies on concurrently waiting for a value to change in the
-	// underlying engine(s). Since the teeing engine does not respond well to
-	// value mismatches, whether transient or permanent, skip this test if the
-	// teeing engine is being used. See
-	// https://github.com/cockroachdb/cockroach/issues/42656 for more context.
-	if storage.DefaultStorageEngine == enginepb.EngineTypeTeePebbleRocksDB {
-		skip.IgnoreLint(t, "disabled on teeing engine")
-	}
 	sc := kvserver.TestStoreConfig(nil)
 	// We're gonna want to validate the state of the store before and after the
 	// replica GC queue does its work, so we disable the replica gc queue here
@@ -3037,15 +2859,6 @@ func TestDecommission(t *testing.T) {
 	// liveness timings.
 	skip.UnderRace(t, "#39807 and #37811")
 
-	// This test relies on concurrently waiting for a value to change in the
-	// underlying engine(s). Since the teeing engine does not respond well to
-	// value mismatches, whether transient or permanent, skip this test if the
-	// teeing engine is being used. See
-	// https://github.com/cockroachdb/cockroach/issues/42656 for more context.
-	if storage.DefaultStorageEngine == enginepb.EngineTypeTeePebbleRocksDB {
-		skip.IgnoreLint(t, "disabled on teeing engine")
-	}
-
 	ctx := context.Background()
 	tc := testcluster.StartTestCluster(t, 5, base.TestClusterArgs{
 		ReplicationMode: base.ReplicationAuto,
@@ -4119,69 +3932,6 @@ func TestFailedConfChange(t *testing.T) {
 	}
 }
 
-// TestStoreRangeRemovalCompactionSuggestion verifies that if a replica
-// is removed from a store, a compaction suggestion is made to the
-// compactor queue.
-func TestStoreRangeRemovalCompactionSuggestion(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	sc := kvserver.TestStoreConfig(nil)
-	mtc := &multiTestContext{storeConfig: &sc}
-
-	ctx := context.Background()
-
-	for i := 0; i < 3; i++ {
-		// Use RocksDB engines because Pebble does not use the compactor queue.
-		eng := storage.NewInMem(ctx, enginepb.EngineTypeRocksDB, roachpb.Attributes{}, 1<<20)
-		defer eng.Close()
-		mtc.engines = append(mtc.engines, eng)
-	}
-
-	defer mtc.Stop()
-	mtc.Start(t, 3)
-
-	const rangeID = roachpb.RangeID(1)
-	mtc.replicateRange(rangeID, 1, 2)
-
-	repl, err := mtc.stores[0].GetReplica(rangeID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx = repl.AnnotateCtx(ctx)
-
-	deleteStore := mtc.stores[2]
-	chgs := roachpb.MakeReplicationChanges(roachpb.REMOVE_REPLICA, roachpb.ReplicationTarget{
-		NodeID:  deleteStore.Ident.NodeID,
-		StoreID: deleteStore.Ident.StoreID,
-	})
-	if _, err := repl.ChangeReplicas(ctx, repl.Desc(), kvserver.SnapshotRequest_REBALANCE, kvserverpb.ReasonRebalance, "", chgs); err != nil {
-		t.Fatal(err)
-	}
-
-	testutils.SucceedsSoon(t, func() error {
-		// Function to check compaction metrics indicating a suggestion
-		// was queued or a compaction was processed or skipped.
-		haveCompaction := func(s *kvserver.Store, exp bool) error {
-			queued := s.Compactor().Metrics.BytesQueued.Value()
-			comps := s.Compactor().Metrics.BytesCompacted.Count()
-			skipped := s.Compactor().Metrics.BytesSkipped.Count()
-			if exp != (queued > 0 || comps > 0 || skipped > 0) {
-				return errors.Errorf("%s: expected non-zero compaction metrics? %t; got queued=%d, compactions=%d, skipped=%d",
-					s, exp, queued, comps, skipped)
-			}
-			return nil
-		}
-		// Verify that no compaction metrics are showing non-zero bytes in the
-		// other stores.
-		for _, s := range mtc.stores {
-			if err := haveCompaction(s, s == deleteStore); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
 func TestStoreRangeWaitForApplication(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -4509,14 +4259,6 @@ func (cs *disablingClientStream) SendMsg(m interface{}) error {
 func TestDefaultConnectionDisruptionDoesNotInterfereWithSystemTraffic(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	// This test relies on concurrently waiting for a value to change in the
-	// underlying engine(s). Since the teeing engine does not respond well to
-	// value mismatches, whether transient or permanent, skip this test if the
-	// teeing engine is being used. See
-	// https://github.com/cockroachdb/cockroach/issues/42656 for more context.
-	if storage.DefaultStorageEngine == enginepb.EngineTypeTeePebbleRocksDB {
-		skip.IgnoreLint(t, "disabled on teeing engine")
-	}
 
 	stopper := stop.NewStopper()
 	ctx := context.Background()
@@ -4798,14 +4540,6 @@ func TestAckWriteBeforeApplication(t *testing.T) {
 func TestProcessSplitAfterRightHandSideHasBeenRemoved(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	// This test relies on concurrently waiting for a value to change in the
-	// underlying engine(s). Since the teeing engine does not respond well to
-	// value mismatches, whether transient or permanent, skip this test if the
-	// teeing engine is being used. See
-	// https://github.com/cockroachdb/cockroach/issues/42656 for more context.
-	if storage.DefaultStorageEngine == enginepb.EngineTypeTeePebbleRocksDB {
-		skip.IgnoreLint(t, "disabled on teeing engine")
-	}
 	sc := kvserver.TestStoreConfig(nil)
 	// Newly-started stores (including the "rogue" one) should not GC
 	// their replicas. We'll turn this back on when needed.

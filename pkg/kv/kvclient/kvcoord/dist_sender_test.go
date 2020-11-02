@@ -45,6 +45,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -2932,11 +2933,11 @@ func TestCountRanges(t *testing.T) {
 	for i := range descriptors {
 		startKey := testMetaEndKey
 		if i > 0 {
-			startKey = roachpb.RKey(string(firstKeyBoundary + i - 1))
+			startKey = roachpb.RKey(string(rune(firstKeyBoundary + i - 1)))
 		}
 		endKey := roachpb.RKeyMax
 		if i < len(descriptors)-1 {
-			endKey = roachpb.RKey(string(firstKeyBoundary + i))
+			endKey = roachpb.RKey(string(rune(firstKeyBoundary + i)))
 		}
 
 		descriptors[i] = roachpb.RangeDescriptor{
@@ -3956,18 +3957,22 @@ func TestDistSenderSlowLogMessage(t *testing.T) {
 	ba.Add(get)
 	br := &roachpb.BatchResponse{}
 	br.Error = roachpb.NewError(errors.New("boom"))
-	desc := &roachpb.RangeDescriptor{RangeID: 9, StartKey: roachpb.RKey("x")}
+	desc := &roachpb.RangeDescriptor{RangeID: 9, StartKey: roachpb.RKey("x"), EndKey: roachpb.RKey("z")}
 	{
-		exp := `have been waiting 8.16s (120 attempts) for RPC Get ["a",/Min) to` +
-			` r9:{-} [<no replicas>, next=0, gen=0]; resp: (err: boom)`
-		act := slowRangeRPCWarningStr(ba, dur, attempts, desc, nil /* err */, br)
-		require.Equal(t, exp, act)
+		exp := `have been waiting 8.16s (120 attempts) for RPC Get [‹"a"›,‹/Min›) to` +
+			` r9:‹{x-z}› [<no replicas>, next=0, gen=0]; resp: ‹(err: boom)›`
+		var s redact.StringBuilder
+		slowRangeRPCWarningStr(&s, ba, dur, attempts, desc, nil /* err */, br)
+		act := s.RedactableString()
+		require.EqualValues(t, exp, act)
 	}
 
 	{
 		exp := `slow RPC finished after 8.16s (120 attempts)`
-		act := slowRangeRPCReturnWarningStr(dur, attempts)
-		require.Equal(t, exp, act)
+		var s redact.StringBuilder
+		slowRangeRPCReturnWarningStr(&s, dur, attempts)
+		act := s.RedactableString()
+		require.EqualValues(t, exp, act)
 	}
 }
 
@@ -4201,7 +4206,8 @@ func TestSendToReplicasSkipsStaleReplicas(t *testing.T) {
 			require.NoError(t, err)
 			tok := EvictionToken{
 				rdc:   rc,
-				entry: ent.(*rangeCacheEntry),
+				desc:  ent.(EvictionToken).desc,
+				lease: ent.(EvictionToken).lease,
 			}
 
 			var called bool
@@ -4272,6 +4278,120 @@ func TestSendToReplicasSkipsStaleReplicas(t *testing.T) {
 	}
 }
 
+// Test a scenario where the DistSender first updates the leaseholder in its
+// routing information and then evicts the descriptor altogether. This scenario
+// is interesting because it shows that evictions work even after the
+// EvictionToken has been updated.
+func TestDistSenderDescEvictionAfterLeaseUpdate(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
+	stopper := stop.NewStopper()
+	defer stopper.Stop(ctx)
+
+	// We'll set things up such that a range lookup first returns a descriptor
+	// with two replicas. The RPC to the 1st replica will return a
+	// NotLeaseholderError indicating the second replica. The RPC to the 2nd
+	// replica will return a RangeNotFoundError.
+	// The DistSender is now expected to evict the descriptor and do a second
+	// range lookup, which will return a new descriptor, whose replica will return
+	// success.
+
+	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
+	rpcContext := rpc.NewInsecureTestingContext(clock, stopper)
+	ns := &mockNodeStore{nodes: []roachpb.NodeDescriptor{
+		{NodeID: 1, Address: util.UnresolvedAddr{}},
+		{NodeID: 2, Address: util.UnresolvedAddr{}},
+		{NodeID: 3, Address: util.UnresolvedAddr{}},
+	}}
+
+	var desc1 = roachpb.RangeDescriptor{
+		RangeID:    roachpb.RangeID(1),
+		Generation: 1,
+		StartKey:   roachpb.RKeyMin,
+		EndKey:     roachpb.RKeyMax,
+		InternalReplicas: []roachpb.ReplicaDescriptor{
+			{NodeID: 1, StoreID: 1, ReplicaID: 1},
+			{NodeID: 2, StoreID: 2, ReplicaID: 2},
+		},
+	}
+	var desc2 = roachpb.RangeDescriptor{
+		RangeID:    roachpb.RangeID(1),
+		Generation: 1,
+		StartKey:   roachpb.RKeyMin,
+		EndKey:     roachpb.RKeyMax,
+		InternalReplicas: []roachpb.ReplicaDescriptor{
+			{NodeID: 3, StoreID: 3, ReplicaID: 3},
+		},
+	}
+
+	// We'll send a request that first gets a NLHE, and then a RangeNotFoundError. We
+	// then expect an updated descriptor to be used and return success.
+	call := 0
+	var transportFn = func(_ context.Context, ba roachpb.BatchRequest) (*roachpb.BatchResponse, error) {
+		br := &roachpb.BatchResponse{}
+		switch call {
+		case 0:
+			expRepl := desc1.Replicas().All()[0]
+			require.Equal(t, expRepl, ba.Replica)
+			br.Error = roachpb.NewError(&roachpb.NotLeaseHolderError{
+				Lease: &roachpb.Lease{Replica: desc1.Replicas().All()[1]},
+			})
+		case 1:
+			expRep := desc1.Replicas().All()[1]
+			require.Equal(t, ba.Replica, expRep)
+			br.Error = roachpb.NewError(roachpb.NewRangeNotFoundError(ba.RangeID, ba.Replica.StoreID))
+		case 2:
+			expRep := desc2.Replicas().All()[0]
+			require.Equal(t, ba.Replica, expRep)
+			br = ba.CreateReply()
+		default:
+			t.Fatal("unexpected")
+		}
+		call++
+		return br, nil
+	}
+
+	rangeLookups := 0
+	cfg := DistSenderConfig{
+		AmbientCtx: log.AmbientContext{Tracer: tracing.NewTracer()},
+		Clock:      clock,
+		NodeDescs:  ns,
+		RPCContext: rpcContext,
+		RangeDescriptorDB: MockRangeDescriptorDB(func(key roachpb.RKey, reverse bool) (
+			[]roachpb.RangeDescriptor, []roachpb.RangeDescriptor, error,
+		) {
+			var desc roachpb.RangeDescriptor
+			switch rangeLookups {
+			case 0:
+				desc = desc1
+			case 1:
+				desc = desc2
+			default:
+				// This doesn't run on the test's goroutine.
+				panic("unexpected")
+			}
+			rangeLookups++
+			return []roachpb.RangeDescriptor{desc}, nil, nil
+		}),
+		TestingKnobs: ClientTestingKnobs{
+			TransportFactory:    adaptSimpleTransport(transportFn),
+			DontReorderReplicas: true,
+		},
+		Settings: cluster.MakeTestingClusterSettings(),
+	}
+
+	ds := NewDistSender(cfg)
+	var ba roachpb.BatchRequest
+	get := &roachpb.GetRequest{}
+	get.Key = roachpb.Key("a")
+	ba.Add(get)
+
+	_, err := ds.Send(ctx, ba)
+	require.NoError(t, err.GoError())
+	require.Equal(t, call, 3)
+	require.Equal(t, rangeLookups, 2)
+}
+
 func TestDistSenderRPCMetrics(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	ctx := context.Background()
@@ -4280,7 +4400,10 @@ func TestDistSenderRPCMetrics(t *testing.T) {
 
 	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
 	rpcContext := rpc.NewInsecureTestingContext(clock, stopper)
-	ns := &mockNodeStore{nodes: []roachpb.NodeDescriptor{{NodeID: 1, Address: util.UnresolvedAddr{}}}}
+	ns := &mockNodeStore{nodes: []roachpb.NodeDescriptor{
+		{NodeID: 1, Address: util.UnresolvedAddr{}},
+		{NodeID: 2, Address: util.UnresolvedAddr{}},
+	}}
 
 	var desc = roachpb.RangeDescriptor{
 		RangeID:    roachpb.RangeID(1),

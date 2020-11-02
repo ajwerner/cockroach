@@ -82,7 +82,7 @@ delete abcde
 build
 DELETE FROM abcde AS foo WHERE foo.a>0 ORDER BY foo.a LIMIT 10
 ----
-delete foo
+delete abcde [as=foo]
  ├── columns: <none>
  ├── fetch columns: a:8 b:9 c:10 d:11 e:12 rowid:13
  └── limit
@@ -94,7 +94,7 @@ delete foo
       │    ├── limit hint: 10.00
       │    └── select
       │         ├── columns: a:8!null b:9 c:10 d:11 e:12 rowid:13!null crdb_internal_mvcc_timestamp:14
-      │         ├── scan foo
+      │         ├── scan abcde [as=foo]
       │         │    ├── columns: a:8!null b:9 c:10 d:11 e:12 rowid:13!null crdb_internal_mvcc_timestamp:14
       │         │    └── computed column expressions
       │         │         ├── d:11
@@ -328,12 +328,12 @@ DELETE FROM abcde AS foo WHERE a=1 RETURNING foo.a+1, foo.b * foo.d
 ----
 project
  ├── columns: "?column?":15!null "?column?":16
- ├── delete foo
+ ├── delete abcde [as=foo]
  │    ├── columns: a:1!null b:2 c:3 d:4 e:5 rowid:6!null
  │    ├── fetch columns: a:8 b:9 c:10 d:11 e:12 rowid:13
  │    └── select
  │         ├── columns: a:8!null b:9 c:10 d:11 e:12 rowid:13!null crdb_internal_mvcc_timestamp:14
- │         ├── scan foo
+ │         ├── scan abcde [as=foo]
  │         │    ├── columns: a:8!null b:9 c:10 d:11 e:12 rowid:13!null crdb_internal_mvcc_timestamp:14
  │         │    └── computed column expressions
  │         │         ├── d:11
@@ -470,8 +470,7 @@ delete partial_indexes
       │         ├── secondary: filters
       │         │    └── c:7 = 'foo'
       │         └── secondary: filters
-      │              ├── a:5 > b:6
-      │              └── c:7 = 'bar'
+      │              └── (a:5 > b:6) AND (c:7 = 'bar')
       └── projections
            ├── c:7 = 'foo' [as=partial_index_del1:9]
            ├── (a:5 > b:6) AND (c:7 = 'bar') [as=partial_index_del2:10]

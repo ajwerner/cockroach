@@ -17,10 +17,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
+	"github.com/cockroachdb/cockroach/pkg/docs"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobsprotectedts"
@@ -108,7 +108,7 @@ func changefeedPlanHook(
 
 	fn := func(ctx context.Context, _ []sql.PlanNode, resultsCh chan<- tree.Datums) error {
 		ctx, span := tracing.ChildSpan(ctx, stmt.StatementTag())
-		defer tracing.FinishSpan(span)
+		defer span.Finish()
 
 		ok, err := p.HasRoleOption(ctx, roleoption.CONTROLCHANGEFEED)
 		if err != nil {
@@ -254,7 +254,11 @@ func changefeedPlanHook(
 		telemetry.CountBucketed(`changefeed.create.num_tables`, int64(len(targets)))
 
 		if details.SinkURI == `` {
+			telemetry.Count(`changefeed.create.core`)
 			err := distChangefeedFlow(ctx, p, 0 /* jobID */, details, progress, resultsCh)
+			if err != nil {
+				telemetry.Count(`changefeed.core.error`)
+			}
 			return MaybeStripRetryableErrorMarker(err)
 		}
 
@@ -263,13 +267,15 @@ func changefeedPlanHook(
 		// `kv.rangefeed.enabled` setting to be true.
 		if !kvserver.RangefeedEnabled.Get(&settings.SV) {
 			return errors.Errorf("rangefeeds require the kv.rangefeed.enabled setting. See %s",
-				base.DocsURL(`change-data-capture.html#enable-rangefeeds-to-reduce-latency`))
+				docs.URL(`change-data-capture.html#enable-rangefeeds-to-reduce-latency`))
 		}
 		if err := utilccl.CheckEnterpriseEnabled(
 			settings, p.ExecCfg().ClusterID(), p.ExecCfg().Organization(), "CHANGEFEED",
 		); err != nil {
 			return err
 		}
+
+		telemetry.Count(`changefeed.create.enterprise`)
 
 		// In the case where a user is executing a CREATE CHANGEFEED and is still
 		// waiting for the statement to return, we take the opportunity to ensure
@@ -570,10 +576,10 @@ func generateChangefeedSessionID() string {
 
 // Resume is part of the jobs.Resumer interface.
 func (b *changefeedResumer) Resume(
-	ctx context.Context, planHookState interface{}, startedCh chan<- tree.Datums,
+	ctx context.Context, exec interface{}, startedCh chan<- tree.Datums,
 ) error {
-	phs := planHookState.(sql.PlanHookState)
-	execCfg := phs.ExecCfg()
+	jobExec := exec.(sql.JobExecContext)
+	execCfg := jobExec.ExecCfg()
 	jobID := *b.job.ID()
 	details := b.job.Details().(jobspb.ChangefeedDetails)
 	progress := b.job.Progress()
@@ -589,7 +595,7 @@ func (b *changefeedResumer) Resume(
 	}
 	var err error
 	for r := retry.StartWithCtx(ctx, opts); r.Next(); {
-		if err = distChangefeedFlow(ctx, phs, jobID, details, progress, startedCh); err == nil {
+		if err = distChangefeedFlow(ctx, jobExec, jobID, details, progress, startedCh); err == nil {
 			return nil
 		}
 		if !IsRetryableError(err) {
@@ -640,12 +646,22 @@ func (b *changefeedResumer) Resume(
 }
 
 // OnFailOrCancel is part of the jobs.Resumer interface.
-func (b *changefeedResumer) OnFailOrCancel(ctx context.Context, planHookState interface{}) error {
-	phs := planHookState.(sql.PlanHookState)
-	execCfg := phs.ExecCfg()
+func (b *changefeedResumer) OnFailOrCancel(ctx context.Context, jobExec interface{}) error {
+	exec := jobExec.(sql.JobExecContext)
+	execCfg := exec.ExecCfg()
 	progress := b.job.Progress()
 	b.maybeCleanUpProtectedTimestamp(ctx, execCfg.DB, execCfg.ProtectedTimestampProvider,
 		progress.GetChangefeed().ProtectedTimestampRecord)
+
+	// If this job has failed (not canceled), increment the counter.
+	if jobs.HasErrJobCanceled(
+		errors.DecodeError(ctx, *b.job.Payload().FinalResumeError),
+	) {
+		telemetry.Count(`changefeed.enterprise.cancel`)
+	} else {
+		telemetry.Count(`changefeed.enterprise.fail`)
+		exec.ExecCfg().JobRegistry.MetricsStruct().Changefeed.(*Metrics).Failures.Inc(1)
+	}
 	return nil
 }
 
@@ -672,7 +688,7 @@ var _ jobs.PauseRequester = (*changefeedResumer)(nil)
 // paused, we want to install a protected timestamp at the most recent high
 // watermark if there isn't already one.
 func (b *changefeedResumer) OnPauseRequest(
-	ctx context.Context, planHookState interface{}, txn *kv.Txn, progress *jobspb.Progress,
+	ctx context.Context, jobExec interface{}, txn *kv.Txn, progress *jobspb.Progress,
 ) error {
 	details := b.job.Details().(jobspb.ChangefeedDetails)
 	if _, shouldPause := details.Opts[changefeedbase.OptProtectDataFromGCOnPause]; !shouldPause {
@@ -697,7 +713,7 @@ func (b *changefeedResumer) OnPauseRequest(
 		return nil
 	}
 
-	pts := planHookState.(sql.PlanHookState).ExecCfg().ProtectedTimestampProvider
+	pts := jobExec.(sql.JobExecContext).ExecCfg().ProtectedTimestampProvider
 	return createProtectedTimestampRecord(ctx, pts, txn, *b.job.ID(),
 		details.Targets, *resolved, cp)
 }

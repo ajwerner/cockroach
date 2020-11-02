@@ -35,7 +35,7 @@ import (
 )
 
 func descForTable(
-	t *testing.T, create string, parent, id descpb.ID, fks fkHandler,
+	ctx context.Context, t *testing.T, create string, parent, id descpb.ID, fks fkHandler,
 ) *tabledesc.Mutable {
 	t.Helper()
 	parsed, err := parser.Parse(create)
@@ -53,8 +53,9 @@ func descForTable(
 		name := parsed[0].AST.(*tree.CreateSequence).Name.String()
 
 		ts := hlc.Timestamp{WallTime: nanos}
-		priv := descpb.NewDefaultPrivilegeDescriptor(security.AdminRole)
+		priv := descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName())
 		desc, err := sql.NewSequenceTableDesc(
+			ctx,
 			name,
 			tree.SequenceOptions{},
 			parent,
@@ -85,7 +86,7 @@ func descForTable(
 
 var testEvalCtx = &tree.EvalContext{
 	SessionData: &sessiondata.SessionData{
-		DataConversion: sessiondata.DataConversionConfig{Location: time.UTC},
+		Location: time.UTC,
 	},
 	StmtTimestamp: timeutil.Unix(100000000, 0),
 	Settings:      cluster.MakeTestingClusterSettings(),

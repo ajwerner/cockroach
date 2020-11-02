@@ -331,7 +331,11 @@ func (e *distSQLSpecExecFactory) ConstructFilter(
 
 // ConstructInvertedFilter is part of the exec.Factory interface.
 func (e *distSQLSpecExecFactory) ConstructInvertedFilter(
-	n exec.Node, invFilter *invertedexpr.SpanExpression, invColumn exec.NodeColumnOrdinal,
+	n exec.Node,
+	invFilter *invertedexpr.SpanExpression,
+	preFiltererExpr tree.TypedExpr,
+	preFiltererType *types.T,
+	invColumn exec.NodeColumnOrdinal,
 ) (exec.Node, error) {
 	return nil, unimplemented.NewWithIssue(
 		47473, "experimental opt-driven distsql planning: inverted filter")
@@ -347,7 +351,7 @@ func (e *distSQLSpecExecFactory) ConstructSimpleProject(
 	}
 	physPlan.AddProjection(projection)
 	physPlan.ResultColumns = getResultColumnsForSimpleProject(
-		cols, nil /* colNames */, physPlan.ResultTypes, physPlan.ResultColumns,
+		cols, nil /* colNames */, physPlan.GetResultTypes(), physPlan.ResultColumns,
 	)
 	physPlan.PlanToStreamColMap = identityMap(physPlan.PlanToStreamColMap, len(cols))
 	physPlan.SetMergeOrdering(e.dsp.convertOrdering(ReqOrdering(reqOrdering), physPlan.PlanToStreamColMap))
@@ -364,7 +368,7 @@ func (e *distSQLSpecExecFactory) ConstructSerializingProject(
 		projection[i] = uint32(cols[physPlan.PlanToStreamColMap[i]])
 	}
 	physPlan.AddProjection(projection)
-	physPlan.ResultColumns = getResultColumnsForSimpleProject(cols, colNames, physPlan.ResultTypes, physPlan.ResultColumns)
+	physPlan.ResultColumns = getResultColumnsForSimpleProject(cols, colNames, physPlan.GetResultTypes(), physPlan.ResultColumns)
 	physPlan.PlanToStreamColMap = identityMap(physPlan.PlanToStreamColMap, len(cols))
 	return plan, nil
 }
@@ -621,6 +625,7 @@ func (e *distSQLSpecExecFactory) ConstructLookupJoin(
 	eqColsAreKey bool,
 	lookupCols exec.TableColumnOrdinalSet,
 	onCond tree.TypedExpr,
+	isSecondJoinInPairedJoiner bool,
 	reqOrdering exec.OutputOrdering,
 	locking *tree.LockingItem,
 ) (exec.Node, error) {
@@ -636,6 +641,7 @@ func (e *distSQLSpecExecFactory) ConstructInvertedJoin(
 	index cat.Index,
 	lookupCols exec.TableColumnOrdinalSet,
 	onCond tree.TypedExpr,
+	isFirstJoinInPairedJoiner bool,
 	reqOrdering exec.OutputOrdering,
 ) (exec.Node, error) {
 	return nil, unimplemented.NewWithIssue(47473, "experimental opt-driven distsql planning: geo lookup join")
@@ -979,9 +985,9 @@ func (e *distSQLSpecExecFactory) constructHashOrMergeJoin(
 	resultColumns := getJoinResultColumns(joinType, leftPhysPlan.ResultColumns, rightPhysPlan.ResultColumns)
 	leftMap, rightMap := leftPhysPlan.PlanToStreamColMap, rightPhysPlan.PlanToStreamColMap
 	helper := &joinPlanningHelper{
-		numLeftOutCols:          len(leftPhysPlan.ResultTypes),
-		numRightOutCols:         len(rightPhysPlan.ResultTypes),
-		numAllLeftCols:          len(leftPhysPlan.ResultTypes),
+		numLeftOutCols:          len(leftPhysPlan.GetResultTypes()),
+		numRightOutCols:         len(rightPhysPlan.GetResultTypes()),
+		numAllLeftCols:          len(leftPhysPlan.GetResultTypes()),
 		leftPlanToStreamColMap:  leftMap,
 		rightPlanToStreamColMap: rightMap,
 	}

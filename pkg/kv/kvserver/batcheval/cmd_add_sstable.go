@@ -42,7 +42,7 @@ func EvalAddSSTable(
 
 	// TODO(tschottdorf): restore the below in some form (gets in the way of testing).
 	// _, span := tracing.ChildSpan(ctx, fmt.Sprintf("AddSSTable [%s,%s)", args.Key, args.EndKey))
-	// defer tracing.FinishSpan(span)
+	// defer span.Finish()
 	log.Eventf(ctx, "evaluating AddSSTable [%s,%s)", mvccStartKey.Key, mvccEndKey.Key)
 
 	// IMPORT INTO should not proceed if any KVs from the SST shadow existing data
@@ -225,7 +225,7 @@ func checkForKeyCollisions(
 	emptyMVCCStats := enginepb.MVCCStats{}
 
 	// Create iterator over the existing data.
-	existingDataIter := dbEngine.NewIterator(storage.IterOptions{UpperBound: mvccEndKey.Key})
+	existingDataIter := dbEngine.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: mvccEndKey.Key})
 	defer existingDataIter.Close()
 	existingDataIter.SeekGE(mvccStartKey)
 	if ok, err := existingDataIter.Valid(); err != nil {

@@ -39,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
+	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -136,6 +137,9 @@ func findLibrary(libraryName string) (string, error) {
 	if local {
 		switch runtime.GOOS {
 		case "linux":
+		case "freebsd":
+		case "openbsd":
+		case "dragonfly":
 		case "windows":
 			suffix = ".dll"
 		case "darwin":
@@ -885,16 +889,9 @@ func (s *clusterSpec) args() []string {
 
 	switch cloud {
 	case aws:
-		if s.Zones != "" {
-			fmt.Fprintf(os.Stderr, "zones spec not yet supported on AWS: %s\n", s.Zones)
-			os.Exit(1)
-		}
-		if s.Geo {
-			fmt.Fprintf(os.Stderr, "geo-distributed clusters not yet supported on AWS\n")
-			os.Exit(1)
-		}
-
 		args = append(args, "--clouds=aws")
+	case gce:
+		args = append(args, "--clouds=gce")
 	case azure:
 		args = append(args, "--clouds=azure")
 	}
@@ -1281,6 +1278,9 @@ func (f *clusterFactory) newCluster(
 	// Attempt to create a cluster several times, cause them clouds be flaky that
 	// my phone says it's snowing.
 	for i := 0; i < 3; i++ {
+		if i > 0 {
+			l.PrintfCtx(ctx, "Retrying cluster creation (attempt #%d)", i+1)
+		}
 		err = execCmd(ctx, l, sargs...)
 		if err == nil {
 			success = true
@@ -2124,18 +2124,10 @@ func (c *cluster) StartE(ctx context.Context, opts ...option) error {
 	}
 	args = append(args, roachprodArgs(opts)...)
 	args = append(args, c.makeNodes(opts...))
-	// Enable Jemalloc profiles for all roachtests. This has only
-	// minimal performance impact and significantly improves the
-	// troubleshootability of memory-related issues.
-	args = append(args, enableJemallocArgs()...)
 	if !argExists(args, "--encrypt") && c.encryptDefault {
 		args = append(args, "--encrypt")
 	}
 	return execCmd(ctx, c.l, args...)
-}
-
-func enableJemallocArgs() []string {
-	return []string{"-e", "MALLOC_CONF=prof:true"}
 }
 
 // Start is like StartE() except it takes a test and, on error, calls t.Fatal().
@@ -2766,8 +2758,10 @@ func (m *monitor) wait(args ...string) error {
 	return err
 }
 
+// TODO(nvanbenschoten): this function should take a context and be responsive
+// to context cancellation.
 func waitForFullReplication(t *test, db *gosql.DB) {
-	t.l.Printf("waiting for up-replication...\n")
+	t.l.Printf("waiting for up-replication...")
 	tStart := timeutil.Now()
 	for ok := false; !ok; time.Sleep(time.Second) {
 		if err := db.QueryRow(
@@ -2777,6 +2771,45 @@ func waitForFullReplication(t *test, db *gosql.DB) {
 		}
 		if timeutil.Since(tStart) > 30*time.Second {
 			t.l.Printf("still waiting for full replication")
+		}
+	}
+}
+
+func waitForUpdatedReplicationReport(ctx context.Context, t *test, db *gosql.DB) {
+	t.l.Printf("waiting for updated replication report...")
+
+	// Temporarily drop the replication report interval down.
+	if _, err := db.ExecContext(
+		ctx, `SET CLUSTER setting kv.replication_reports.interval = '2s'`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := db.ExecContext(
+			ctx, `RESET CLUSTER setting kv.replication_reports.interval`,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	// Wait for a new report with a timestamp after tStart to ensure
+	// that the report picks up any new tables or zones.
+	tStart := timeutil.Now()
+	for r := retry.StartWithCtx(ctx, retry.Options{}); r.Next(); {
+		var gen time.Time
+		if err := db.QueryRowContext(
+			ctx, `SELECT generated FROM system.reports_meta ORDER BY 1 DESC LIMIT 1`,
+		).Scan(&gen); err != nil {
+			if !errors.Is(err, gosql.ErrNoRows) {
+				t.Fatal(err)
+			}
+			// No report generated yet.
+		} else if tStart.Before(gen) {
+			// New report generated.
+			return
+		}
+		if timeutil.Since(tStart) > 30*time.Second {
+			t.l.Printf("still waiting for updated replication report")
 		}
 	}
 }

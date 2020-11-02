@@ -33,15 +33,17 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/build"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
+	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -51,7 +53,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
@@ -61,6 +65,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
 	"github.com/cockroachdb/cockroach/pkg/util/timetz"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/unaccent"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/knz/strtime"
@@ -80,24 +85,28 @@ var (
 	SequenceNameArg = "sequence_name"
 )
 
+const defaultFollowerReadDuration = -4800 * time.Millisecond
+
 const maxAllocatedStringSize = 128 * 1024 * 1024
 
 const errInsufficientArgsFmtString = "unknown signature: %s()"
 
 const (
-	categoryArray         = "Array"
-	categoryComparison    = "Comparison"
-	categoryCompatibility = "Compatibility"
-	categoryDateAndTime   = "Date and time"
-	categoryEnum          = "Enum"
-	categoryGenerator     = "Set-returning"
-	categorySpatial       = "Spatial"
-	categoryIDGeneration  = "ID generation"
-	categoryJSON          = "JSONB"
-	categoryMultiTenancy  = "Multi-tenancy"
-	categorySequences     = "Sequence"
-	categoryString        = "String and byte"
-	categorySystemInfo    = "System info"
+	categoryArray          = "Array"
+	categoryComparison     = "Comparison"
+	categoryCompatibility  = "Compatibility"
+	categoryDateAndTime    = "Date and time"
+	categoryEnum           = "Enum"
+	categoryFullTextSearch = "Full Text Search"
+	categoryGenerator      = "Set-returning"
+	categoryTrigram        = "Trigrams"
+	categoryIDGeneration   = "ID generation"
+	categoryJSON           = "JSONB"
+	categoryMultiTenancy   = "Multi-tenancy"
+	categorySequences      = "Sequence"
+	categorySpatial        = "Spatial"
+	categoryString         = "String and byte"
+	categorySystemInfo     = "System info"
 )
 
 func categorizeType(t *types.T) string {
@@ -254,6 +263,26 @@ var builtins = map[string]builtinDefinition{
 			},
 			types.String,
 			"Converts all characters in `val` to their lower-case equivalents.",
+			tree.VolatilityImmutable,
+		),
+	),
+
+	"unaccent": makeBuiltin(tree.FunctionProperties{Category: categoryString},
+		stringOverload1(
+			func(evalCtx *tree.EvalContext, s string) (tree.Datum, error) {
+				var b strings.Builder
+				for _, ch := range s {
+					v, ok := unaccent.Dictionary[ch]
+					if ok {
+						b.WriteString(v)
+					} else {
+						b.WriteRune(ch)
+					}
+				}
+				return tree.NewDString(b.String()), nil
+			},
+			types.String,
+			"Removes accents (diacritic signs) from the text provided in `val`.",
 			tree.VolatilityImmutable,
 		),
 	),
@@ -896,7 +925,7 @@ var builtins = map[string]builtinDefinition{
 			ReturnType: tree.FixedReturnType(types.String),
 			Fn: func(evalCtx *tree.EvalContext, args tree.Datums) (_ tree.Datum, err error) {
 				data, format := *args[0].(*tree.DBytes), string(tree.MustBeDString(args[1]))
-				be, ok := lex.BytesEncodeFormatFromString(format)
+				be, ok := sessiondatapb.BytesEncodeFormatFromString(format)
 				if !ok {
 					return nil, pgerror.New(pgcode.InvalidParameterValue,
 						"only 'hex', 'escape', and 'base64' formats are supported for encode()")
@@ -915,7 +944,7 @@ var builtins = map[string]builtinDefinition{
 			ReturnType: tree.FixedReturnType(types.Bytes),
 			Fn: func(evalCtx *tree.EvalContext, args tree.Datums) (_ tree.Datum, err error) {
 				data, format := string(tree.MustBeDString(args[0])), string(tree.MustBeDString(args[1]))
-				be, ok := lex.BytesEncodeFormatFromString(format)
+				be, ok := sessiondatapb.BytesEncodeFormatFromString(format)
 				if !ok {
 					return nil, pgerror.New(pgcode.InvalidParameterValue,
 						"only 'hex', 'escape', and 'base64' formats are supported for decode()")
@@ -976,9 +1005,19 @@ var builtins = map[string]builtinDefinition{
 		"Calculates the SHA1 hash value of a set of values.",
 	),
 
+	"sha224": hashBuiltin(
+		func() hash.Hash { return sha256.New224() },
+		"Calculates the SHA224 hash value of a set of values.",
+	),
+
 	"sha256": hashBuiltin(
 		func() hash.Hash { return sha256.New() },
 		"Calculates the SHA256 hash value of a set of values.",
+	),
+
+	"sha384": hashBuiltin(
+		func() hash.Hash { return sha512.New384() },
+		"Calculates the SHA384 hash value of a set of values.",
 	),
 
 	"sha512": hashBuiltin(
@@ -1591,7 +1630,7 @@ var builtins = map[string]builtinDefinition{
 		stringOverload1(
 			func(evalCtx *tree.EvalContext, s string) (tree.Datum, error) {
 				var buf bytes.Buffer
-				lex.EncodeRestrictedSQLIdent(&buf, s, lex.EncNoFlags)
+				lexbase.EncodeRestrictedSQLIdent(&buf, s, lexbase.EncNoFlags)
 				return tree.NewDString(buf.String()), nil
 			},
 			types.String,
@@ -2129,7 +2168,7 @@ var builtins = map[string]builtinDefinition{
 			Types:      tree.ArgTypes{},
 			ReturnType: tree.FixedReturnType(types.TimestampTZ),
 			Fn:         followerReadTimestamp,
-			Info: `Returns a timestamp which is very likely to be safe to perform
+			Info: fmt.Sprintf(`Returns a timestamp which is very likely to be safe to perform
 against a follower replica.
 
 This function is intended to be used with an AS OF SYSTEM TIME clause to perform
@@ -2138,7 +2177,9 @@ to be performed against the closest replica as opposed to the currently
 leaseholder for a given range.
 
 Note that this function requires an enterprise license on a CCL distribution to
-return without an error.`,
+return a result that is less likely the closest replica. It is otherwise
+hardcoded as %s from the statement time, which may not result in reading from the
+nearest replica.`, defaultFollowerReadDuration),
 			Volatility: tree.VolatilityVolatile,
 		},
 	),
@@ -2849,6 +2890,45 @@ may increase either contention or retry errors, or both.`,
 		}
 	})),
 
+	// Full text search functions.
+	"ts_match_qv":                    makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"ts_match_vq":                    makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"tsvector_cmp":                   makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"tsvector_concat":                makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"ts_debug":                       makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"ts_headline":                    makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"ts_lexize":                      makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"websearch_to_tsquery":           makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"array_to_tsvector":              makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"get_current_ts_config":          makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"numnode":                        makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"plainto_tsquery":                makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"phraseto_tsquery":               makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"querytree":                      makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"setweight":                      makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"strip":                          makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"to_tsquery":                     makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"to_tsvector":                    makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"json_to_tsvector":               makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"jsonb_to_tsvector":              makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"ts_delete":                      makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"ts_filter":                      makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"ts_rank":                        makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"ts_rank_cd":                     makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"ts_rewrite":                     makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"tsquery_phrase":                 makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"tsvector_to_array":              makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"tsvector_update_trigger":        makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+	"tsvector_update_trigger_column": makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 7821, Category: categoryFullTextSearch}),
+
+	// Trigram functions.
+	"similarity":             makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 41285, Category: categoryTrigram}),
+	"show_trgm":              makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 41285, Category: categoryTrigram}),
+	"word_similarity":        makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 41285, Category: categoryTrigram}),
+	"strict_word_similarity": makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 41285, Category: categoryTrigram}),
+	"show_limit":             makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 41285, Category: categoryTrigram}),
+	"set_limit":              makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 41285, Category: categoryTrigram}),
+
 	// JSON functions.
 	// The behavior of both the JSON and JSONB data types in CockroachDB is
 	// similar to the behavior of the JSONB data type in Postgres.
@@ -2857,6 +2937,14 @@ may increase either contention or retry errors, or both.`,
 	"jsonb_to_recordset":       makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 33285, Category: categoryJSON}),
 	"json_populate_recordset":  makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 33285, Category: categoryJSON}),
 	"jsonb_populate_recordset": makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 33285, Category: categoryJSON}),
+
+	"jsonb_path_exists":      makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 22513, Category: categoryJSON}),
+	"jsonb_path_exists_opr":  makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 22513, Category: categoryJSON}),
+	"jsonb_path_match":       makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 22513, Category: categoryJSON}),
+	"jsonb_path_match_opr":   makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 22513, Category: categoryJSON}),
+	"jsonb_path_query":       makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 22513, Category: categoryJSON}),
+	"jsonb_path_query_array": makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 22513, Category: categoryJSON}),
+	"jsonb_path_query_first": makeBuiltin(tree.FunctionProperties{UnsupportedWithIssue: 22513, Category: categoryJSON}),
 
 	"json_remove_path": makeBuiltin(jsonProps(),
 		tree.Overload{
@@ -2935,6 +3023,22 @@ may increase either contention or retry errors, or both.`,
 
 	"jsonb_array_length": makeBuiltin(jsonProps(), jsonArrayLengthImpl),
 
+	"jsonb_exists_any": makeBuiltin(
+		jsonProps(),
+		tree.Overload{
+			Types: tree.ArgTypes{
+				{"json", types.Jsonb},
+				{"array", types.StringArray},
+			},
+			ReturnType: tree.FixedReturnType(types.Bool),
+			Fn: func(e *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
+				return tree.JSONExistsAny(e, tree.MustBeDJSON(args[0]), tree.MustBeDArray(args[1]))
+			},
+			Info:       "Returns whether any of the strings in the text array exist as top-level keys or array elements",
+			Volatility: tree.VolatilityImmutable,
+		},
+	),
+
 	"crdb_internal.pb_to_json": makeBuiltin(
 		jsonProps(),
 		tree.Overload{
@@ -2951,7 +3055,7 @@ may increase either contention or retry errors, or both.`,
 				if err != nil {
 					return nil, err
 				}
-				j, err := protoreflect.MessageToJSON(msg)
+				j, err := protoreflect.MessageToJSON(msg, true /* emitDefaults */)
 				if err != nil {
 					return nil, err
 				}
@@ -3247,10 +3351,10 @@ may increase either contention or retry errors, or both.`,
 			Types:      tree.ArgTypes{},
 			ReturnType: tree.FixedReturnType(types.String),
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				if len(ctx.SessionData.User) == 0 {
+				if ctx.SessionData.User().Undefined() {
 					return tree.DNull, nil
 				}
-				return tree.NewDString(ctx.SessionData.User), nil
+				return tree.NewDString(ctx.SessionData.User().Normalized()), nil
 			},
 			Info: "Returns the current user. This function is provided for " +
 				"compatibility with PostgreSQL.",
@@ -3391,33 +3495,7 @@ may increase either contention or retry errors, or both.`,
 				if sTenID <= 0 {
 					return nil, pgerror.New(pgcode.InvalidParameterValue, "tenant ID must be positive")
 				}
-				if err := ctx.Tenant.CreateTenant(ctx.Context, uint64(sTenID), nil); err != nil {
-					return nil, err
-				}
-				return args[0], nil
-			},
-			Info:       "Creates a new tenant with the provided ID. Must be run by the System tenant.",
-			Volatility: tree.VolatilityVolatile,
-		},
-		tree.Overload{
-			Types: tree.ArgTypes{
-				{"id", types.Int},
-				{"info", types.Bytes},
-			},
-			ReturnType: tree.FixedReturnType(types.Int),
-			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				if err := requireNonNull(args[0]); err != nil {
-					return nil, err
-				}
-				sTenID := int64(tree.MustBeDInt(args[0]))
-				if sTenID <= 0 {
-					return nil, pgerror.New(pgcode.InvalidParameterValue, "tenant ID must be positive")
-				}
-				var tenInfo []byte
-				if args[1] != tree.DNull {
-					tenInfo = []byte(tree.MustBeDBytes(args[1]))
-				}
-				if err := ctx.Tenant.CreateTenant(ctx.Context, uint64(sTenID), tenInfo); err != nil {
+				if err := ctx.Tenant.CreateTenant(ctx.Context, uint64(sTenID)); err != nil {
 					return nil, err
 				}
 				return args[0], nil
@@ -3841,6 +3919,35 @@ may increase either contention or retry errors, or both.`,
 		},
 	),
 
+	// Returns the descriptor of a database based on its name.
+	// Allows a non-admin to query the system.namespace table, but performs
+	// the relevant permission checks to ensure secure access.
+	// Returns NULL if none is found.
+	// Errors if there is no permission for the current user to view the descriptor.
+	"crdb_internal.get_database_id": makeBuiltin(
+		tree.FunctionProperties{Category: categorySystemInfo},
+		tree.Overload{
+			Types:      tree.ArgTypes{{"name", types.String}},
+			ReturnType: tree.FixedReturnType(types.Int),
+			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
+				name := tree.MustBeDString(args[0])
+				id, found, err := ctx.PrivilegedAccessor.LookupNamespaceID(
+					ctx.Context,
+					int64(0),
+					string(name),
+				)
+				if err != nil {
+					return nil, err
+				}
+				if !found {
+					return tree.DNull, nil
+				}
+				return tree.NewDInt(id), nil
+			},
+			Volatility: tree.VolatilityStable,
+		},
+	),
+
 	// Returns the zone config based on a given namespace id.
 	// Returns NULL if a zone configuration is not found.
 	// Errors if there is no permission for the current user to view the zone config.
@@ -3974,16 +4081,8 @@ may increase either contention or retry errors, or both.`,
 		tree.Overload{
 			Types:      tree.ArgTypes{{"val", types.Jsonb}},
 			ReturnType: tree.FixedReturnType(types.Int),
-			Fn: func(_ *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				arg := args[0]
-				if arg == tree.DNull {
-					return tree.DZero, nil
-				}
-				n, err := json.NumInvertedIndexEntries(tree.MustBeDJSON(arg).JSON)
-				if err != nil {
-					return nil, err
-				}
-				return tree.NewDInt(tree.DInt(n)), nil
+			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
+				return jsonNumInvertedIndexEntries(ctx, args[0])
 			},
 			Info:       "This function is used only by CockroachDB's developers for testing purposes.",
 			Volatility: tree.VolatilityStable,
@@ -3992,21 +4091,36 @@ may increase either contention or retry errors, or both.`,
 			Types:      tree.ArgTypes{{"val", types.AnyArray}},
 			ReturnType: tree.FixedReturnType(types.Int),
 			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
-				arg := args[0]
-				if arg == tree.DNull {
-					return tree.DZero, nil
-				}
-				arr := tree.MustBeDArray(arg)
-				if !arr.HasNonNulls {
-					// Inverted indexes on arrays don't contain entries for null array
-					// elements.
-					return tree.DZero, nil
-				}
-				keys, err := rowenc.EncodeInvertedIndexTableKeys(arr, nil)
-				if err != nil {
-					return nil, err
-				}
-				return tree.NewDInt(tree.DInt(len(keys))), nil
+				return arrayNumInvertedIndexEntries(ctx, args[0], tree.DNull)
+			},
+			Info:       "This function is used only by CockroachDB's developers for testing purposes.",
+			Volatility: tree.VolatilityStable,
+		},
+		tree.Overload{
+			Types: tree.ArgTypes{
+				{"val", types.Jsonb},
+				{"version", types.Int},
+			},
+			ReturnType: tree.FixedReturnType(types.Int),
+			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
+				// The version argument is currently ignored for JSON inverted indexes,
+				// since all prior versions of JSON inverted indexes include the same
+				// entries. (The version argument was introduced for array indexes,
+				// since prior versions of array indexes did not include keys for empty
+				// arrays.)
+				return jsonNumInvertedIndexEntries(ctx, args[0])
+			},
+			Info:       "This function is used only by CockroachDB's developers for testing purposes.",
+			Volatility: tree.VolatilityStable,
+		},
+		tree.Overload{
+			Types: tree.ArgTypes{
+				{"val", types.AnyArray},
+				{"version", types.Int},
+			},
+			ReturnType: tree.FixedReturnType(types.Int),
+			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
+				return arrayNumInvertedIndexEntries(ctx, args[0], args[1])
 			},
 			Info:       "This function is used only by CockroachDB's developers for testing purposes.",
 			Volatility: tree.VolatilityStable,
@@ -4176,6 +4290,31 @@ may increase either contention or retry errors, or both.`,
 			},
 			Info:       "Checks is given sqlliveness session id is not expired",
 			Volatility: tree.VolatilityStable,
+		},
+	),
+
+	"crdb_internal.gc_tenant": makeBuiltin(
+		tree.FunctionProperties{
+			Category:     categoryMultiTenancy,
+			Undocumented: true,
+		},
+		tree.Overload{
+			Types: tree.ArgTypes{
+				{"id", types.Int},
+			},
+			ReturnType: tree.FixedReturnType(types.Int),
+			Fn: func(ctx *tree.EvalContext, args tree.Datums) (tree.Datum, error) {
+				sTenID := int64(tree.MustBeDInt(args[0]))
+				if sTenID <= 0 {
+					return nil, pgerror.New(pgcode.InvalidParameterValue, "tenant ID must be positive")
+				}
+				if err := ctx.Tenant.GCTenant(ctx.Context, uint64(sTenID)); err != nil {
+					return nil, err
+				}
+				return args[0], nil
+			},
+			Info:       "Garbage collects a tenant with the provided ID. Must be run by the System tenant.",
+			Volatility: tree.VolatilityVolatile,
 		},
 	),
 
@@ -6239,7 +6378,7 @@ var errInsufficientPriv = pgerror.New(
 )
 
 func checkPrivilegedUser(ctx *tree.EvalContext) error {
-	if ctx.SessionData.User != security.RootUser {
+	if !ctx.SessionData.User().IsRootUser() {
 		return errInsufficientPriv
 	}
 	return nil
@@ -6253,12 +6392,32 @@ var EvalFollowerReadOffset func(clusterID uuid.UUID, _ *cluster.Settings) (time.
 
 func recentTimestamp(ctx *tree.EvalContext) (time.Time, error) {
 	if EvalFollowerReadOffset == nil {
-		return time.Time{}, pgerror.New(pgcode.FeatureNotSupported,
-			tree.FollowerReadTimestampFunctionName+
-				" is only available in ccl distribution")
+		telemetry.Inc(sqltelemetry.FollowerReadDisabledCCLCounter)
+		ctx.ClientNoticeSender.BufferClientNotice(
+			ctx.Context,
+			pgnotice.Newf(
+				tree.FollowerReadTimestampFunctionName+
+					" does not returns a value that is less likely to read from the closest replica "+
+					"in a non-CCL distribution, using %s from statement time instead",
+				defaultFollowerReadDuration,
+			),
+		)
+		return ctx.StmtTimestamp.Add(defaultFollowerReadDuration), nil
 	}
 	offset, err := EvalFollowerReadOffset(ctx.ClusterID, ctx.Settings)
 	if err != nil {
+		if code := pgerror.GetPGCode(err); code == pgcode.CCLValidLicenseRequired {
+			telemetry.Inc(sqltelemetry.FollowerReadDisabledNoEnterpriseLicense)
+			ctx.ClientNoticeSender.BufferClientNotice(
+				ctx.Context,
+				pgnotice.Newf(
+					"%s: using %s from current statement time instead",
+					defaultFollowerReadDuration,
+					err.Error(),
+				),
+			)
+			return ctx.StmtTimestamp.Add(defaultFollowerReadDuration), nil
+		}
 		return time.Time{}, err
 	}
 	return ctx.StmtTimestamp.Add(offset), nil
@@ -6277,4 +6436,41 @@ func followerReadTimestamp(ctx *tree.EvalContext, _ tree.Datums) (tree.Datum, er
 		return nil, err
 	}
 	return tree.MakeDTimestampTZ(ts, time.Microsecond)
+}
+
+func jsonNumInvertedIndexEntries(_ *tree.EvalContext, val tree.Datum) (tree.Datum, error) {
+	if val == tree.DNull {
+		return tree.DZero, nil
+	}
+	n, err := json.NumInvertedIndexEntries(tree.MustBeDJSON(val).JSON)
+	if err != nil {
+		return nil, err
+	}
+	return tree.NewDInt(tree.DInt(n)), nil
+}
+
+func arrayNumInvertedIndexEntries(
+	ctx *tree.EvalContext, val, version tree.Datum,
+) (tree.Datum, error) {
+	if val == tree.DNull {
+		return tree.DZero, nil
+	}
+	arr := tree.MustBeDArray(val)
+
+	v := descpb.SecondaryIndexFamilyFormatVersion
+	if version == tree.DNull {
+		if ctx.Settings.Version.IsActive(
+			ctx.Context, clusterversion.VersionEmptyArraysInInvertedIndexes,
+		) {
+			v = descpb.EmptyArraysInInvertedIndexesVersion
+		}
+	} else {
+		v = descpb.IndexDescriptorVersion(tree.MustBeDInt(version))
+	}
+
+	keys, err := rowenc.EncodeInvertedIndexTableKeys(arr, nil, v)
+	if err != nil {
+		return nil, err
+	}
+	return tree.NewDInt(tree.DInt(len(keys))), nil
 }

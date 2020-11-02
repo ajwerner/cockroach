@@ -125,6 +125,9 @@ type TestServerArgs struct {
 	// If set, web session authentication will be disabled, even if the server
 	// is running in secure mode.
 	DisableWebSessionAuthentication bool
+
+	// If set, testing specific descriptor validation will be disabled. even if the server
+	DisableTestingDescriptorValidation bool
 }
 
 // TestClusterArgs contains the parameters one can set when creating a test
@@ -149,6 +152,8 @@ type TestClusterArgs struct {
 	// map. The map's key is an index within TestCluster.Servers. If there is
 	// no entry in the map for a particular server, the default ServerArgs are
 	// used.
+	//
+	// These are indexes: the key 0 corresponds to the first node.
 	//
 	// A copy of an entry from this map will be copied to each individual server
 	// and potentially adjusted according to ReplicationMode.
@@ -188,6 +193,7 @@ func DefaultTestTempStorageConfigWithSize(
 	return TempStorageConfig{
 		InMemory: true,
 		Mon:      monitor,
+		Settings: st,
 	}
 }
 
@@ -216,9 +222,6 @@ const (
 type TestTenantArgs struct {
 	TenantID roachpb.TenantID
 
-	// TenantInfo is the metadata used if creating a tenant.
-	TenantInfo []byte
-
 	// Existing, if true, indicates an existing tenant, rather than a new tenant
 	// to be created by StartTenant.
 	Existing bool
@@ -230,4 +233,8 @@ type TestTenantArgs struct {
 	// TenantIDCodecOverride overrides the tenant ID used to construct the SQL
 	// server's codec, but nothing else (e.g. its certs). Used for testing.
 	TenantIDCodecOverride roachpb.TenantID
+
+	// Stopper, if not nil, is used to stop the tenant manually otherwise the
+	// TestServer stopper will be used.
+	Stopper *stop.Stopper
 }

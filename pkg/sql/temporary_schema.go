@@ -28,10 +28,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
@@ -94,7 +94,7 @@ func (p *planner) getOrCreateTemporarySchema(
 	sKey := catalogkeys.NewSchemaKey(dbID, tempSchemaName)
 	schemaID, err := catalogkv.GetDescriptorID(ctx, p.txn, p.ExecCfg().Codec, sKey)
 	if err != nil {
-		return 0, err
+		return descpb.InvalidID, err
 	} else if schemaID == descpb.InvalidID {
 		// The temporary schema has not been created yet.
 		id, err := catalogkv.GenerateUniqueDescID(ctx, p.ExecCfg().DB, p.ExecCfg().Codec)
@@ -105,7 +105,7 @@ func (p *planner) getOrCreateTemporarySchema(
 			return descpb.InvalidID, err
 		}
 		p.sessionDataMutator.SetTemporarySchemaName(sKey.Name())
-		p.sessionDataMutator.SetTemporarySchemaID(uint32(id))
+		p.sessionDataMutator.SetTemporarySchemaIDForDatabase(uint32(dbID), uint32(id))
 		return id, nil
 	}
 	return schemaID, nil
@@ -160,8 +160,7 @@ func getTemporaryObjectNames(
 	if err != nil {
 		return nil, err
 	}
-	a := catalogkv.UncachedPhysicalAccessor{}
-	return a.GetObjectNames(
+	return descs.GetObjectNames(
 		ctx,
 		txn,
 		codec,
@@ -176,13 +175,14 @@ func getTemporaryObjectNames(
 func cleanupSessionTempObjects(
 	ctx context.Context,
 	settings *cluster.Settings,
+	leaseMgr *lease.Manager,
 	db *kv.DB,
 	codec keys.SQLCodec,
 	ie sqlutil.InternalExecutor,
 	sessionID ClusterWideID,
 ) error {
 	tempSchemaName := temporarySchemaName(sessionID)
-	return db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+	return descs.Txn(ctx, settings, leaseMgr, ie, db, func(ctx context.Context, txn *kv.Txn, descsCol *descs.Collection) error {
 		// We are going to read all database descriptor IDs, then for each database
 		// we will drop all the objects under the temporary schema.
 		dbIDs, err := catalogkv.GetAllDatabaseDescriptorIDs(ctx, txn, codec)
@@ -194,6 +194,7 @@ func cleanupSessionTempObjects(
 				ctx,
 				settings,
 				txn,
+				descsCol,
 				codec,
 				ie,
 				id,
@@ -218,6 +219,7 @@ func cleanupSchemaObjects(
 	ctx context.Context,
 	settings *cluster.Settings,
 	txn *kv.Txn,
+	descsCol *descs.Collection,
 	codec keys.SQLCodec,
 	ie sqlutil.InternalExecutor,
 	dbID descpb.ID,
@@ -227,13 +229,11 @@ func cleanupSchemaObjects(
 	if err != nil {
 		return err
 	}
-	a := catalogkv.UncachedPhysicalAccessor{}
 
-	searchPath := catconstants.DefaultSearchPath.WithTemporarySchemaName(schemaName)
-	override := sessiondata.InternalExecutorOverride{
-		SearchPath: &searchPath,
-		User:       security.RootUser,
-	}
+	// We construct the database ID -> temp Schema ID map here so that the
+	// drop statements executed by the internal executor can resolve the temporary
+	// schemaID later.
+	databaseIDToTempSchemaID := make(map[uint32]uint32)
 
 	// TODO(andrei): We might want to accelerate the deletion of this data.
 	var tables descpb.IDs
@@ -243,25 +243,17 @@ func cleanupSchemaObjects(
 	tblDescsByID := make(map[descpb.ID]catalog.TableDescriptor, len(tbNames))
 	tblNamesByID := make(map[descpb.ID]tree.TableName, len(tbNames))
 	for _, tbName := range tbNames {
-		objDesc, err := a.GetObjectDesc(
-			ctx,
-			txn,
-			settings,
-			codec,
-			tbName.Catalog(),
-			tbName.Schema(),
-			tbName.Object(),
-			tree.ObjectLookupFlagsWithRequired(),
-		)
+		flags := tree.ObjectLookupFlagsWithRequired()
+		flags.AvoidCached = true
+		desc, err := descsCol.GetTableVersion(ctx, txn, &tbName, flags)
 		if err != nil {
 			return err
 		}
-		// TODO(ajwerner): Deal with temporary types or ensure that they cannot
-		// exist.
-		desc := objDesc.(*tabledesc.Immutable)
 
 		tblDescsByID[desc.ID] = desc
 		tblNamesByID[desc.ID] = tbName
+
+		databaseIDToTempSchemaID[uint32(desc.ParentID)] = uint32(desc.GetParentSchemaID())
 
 		if desc.SequenceOpts != nil {
 			sequences = append(sequences, desc.ID)
@@ -270,6 +262,13 @@ func cleanupSchemaObjects(
 		} else {
 			tables = append(tables, desc.ID)
 		}
+	}
+
+	searchPath := sessiondata.DefaultSearchPathForUser(security.RootUserName()).WithTemporarySchemaName(schemaName)
+	override := sessiondata.InternalExecutorOverride{
+		SearchPath:               &searchPath,
+		User:                     security.RootUserName(),
+		DatabaseIDToTempSchemaID: databaseIDToTempSchemaID,
 	}
 
 	for _, toDelete := range []struct {
@@ -299,6 +298,7 @@ func cleanupSchemaObjects(
 					if _, ok := tblDescsByID[d.ID]; ok {
 						return nil
 					}
+					// TODO (lucy): Use the descriptor collection to get descriptors here.
 					dTableDesc, err := catalogkv.MustGetTableDescByID(ctx, txn, codec, d.ID)
 					if err != nil {
 						return err
@@ -396,6 +396,7 @@ type TemporaryObjectCleaner struct {
 	isMeta1LeaseholderFunc isMeta1LeaseholderFunc
 	testingKnobs           ExecutorTestingKnobs
 	metrics                *temporaryObjectCleanerMetrics
+	leaseMgr               *lease.Manager
 }
 
 // temporaryObjectCleanerMetrics are the metrics for TemporaryObjectCleaner
@@ -422,6 +423,7 @@ func NewTemporaryObjectCleaner(
 	statusServer serverpb.SQLStatusServer,
 	isMeta1LeaseholderFunc isMeta1LeaseholderFunc,
 	testingKnobs ExecutorTestingKnobs,
+	leaseMgr *lease.Manager,
 ) *TemporaryObjectCleaner {
 	metrics := makeTemporaryObjectCleanerMetrics()
 	registry.AddMetricStruct(metrics)
@@ -434,6 +436,7 @@ func NewTemporaryObjectCleaner(
 		isMeta1LeaseholderFunc:           isMeta1LeaseholderFunc,
 		testingKnobs:                     testingKnobs,
 		metrics:                          metrics,
+		leaseMgr:                         leaseMgr,
 	}
 }
 
@@ -559,6 +562,7 @@ func (c *TemporaryObjectCleaner) doTemporaryObjectCleanup(
 				return cleanupSessionTempObjects(
 					ctx,
 					c.settings,
+					c.leaseMgr,
 					c.db,
 					c.codec,
 					ie,

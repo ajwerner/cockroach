@@ -39,6 +39,7 @@ func TestShowBackup(t *testing.T) {
 	defer cleanupFn()
 	defer cleanupEmptyCluster()
 	sqlDB.Exec(t, `
+SET CLUSTER SETTING sql.cross_db_fks.enabled = TRUE;
 CREATE TYPE data.welcome AS ENUM ('hello', 'hi');
 USE data; CREATE SCHEMA sc;
 CREATE TABLE data.sc.t1 (a INT);
@@ -417,7 +418,7 @@ func TestShowBackupTenants(t *testing.T) {
 	// NB: tenant certs for 10, 11, 20 are embedded. See:
 	_ = security.EmbeddedTenantIDs()
 
-	conn10 := serverutils.StartTenant(t, srv, base.TestTenantArgs{TenantID: roachpb.MakeTenantID(10), TenantInfo: []byte("ten")})
+	conn10 := serverutils.StartTenant(t, srv, base.TestTenantArgs{TenantID: roachpb.MakeTenantID(10)})
 	defer conn10.Close()
 	tenant10 := sqlutils.MakeSQLRunner(conn10)
 	tenant10.Exec(t, `CREATE DATABASE foo; CREATE TABLE foo.bar(i int primary key); INSERT INTO foo.bar VALUES (110), (210)`)

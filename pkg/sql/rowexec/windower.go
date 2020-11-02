@@ -32,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 // windowerState represents the state of the processor.
@@ -207,7 +206,7 @@ func newWindower(
 	// them to reuse the same shared memory account with the windower.
 	evalCtx.SingleDatumAggMemAccount = &w.acc
 
-	if sp := opentracing.SpanFromContext(ctx); sp != nil && tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(ctx); sp != nil && sp.IsRecording() {
 		w.input = newInputStatCollector(w.input)
 		w.FinishTrace = w.outputStatsToTrace
 	}
@@ -449,6 +448,10 @@ func (w *windower) processPartition(
 	for _, windowFnIdx := range w.orderOfWindowFnsProcessing {
 		windowFn := w.windowFns[windowFnIdx]
 
+		// TODO(yuzefovich): creating a new WindowFrameRun object for each
+		// partition and populating it below for a custom window frame is
+		// suboptimal. Consider extracting this logic into the constructor of
+		// the windower and reusing the same objects between partitions.
 		frameRun := &tree.WindowFrameRun{
 			ArgsIdxs:     windowFn.argsIdxs,
 			FilterColIdx: windowFn.filterColIdx,
@@ -677,7 +680,14 @@ func (w *windower) computeWindowFunctions(ctx context.Context, evalCtx *tree.Eva
 						"hash column %d, row with only %d columns", errors.Safe(col), errors.Safe(len(row)))
 				}
 				var err error
-				w.scratch, err = row[int(col)].Fingerprint(w.inputTypes[int(col)], &w.datumAlloc, w.scratch)
+				// We might allocate tree.Datums when hashing the row, so we'll
+				// ask the fingerprint to account for them. Note that if the
+				// datums are later used by the window functions (and accounted
+				// for accordingly), this can lead to over-accounting which is
+				// acceptable.
+				w.scratch, err = row[col].Fingerprint(
+					ctx, w.inputTypes[int(col)], &w.datumAlloc, w.scratch, &w.acc,
+				)
 				if err != nil {
 					return err
 				}
@@ -867,9 +877,8 @@ func (w *windower) outputStatsToTrace() {
 	if !ok {
 		return
 	}
-	if sp := opentracing.SpanFromContext(w.Ctx); sp != nil {
-		tracing.SetSpanStats(
-			sp,
+	if sp := tracing.SpanFromContext(w.Ctx); sp != nil {
+		sp.SetSpanStats(
 			&WindowerStats{
 				InputStats:       is,
 				MaxAllocatedMem:  w.MemMonitor.MaximumBytes(),

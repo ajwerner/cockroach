@@ -36,6 +36,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/rpc/nodedialer"
 	"github.com/cockroachdb/cockroach/pkg/scheduledjobs"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
 	"github.com/cockroachdb/cockroach/pkg/sql"
@@ -87,12 +88,17 @@ type sqlServer struct {
 	statsRefresher         *stats.Refresher
 	temporaryObjectCleaner *sql.TemporaryObjectCleaner
 	internalMemMetrics     sql.MemoryMetrics
-	adminMemMetrics        sql.MemoryMetrics
 	// sqlMemMetrics are used to track memory usage of sql sessions.
 	sqlMemMetrics           sql.MemoryMetrics
 	stmtDiagnosticsRegistry *stmtdiagnostics.Registry
 	sqlLivenessProvider     sqlliveness.Provider
 	metricsRegistry         *metric.Registry
+
+	// pgL is the shared RPC/SQL listener, opened when RPC was initialized.
+	pgL net.Listener
+	// connManager is the connection manager to use to set up additional
+	// SQL listeners in AcceptClients().
+	connManager netutil.Server
 }
 
 // sqlServerOptionalKVArgs are the arguments supplied to newSQLServer which are
@@ -239,10 +245,10 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*sqlServer, error) {
 			cfg.sqlLivenessProvider,
 			cfg.Settings,
 			cfg.HistogramWindowInterval(),
-			func(opName, user string) (interface{}, func()) {
+			func(opName string, user security.SQLUsername) (interface{}, func()) {
 				// This is a hack to get around a Go package dependency cycle. See comment
 				// in sql/jobs/registry.go on planHookMaker.
-				return sql.NewInternalPlanner(opName, nil, user, &sql.MemoryMetrics{}, execCfg)
+				return sql.MakeJobExecContext(opName, user, &sql.MemoryMetrics{}, execCfg)
 			},
 			cfg.jobAdoptionStopFile,
 		)
@@ -270,6 +276,9 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*sqlServer, error) {
 		cfg.LeaseManagerConfig,
 	)
 
+	rootSQLMetrics := sql.MakeBaseMemMetrics("root", cfg.HistogramWindowInterval())
+	cfg.registry.AddMetricStruct(rootSQLMetrics)
+
 	// Set up internal memory metrics for use by internal SQL executors.
 	internalMemMetrics := sql.MakeMemMetrics("internal", cfg.HistogramWindowInterval())
 	cfg.registry.AddMetricStruct(internalMemMetrics)
@@ -279,8 +288,8 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*sqlServer, error) {
 	rootSQLMemoryMonitor := mon.NewMonitor(
 		"root",
 		mon.MemoryResource,
-		nil,           /* curCount */
-		nil,           /* maxHist */
+		rootSQLMetrics.CurBytesCount,
+		rootSQLMetrics.MaxBytesHist,
 		-1,            /* increment: use default increment */
 		math.MaxInt64, /* noteworthy */
 		cfg.Settings,
@@ -296,10 +305,12 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*sqlServer, error) {
 	bulkMemoryMonitor.SetMetrics(bulkMetrics.CurBytesCount, bulkMetrics.MaxBytesHist)
 	bulkMemoryMonitor.Start(context.Background(), rootSQLMemoryMonitor, mon.BoundAccount{})
 
+	backfillMemoryMonitor := execinfra.NewMonitor(ctx, bulkMemoryMonitor, "backfill-mon")
+
 	// Set up the DistSQL temp engine.
 
 	useStoreSpec := cfg.TempStorageConfig.Spec
-	tempEngine, tempFS, err := storage.NewTempEngine(ctx, cfg.StorageEngine, cfg.TempStorageConfig, useStoreSpec)
+	tempEngine, tempFS, err := storage.NewTempEngine(ctx, cfg.TempStorageConfig, useStoreSpec)
 	if err != nil {
 		return nil, errors.Wrap(err, "creating temp storage")
 	}
@@ -324,10 +335,6 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*sqlServer, error) {
 			log.Errorf(ctx, "could not remove temporary store directory: %v", err.Error())
 		}
 	}))
-
-	// Set up admin memory metrics for use by admin SQL executors.
-	adminMemMetrics := sql.MakeMemMetrics("admin", cfg.HistogramWindowInterval())
-	cfg.registry.AddMetricStruct(adminMemMetrics)
 
 	hydratedTablesCache := hydratedtables.NewCache(cfg.Settings)
 	cfg.registry.AddMetricStruct(hydratedTablesCache.Metrics())
@@ -355,8 +362,9 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*sqlServer, error) {
 		// descriptors that the vectorized execution engine may have open at any
 		// one time. This limit is implemented as a weighted semaphore acquired
 		// before opening files.
-		VecFDSemaphore: semaphore.New(envutil.EnvOrDefaultInt("COCKROACH_VEC_MAX_OPEN_FDS", colexec.VecMaxOpenFDsLimit)),
-		DiskMonitor:    cfg.TempStorageConfig.Mon,
+		VecFDSemaphore:    semaphore.New(envutil.EnvOrDefaultInt("COCKROACH_VEC_MAX_OPEN_FDS", colexec.VecMaxOpenFDsLimit)),
+		DiskMonitor:       cfg.TempStorageConfig.Mon,
+		BackfillerMonitor: backfillMemoryMonitor,
 
 		ParentMemoryMonitor: rootSQLMemoryMonitor,
 		BulkAdder: func(
@@ -537,6 +545,9 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*sqlServer, error) {
 	} else {
 		execCfg.TypeSchemaChangerTestingKnobs = new(sql.TypeSchemaChangerTestingKnobs)
 	}
+	execCfg.SchemaChangerMetrics = sql.NewSchemaChangerMetrics()
+	cfg.registry.AddMetricStruct(execCfg.SchemaChangerMetrics)
+
 	if gcJobTestingKnobs := cfg.TestingKnobs.GCJob; gcJobTestingKnobs != nil {
 		execCfg.GCJobTestingKnobs = gcJobTestingKnobs.(*sql.GCJobTestingKnobs)
 	} else {
@@ -591,7 +602,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*sqlServer, error) {
 		ie := sql.MakeInternalExecutor(
 			ctx,
 			pgServer.SQLServer,
-			sqlMemMetrics,
+			internalMemMetrics,
 			cfg.Settings,
 		)
 		ie.SetSessionData(sessionData)
@@ -626,6 +637,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*sqlServer, error) {
 		cfg.sqlStatusServer,
 		cfg.isMeta1Leaseholder,
 		sqlExecutorTestingKnobs,
+		leaseMgr,
 	)
 
 	return &sqlServer{
@@ -641,7 +653,6 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*sqlServer, error) {
 		statsRefresher:          statsRefresher,
 		temporaryObjectCleaner:  temporaryObjectCleaner,
 		internalMemMetrics:      internalMemMetrics,
-		adminMemMetrics:         adminMemMetrics,
 		sqlMemMetrics:           sqlMemMetrics,
 		stmtDiagnosticsRegistry: stmtDiagnosticsRegistry,
 		sqlLivenessProvider:     cfg.sqlLivenessProvider,
@@ -649,7 +660,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*sqlServer, error) {
 	}, nil
 }
 
-func (s *sqlServer) start(
+func (s *sqlServer) preStart(
 	ctx context.Context,
 	stopper *stop.Stopper,
 	knobs base.TestingKnobs,
@@ -665,7 +676,8 @@ func (s *sqlServer) start(
 			return err
 		}
 	}
-	s.sqlLivenessProvider.Start(ctx)
+	s.connManager = connManager
+	s.pgL = pgL
 	s.execCfg.GCJobNotifier.Start(ctx)
 	s.temporaryObjectCleaner.Start(ctx, stopper)
 	s.distSQLServer.Start()
@@ -687,18 +699,27 @@ func (s *sqlServer) start(
 	s.leaseMgr.RefreshLeases(ctx, stopper, s.execCfg.DB, s.execCfg.Gossip)
 	s.leaseMgr.PeriodicallyRefreshSomeLeases(ctx)
 
+	// Only start the sqlliveness subsystem if we're already at the cluster
+	// version which relies on it.
+	sqllivenessActive := sqlliveness.IsActive(ctx, s.execCfg.Settings)
+	if sqllivenessActive {
+		s.sqlLivenessProvider.Start(ctx)
+	}
+
 	migrationsExecutor := sql.MakeInternalExecutor(
 		ctx, s.pgServer.SQLServer, s.internalMemMetrics, s.execCfg.Settings)
 	migrationsExecutor.SetSessionData(
 		&sessiondata.SessionData{
-			// Migrations need an executor with query distribution turned off. This is
-			// because the node crashes if migrations fail to execute, and query
-			// distribution introduces more moving parts. Local execution is more
-			// robust; for example, the DistSender has retries if it can't connect to
-			// another node, but DistSQL doesn't. Also see #44101 for why DistSQL is
-			// particularly fragile immediately after a node is started (i.e. the
-			// present situation).
-			DistSQLMode: sessiondata.DistSQLOff,
+			LocalOnlySessionData: sessiondata.LocalOnlySessionData{
+				// Migrations need an executor with query distribution turned off. This is
+				// because the node crashes if migrations fail to execute, and query
+				// distribution introduces more moving parts. Local execution is more
+				// robust; for example, the DistSender has retries if it can't connect to
+				// another node, but DistSQL doesn't. Also see #44101 for why DistSQL is
+				// particularly fragile immediately after a node is started (i.e. the
+				// present situation).
+				DistSQLMode: sessiondata.DistSQLOff,
+			},
 		})
 	migMgr := sqlmigrations.NewManager(
 		stopper,
@@ -752,11 +773,20 @@ func (s *sqlServer) start(
 
 	log.Infof(ctx, "done ensuring all necessary migrations have run")
 
-	// Start serving SQL clients.
-	if err := s.startServeSQL(ctx, stopper, connManager, pgL, socketFile); err != nil {
-		return err
+	// Start the sqlLivenessProvider after we've run the SQL migrations that it
+	// relies on. Jobs used by sqlmigrations can't rely on having the
+	// sqlLivenessProvider running as it was introduced in 20.2.
+	//
+	// TODO(ajwerner): For 21.1 this call will need to be lifted above the call
+	// to EnsureMigrations so that migrations which launch jobs will work.
+	if !sqllivenessActive &&
+		// This clause exists to support sqlmigrations tests which intentionally
+		// inject a binary version below the one which includes the relevant
+		// migration. In this case we won't start the sqlliveness subsystem.
+		(!s.execCfg.Settings.Version.BinaryVersion().Less(clusterversion.VersionByKey(
+			clusterversion.VersionAlterSystemJobsAddSqllivenessColumnsAddNewSystemSqllivenessTable))) {
+		s.sqlLivenessProvider.Start(ctx)
 	}
-
 	// Start the async migration to upgrade namespace entries from the old
 	// namespace table (id 2) to the new one (id 30).
 	if err := migMgr.StartSystemNamespaceMigration(ctx, bootstrapVersion); err != nil {
@@ -777,7 +807,7 @@ func (s *sqlServer) start(
 			InternalExecutor: s.internalExecutor,
 			DB:               s.execCfg.DB,
 			TestingKnobs:     knobs.JobsTestingKnobs,
-			PlanHookMaker: func(opName string, txn *kv.Txn, user string) (interface{}, func()) {
+			PlanHookMaker: func(opName string, txn *kv.Txn, user security.SQLUsername) (interface{}, func()) {
 				// This is a hack to get around a Go package dependency cycle. See comment
 				// in sql/jobs/registry.go on planHookMaker.
 				return sql.NewInternalPlanner(opName, txn, user, &sql.MemoryMetrics{}, s.execCfg)

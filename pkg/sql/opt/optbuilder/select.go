@@ -114,9 +114,10 @@ func (b *Builder) buildDataSource(
 			return b.buildScan(
 				tabMeta,
 				tableOrdinals(t, columnKinds{
-					includeMutations: false,
-					includeSystem:    true,
-					includeVirtual:   false,
+					includeMutations:       false,
+					includeSystem:          true,
+					includeVirtualInverted: false,
+					includeVirtualComputed: false,
 				}),
 				indexFlags, locking, inScope,
 			)
@@ -397,9 +398,10 @@ func (b *Builder) buildScanFromTableRef(
 		ordinals = resolveNumericColumnRefs(tab, ref.Columns)
 	} else {
 		ordinals = tableOrdinals(tab, columnKinds{
-			includeMutations: false,
-			includeSystem:    true,
-			includeVirtual:   false,
+			includeMutations:       false,
+			includeSystem:          true,
+			includeVirtualInverted: false,
+			includeVirtualComputed: false,
 		})
 	}
 
@@ -517,9 +519,30 @@ func (b *Builder) buildScan(
 
 		b.addCheckConstraintsForTable(tabMeta)
 		b.addComputedColsForTable(tabMeta)
-		b.addPartialIndexPredicatesForTable(tabMeta)
 
 		outScope.expr = b.factory.ConstructScan(&private)
+
+		// Add the partial indexes after constructing the scan so we can use the
+		// logical properties of the scan to fully normalize the index
+		// predicates. Partial index predicates are only added if the outScope
+		// contains all the table's ordinary columns. If it does not, partial
+		// index predicates cannot be built because they may reference columns
+		// not in outScope. In the most common case, the outScope has the same
+		// number of columns as the table and we can skip checking that each
+		// ordinary column exists in outScope.
+		containsAllOrdinaryTableColumns := true
+		if len(outScope.cols) != tab.ColumnCount() {
+			for i := 0; i < tab.ColumnCount(); i++ {
+				col := tab.Column(i)
+				if col.Kind() == cat.Ordinary && !outScope.colSet().Contains(tabID.ColumnID(col.Ordinal())) {
+					containsAllOrdinaryTableColumns = false
+					break
+				}
+			}
+		}
+		if containsAllOrdinaryTableColumns {
+			b.addPartialIndexPredicatesForTable(tabMeta, outScope)
+		}
 
 		if b.trackViewDeps {
 			dep := opt.ViewDep{DataSource: tab}
@@ -661,7 +684,7 @@ func (b *Builder) addComputedColsForTable(tabMeta *opt.TableMeta) {
 //
 // The predicates are used as "known truths" about table data. Any predicates
 // containing non-immutable operators are omitted.
-func (b *Builder) addPartialIndexPredicatesForTable(tabMeta *opt.TableMeta) {
+func (b *Builder) addPartialIndexPredicatesForTable(tabMeta *opt.TableMeta, tableScope *scope) {
 	tab := tabMeta.Table
 
 	// Find the first partial index.
@@ -678,10 +701,6 @@ func (b *Builder) addPartialIndexPredicatesForTable(tabMeta *opt.TableMeta) {
 	if indexOrd == numIndexes {
 		return
 	}
-
-	// Create a scope that can be used for building the scalar expressions.
-	tableScope := b.allocScope()
-	tableScope.appendOrdinaryColumnsFromTable(tabMeta, &tabMeta.Alias)
 
 	// Skip to the first partial index we found above.
 	for ; indexOrd < numIndexes; indexOrd++ {
@@ -700,7 +719,10 @@ func (b *Builder) addPartialIndexPredicatesForTable(tabMeta *opt.TableMeta) {
 
 		// Build the partial index predicate as a memo.FiltersExpr and add it
 		// to the table metadata.
-		predExpr := b.buildPartialIndexPredicate(tableScope, expr)
+		predExpr, err := b.buildPartialIndexPredicate(tableScope, expr, "index predicate")
+		if err != nil {
+			panic(err)
+		}
 		tabMeta.AddPartialIndexPredicate(indexOrd, &predExpr)
 	}
 }

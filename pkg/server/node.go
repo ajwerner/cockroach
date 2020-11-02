@@ -49,7 +49,6 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 	"github.com/cockroachdb/redact"
-	opentracing "github.com/opentracing/opentracing-go"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 )
@@ -150,18 +149,19 @@ func (nm nodeMetrics) callComplete(d time.Duration, pErr *roachpb.Error) {
 // IDs for bootstrapping the node itself or new stores as they're added
 // on subsequent instantiations.
 type Node struct {
-	stopper      *stop.Stopper
-	clusterID    *base.ClusterIDContainer // UUID for Cockroach cluster
-	Descriptor   roachpb.NodeDescriptor   // Node ID, network/physical topology
-	storeCfg     kvserver.StoreConfig     // Config to use and pass to stores
-	eventLogger  sql.EventLogger
-	stores       *kvserver.Stores // Access to node-local stores
-	metrics      nodeMetrics
-	recorder     *status.MetricsRecorder
-	startedAt    int64
-	lastUp       int64
-	initialStart bool // True if this is the first time this node has started.
-	txnMetrics   kvcoord.TxnMetrics
+	stopper              *stop.Stopper
+	clusterID            *base.ClusterIDContainer // UUID for Cockroach cluster
+	Descriptor           roachpb.NodeDescriptor   // Node ID, network/physical topology
+	storeCfg             kvserver.StoreConfig     // Config to use and pass to stores
+	eventLogger          sql.EventLogger
+	stores               *kvserver.Stores // Access to node-local stores
+	metrics              nodeMetrics
+	recorder             *status.MetricsRecorder
+	startedAt            int64
+	lastUp               int64
+	initialStart         bool // True if this is the first time this node has started.
+	txnMetrics           kvcoord.TxnMetrics
+	bootstrapNewStoresCh chan struct{}
 
 	perReplicaServer kvserver.Server
 }
@@ -329,14 +329,14 @@ func (n *Node) AnnotateCtx(ctx context.Context) context.Context {
 // AnnotateCtxWithSpan is a convenience wrapper; see AmbientContext.
 func (n *Node) AnnotateCtxWithSpan(
 	ctx context.Context, opName string,
-) (context.Context, opentracing.Span) {
+) (context.Context, *tracing.Span) {
 	return n.storeCfg.AmbientCtx.AnnotateCtxWithSpan(ctx, opName)
 }
 
-// start starts the node by registering the storage instance for the
-// RPC service "Node" and initializing stores for each specified
-// engine. Launches periodic store gossiping in a goroutine.
-// A callback can be optionally provided that will be invoked once this node's
+// start starts the node by registering the storage instance for the RPC
+// service "Node" and initializing stores for each specified engine.
+// Launches periodic store gossiping in a goroutine. A callback can
+// be optionally provided that will be invoked once this node's
 // NodeDescriptor is available, to help bootstrapping.
 func (n *Node) start(
 	ctx context.Context,
@@ -462,12 +462,27 @@ func (n *Node) start(
 		return fmt.Errorf("failed to initialize the gossip interface: %s", err)
 	}
 
-	// Bootstrap any uninitialized stores.
-	//
-	// TODO(tbg): address https://github.com/cockroachdb/cockroach/issues/39415.
-	// Should be easy enough. Writing the test is probably most of the work.
+	// Bootstrap uninitialized stores, if any.
 	if len(state.newEngines) > 0 {
-		if err := n.bootstrapStores(ctx, state.firstStoreID, state.newEngines, n.stopper); err != nil {
+		// We need to bootstrap additional stores asynchronously. Consider the range that
+		// houses the store ID allocator. When restarting the set of nodes that holds a
+		// quorum of these replicas, when restarting them with additional stores, those
+		// additional stores will require store IDs to get fully bootstrapped. But if we're
+		// gating node start (specifically opening up the RPC floodgates) on having all
+		// stores fully bootstrapped, we'll simply hang when trying to allocate store IDs.
+		// See TestAddNewStoresToExistingNodes and #39415 for more details.
+		//
+		// Instead we opt to bootstrap additional stores asynchronously, and rely on the
+		// blocking function n.waitForBootstrapNewStores() to signal to the caller that
+		// all stores have been fully bootstrapped.
+		n.bootstrapNewStoresCh = make(chan struct{})
+		if err := n.stopper.RunAsyncTask(ctx, "bootstrap-stores", func(ctx context.Context) {
+			if err := n.bootstrapStores(ctx, state.firstStoreID, state.newEngines, n.stopper); err != nil {
+				log.Fatalf(ctx, "while bootstrapping additional stores: %v", err)
+			}
+			close(n.bootstrapNewStoresCh)
+		}); err != nil {
+			close(n.bootstrapNewStoresCh)
 			return err
 		}
 	}
@@ -490,6 +505,14 @@ func (n *Node) start(
 	}
 	log.Infof(ctx, "started with attributes %v", attrs.Attrs)
 	return nil
+}
+
+// waitForBootstrapNewStores blocks until all additional empty stores,
+// if any, have been bootstrapped.
+func (n *Node) waitForBootstrapNewStores() {
+	if n.bootstrapNewStoresCh != nil {
+		<-n.bootstrapNewStoresCh
+	}
 }
 
 // IsDraining returns true if at least one Store housed on this Node is not
@@ -526,7 +549,7 @@ func (n *Node) SetHLCUpperBound(ctx context.Context, hlcUpperBound int64) error 
 }
 
 func (n *Node) addStore(ctx context.Context, store *kvserver.Store) {
-	cv, err := store.GetClusterVersion(context.TODO())
+	cv, err := kvserver.ReadClusterVersion(context.TODO(), store.Engine())
 	if err != nil {
 		log.Fatalf(ctx, "%v", err)
 	}
@@ -946,20 +969,20 @@ func (n *Node) setupSpanForIncomingRPC(
 	// The operation name matches the one created by the interceptor in the
 	// remoteTrace case below.
 	const opName = "/cockroach.roachpb.Internal/Batch"
-	var newSpan, grpcSpan opentracing.Span
+	var newSpan, grpcSpan *tracing.Span
 	if isLocalRequest {
 		// This is a local request which circumvented gRPC. Start a span now.
 		ctx, newSpan = tracing.ChildSpan(ctx, opName)
 	} else {
-		grpcSpan = opentracing.SpanFromContext(ctx)
+		grpcSpan = tracing.SpanFromContext(ctx)
 		if grpcSpan == nil {
 			// If tracing information was passed via gRPC metadata, the gRPC interceptor
 			// should have opened a span for us. If not, open a span now (if tracing is
 			// disabled, this will be a noop span).
-			newSpan = n.storeCfg.AmbientCtx.Tracer.(*tracing.Tracer).StartRootSpan(
-				opName, n.storeCfg.AmbientCtx.LogTags(), tracing.NonRecordableSpan,
+			newSpan = n.storeCfg.AmbientCtx.Tracer.StartSpan(
+				opName, tracing.WithLogTags(n.storeCfg.AmbientCtx.LogTags()),
 			)
-			ctx = opentracing.ContextWithSpan(ctx, newSpan)
+			ctx = tracing.ContextWithSpan(ctx, newSpan)
 		} else {
 			grpcSpan.SetTag("node", n.Descriptor.NodeID)
 		}
@@ -977,7 +1000,7 @@ func (n *Node) setupSpanForIncomingRPC(
 			// spans in the BatchResponse at the end of the request.
 			// We don't want to do this if the operation is on the same host, in which
 			// case everything is already part of the same recording.
-			if rec := tracing.GetRecording(grpcSpan); rec != nil {
+			if rec := grpcSpan.GetRecording(); rec != nil {
 				br.CollectedSpans = append(br.CollectedSpans, rec...)
 			}
 		}

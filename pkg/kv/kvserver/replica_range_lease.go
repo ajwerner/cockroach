@@ -56,8 +56,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/cockroachdb/logtags"
-	"github.com/opentracing/opentracing-go"
+	"go.etcd.io/etcd/raft"
 )
 
 var leaseStatusLogLimiter = log.Every(5 * time.Second)
@@ -224,12 +223,12 @@ func (p *pendingLeaseRequest) InitOrJoinRequest(
 		*reqLease.Expiration = status.Timestamp.Add(int64(p.repl.store.cfg.RangeLeaseActiveDuration()), 0)
 	} else {
 		// Get the liveness for the next lease holder and set the epoch in the lease request.
-		liveness, err := p.repl.store.cfg.NodeLiveness.GetLiveness(nextLeaseHolder.NodeID)
-		if err != nil {
+		liveness, ok := p.repl.store.cfg.NodeLiveness.GetLiveness(nextLeaseHolder.NodeID)
+		if !ok {
 			llHandle.resolve(roachpb.NewError(&roachpb.LeaseRejectedError{
 				Existing:  status.Lease,
 				Requested: reqLease,
-				Message:   fmt.Sprintf("couldn't request lease for %+v: %v", nextLeaseHolder, err),
+				Message:   fmt.Sprintf("couldn't request lease for %+v: %v", nextLeaseHolder, errLivenessRecordCacheMiss),
 			}))
 			return llHandle
 		}
@@ -286,9 +285,9 @@ func (p *pendingLeaseRequest) requestLeaseAsync(
 	leaseReq roachpb.Request,
 ) error {
 	const opName = "request range lease"
-	var sp opentracing.Span
+	var sp *tracing.Span
 	tr := p.repl.AmbientContext.Tracer
-	if parentSp := opentracing.SpanFromContext(parentCtx); parentSp != nil {
+	if parentSp := tracing.SpanFromContext(parentCtx); parentSp != nil {
 		// We use FollowsFrom because the lease request's span can outlive the
 		// parent request. This is possible if parentCtx is canceled after others
 		// have coalesced on to this lease request (see leaseRequestHandle.Cancel).
@@ -296,12 +295,12 @@ func (p *pendingLeaseRequest) requestLeaseAsync(
 		// except that one does not currently support FollowsFrom relationships.
 		sp = tr.StartSpan(
 			opName,
-			opentracing.FollowsFrom(parentSp.Context()),
-			tracing.LogTagsFromCtx(parentCtx),
+			tracing.WithParent(parentSp),
+			tracing.WithFollowsFrom(),
+			tracing.WithCtxLogTags(parentCtx),
 		)
 	} else {
-		sp = tr.(*tracing.Tracer).StartRootSpan(
-			opName, logtags.FromContext(parentCtx), tracing.NonRecordableSpan)
+		sp = tr.StartSpan(opName, tracing.WithCtxLogTags(parentCtx))
 	}
 
 	// Create a new context *without* a timeout. Instead, we multiplex the
@@ -309,7 +308,7 @@ func (p *pendingLeaseRequest) requestLeaseAsync(
 	// coalesced requests timeout/cancel. p.cancelLocked (defined below) is the
 	// cancel function that must be called; calling just cancel is insufficient.
 	ctx := p.repl.AnnotateCtx(context.Background())
-	ctx = opentracing.ContextWithSpan(ctx, sp)
+	ctx = tracing.ContextWithSpan(ctx, sp)
 	ctx, cancel := context.WithCancel(ctx)
 
 	// Make sure we clean up the context and request state. This will be called
@@ -543,17 +542,17 @@ func (r *Replica) leaseStatus(
 	if lease.Type() == roachpb.LeaseExpiration {
 		expiration = lease.GetExpiration()
 	} else {
-		l, err := r.store.cfg.NodeLiveness.GetLiveness(lease.Replica.NodeID)
+		l, ok := r.store.cfg.NodeLiveness.GetLiveness(lease.Replica.NodeID)
 		status.Liveness = l.Liveness
-		if err != nil || status.Liveness.Epoch < lease.Epoch {
+		if !ok || status.Liveness.Epoch < lease.Epoch {
 			// If lease validity can't be determined (e.g. gossip is down
 			// and liveness info isn't available for owner), we can neither
 			// use the lease nor do we want to attempt to acquire it.
-			if err != nil {
+			if !ok {
 				if leaseStatusLogLimiter.ShouldLog() {
 					ctx = r.AnnotateCtx(ctx)
 					log.Warningf(ctx, "can't determine lease status of %s due to node liveness error: %+v",
-						lease.Replica, err)
+						lease.Replica, errLivenessRecordCacheMiss)
 				}
 			}
 			status.State = kvserverpb.LeaseState_ERROR
@@ -581,6 +580,15 @@ func (r *Replica) leaseStatus(
 		status.State = kvserverpb.LeaseState_EXPIRED
 	}
 	return status
+}
+
+// currentLeaseStatus returns the status of the current lease for a current
+// timestamp.
+func (r *Replica) currentLeaseStatus(ctx context.Context) kvserverpb.LeaseStatus {
+	timestamp := r.store.Clock().Now()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.leaseStatus(ctx, *r.mu.state.Lease, timestamp, r.mu.minLeaseProposedTS)
 }
 
 // requiresExpiringLeaseRLocked returns whether this range uses an
@@ -616,8 +624,14 @@ func (r *Replica) requestLeaseLocked(
 		return r.mu.pendingLeaseRequest.newResolvedHandle(roachpb.NewError(
 			newNotLeaseHolderError(&transferLease, r.store.StoreID(), r.mu.state.Desc)))
 	}
-	if r.store.IsDraining() {
-		// We've retired from active duty.
+	// If we're draining, we'd rather not take any new leases (since we're also
+	// trying to move leases away elsewhere). But if we're the leader, we don't
+	// really have a choice and we take the lease - there might not be any other
+	// replica available to take this lease (perhaps they're all draining).
+	if r.store.IsDraining() && (r.raftBasicStatusRLocked().RaftState != raft.StateLeader) {
+		// TODO(andrei): If we start refusing to take leases on followers elsewhere,
+		// this code can go away.
+		log.VEventf(ctx, 2, "refusing to take the lease because we're draining")
 		return r.mu.pendingLeaseRequest.newResolvedHandle(roachpb.NewError(
 			newNotLeaseHolderError(nil, r.store.StoreID(), r.mu.state.Desc)))
 	}

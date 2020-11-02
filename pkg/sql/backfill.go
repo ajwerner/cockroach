@@ -32,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
@@ -43,6 +44,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -646,7 +648,7 @@ func (sc *SchemaChanger) validateConstraints(
 				evalCtx.Txn = txn
 				// Use the DistSQLTypeResolver because we need to resolve types by ID.
 				semaCtx := tree.MakeSemaContext()
-				collection := descs.NewCollection(ctx, sc.settings, sc.leaseMgr, nil /* hydratedTables */)
+				collection := descs.NewCollection(sc.settings, sc.leaseMgr, nil /* hydratedTables */)
 				semaCtx.TypeResolver = descs.NewDistSQLTypeResolver(collection, txn)
 				// TODO (rohany): When to release this? As of now this is only going to get released
 				//  after the check is validated.
@@ -789,7 +791,7 @@ func (sc *SchemaChanger) truncateIndexes(
 				}
 
 				// Retrieve a lease for this table inside the current txn.
-				tc := descs.NewCollection(ctx, sc.settings, sc.leaseMgr, nil /* hydratedTables */)
+				tc := descs.NewCollection(sc.settings, sc.leaseMgr, nil /* hydratedTables */)
 				defer tc.ReleaseAll(ctx)
 				tableDesc, err := sc.getTableVersion(ctx, txn, tc, version)
 				if err != nil {
@@ -949,7 +951,12 @@ func (sc *SchemaChanger) distBackfill(
 
 	for len(todoSpans) > 0 {
 		log.VEventf(ctx, 2, "backfill: process %+v spans", todoSpans)
+		// Make sure not to update todoSpans inside the transaction closure as it
+		// may not commit. Instead write the updated value for todoSpans to this
+		// variable and assign to todoSpans after committing.
+		var updatedTodoSpans []roachpb.Span
 		if err := sc.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+			updatedTodoSpans = todoSpans
 			// Report schema change progress. We define progress at this point
 			// as the the fraction of fully-backfilled ranges of the primary index of
 			// the table being scanned. Since we may have already modified the
@@ -973,7 +980,7 @@ func (sc *SchemaChanger) distBackfill(
 				}
 			}
 
-			tc := descs.NewCollection(ctx, sc.settings, sc.leaseMgr, nil /* hydratedTables */)
+			tc := descs.NewCollection(sc.settings, sc.leaseMgr, nil /* hydratedTables */)
 			// Use a leased table descriptor for the backfill.
 			defer tc.ReleaseAll(ctx)
 			tableDesc, err := sc.getTableVersion(ctx, txn, tc, version)
@@ -982,7 +989,7 @@ func (sc *SchemaChanger) distBackfill(
 			}
 			metaFn := func(_ context.Context, meta *execinfrapb.ProducerMetadata) error {
 				if meta.BulkProcessorProgress != nil {
-					todoSpans = roachpb.SubtractSpans(todoSpans,
+					updatedTodoSpans = roachpb.SubtractSpans(updatedTodoSpans,
 						meta.BulkProcessorProgress.CompletedSpans)
 				}
 				return nil
@@ -1019,6 +1026,8 @@ func (sc *SchemaChanger) distBackfill(
 		}); err != nil {
 			return err
 		}
+		todoSpans = updatedTodoSpans
+
 		if !inMemoryStatusEnabled {
 			var resumeSpans []roachpb.Span
 			// There is a worker node of older version that will communicate
@@ -1035,7 +1044,6 @@ func (sc *SchemaChanger) distBackfill(
 			}
 			// A \intersect B = A - (A - B)
 			todoSpans = roachpb.SubtractSpans(todoSpans, roachpb.SubtractSpans(todoSpans, resumeSpans))
-
 		}
 		// Record what is left to do for the job.
 		// TODO(spaskob): Execute this at a regular cadence.
@@ -1199,12 +1207,6 @@ func (sc *SchemaChanger) validateInvertedIndexes(
 		i, idx := i, idx
 		countReady[i] = make(chan struct{})
 
-		// Skip partial indexes for now.
-		// TODO(mgartner): Validate partial inverted index entry counts.
-		if idx.IsPartial() {
-			continue
-		}
-
 		grp.GoCtx(func(ctx context.Context) error {
 			// Inverted indexes currently can't be interleaved, so a KV scan can be
 			// used to get the index length.
@@ -1253,25 +1255,26 @@ func (sc *SchemaChanger) validateInvertedIndexes(
 			defer close(countReady[i])
 
 			start := timeutil.Now()
-			if len(idx.ColumnNames) != 1 {
-				panic(errors.AssertionFailedf("expected inverted index %s to have exactly 1 column, but found columns %+v",
-					idx.Name, idx.ColumnNames))
-			}
-			col := idx.ColumnNames[0]
+			col := idx.InvertedColumnName()
 
 			if err := runHistoricalTxn(ctx, func(ctx context.Context, txn *kv.Txn, evalCtx *extendedEvalContext) error {
 				ie := evalCtx.InternalExecutor.(*InternalExecutor)
 				var stmt string
 				if geoindex.IsEmptyConfig(&idx.GeoConfig) {
 					stmt = fmt.Sprintf(
-						`SELECT coalesce(sum_int(crdb_internal.num_inverted_index_entries(%q)), 0) FROM [%d AS t]`,
-						col, tableDesc.ID,
+						`SELECT coalesce(sum_int(crdb_internal.num_inverted_index_entries(%q, %d)), 0) FROM [%d AS t]`,
+						col, idx.Version, tableDesc.ID,
 					)
 				} else {
 					stmt = fmt.Sprintf(
 						`SELECT coalesce(sum_int(crdb_internal.num_geo_inverted_index_entries(%d, %d, %q)), 0) FROM [%d AS t]`,
 						tableDesc.ID, idx.ID, col, tableDesc.ID,
 					)
+				}
+				// If the index is a partial index the predicate must be added
+				// as a filter to the query.
+				if idx.IsPartial() {
+					stmt = fmt.Sprintf(`%s WHERE %s`, stmt, idx.Predicate)
 				}
 				row, err := ie.QueryRowEx(ctx, "verify-inverted-idx-count", txn,
 					sessiondata.InternalExecutorOverride{}, stmt)
@@ -1283,7 +1286,7 @@ func (sc *SchemaChanger) validateInvertedIndexes(
 			}); err != nil {
 				return err
 			}
-			log.Infof(ctx, "JSON column %s/%s expected inverted index count = %d, took %s",
+			log.Infof(ctx, "column %s/%s expected inverted index count = %d, took %s",
 				tableDesc.Name, col, expectedCount[i], timeutil.Since(start))
 			return nil
 		})
@@ -1331,7 +1334,7 @@ func (sc *SchemaChanger) validateForwardIndexes(
 			if err != nil {
 				return err
 			}
-			tc := descs.NewCollection(ctx, sc.settings, sc.leaseMgr, nil /* hydratedTables */)
+			tc := descs.NewCollection(sc.settings, sc.leaseMgr, nil /* hydratedTables */)
 			// pretend that the schema has been modified.
 			if err := tc.AddUncommittedDescriptor(desc); err != nil {
 				return err
@@ -1407,7 +1410,7 @@ func (sc *SchemaChanger) validateForwardIndexes(
 			return err
 		}
 
-		tc := descs.NewCollection(ctx, sc.settings, sc.leaseMgr, nil /* hydratedTables */)
+		tc := descs.NewCollection(sc.settings, sc.leaseMgr, nil /* hydratedTables */)
 		if err := tc.AddUncommittedDescriptor(desc); err != nil {
 			return err
 		}
@@ -1817,7 +1820,7 @@ func validateCheckInTxn(
 ) error {
 	ie := evalCtx.InternalExecutor.(*InternalExecutor)
 	if tableDesc.Version > tableDesc.ClusterVersion.Version {
-		newTc := descs.NewCollection(ctx, evalCtx.Settings, leaseMgr, nil /* hydratedTables */)
+		newTc := descs.NewCollection(evalCtx.Settings, leaseMgr, nil /* hydratedTables */)
 		// pretend that the schema has been modified.
 		if err := newTc.AddUncommittedDescriptor(tableDesc); err != nil {
 			return err
@@ -1853,7 +1856,7 @@ func validateFkInTxn(
 ) error {
 	ie := evalCtx.InternalExecutor.(*InternalExecutor)
 	if tableDesc.Version > tableDesc.ClusterVersion.Version {
-		newTc := descs.NewCollection(ctx, evalCtx.Settings, leaseMgr, nil /* hydratedTables */)
+		newTc := descs.NewCollection(evalCtx.Settings, leaseMgr, nil /* hydratedTables */)
 		// pretend that the schema has been modified.
 		if err := newTc.AddUncommittedDescriptor(tableDesc); err != nil {
 			return err
@@ -1897,10 +1900,17 @@ func columnBackfillInTxn(
 	if tableDesc.Adding() {
 		return nil
 	}
+	var columnBackfillerMon *mon.BytesMonitor
+	// This is the planner's memory monitor.
+	if evalCtx.Mon != nil {
+		columnBackfillerMon = execinfra.NewMonitor(ctx, evalCtx.Mon, "local-column-backfill-mon")
+	}
+
 	var backfiller backfill.ColumnBackfiller
-	if err := backfiller.InitForLocalUse(ctx, evalCtx, semaCtx, tableDesc); err != nil {
+	if err := backfiller.InitForLocalUse(ctx, evalCtx, semaCtx, tableDesc, columnBackfillerMon); err != nil {
 		return err
 	}
+	defer backfiller.Close(ctx)
 	sp := tableDesc.PrimaryIndexSpan(evalCtx.Codec)
 	for sp.Key != nil {
 		var err error
@@ -1911,6 +1921,7 @@ func columnBackfillInTxn(
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -1927,10 +1938,17 @@ func indexBackfillInTxn(
 	tableDesc *tabledesc.Immutable,
 	traceKV bool,
 ) error {
+	var indexBackfillerMon *mon.BytesMonitor
+	// This is the planner's memory monitor.
+	if evalCtx.Mon != nil {
+		indexBackfillerMon = execinfra.NewMonitor(ctx, evalCtx.Mon, "local-index-backfill-mon")
+	}
+
 	var backfiller backfill.IndexBackfiller
-	if err := backfiller.InitForLocalUse(ctx, evalCtx, semaCtx, tableDesc); err != nil {
+	if err := backfiller.InitForLocalUse(ctx, evalCtx, semaCtx, tableDesc, indexBackfillerMon); err != nil {
 		return err
 	}
+	defer backfiller.Close(ctx)
 	sp := tableDesc.PrimaryIndexSpan(evalCtx.Codec)
 	for sp.Key != nil {
 		var err error
@@ -1940,6 +1958,7 @@ func indexBackfillInTxn(
 			return err
 		}
 	}
+
 	return nil
 }
 

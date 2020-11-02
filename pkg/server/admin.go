@@ -277,7 +277,10 @@ func (s *adminServer) DatabaseDetails(
 	rows, cols, err := s.server.sqlServer.internalExecutor.QueryWithCols(
 		ctx, "admin-show-grants", nil, /* txn */
 		sessiondata.InternalExecutorOverride{User: userName},
-		fmt.Sprintf("SHOW GRANTS ON DATABASE %s", escDBName),
+		// We only want to show the grants on the database.
+		// Since public schemas inherit grants from the database,
+		// it is safe to query only the public schema here.
+		fmt.Sprintf("SELECT * FROM [SHOW GRANTS ON DATABASE %s] WHERE schema_name = 'public'", escDBName),
 	)
 	if s.isNotFoundError(err) {
 		return nil, status.Errorf(codes.NotFound, "%s", err)
@@ -299,10 +302,6 @@ func (s *adminServer) DatabaseDetails(
 			if err := scanner.Scan(row, schemaCol, &schemaName); err != nil {
 				return nil, err
 			}
-			if schemaName != tree.PublicSchema {
-				// We only want to list real tables.
-				continue
-			}
 
 			// Marshal grant, splitting comma-separated privileges into a proper slice.
 			var grant serverpb.DatabaseDetailsResponse_Grant
@@ -321,9 +320,10 @@ func (s *adminServer) DatabaseDetails(
 	// Marshal table names.
 	rows, cols, err = s.server.sqlServer.internalExecutor.QueryWithCols(
 		ctx, "admin-show-tables", nil, /* txn */
-		sessiondata.InternalExecutorOverride{User: userName},
-		fmt.Sprintf("SHOW TABLES FROM %s", escDBName),
-	)
+		sessiondata.InternalExecutorOverride{User: userName, Database: req.Database},
+		`SELECT table_schema, table_name FROM information_schema.tables
+WHERE table_catalog = $1 AND table_type != 'SYSTEM VIEW';`, req.Database)
+
 	if s.isNotFoundError(err) {
 		return nil, status.Errorf(codes.NotFound, "%s", err)
 	}
@@ -334,33 +334,28 @@ func (s *adminServer) DatabaseDetails(
 	// Marshal table names.
 	{
 		scanner := makeResultScanner(cols)
-		if a, e := len(cols), 4; a != e {
-			return nil, s.serverErrorf("show tables columns mismatch: %d != expected %d", a, e)
-		}
 		for _, row := range rows {
 			var schemaName, tableName string
-			if err := scanner.Scan(row, "schema_name", &schemaName); err != nil {
+			if err := scanner.Scan(row, "table_schema", &schemaName); err != nil {
 				return nil, err
-			}
-			if schemaName != "public" {
-				continue
 			}
 			if err := scanner.Scan(row, "table_name", &tableName); err != nil {
 				return nil, err
 			}
-			resp.TableNames = append(resp.TableNames, tableName)
+			resp.TableNames = append(resp.TableNames, fmt.Sprintf("%s.%s",
+				tree.NameStringP(&schemaName), tree.NameStringP(&tableName)))
 		}
 	}
 
 	// Query the descriptor ID and zone configuration for this database.
 	{
-		path, err := s.queryDescriptorIDPath(ctx, userName, []string{req.Database})
+		databaseID, err := s.queryDatabaseID(ctx, userName, req.Database)
 		if err != nil {
 			return nil, s.serverError(err)
 		}
-		resp.DescriptorID = int64(path[1])
+		resp.DescriptorID = int64(databaseID)
 
-		id, zone, zoneExists, err := s.queryZonePath(ctx, userName, path)
+		id, zone, zoneExists, err := s.queryZonePath(ctx, userName, []descpb.ID{databaseID})
 		if err != nil {
 			return nil, s.serverError(err)
 		}
@@ -371,7 +366,7 @@ func (s *adminServer) DatabaseDetails(
 		resp.ZoneConfig = zone
 
 		switch id {
-		case path[1]:
+		case databaseID:
 			resp.ZoneConfigLevel = serverpb.ZoneConfigurationLevel_DATABASE
 		default:
 			resp.ZoneConfigLevel = serverpb.ZoneConfigurationLevel_CLUSTER
@@ -379,6 +374,34 @@ func (s *adminServer) DatabaseDetails(
 	}
 
 	return &resp, nil
+}
+
+// getFullyQualifiedTableName, given a database name and a tableName that either
+// is a unqualified name or a schema-qualified name, returns a maximally
+// qualified name: either database.table if the input wasn't schema qualified,
+// or database.schema.table if it was.
+func getFullyQualifiedTableName(dbName string, tableName string) (string, error) {
+	name, err := parser.ParseQualifiedTableName(tableName)
+	if err != nil {
+		// If we got a parse error, it could be that the user passed us an unescaped
+		// table name. Quote the whole thing and try again.
+		name, err = parser.ParseQualifiedTableName(tree.NameStringP(&tableName))
+		if err != nil {
+			return "", err
+		}
+	}
+	if !name.ExplicitSchema {
+		// If the schema wasn't explicitly set, craft the qualified table name to be
+		// database.table.
+		name.SchemaName = tree.Name(dbName)
+		name.ExplicitSchema = true
+	} else {
+		// Otherwise, add the database to the beginning of the name:
+		// database.schema.table.
+		name.CatalogName = tree.Name(dbName)
+		name.ExplicitCatalog = true
+	}
+	return name.String(), nil
 }
 
 // TableDetails is an endpoint that returns columns, indices, and other
@@ -392,11 +415,10 @@ func (s *adminServer) TableDetails(
 		return nil, err
 	}
 
-	escDBName := tree.NameStringP(&req.Database)
-	// TODO(cdo): Use real placeholders for the table and database names when we've extended our SQL
-	// grammar to allow that.
-	escTableName := tree.NameStringP(&req.Table)
-	escQualTable := fmt.Sprintf("%s.%s", escDBName, escTableName)
+	escQualTable, err := getFullyQualifiedTableName(req.Database, req.Table)
+	if err != nil {
+		return nil, err
+	}
 
 	var resp serverpb.TableDetailsResponse
 
@@ -579,14 +601,17 @@ func (s *adminServer) TableDetails(
 	var tableID descpb.ID
 	// Query the descriptor ID and zone configuration for this table.
 	{
-		path, err := s.queryDescriptorIDPath(ctx, userName, []string{req.Database, req.Table})
+		databaseID, err := s.queryDatabaseID(ctx, userName, req.Database)
 		if err != nil {
 			return nil, s.serverError(err)
 		}
-		tableID = path[2]
+		tableID, err = s.queryTableID(ctx, userName, req.Database, escQualTable)
+		if err != nil {
+			return nil, s.serverError(err)
+		}
 		resp.DescriptorID = int64(tableID)
 
-		id, zone, zoneExists, err := s.queryZonePath(ctx, userName, path)
+		id, zone, zoneExists, err := s.queryZonePath(ctx, userName, []descpb.ID{databaseID, tableID})
 		if err != nil {
 			return nil, s.serverError(err)
 		}
@@ -597,9 +622,9 @@ func (s *adminServer) TableDetails(
 		resp.ZoneConfig = zone
 
 		switch id {
-		case path[1]:
+		case databaseID:
 			resp.ZoneConfigLevel = serverpb.ZoneConfigurationLevel_DATABASE
-		case path[2]:
+		case tableID:
 			resp.ZoneConfigLevel = serverpb.ZoneConfigurationLevel_TABLE
 		default:
 			resp.ZoneConfigLevel = serverpb.ZoneConfigurationLevel_CLUSTER
@@ -640,21 +665,19 @@ func (s *adminServer) TableStats(
 	ctx context.Context, req *serverpb.TableStatsRequest,
 ) (*serverpb.TableStatsResponse, error) {
 	ctx = s.server.AnnotateCtx(ctx)
-	// TODO(someone): perform authorization based on the requesting user's
-	// SELECT privilege over the requested table.
 	userName, err := s.requireAdminUser(ctx)
 	if err != nil {
 		return nil, err
 	}
+	escQualTable, err := getFullyQualifiedTableName(req.Database, req.Table)
+	if err != nil {
+		return nil, err
+	}
 
-	// Get table span.
-	path, err := s.queryDescriptorIDPath(
-		ctx, userName, []string{req.Database, req.Table},
-	)
+	tableID, err := s.queryTableID(ctx, userName, req.Database, escQualTable)
 	if err != nil {
 		return nil, s.serverError(err)
 	}
-	tableID := path[2]
 	tableSpan := generateTableSpan(tableID)
 
 	return s.statsForSpan(ctx, tableSpan)
@@ -1099,7 +1122,7 @@ func (s *adminServer) RangeLog(
 // getUIData returns the values and timestamps for the given UI keys. Keys
 // that are not found will not be returned.
 func (s *adminServer) getUIData(
-	ctx context.Context, userName string, keys []string,
+	ctx context.Context, userName security.SQLUsername, keys []string,
 ) (*serverpb.GetUIDataResponse, error) {
 	if len(keys) == 0 {
 		return &serverpb.GetUIDataResponse{}, nil
@@ -1120,7 +1143,7 @@ func (s *adminServer) getUIData(
 	}
 	rows, err := s.server.sqlServer.internalExecutor.QueryEx(
 		ctx, "admin-getUIData", nil, /* txn */
-		sessiondata.InternalExecutorOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		query.String(), query.QueryArguments()...,
 	)
 	if err != nil {
@@ -1158,8 +1181,8 @@ func (s *adminServer) getUIData(
 // system.ui.
 // The username is combined to ensure that different users
 // can use different customizations.
-func makeUIKey(username, key string) string {
-	return username + "$" + key
+func makeUIKey(username security.SQLUsername, key string) string {
+	return username.Normalized() + "$" + key
 }
 
 // splitUIKey is the inverse of makeUIKey.
@@ -1192,7 +1215,7 @@ func (s *adminServer) SetUIData(
 		rowsAffected, err := s.server.sqlServer.internalExecutor.ExecEx(
 			ctx, "admin-set-ui-data", nil, /* txn */
 			sessiondata.InternalExecutorOverride{
-				User: security.RootUser,
+				User: security.RootUserName(),
 			},
 			query, makeUIKey(userName, key), val)
 		if err != nil {
@@ -1344,9 +1367,9 @@ func (s *adminServer) checkReadinessForHealthCheck() error {
 
 	// TODO(knz): update this code when progress is made on
 	// https://github.com/cockroachdb/cockroach/issues/45123
-	l, err := s.server.nodeLiveness.GetLiveness(s.server.NodeID())
-	if err != nil {
-		return s.serverError(err)
+	l, ok := s.server.nodeLiveness.GetLiveness(s.server.NodeID())
+	if !ok {
+		return status.Error(codes.Unavailable, "liveness record not found")
 	}
 	if !l.IsLive(s.server.clock.Now().GoTime()) {
 		return status.Errorf(codes.Unavailable, "node is not healthy")
@@ -1505,7 +1528,7 @@ func (s *adminServer) Locations(
 	q.Append(`SELECT "localityKey", "localityValue", latitude, longitude FROM system.locations`)
 	rows, cols, err := s.server.sqlServer.internalExecutor.QueryWithCols(
 		ctx, "admin-locations", nil, /* txn */
-		sessiondata.InternalExecutorOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		q.String(),
 	)
 	if err != nil {
@@ -1682,9 +1705,9 @@ func (s *adminServer) DecommissionStatus(
 	var res serverpb.DecommissionStatusResponse
 
 	for nodeID := range replicaCounts {
-		l, err := s.server.nodeLiveness.GetLiveness(nodeID)
-		if err != nil {
-			return nil, errors.Wrapf(err, "unable to get liveness for %d", nodeID)
+		l, ok := s.server.nodeLiveness.GetLiveness(nodeID)
+		if !ok {
+			return nil, errors.Newf("unable to get liveness for %d", nodeID)
 		}
 		nodeResp := serverpb.DecommissionStatusResponse_Status{
 			NodeID:       l.NodeID,
@@ -2280,7 +2303,7 @@ func (rs resultScanner) Scan(row tree.Datums, colName string, dst interface{}) e
 // queryZone retrieves the specific ZoneConfig associated with the supplied ID,
 // if it exists.
 func (s *adminServer) queryZone(
-	ctx context.Context, userName string, id descpb.ID,
+	ctx context.Context, userName security.SQLUsername, id descpb.ID,
 ) (zonepb.ZoneConfig, bool, error) {
 	const query = `SELECT crdb_internal.get_zone_config($1)`
 	rows, cols, err := s.server.sqlServer.internalExecutor.QueryWithCols(
@@ -2323,7 +2346,7 @@ func (s *adminServer) queryZone(
 // queryDescriptorIDPath(), for a ZoneConfig. It returns the most specific
 // ZoneConfig specified for the object IDs in the path.
 func (s *adminServer) queryZonePath(
-	ctx context.Context, userName string, path []descpb.ID,
+	ctx context.Context, userName security.SQLUsername, path []descpb.ID,
 ) (descpb.ID, zonepb.ZoneConfig, bool, error) {
 	for i := len(path) - 1; i >= 0; i-- {
 		zone, zoneExists, err := s.queryZone(ctx, userName, path[i])
@@ -2334,23 +2357,22 @@ func (s *adminServer) queryZonePath(
 	return 0, *zonepb.NewZoneConfig(), false, nil
 }
 
-// queryNamespaceID queries for the ID of the namespace with the given name and
-// parent ID.
-func (s *adminServer) queryNamespaceID(
-	ctx context.Context, userName string, parentID descpb.ID, name string,
+// queryDatabaseID queries for the ID of the database with the given name.
+func (s *adminServer) queryDatabaseID(
+	ctx context.Context, userName security.SQLUsername, name string,
 ) (descpb.ID, error) {
-	const query = `SELECT crdb_internal.get_namespace_id($1, $2)`
+	const query = `SELECT crdb_internal.get_database_id($1)`
 	rows, cols, err := s.server.sqlServer.internalExecutor.QueryWithCols(
 		ctx, "admin-query-namespace-ID", nil, /* txn */
 		sessiondata.InternalExecutorOverride{User: userName},
-		query, parentID, name,
+		query, name,
 	)
 	if err != nil {
 		return 0, err
 	}
 
 	if len(rows) != 1 {
-		return 0, errors.Errorf("invalid number of rows returned: %s (%d, %s)", query, parentID, name)
+		return 0, errors.Errorf("invalid number of rows returned: %s (%s)", query, name)
 	}
 
 	var id int64
@@ -2358,7 +2380,7 @@ func (s *adminServer) queryNamespaceID(
 	if isNull, err := scanner.IsNull(rows[0], cols[0].Name); err != nil {
 		return 0, err
 	} else if isNull {
-		return 0, errors.Errorf("namespace %s with ParentID %d not found", name, parentID)
+		return 0, errors.Errorf("database %s not found", name)
 	}
 
 	err = scanner.ScanIndex(rows[0], 0, &id)
@@ -2369,22 +2391,20 @@ func (s *adminServer) queryNamespaceID(
 	return descpb.ID(id), nil
 }
 
-// queryDescriptorIDPath converts a path of namespaces into a path of namespace
-// IDs. For example, if this function is called with a database/table name pair,
-// it will return a list of IDs consisting of the root namespace ID, the
-// databases ID, and the table ID (in that order).
-func (s *adminServer) queryDescriptorIDPath(
-	ctx context.Context, userName string, names []string,
-) ([]descpb.ID, error) {
-	path := []descpb.ID{keys.RootNamespaceID}
-	for _, name := range names {
-		id, err := s.queryNamespaceID(ctx, userName, path[len(path)-1], name)
-		if err != nil {
-			return nil, err
-		}
-		path = append(path, id)
+// queryTableID queries for the ID of the table with the given name in the
+// database with the given name. The table name may contain a schema qualifier.
+func (s *adminServer) queryTableID(
+	ctx context.Context, username security.SQLUsername, database string, tableName string,
+) (descpb.ID, error) {
+	row, err := s.server.sqlServer.internalExecutor.QueryRowEx(
+		ctx, "admin-resolve-name", nil,
+		sessiondata.InternalExecutorOverride{User: username, Database: database},
+		"SELECT $1::regclass::oid", tableName,
+	)
+	if err != nil {
+		return descpb.InvalidID, err
 	}
-	return path, nil
+	return descpb.ID(tree.MustBeDOid(row[0]).DInt), nil
 }
 
 func (s *adminServer) dialNode(
@@ -2408,31 +2428,33 @@ type adminPrivilegeChecker struct {
 	ie *sql.InternalExecutor
 }
 
-func (c *adminPrivilegeChecker) requireAdminUser(ctx context.Context) (userName string, err error) {
+func (c *adminPrivilegeChecker) requireAdminUser(
+	ctx context.Context,
+) (userName security.SQLUsername, err error) {
 	userName, isAdmin, err := c.getUserAndRole(ctx)
 	if err != nil {
-		return "", err
+		return userName, err
 	}
 	if !isAdmin {
-		return "", errRequiresAdmin
+		return userName, errRequiresAdmin
 	}
 	return userName, nil
 }
 
 func (c *adminPrivilegeChecker) requireViewActivityPermission(
 	ctx context.Context,
-) (userName string, err error) {
+) (userName security.SQLUsername, err error) {
 	userName, isAdmin, err := c.getUserAndRole(ctx)
 	if err != nil {
-		return "", err
+		return userName, err
 	}
 	if !isAdmin {
 		hasViewActivity, err := c.hasRoleOption(ctx, userName, roleoption.VIEWACTIVITY)
 		if err != nil {
-			return "", err
+			return userName, err
 		}
 		if !hasViewActivity {
-			return "", status.Errorf(
+			return userName, status.Errorf(
 				codes.PermissionDenied, "this operation requires the %s role option",
 				roleoption.VIEWACTIVITY)
 		}
@@ -2442,17 +2464,19 @@ func (c *adminPrivilegeChecker) requireViewActivityPermission(
 
 func (c *adminPrivilegeChecker) getUserAndRole(
 	ctx context.Context,
-) (userName string, isAdmin bool, err error) {
+) (userName security.SQLUsername, isAdmin bool, err error) {
 	userName, err = userFromContext(ctx)
 	if err != nil {
-		return "", false, err
+		return userName, false, err
 	}
 	isAdmin, err = c.hasAdminRole(ctx, userName)
 	return userName, isAdmin, err
 }
 
-func (c *adminPrivilegeChecker) hasAdminRole(ctx context.Context, user string) (bool, error) {
-	if user == security.RootUser {
+func (c *adminPrivilegeChecker) hasAdminRole(
+	ctx context.Context, user security.SQLUsername,
+) (bool, error) {
+	if user.IsRootUser() {
 		// Shortcut.
 		return true, nil
 	}
@@ -2477,9 +2501,9 @@ func (c *adminPrivilegeChecker) hasAdminRole(ctx context.Context, user string) (
 }
 
 func (c *adminPrivilegeChecker) hasRoleOption(
-	ctx context.Context, user string, roleOption roleoption.Option,
+	ctx context.Context, user security.SQLUsername, roleOption roleoption.Option,
 ) (bool, error) {
-	if user == security.RootUser {
+	if user.IsRootUser() {
 		// Shortcut.
 		return true, nil
 	}

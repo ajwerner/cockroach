@@ -29,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -1038,6 +1039,20 @@ type Mutator interface {
 	Mutate(rng *rand.Rand, stmts []tree.Statement) (mutated []tree.Statement, changed bool)
 }
 
+// MakeSchemaName creates a CreateSchema definition
+func MakeSchemaName(
+	ifNotExists bool, schema string, authRole security.SQLUsername,
+) *tree.CreateSchema {
+	return &tree.CreateSchema{
+		IfNotExists: ifNotExists,
+		Schema: tree.ObjectNamePrefix{
+			SchemaName:     tree.Name(schema),
+			ExplicitSchema: true,
+		},
+		AuthRole: authRole,
+	}
+}
+
 // RandCreateTables creates random table definitions.
 func RandCreateTables(
 	rng *rand.Rand, prefix string, num int, mutators ...Mutator,
@@ -1359,7 +1374,7 @@ func IndexStoringMutator(rng *rand.Rand, stmts []tree.Statement) ([]tree.Stateme
 				case *tree.IndexTableDef:
 					idx = defType
 				case *tree.UniqueConstraintTableDef:
-					if !defType.PrimaryKey {
+					if !defType.PrimaryKey && !defType.WithoutIndex {
 						idx = &defType.IndexTableDef
 					}
 				}
@@ -1390,12 +1405,6 @@ func PartialIndexMutator(rng *rand.Rand, stmts []tree.Statement) ([]tree.Stateme
 	for _, stmt := range stmts {
 		switch ast := stmt.(type) {
 		case *tree.CreateIndex:
-			// TODO(mgartner): Create partial inverted indexes when they are
-			// fully supported.
-			if ast.Inverted {
-				continue
-			}
-
 			tableInfo, ok := tables[ast.Table.ObjectName]
 			if !ok {
 				continue
@@ -1419,14 +1428,12 @@ func PartialIndexMutator(rng *rand.Rand, stmts []tree.Statement) ([]tree.Stateme
 				case *tree.IndexTableDef:
 					idx = defType
 				case *tree.UniqueConstraintTableDef:
-					if !defType.PrimaryKey {
+					if !defType.PrimaryKey && !defType.WithoutIndex {
 						idx = &defType.IndexTableDef
 					}
 				}
 
-				// TODO(mgartner): Create partial inverted indexes when they are
-				// fully supported.
-				if idx == nil || idx.Inverted {
+				if idx == nil {
 					continue
 				}
 
@@ -1708,13 +1715,13 @@ func RandString(rng *rand.Rand, length int, alphabet string) string {
 // be random strings generated from alphabet.
 func RandCreateType(rng *rand.Rand, name, alphabet string) tree.Statement {
 	numLabels := rng.Intn(6) + 1
-	labels := make([]string, numLabels)
+	labels := make(tree.EnumValueList, numLabels)
 	labelsMap := make(map[string]struct{})
 	i := 0
 	for i < numLabels {
 		s := RandString(rng, rng.Intn(6)+1, alphabet)
 		if _, ok := labelsMap[s]; !ok {
-			labels[i] = s
+			labels[i] = tree.EnumValue(s)
 			labelsMap[s] = struct{}{}
 			i++
 		}

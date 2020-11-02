@@ -18,11 +18,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
 )
 
@@ -51,31 +53,28 @@ func rejectIfSystemTenant(tenID uint64, op string) error {
 
 // CreateTenantRecord creates a tenant in system.tenants.
 func CreateTenantRecord(
-	ctx context.Context,
-	execCfg *ExecutorConfig,
-	txn *kv.Txn,
-	tenID uint64,
-	active bool,
-	tenInfo []byte,
+	ctx context.Context, execCfg *ExecutorConfig, txn *kv.Txn, info *descpb.TenantInfo,
 ) error {
 	const op = "create"
 	if err := rejectIfCantCoordinateMultiTenancy(execCfg.Codec, op); err != nil {
 		return err
 	}
-	if err := rejectIfSystemTenant(tenID, op); err != nil {
+	if err := rejectIfSystemTenant(info.ID, op); err != nil {
 		return err
 	}
 
-	// NB: interface{}([]byte(nil)) != interface{}(nil).
-	var tenInfoArg interface{}
-	if tenInfo != nil {
-		tenInfoArg = tenInfo
+	tenID := info.ID
+	active := info.State == descpb.TenantInfo_ACTIVE
+	infoBytes, err := protoutil.Marshal(info)
+	if err != nil {
+		return err
 	}
 
 	// Insert into the tenant table and detect collisions.
 	if num, err := execCfg.InternalExecutor.ExecEx(
 		ctx, "create-tenant", txn, sessiondata.NodeUserSessionDataOverride,
-		`INSERT INTO system.tenants (id, active, info) VALUES ($1, $2, $3)`, tenID, active, tenInfoArg,
+		`INSERT INTO system.tenants (id, active, info) VALUES ($1, $2, $3)`,
+		tenID, active, infoBytes,
 	); err != nil {
 		if pgerror.GetPGCode(err) == pgcode.UniqueViolation {
 			return pgerror.Newf(pgcode.DuplicateObject, "tenant \"%d\" already exists", tenID)
@@ -87,9 +86,60 @@ func CreateTenantRecord(
 	return nil
 }
 
+// getTenantRecord retrieves a tenant in system.tenants.
+func getTenantRecord(
+	ctx context.Context, execCfg *ExecutorConfig, txn *kv.Txn, tenID uint64,
+) (*descpb.TenantInfo, error) {
+	row, err := execCfg.InternalExecutor.QueryRowEx(
+		ctx, "activate-tenant", txn, sessiondata.NodeUserSessionDataOverride,
+		`SELECT info FROM system.tenants WHERE id = $1`, tenID,
+	)
+	if err != nil {
+		return nil, err
+	} else if row == nil {
+		return nil, pgerror.Newf(pgcode.UndefinedObject, "tenant \"%d\" does not exist", tenID)
+	}
+
+	info := &descpb.TenantInfo{}
+	infoBytes := []byte(tree.MustBeDBytes(row[0]))
+	if err := protoutil.Unmarshal(infoBytes, info); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+// updateTenantRecord updates a tenant in system.tenants.
+func updateTenantRecord(
+	ctx context.Context, execCfg *ExecutorConfig, txn *kv.Txn, info *descpb.TenantInfo,
+) error {
+	tenID := info.ID
+	active := info.State == descpb.TenantInfo_ACTIVE
+	infoBytes, err := protoutil.Marshal(info)
+	if err != nil {
+		return err
+	}
+
+	if num, err := execCfg.InternalExecutor.ExecEx(
+		ctx, "activate-tenant", txn, sessiondata.NodeUserSessionDataOverride,
+		`UPDATE system.tenants SET active = $2, info = $3 WHERE id = $1`,
+		tenID, active, infoBytes,
+	); err != nil {
+		return errors.Wrap(err, "activating tenant")
+	} else if num != 1 {
+		log.Fatalf(ctx, "unexpected number of rows affected: %d", num)
+	}
+	return nil
+}
+
 // CreateTenant implements the tree.TenantOperator interface.
-func (p *planner) CreateTenant(ctx context.Context, tenID uint64, tenInfo []byte) error {
-	if err := CreateTenantRecord(ctx, p.ExecCfg(), p.Txn(), tenID, true /*active*/, tenInfo); err != nil {
+func (p *planner) CreateTenant(ctx context.Context, tenID uint64) error {
+	info := &descpb.TenantInfo{
+		ID: tenID,
+		// We synchronously initialize the tenant's keyspace below, so
+		// we can skip the ADD state and go straight to an ACTIVE state.
+		State: descpb.TenantInfo_ACTIVE,
+	}
+	if err := CreateTenantRecord(ctx, p.ExecCfg(), p.Txn(), info); err != nil {
 		return err
 	}
 
@@ -145,59 +195,115 @@ func ActivateTenant(ctx context.Context, execCfg *ExecutorConfig, txn *kv.Txn, t
 	if err := rejectIfSystemTenant(tenID, op); err != nil {
 		return err
 	}
-	// Mark the tenant as active.
-	if num, err := execCfg.InternalExecutor.ExecEx(
-		ctx, "activate-tenant", txn, sessiondata.NodeUserSessionDataOverride,
-		`UPDATE system.tenants SET active = true WHERE id = $1`, tenID,
-	); err != nil {
+
+	// Retrieve the tenant's info.
+	info, err := getTenantRecord(ctx, execCfg, txn, tenID)
+	if err != nil {
 		return errors.Wrap(err, "activating tenant")
-	} else if num != 1 {
-		log.Fatalf(ctx, "unexpected number of rows affected: %d", num)
 	}
+
+	// Mark the tenant as active.
+	info.State = descpb.TenantInfo_ACTIVE
+	if err := updateTenantRecord(ctx, execCfg, txn, info); err != nil {
+		return errors.Wrap(err, "activating tenant")
+	}
+
 	return nil
 }
 
+// clearTenant deletes the tenant's data.
+func clearTenant(ctx context.Context, execCfg *ExecutorConfig, info *descpb.TenantInfo) error {
+	// Confirm tenant is ready to be cleared.
+	if info.State != descpb.TenantInfo_DROP {
+		return errors.Errorf("tenant %d is not in state DROP", info.ID)
+	}
+
+	log.Infof(ctx, "clearing data for tenant %d", info.ID)
+
+	prefix := keys.MakeTenantPrefix(roachpb.MakeTenantID(info.ID))
+	prefixEnd := prefix.PrefixEnd()
+
+	log.VEventf(ctx, 2, "ClearRange %s - %s", prefix, prefixEnd)
+	// ClearRange cannot be run in a transaction, so create a non-transactional
+	// batch to send the request.
+	b := &kv.Batch{}
+	b.AddRawRequest(&roachpb.ClearRangeRequest{
+		RequestHeader: roachpb.RequestHeader{Key: prefix, EndKey: prefixEnd},
+	})
+
+	return errors.Wrapf(execCfg.DB.Run(ctx, b), "clearing tenant %d data", info.ID)
+}
+
 // DestroyTenant implements the tree.TenantOperator interface.
-func DestroyTenant(ctx context.Context, execCfg *ExecutorConfig, txn *kv.Txn, tenID uint64) error {
+func (p *planner) DestroyTenant(ctx context.Context, tenID uint64) error {
 	const op = "destroy"
-	if err := rejectIfCantCoordinateMultiTenancy(execCfg.Codec, op); err != nil {
+	if err := rejectIfCantCoordinateMultiTenancy(p.execCfg.Codec, op); err != nil {
 		return err
 	}
 	if err := rejectIfSystemTenant(tenID, op); err != nil {
 		return err
 	}
 
-	// Query the tenant's active status. If it is marked as inactive, it is
-	// already destroyed.
-	if row, err := execCfg.InternalExecutor.QueryRowEx(
-		ctx, "destroy-tenant", txn, sessiondata.NodeUserSessionDataOverride,
-		`SELECT active FROM system.tenants WHERE id = $1`, tenID,
-	); err != nil {
-		return errors.Wrap(err, "deleting tenant")
-	} else if row == nil {
-		return pgerror.Newf(pgcode.UndefinedObject, "tenant \"%d\" does not exist", tenID)
-	} else if !bool(tree.MustBeDBool(row[0])) {
-		return nil // tenant already destroyed
+	// Retrieve the tenant's info.
+	info, err := getTenantRecord(ctx, p.execCfg, p.txn, tenID)
+	if err != nil {
+		return errors.Wrap(err, "destroying tenant")
 	}
 
-	// Mark the tenant as inactive.
-	if num, err := execCfg.InternalExecutor.ExecEx(
-		ctx, "destroy-tenant", txn, sessiondata.NodeUserSessionDataOverride,
-		`UPDATE system.tenants SET active = false WHERE id = $1`, tenID,
-	); err != nil {
-		return errors.Wrap(err, "deleting tenant")
-	} else if num != 1 {
-		log.Fatalf(ctx, "unexpected number of rows affected: %d", num)
+	if info.State == descpb.TenantInfo_DROP {
+		return errors.Errorf("tenant %d is already in state DROP", tenID)
 	}
 
-	// TODO(nvanbenschoten): actually clear tenant keyspace. We don't want to do
-	// this synchronously in the same transaction, because we could be deleting
-	// a very large amount of data. Tracked in #48775.
-
-	return nil
+	// Mark the tenant as dropping.
+	info.State = descpb.TenantInfo_DROP
+	return errors.Wrap(updateTenantRecord(ctx, p.execCfg, p.txn, info), "destroying tenant")
 }
 
-// DestroyTenant implements the tree.TenantOperator interface.
-func (p *planner) DestroyTenant(ctx context.Context, tenID uint64) error {
-	return DestroyTenant(ctx, p.ExecCfg(), p.Txn(), tenID)
+// GCTenant clears the tenant's data and removes its record.
+func GCTenant(ctx context.Context, execCfg *ExecutorConfig, info *descpb.TenantInfo) error {
+	const op = "gc"
+	if err := rejectIfCantCoordinateMultiTenancy(execCfg.Codec, op); err != nil {
+		return err
+	}
+	if err := rejectIfSystemTenant(info.ID, op); err != nil {
+		return err
+	}
+
+	if err := clearTenant(ctx, execCfg, info); err != nil {
+		return errors.Wrap(err, "clear tenant")
+	}
+
+	err := execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		if num, err := execCfg.InternalExecutor.ExecEx(
+			ctx, "delete-tenant", txn, sessiondata.NodeUserSessionDataOverride,
+			`DELETE FROM system.tenants WHERE id = $1`, info.ID,
+		); err != nil {
+			return errors.Wrapf(err, "deleting tenant %d", info.ID)
+		} else if num != 1 {
+			log.Fatalf(ctx, "unexpected number of rows affected: %d", num)
+		}
+		return nil
+	})
+	return errors.Wrapf(err, "deleting tenant %d record", info.ID)
+}
+
+// GCTenant implements the tree.TenantOperator interface.
+func (p *planner) GCTenant(ctx context.Context, tenID uint64) error {
+	if !p.ExtendedEvalContext().TxnImplicit {
+		return errors.Errorf("gc_tenant cannot be used inside a transaction")
+	}
+
+	var info *descpb.TenantInfo
+	var err error
+	if err := p.ExecCfg().DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		info, err = getTenantRecord(ctx, p.execCfg, p.txn, tenID)
+		if err != nil {
+			return errors.Wrapf(err, "retrieving tenant %d", tenID)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	return GCTenant(ctx, p.ExecCfg(), info)
 }

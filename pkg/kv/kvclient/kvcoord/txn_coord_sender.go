@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
@@ -472,7 +471,7 @@ func (tc *TxnCoordSender) Send(
 	if tc.mu.txn.ID == (uuid.UUID{}) {
 		log.Fatalf(ctx, "cannot send transactional request through unbound TxnCoordSender")
 	}
-	if !tracing.IsBlackHoleSpan(sp) {
+	if !sp.IsBlackHole() {
 		sp.SetBaggageItem("txnID", tc.mu.txn.ID.String())
 	}
 	ctx = logtags.AddTag(ctx, "txn", uuid.ShortStringer(tc.mu.txn.ID))
@@ -1122,10 +1121,6 @@ func (tc *TxnCoordSender) PrepareRetryableError(ctx context.Context, msg string)
 
 // Step is part of the TxnSender interface.
 func (tc *TxnCoordSender) Step(ctx context.Context) error {
-	if tc.typ != kv.RootTxn {
-		return errors.WithContextTags(
-			errors.AssertionFailedf("cannot call Step() in leaf txn"), ctx)
-	}
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	return tc.interceptorAlloc.txnSeqNumAllocator.stepLocked(ctx)
@@ -1135,10 +1130,6 @@ func (tc *TxnCoordSender) Step(ctx context.Context) error {
 func (tc *TxnCoordSender) ConfigureStepping(
 	ctx context.Context, mode kv.SteppingMode,
 ) (prevMode kv.SteppingMode) {
-	if tc.typ != kv.RootTxn {
-		panic(errors.WithContextTags(
-			errors.AssertionFailedf("cannot call ConfigureStepping() in leaf txn"), ctx))
-	}
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	return tc.interceptorAlloc.txnSeqNumAllocator.configureSteppingLocked(mode)

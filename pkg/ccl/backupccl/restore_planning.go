@@ -16,6 +16,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -305,7 +306,24 @@ func allocateDescriptorRewrites(
 		if err != nil {
 			return nil, err
 		}
+		// Remap all of the descriptor belonging to system tables to the temp system
+		// DB.
 		descriptorRewrites[tempSysDBID] = &jobspb.RestoreDetails_DescriptorRewrite{ID: tempSysDBID}
+		for _, table := range tablesByID {
+			if table.GetParentID() == systemschema.SystemDB.ID {
+				descriptorRewrites[table.GetID()] = &jobspb.RestoreDetails_DescriptorRewrite{ParentID: tempSysDBID}
+			}
+		}
+		for _, sc := range typesByID {
+			if sc.GetParentID() == systemschema.SystemDB.ID {
+				descriptorRewrites[sc.GetID()] = &jobspb.RestoreDetails_DescriptorRewrite{ParentID: tempSysDBID}
+			}
+		}
+		for _, typ := range typesByID {
+			if typ.GetParentID() == systemschema.SystemDB.ID {
+				descriptorRewrites[typ.GetID()] = &jobspb.RestoreDetails_DescriptorRewrite{ParentID: tempSysDBID}
+			}
+		}
 	}
 
 	// Fail fast if the necessary databases don't exist or are otherwise
@@ -322,20 +340,17 @@ func allocateDescriptorRewrites(
 			}
 		}
 
-		// TODO (rohany, pbardea): This method is becoming too large. We should
-		//  split the individual components out into helper methods.
+		// TODO (rohany, pbardea): These checks really need to be refactored.
 		// Construct rewrites for any user defined schemas.
 		for _, sc := range schemasByID {
-			var targetDB string
-			if renaming {
-				targetDB = overrideDB
-			} else {
-				database, ok := databasesByID[sc.ParentID]
-				if !ok {
-					return errors.Errorf("no database with ID %d in backup for schema %q",
-						sc.ParentID, sc.Name)
-				}
-				targetDB = database.Name
+			if _, ok := descriptorRewrites[sc.ID]; ok {
+				continue
+			}
+
+			targetDB, err := resolveTargetDB(ctx, txn, p, databasesByID, renaming, overrideDB,
+				descriptorCoverage, sc)
+			if err != nil {
+				return err
 			}
 
 			if _, ok := restoreDBNames[targetDB]; ok {
@@ -385,38 +400,15 @@ func allocateDescriptorRewrites(
 		}
 
 		for _, table := range tablesByID {
-			var targetDB string
-			if renaming {
-				targetDB = overrideDB
-			} else if descriptorCoverage == tree.AllDescriptors && table.ParentID < catalogkeys.MaxDefaultDescriptorID {
-				// This is a table that is in a database that already existed at
-				// cluster creation time.
-				defaultDBID, err := lookupDatabaseID(ctx, txn, p.ExecCfg().Codec, catalogkeys.DefaultDatabaseName)
-				if err != nil {
-					return err
-				}
-				postgresDBID, err := lookupDatabaseID(ctx, txn, p.ExecCfg().Codec, catalogkeys.PgDatabaseName)
-				if err != nil {
-					return err
-				}
+			// If a descriptor has already been assigned a rewrite, then move on.
+			if _, ok := descriptorRewrites[table.ID]; ok {
+				continue
+			}
 
-				if table.ParentID == systemschema.SystemDB.GetID() {
-					// For full cluster backups, put the system tables in the temporary
-					// system table.
-					targetDB = restoreTempSystemDB
-					descriptorRewrites[table.ID] = &jobspb.RestoreDetails_DescriptorRewrite{ParentID: tempSysDBID}
-				} else if table.ParentID == defaultDBID {
-					targetDB = catalogkeys.DefaultDatabaseName
-				} else if table.ParentID == postgresDBID {
-					targetDB = catalogkeys.PgDatabaseName
-				}
-			} else {
-				database, ok := databasesByID[table.ParentID]
-				if !ok {
-					return errors.Errorf("no database with ID %d in backup for table %q",
-						table.ParentID, table.Name)
-				}
-				targetDB = database.GetName()
+			targetDB, err := resolveTargetDB(ctx, txn, p, databasesByID, renaming, overrideDB,
+				descriptorCoverage, table)
+			if err != nil {
+				return err
 			}
 
 			if _, ok := restoreDBNames[targetDB]; ok {
@@ -471,16 +463,10 @@ func allocateDescriptorRewrites(
 				continue
 			}
 
-			var targetDB string
-			if renaming {
-				targetDB = overrideDB
-			} else {
-				database, ok := databasesByID[typ.ParentID]
-				if !ok {
-					return errors.Errorf("no database with ID %d in backup for type %q",
-						typ.ParentID, typ.Name)
-				}
-				targetDB = database.Name
+			targetDB, err := resolveTargetDB(ctx, txn, p, databasesByID, renaming, overrideDB,
+				descriptorCoverage, typ)
+			if err != nil {
+				return err
 			}
 
 			if _, ok := restoreDBNames[targetDB]; ok {
@@ -670,6 +656,53 @@ func allocateDescriptorRewrites(
 	return descriptorRewrites, nil
 }
 
+func resolveTargetDB(
+	ctx context.Context,
+	txn *kv.Txn,
+	p sql.PlanHookState,
+	databasesByID map[descpb.ID]*dbdesc.Mutable,
+	renaming bool,
+	overrideDB string,
+	descriptorCoverage tree.DescriptorCoverage,
+	descriptor catalog.Descriptor,
+) (string, error) {
+	if renaming {
+		return overrideDB, nil
+	}
+
+	if descriptorCoverage == tree.AllDescriptors && descriptor.GetParentID() < catalogkeys.MaxDefaultDescriptorID {
+		// This is a table that is in a database that already existed at
+		// cluster creation time.
+		defaultDBID, err := lookupDatabaseID(ctx, txn, p.ExecCfg().Codec, catalogkeys.DefaultDatabaseName)
+		if err != nil {
+			return "", err
+		}
+		postgresDBID, err := lookupDatabaseID(ctx, txn, p.ExecCfg().Codec, catalogkeys.PgDatabaseName)
+		if err != nil {
+			return "", err
+		}
+
+		var targetDB string
+		if descriptor.GetParentID() == systemschema.SystemDB.GetID() {
+			// For full cluster backups, put the system tables in the temporary
+			// system table.
+			targetDB = restoreTempSystemDB
+		} else if descriptor.GetParentID() == defaultDBID {
+			targetDB = catalogkeys.DefaultDatabaseName
+		} else if descriptor.GetParentID() == postgresDBID {
+			targetDB = catalogkeys.PgDatabaseName
+		}
+		return targetDB, nil
+	}
+
+	database, ok := databasesByID[descriptor.GetParentID()]
+	if !ok {
+		return "", errors.Errorf("no database with ID %d in backup for object %q (%d)",
+			descriptor.GetParentID(), descriptor.GetName(), descriptor.GetID())
+	}
+	return database.Name, nil
+}
+
 // maybeUpgradeTableDescsInBackupManifests updates the backup descriptors'
 // table descriptors to use the newer 19.2-style foreign key representation,
 // if they are not already upgraded. This requires resolving cross-table FK
@@ -835,9 +868,17 @@ func maybeRewriteSchemaID(curSchemaID descpb.ID, descriptorRewrites DescRewriteM
 
 // RewriteTableDescs mutates tables to match the ID and privilege specified
 // in descriptorRewrites, as well as adjusting cross-table references to use the
-// new IDs. overrideDB can be specified to set database names in views.
+// new IDs. overrideDB can be specified to set database names in views. The
+// canResetModTime parameter is set based on the cluster version. It is unsafe
+// to reset the mod time in a mixed version state as 20.1 nodes expect the mod
+// time to be set on all descriptors which are deserialized, even at version 1.
+//
+// TODO(ajwerner): Remove canResetModTime in 21.1.
 func RewriteTableDescs(
-	tables []*tabledesc.Mutable, descriptorRewrites DescRewriteMap, overrideDB string,
+	tables []*tabledesc.Mutable,
+	descriptorRewrites DescRewriteMap,
+	overrideDB string,
+	canResetModTime bool,
 ) error {
 	for _, table := range tables {
 		tableRewrite, ok := descriptorRewrites[table.ID]
@@ -846,7 +887,9 @@ func RewriteTableDescs(
 		}
 		// Reset the version and modification time on this new descriptor.
 		table.Version = 1
-		table.ModificationTime = hlc.Timestamp{}
+		if canResetModTime {
+			table.ModificationTime = hlc.Timestamp{}
+		}
 
 		if table.IsView() && overrideDB != "" {
 			// restore checks that all dependencies are also being restored, but if
@@ -1038,7 +1081,7 @@ func errOnMissingRange(span covering.Range, start, end hlc.Timestamp) error {
 func getUserDescriptorNames(
 	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec,
 ) ([]string, error) {
-	allDescs, err := catalogkv.GetAllDescriptors(ctx, txn, codec)
+	allDescs, err := catalogkv.GetAllDescriptors(ctx, txn, codec, true /* validate */)
 	if err != nil {
 		return nil, err
 	}
@@ -1182,7 +1225,7 @@ func restorePlanHook(
 	fn := func(ctx context.Context, _ []sql.PlanNode, resultsCh chan<- tree.Datums) error {
 		// TODO(dan): Move this span into sql.
 		ctx, span := tracing.ChildSpan(ctx, stmt.StatementTag())
-		defer tracing.FinishSpan(span)
+		defer span.Finish()
 
 		if !(p.ExtendedEvalContext().TxnImplicit || restoreStmt.Options.Detached) {
 			return errors.Errorf("RESTORE cannot be used inside a transaction without DETACHED option")
@@ -1295,21 +1338,22 @@ func checkPrivilegesForRestore(
 		}
 	}
 	knobs := p.ExecCfg().BackupRestoreTestingKnobs
-	if knobs == nil || !knobs.AllowImplicitAccess {
-		// Check that none of the sources rely on implicit access.
-		for i := range from {
-			for j := range from[i] {
-				uri := from[i][j]
-				hasExplicitAuth, uriScheme, err := cloudimpl.AccessIsWithExplicitAuth(uri)
-				if err != nil {
-					return err
-				}
-				if !hasExplicitAuth {
-					return pgerror.Newf(
-						pgcode.InsufficientPrivilege,
-						"only users with the admin role are allowed to RESTORE from the specified %s URI",
-						uriScheme)
-				}
+	if knobs != nil && knobs.AllowImplicitAccess {
+		return nil
+	}
+	// Check that none of the sources rely on implicit access.
+	for i := range from {
+		for j := range from[i] {
+			uri := from[i][j]
+			hasExplicitAuth, uriScheme, err := cloudimpl.AccessIsWithExplicitAuth(uri)
+			if err != nil {
+				return err
+			}
+			if !hasExplicitAuth {
+				return pgerror.Newf(
+					pgcode.InsufficientPrivilege,
+					"only users with the admin role are allowed to RESTORE from the specified %s URI",
+					uriScheme)
 			}
 		}
 	}
@@ -1496,7 +1540,13 @@ func doRestorePlan(
 
 	// We attempt to rewrite ID's in the collected type and table descriptors
 	// to catch errors during this process here, rather than in the job itself.
-	if err := RewriteTableDescs(tables, descriptorRewrites, intoDB); err != nil {
+	//
+	// TODO(ajwerner): Remove this version check in 21.1.
+	canResetModTime := p.ExecCfg().Settings.Version.IsActive(
+		ctx, clusterversion.VersionLeasedDatabaseDescriptors)
+	if err := RewriteTableDescs(
+		tables, descriptorRewrites, intoDB, canResetModTime,
+	); err != nil {
 		return err
 	}
 	if err := rewriteDatabaseDescs(databases, descriptorRewrites); err != nil {
@@ -1536,10 +1586,10 @@ func doRestorePlan(
 			URIs:               defaultURIs,
 			BackupLocalityInfo: localityInfo,
 			TableDescs:         encodedTables,
+			Tenants:            tenants,
 			OverrideDB:         intoDB,
 			DescriptorCoverage: restoreStmt.DescriptorCoverage,
 			Encryption:         encryption,
-			Tenants:            tenants,
 		},
 		Progress: jobspb.RestoreProgress{},
 	}
@@ -1570,6 +1620,7 @@ func doRestorePlan(
 				log.Warningf(ctx, "failed to cleanup StartableJob: %v", cleanupErr)
 			}
 		}
+		return err
 	}
 
 	collectTelemetry()

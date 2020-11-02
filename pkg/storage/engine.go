@@ -12,8 +12,6 @@ package storage
 
 import (
 	"context"
-	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -24,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
@@ -37,10 +36,10 @@ func init() {
 	_ = DefaultStorageEngine.Set(envutil.EnvOrDefaultString("COCKROACH_STORAGE_ENGINE", "pebble"))
 }
 
-// SimpleIterator is an interface for iterating over key/value pairs in an
-// engine. SimpleIterator implementations are thread safe unless otherwise
-// noted. SimpleIterator is a subset of the functionality offered by Iterator.
-type SimpleIterator interface {
+// SimpleMVCCIterator is an interface for iterating over key/value pairs in an
+// engine. SimpleMVCCIterator implementations are thread safe unless otherwise
+// noted. SimpleMVCCIterator is a subset of the functionality offered by MVCCIterator.
+type SimpleMVCCIterator interface {
 	// Close frees up resources held by the iterator.
 	Close()
 	// SeekGE advances the iterator to the first key in the engine which
@@ -71,17 +70,21 @@ type SimpleIterator interface {
 	UnsafeValue() []byte
 }
 
-// IteratorStats is returned from (Iterator).Stats.
+// IteratorStats is returned from (MVCCIterator).Stats.
 type IteratorStats struct {
 	InternalDeleteSkippedCount int
 	TimeBoundNumSSTs           int
 }
 
-// Iterator is an interface for iterating over key/value pairs in an
-// engine. Iterator implementations are thread safe unless otherwise
-// noted.
-type Iterator interface {
-	SimpleIterator
+// MVCCIterator is an interface for iterating over key/value pairs in an
+// engine. It is used for iterating over the key space that can have multiple
+// versions, and if often also used (due to historical reasons) for iterating
+// over the key space that never has multiple versions (i.e.,
+// MVCCKey.Timestamp == hlc.Timestamp{}).
+//
+// MVCCIterator implementations are thread safe unless otherwise noted.
+type MVCCIterator interface {
+	SimpleMVCCIterator
 
 	// SeekLT advances the iterator to the first key in the engine which
 	// is < the provided key.
@@ -92,6 +95,10 @@ type Iterator interface {
 	Prev()
 	// Key returns the current key.
 	Key() MVCCKey
+	// UnsafeRawKey returns the current raw key (i.e. the encoded MVCC key).
+	// TODO(sumeer): this is a dangerous method since it may expose the
+	// raw key of a separated intent. Audit all callers and fix.
+	UnsafeRawKey() []byte
 	// Value returns the current value as a byte slice.
 	Value() []byte
 	// ValueProto unmarshals the value the iterator is currently
@@ -110,7 +117,7 @@ type Iterator interface {
 	// chosen from the key ranges listed in keys.NoSplitSpans and will always
 	// sort equal to or after minSplitKey.
 	//
-	// DO NOT CALL directly (except in wrapper Iterator implementations). Use the
+	// DO NOT CALL directly (except in wrapper MVCCIterator implementations). Use the
 	// package-level MVCCFindSplitKey instead. For correct operation, the caller
 	// must set the upper bound on the iterator before calling this method.
 	FindSplitKey(start, end, minSplitKey roachpb.Key, targetSize int64) (MVCCKey, error)
@@ -122,43 +129,58 @@ type Iterator interface {
 	SetUpperBound(roachpb.Key)
 	// Stats returns statistics about the iterator.
 	Stats() IteratorStats
-	// SupportsPrev returns true if Iterator implementation supports reverse
+	// SupportsPrev returns true if MVCCIterator implementation supports reverse
 	// iteration with Prev() or SeekLT().
 	SupportsPrev() bool
 }
 
-// MVCCIterator is an interface that extends Iterator and provides concrete
-// implementations for MVCCGet and MVCCScan operations. It is used by instances
-// of the interface backed by RocksDB iterators to avoid cgo hops.
-type MVCCIterator interface {
-	Iterator
-	// MVCCOpsSpecialized returns whether the iterator has a specialized
-	// implementation of MVCCGet and MVCCScan. This is exposed as a method
-	// so that wrapper types can defer to their wrapped iterators.
-	MVCCOpsSpecialized() bool
-	// MVCCGet is the internal implementation of the family of package-level
-	// MVCCGet functions.
-	MVCCGet(
-		key roachpb.Key, timestamp hlc.Timestamp, opts MVCCGetOptions,
-	) (*roachpb.Value, *roachpb.Intent, error)
-	// MVCCScan is the internal implementation of the family of package-level
-	// MVCCScan functions. The notable difference is that key/value pairs are
-	// returned raw, as a series of buffers of length-prefixed slices,
-	// alternating from key to value, where numKVs specifies the number of pairs
-	// in the buffer.
-	MVCCScan(
-		start, end roachpb.Key, timestamp hlc.Timestamp, opts MVCCScanOptions,
-	) (MVCCScanResult, error)
+// EngineIterator is an iterator over key-value pairs where the key is
+// an EngineKey.
+//lint:ignore U1001 unused
+type EngineIterator interface {
+	// Close frees up resources held by the iterator.
+	Close()
+	// SeekGE advances the iterator to the first key in the engine which
+	// is >= the provided key.
+	SeekGE(key EngineKey) (valid bool, err error)
+	// SeekLT advances the iterator to the first key in the engine which
+	// is < the provided key.
+	SeekLT(key EngineKey) (valid bool, err error)
+	// Next advances the iterator to the next key/value in the
+	// iteration. After this call, valid will be true if the
+	// iterator was not originally positioned at the last key.
+	Next() (valid bool, err error)
+	// Prev moves the iterator backward to the previous key/value
+	// in the iteration. After this call, valid will be true if the
+	// iterator was not originally positioned at the first key.
+	Prev() (valid bool, err error)
+	// UnsafeKey returns the same value as Key, but the memory is invalidated on
+	// the next call to {Next,NextKey,Prev,SeekGE,SeekLT,Close}.
+	// REQUIRES: latest positioning function returned valid=true.
+	UnsafeKey() EngineKey
+	// UnsafeValue returns the same value as Value, but the memory is
+	// invalidated on the next call to {Next,NextKey,Prev,SeekGE,SeekLT,Close}.
+	// REQUIRES: latest positioning function returned valid=true.
+	UnsafeValue() []byte
+	// Key returns the current key.
+	// REQUIRES: latest positioning function returned valid=true.
+	Key() EngineKey
+	// Value returns the current value as a byte slice.
+	// REQUIRES: latest positioning function returned valid=true.
+	Value() []byte
+	// SetUpperBound installs a new upper bound for this iterator.
+	SetUpperBound(roachpb.Key)
 }
 
-// IterOptions contains options used to create an Iterator.
+// IterOptions contains options used to create an {MVCC,Engine}Iterator.
 //
-// For performance, every Iterator must specify either Prefix or UpperBound.
+// For performance, every {MVCC,Engine}Iterator must specify either Prefix or
+// UpperBound.
 type IterOptions struct {
-	// If Prefix is true, Seek will use the user-key prefix of
-	// the supplied MVCC key to restrict which sstables are searched,
-	// but iteration (using Next) over keys without the same user-key
-	// prefix will not work correctly (keys may be skipped).
+	// If Prefix is true, Seek will use the user-key prefix of the supplied
+	// {MVCC,Engine}Key (the Key field) to restrict which sstables are searched,
+	// but iteration (using Next) over keys without the same user-key prefix
+	// will not work correctly (keys may be skipped).
 	Prefix bool
 	// LowerBound gives this iterator an inclusive lower bound. Attempts to
 	// SeekReverse or Prev to a key that is strictly less than the bound will
@@ -169,7 +191,7 @@ type IterOptions struct {
 	// the iterator. UpperBound must be provided unless Prefix is true, in which
 	// case the end of the prefix will be used as the upper bound.
 	UpperBound roachpb.Key
-	// If WithStats is true, the iterator accumulates RocksDB performance
+	// If WithStats is true, the iterator accumulates performance
 	// counters over its lifetime which can be queried via `Stats()`.
 	WithStats bool
 	// MinTimestampHint and MaxTimestampHint, if set, indicate that keys outside
@@ -182,8 +204,27 @@ type IterOptions struct {
 	// iterators with time bounds hints will frequently return keys outside of the
 	// [start, end] time range. If you must guarantee that you never see a key
 	// outside of the time bounds, perform your own filtering.
+	//
+	// These fields are only relevant for MVCCIterators.
 	MinTimestampHint, MaxTimestampHint hlc.Timestamp
 }
+
+// MVCCIterKind is used to inform Reader about the kind of iteration desired
+// by the caller.
+type MVCCIterKind int
+
+const (
+	// MVCCKeyAndIntentsIterKind specifies that intents must be seen, and appear
+	// interleaved with keys, even if they are in a separated lock table.
+	MVCCKeyAndIntentsIterKind MVCCIterKind = iota
+	// MVCCKeyIterKind specifies that the caller does not need to see intents.
+	// Any interleaved intents may be seen, but no correctness properties are
+	// derivable from such partial knowledge of intents. NB: this is a performance
+	// optimization when iterating over (a) MVCC keys where the caller does
+	// not need to see intents, (b) a key space that is known to not have multiple
+	// versions (and therefore will never have intents), like the raft log.
+	MVCCKeyIterKind
+)
 
 // Reader is the read interface to an engine's data.
 type Reader interface {
@@ -197,7 +238,7 @@ type Reader interface {
 	// that they are not using a closed engine. Intended for use within package
 	// engine; exported to enable wrappers to exist in other packages.
 	Closed() bool
-	// ExportToSst exports changes to the keyrange [startKey, endKey) over the
+	// ExportMVCCToSst exports changes to the keyrange [startKey, endKey) over the
 	// interval (startTS, endTS]. Passing exportAllRevisions exports
 	// every revision of a key for the interval, otherwise only the latest value
 	// within the interval is exported. Deletions are included if all revisions are
@@ -214,34 +255,39 @@ type Reader interface {
 	// returned sst. If it is the case that the versions of the last key will lead
 	// to an SST that exceeds maxSize, an error will be returned. This parameter
 	// exists to prevent creating SSTs which are too large to be used.
-	ExportToSst(
+	//
+	// This function looks at MVCC versions and intents, and returns an error if an
+	// intent is found.
+	ExportMVCCToSst(
 		startKey, endKey roachpb.Key, startTS, endTS hlc.Timestamp,
 		exportAllRevisions bool, targetSize uint64, maxSize uint64,
 		io IterOptions,
 	) (sst []byte, _ roachpb.BulkOpSummary, resumeKey roachpb.Key, _ error)
-	// Get returns the value for the given key, nil otherwise.
+	// Get returns the value for the given key, nil otherwise. Semantically, it
+	// behaves as if an iterator with MVCCKeyAndIntentsIterKind was used.
 	//
-	// Deprecated: use MVCCGet instead.
-	Get(key MVCCKey) ([]byte, error)
-	// GetProto fetches the value at the specified key and unmarshals it
+	// Deprecated: use storage.MVCCGet instead.
+	MVCCGet(key MVCCKey) ([]byte, error)
+	// MVCCGetProto fetches the value at the specified key and unmarshals it
 	// using a protobuf decoder. Returns true on success or false if the
 	// key was not found. On success, returns the length in bytes of the
-	// key and the value.
+	// key and the value. Semantically, it behaves as if an iterator with
+	// MVCCKeyAndIntentsIterKind was used.
 	//
-	// Deprecated: use Iterator.ValueProto instead.
-	GetProto(key MVCCKey, msg protoutil.Message) (ok bool, keyBytes, valBytes int64, err error)
-	// Iterate scans from the start key to the end key (exclusive), invoking the
+	// Deprecated: use MVCCIterator.ValueProto instead.
+	MVCCGetProto(key MVCCKey, msg protoutil.Message) (ok bool, keyBytes, valBytes int64, err error)
+	// MVCCIterate scans from the start key to the end key (exclusive), invoking the
 	// function f on each key value pair. If f returns an error or if the scan
 	// itself encounters an error, the iteration will stop and return the error.
 	// If the first result of f is true, the iteration stops and returns a nil
 	// error. Note that this method is not expected take into account the
 	// timestamp of the end key; all MVCCKeys at end.Key are considered excluded
 	// in the iteration.
-	Iterate(start, end roachpb.Key, f func(MVCCKeyValue) (stop bool, err error)) error
-	// NewIterator returns a new instance of an Iterator over this
-	// engine. The caller must invoke Iterator.Close() when finished
+	MVCCIterate(start, end roachpb.Key, iterKind MVCCIterKind, f func(MVCCKeyValue) error) error
+	// NewMVCCIterator returns a new instance of an MVCCIterator over this
+	// engine. The caller must invoke MVCCIterator.Close() when finished
 	// with the iterator to free resources.
-	NewIterator(opts IterOptions) Iterator
+	NewMVCCIterator(iterKind MVCCIterKind, opts IterOptions) MVCCIterator
 }
 
 // Writer is the write interface to an engine's data.
@@ -294,7 +340,7 @@ type Writer interface {
 	//
 	// It is safe to modify the contents of the arguments after ClearIterRange
 	// returns.
-	ClearIterRange(iter Iterator, start, end roachpb.Key) error
+	ClearIterRange(iter MVCCIterator, start, end roachpb.Key) error
 	// Merge is a high-performance write operation used for values which are
 	// accumulated over several writes. Multiple values can be merged
 	// sequentially into a single key; a subsequent read will return a "merged"
@@ -345,13 +391,11 @@ type Engine interface {
 	// Flush causes the engine to write all in-memory data to disk
 	// immediately.
 	Flush() error
-	// GetSSTables retrieves metadata about this engine's live sstables.
-	GetSSTables() SSTableInfos
 	// GetCompactionStats returns the internal RocksDB compaction stats. See
 	// https://github.com/facebook/rocksdb/wiki/RocksDB-Tuning-Guide#rocksdb-statistics.
 	GetCompactionStats() string
-	// GetStats retrieves stats from the engine.
-	GetStats() (*Stats, error)
+	// GetMetrics retrieves metrics from the engine.
+	GetMetrics() (*Metrics, error)
 	// GetEncryptionRegistries returns the file and key registries when encryption is enabled
 	// on the store.
 	GetEncryptionRegistries() (*EncryptionRegistries, error)
@@ -383,7 +427,7 @@ type Engine interface {
 	//
 	// TODO(nvanbenschoten): remove this complexity when we're fully on Pebble
 	// and can guarantee that all iterators created from a read-only engine are
-	// consistent. To do this, we will want to add an Iterator.Clone method.
+	// consistent. To do this, we will want to add an MVCCIterator.Clone method.
 	NewReadOnly() ReadWriter
 	// NewWriteOnlyBatch returns a new instance of a batched engine which wraps
 	// this engine. A write-only batch accumulates all mutations and applies them
@@ -478,8 +522,8 @@ type Batch interface {
 	Repr() []byte
 }
 
-// Stats is a set of Engine stats. Most are described in RocksDB.
-// Some stats (eg, `IngestedBytes`) are only exposed by Pebble.
+// Metrics is a set of Engine metrics. Most are described in RocksDB.
+// Some metrics (eg, `IngestedBytes`) are only exposed by Pebble.
 //
 // Currently, we collect stats from the following sources:
 // 1. RocksDB's internal "tickers" (i.e. counters). They're defined in
@@ -489,13 +533,18 @@ type Batch interface {
 //
 // This is a good resource describing RocksDB's memory-related stats:
 // https://github.com/facebook/rocksdb/wiki/Memory-usage-in-RocksDB
-type Stats struct {
+//
+// TODO(jackson): Refactor to mirror or even expose pebble.Metrics when
+// RocksDB is removed.
+type Metrics struct {
 	BlockCacheHits                 int64
 	BlockCacheMisses               int64
 	BlockCacheUsage                int64
 	BlockCachePinnedUsage          int64
 	BloomFilterPrefixChecked       int64
 	BloomFilterPrefixUseful        int64
+	DiskSlowCount                  int64
+	DiskStallCount                 int64
 	MemtableTotalSize              int64
 	Flushes                        int64
 	FlushedBytes                   int64
@@ -507,6 +556,8 @@ type Stats struct {
 	PendingCompactionBytesEstimate int64
 	L0FileCount                    int64
 	L0SublevelCount                int64
+	ReadAmplification              int64
+	NumSSTables                    int64
 }
 
 // EnvStats is a set of RocksDB env stats, including encryption status.
@@ -538,62 +589,21 @@ type EncryptionRegistries struct {
 }
 
 // NewEngine creates a new storage engine.
-func NewEngine(
-	engine enginepb.EngineType, cacheSize int64, storageConfig base.StorageConfig,
-) (Engine, error) {
-	switch engine {
-	case enginepb.EngineTypeTeePebbleRocksDB:
-		pebbleConfig := PebbleConfig{
-			StorageConfig: storageConfig,
-			Opts:          DefaultPebbleOptions(),
-		}
-		pebbleConfig.Opts.Cache = pebble.NewCache(cacheSize)
-		defer pebbleConfig.Opts.Cache.Unref()
-
-		pebbleConfig.Dir = filepath.Join(pebbleConfig.Dir, "pebble")
-		cache := NewRocksDBCache(cacheSize)
-		defer cache.Release()
-
-		ctx := context.Background()
-		pebbleDB, err := NewPebble(ctx, pebbleConfig)
-		if err != nil {
-			return nil, err
-		}
-
-		rocksDBConfig := RocksDBConfig{StorageConfig: storageConfig}
-		rocksDBConfig.Dir = filepath.Join(rocksDBConfig.Dir, "rocksdb")
-		rocksDB, err := NewRocksDB(rocksDBConfig, cache)
-		if err != nil {
-			return nil, err
-		}
-
-		return NewTee(ctx, rocksDB, pebbleDB), nil
-	case enginepb.EngineTypeDefault:
-		fallthrough
-	case enginepb.EngineTypePebble:
-		pebbleConfig := PebbleConfig{
-			StorageConfig: storageConfig,
-			Opts:          DefaultPebbleOptions(),
-		}
-		pebbleConfig.Opts.Cache = pebble.NewCache(cacheSize)
-		defer pebbleConfig.Opts.Cache.Unref()
-
-		return NewPebble(context.Background(), pebbleConfig)
-	case enginepb.EngineTypeRocksDB:
-		cache := NewRocksDBCache(cacheSize)
-		defer cache.Release()
-
-		return NewRocksDB(
-			RocksDBConfig{StorageConfig: storageConfig},
-			cache)
+func NewEngine(cacheSize int64, storageConfig base.StorageConfig) (Engine, error) {
+	pebbleConfig := PebbleConfig{
+		StorageConfig: storageConfig,
+		Opts:          DefaultPebbleOptions(),
 	}
-	panic(fmt.Sprintf("unknown engine type: %d", engine))
+	pebbleConfig.Opts.Cache = pebble.NewCache(cacheSize)
+	defer pebbleConfig.Opts.Cache.Unref()
+
+	return NewPebble(context.Background(), pebbleConfig)
 }
 
 // NewDefaultEngine allocates and returns a new, opened engine with the default configuration.
 // The caller must call the engine's Close method when the engine is no longer needed.
 func NewDefaultEngine(cacheSize int64, storageConfig base.StorageConfig) (Engine, error) {
-	return NewEngine(DefaultStorageEngine, cacheSize, storageConfig)
+	return NewEngine(cacheSize, storageConfig)
 }
 
 // PutProto sets the given key to the protobuf-serialized byte string
@@ -621,12 +631,12 @@ func PutProto(
 // Specify max=0 for unbounded scans.
 func Scan(reader Reader, start, end roachpb.Key, max int64) ([]MVCCKeyValue, error) {
 	var kvs []MVCCKeyValue
-	err := reader.Iterate(start, end, func(kv MVCCKeyValue) (bool, error) {
+	err := reader.MVCCIterate(start, end, MVCCKeyAndIntentsIterKind, func(kv MVCCKeyValue) error {
 		if max != 0 && int64(len(kvs)) >= max {
-			return true, nil
+			return iterutil.StopIteration()
 		}
 		kvs = append(kvs, kv)
-		return false, nil
+		return nil
 	})
 	return kvs, err
 }
@@ -650,7 +660,7 @@ func WriteSyncNoop(ctx context.Context, eng Engine) error {
 // (exclusive). Depending on the number of keys, it will either use ClearRange
 // or ClearIterRange.
 func ClearRangeWithHeuristic(reader Reader, writer Writer, start, end roachpb.Key) error {
-	iter := reader.NewIterator(IterOptions{UpperBound: end})
+	iter := reader.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: end})
 	defer iter.Close()
 
 	// It is expensive for there to be many range deletion tombstones in the same
@@ -721,17 +731,17 @@ func preIngestDelay(ctx context.Context, eng Engine, settings *cluster.Settings)
 	if settings == nil {
 		return
 	}
-	stats, err := eng.GetStats()
+	metrics, err := eng.GetMetrics()
 	if err != nil {
-		log.Warningf(ctx, "failed to read stats: %+v", err)
+		log.Warningf(ctx, "failed to read metrics: %+v", err)
 		return
 	}
-	targetDelay := calculatePreIngestDelay(settings, stats)
+	targetDelay := calculatePreIngestDelay(settings, metrics)
 
 	if targetDelay == 0 {
 		return
 	}
-	log.VEventf(ctx, 2, "delaying SST ingestion %s. %d L0 files, %d L0 Sublevels", targetDelay, stats.L0FileCount, stats.L0SublevelCount)
+	log.VEventf(ctx, 2, "delaying SST ingestion %s. %d L0 files, %d L0 Sublevels", targetDelay, metrics.L0FileCount, metrics.L0SublevelCount)
 
 	select {
 	case <-time.After(targetDelay):
@@ -739,14 +749,14 @@ func preIngestDelay(ctx context.Context, eng Engine, settings *cluster.Settings)
 	}
 }
 
-func calculatePreIngestDelay(settings *cluster.Settings, stats *Stats) time.Duration {
+func calculatePreIngestDelay(settings *cluster.Settings, metrics *Metrics) time.Duration {
 	maxDelay := ingestDelayTime.Get(&settings.SV)
 	l0ReadAmpLimit := ingestDelayL0Threshold.Get(&settings.SV)
 
 	const ramp = 10
-	l0ReadAmp := stats.L0FileCount
-	if stats.L0SublevelCount >= 0 {
-		l0ReadAmp = stats.L0SublevelCount
+	l0ReadAmp := metrics.L0FileCount
+	if metrics.L0SublevelCount >= 0 {
+		l0ReadAmp = metrics.L0SublevelCount
 	}
 	if l0ReadAmp > l0ReadAmpLimit {
 		delayPerFile := maxDelay / time.Duration(ramp)
@@ -759,18 +769,18 @@ func calculatePreIngestDelay(settings *cluster.Settings, stats *Stats) time.Dura
 	return 0
 }
 
-// Helper function to implement Reader.Iterate().
+// Helper function to implement Reader.MVCCIterate().
 func iterateOnReader(
-	reader Reader, start, end roachpb.Key, f func(MVCCKeyValue) (stop bool, err error),
+	reader Reader, start, end roachpb.Key, iterKind MVCCIterKind, f func(MVCCKeyValue) error,
 ) error {
 	if reader.Closed() {
-		return errors.New("cannot call Iterate on a closed batch")
+		return errors.New("cannot call MVCCIterate on a closed batch")
 	}
 	if start.Compare(end) >= 0 {
 		return nil
 	}
 
-	it := reader.NewIterator(IterOptions{UpperBound: end})
+	it := reader.NewMVCCIterator(iterKind, IterOptions{UpperBound: end})
 	defer it.Close()
 
 	it.SeekGE(MakeMVCCMetadataKey(start))
@@ -781,7 +791,10 @@ func iterateOnReader(
 		} else if !ok {
 			break
 		}
-		if done, err := f(MVCCKeyValue{Key: it.Key(), Value: it.Value()}); done || err != nil {
+		if err := f(MVCCKeyValue{Key: it.Key(), Value: it.Value()}); err != nil {
+			if iterutil.Done(err) {
+				return nil
+			}
 			return err
 		}
 	}

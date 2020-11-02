@@ -16,7 +16,8 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
-	"github.com/cockroachdb/cockroach/pkg/sql/lex"
+	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/mutations"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
@@ -132,10 +133,13 @@ func (b *Builder) tryBuildFastPathInsert(ins *memo.InsertExpr) (_ execPlan, ok b
 		return execPlan{}, false, nil
 	}
 
-	//  - the input is Values with at most InsertFastPathMaxRows, and there are no
+	//  - the input is Values with at most mutations.MaxBatchSize, and there are no
 	//    subqueries;
+	//    (note that mutations.MaxBatchSize() is a quantity of keys in the batch
+	//     that we send, not a number of rows. We use this as a guideline only,
+	//     and there is no guarantee that we won't produce a bigger batch.)
 	values, ok := ins.Input.(*memo.ValuesExpr)
-	if !ok || values.ChildCount() > exec.InsertFastPathMaxRows || values.Relational().HasSubquery {
+	if !ok || values.ChildCount() > mutations.MaxBatchSize() || values.Relational().HasSubquery {
 		return execPlan{}, false, nil
 	}
 
@@ -514,14 +518,20 @@ func (b *Builder) tryBuildDeleteRange(del *memo.DeleteExpr) (_ execPlan, ok bool
 	}
 
 	// No other tables interleaved inside this table. We can use the fast path
-	// if this table is not referenced by any foreign keys (because the
-	// integrity of those references must be checked).
-	if tab.InboundForeignKeyCount() > 0 {
+	// if we don't need to buffer the input to the delete operator (for foreign
+	// key checks/cascades).
+	if del.WithID != 0 {
 		return execPlan{}, false, nil
 	}
 
 	ep, err := b.buildDeleteRange(del, nil /* interleavedTables */)
 	if err != nil {
+		return execPlan{}, false, err
+	}
+	if err := b.buildFKChecks(del.Checks); err != nil {
+		return execPlan{}, false, err
+	}
+	if err := b.buildFKCascades(del.WithID, del.FKCascades); err != nil {
 		return execPlan{}, false, err
 	}
 	return ep, true, nil
@@ -667,6 +677,12 @@ func (b *Builder) buildDeleteRange(
 					autoCommit = true
 				}
 			}
+			if len(del.Checks) > 0 || len(del.FKCascades) > 0 {
+				// Do not allow autocommit if we have checks or cascades. This does not
+				// apply for the interleaved case, where we decided that the delete
+				// range takes care of all the FKs as well.
+				autoCommit = false
+			}
 		}
 	}
 
@@ -776,15 +792,17 @@ func mkFKCheckErr(md *opt.Metadata, c *memo.FKChecksItem, keyVals tree.Datums) e
 	referenced := md.TableMeta(c.ReferencedTable)
 
 	var msg, details bytes.Buffer
+	var constraintName string
 	if c.FKOutbound {
 		// Generate an error of the form:
 		//   ERROR:  insert on table "child" violates foreign key constraint "foo"
 		//   DETAIL: Key (child_p)=(2) is not present in table "parent".
 		fk := origin.Table.OutboundForeignKey(c.FKOrdinal)
+		constraintName = fk.Name()
 		fmt.Fprintf(&msg, "%s on table ", c.OpName)
-		lex.EncodeEscapedSQLIdent(&msg, string(origin.Alias.ObjectName))
+		lexbase.EncodeEscapedSQLIdent(&msg, string(origin.Alias.ObjectName))
 		msg.WriteString(" violates foreign key constraint ")
-		lex.EncodeEscapedSQLIdent(&msg, fk.Name())
+		lexbase.EncodeEscapedSQLIdent(&msg, fk.Name())
 
 		details.WriteString("Key (")
 		for i := 0; i < fk.ColumnCount(); i++ {
@@ -813,7 +831,7 @@ func mkFKCheckErr(md *opt.Metadata, c *memo.FKChecksItem, keyVals tree.Datums) e
 			details.WriteString("MATCH FULL does not allow mixing of null and nonnull key values.")
 		} else {
 			details.WriteString(") is not present in table ")
-			lex.EncodeEscapedSQLIdent(&details, string(referenced.Alias.ObjectName))
+			lexbase.EncodeEscapedSQLIdent(&details, string(referenced.Alias.ObjectName))
 			details.WriteByte('.')
 		}
 	} else {
@@ -822,12 +840,13 @@ func mkFKCheckErr(md *opt.Metadata, c *memo.FKChecksItem, keyVals tree.Datums) e
 		//           "child_child_p_fkey" on table "child"
 		//   DETAIL: Key (p)=(1) is still referenced from table "child".
 		fk := referenced.Table.InboundForeignKey(c.FKOrdinal)
+		constraintName = fk.Name()
 		fmt.Fprintf(&msg, "%s on table ", c.OpName)
-		lex.EncodeEscapedSQLIdent(&msg, string(referenced.Alias.ObjectName))
+		lexbase.EncodeEscapedSQLIdent(&msg, string(referenced.Alias.ObjectName))
 		msg.WriteString(" violates foreign key constraint ")
-		lex.EncodeEscapedSQLIdent(&msg, fk.Name())
+		lexbase.EncodeEscapedSQLIdent(&msg, fk.Name())
 		msg.WriteString(" on table ")
-		lex.EncodeEscapedSQLIdent(&msg, string(origin.Alias.ObjectName))
+		lexbase.EncodeEscapedSQLIdent(&msg, string(origin.Alias.ObjectName))
 
 		details.WriteString("Key (")
 		for i := 0; i < fk.ColumnCount(); i++ {
@@ -845,12 +864,15 @@ func mkFKCheckErr(md *opt.Metadata, c *memo.FKChecksItem, keyVals tree.Datums) e
 			details.WriteString(d.String())
 		}
 		details.WriteString(") is still referenced from table ")
-		lex.EncodeEscapedSQLIdent(&details, string(origin.Alias.ObjectName))
+		lexbase.EncodeEscapedSQLIdent(&details, string(origin.Alias.ObjectName))
 		details.WriteByte('.')
 	}
 
 	return errors.WithDetail(
-		pgerror.Newf(pgcode.ForeignKeyViolation, "%s", msg.String()),
+		pgerror.WithConstraintName(
+			pgerror.Newf(pgcode.ForeignKeyViolation, "%s", msg.String()),
+			constraintName,
+		),
 		details.String(),
 	)
 }

@@ -14,6 +14,7 @@ import (
 	cryptorand "crypto/rand"
 	"fmt"
 	"net/url"
+	"strconv"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/build"
@@ -31,7 +32,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/covering"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -66,23 +66,6 @@ const (
 	passphrase
 	kms
 )
-
-// TODO(pbardea): We should move to a model of having the system tables opt-
-// {in,out} of being included in a full cluster backup. See #43781.
-var fullClusterSystemTables = []string{
-	// System config tables.
-	systemschema.UsersTable.Name,
-	systemschema.ZonesTable.Name,
-	systemschema.SettingsTable.Name,
-	// Rest of system tables.
-	systemschema.LocationsTable.Name,
-	systemschema.RoleMembersTable.Name,
-	systemschema.UITable.Name,
-	systemschema.CommentsTable.Name,
-	systemschema.JobsTable.Name,
-	systemschema.ScheduledJobsTable.Name,
-	// Table statistics are backed up in the backup descriptor for now.
-}
 
 type tableAndIndex struct {
 	tableID descpb.ID
@@ -304,14 +287,16 @@ func resolveOptionsForBackupJobDescription(
 	return newOpts, nil
 }
 
-func backupJobDescription(
-	p sql.PlanHookState,
+// GetRedactedBackupNode returns a copy of the argument `backup`, but with all
+// the secret information redacted.
+func GetRedactedBackupNode(
 	backup *tree.Backup,
 	to []string,
 	incrementalFrom []string,
 	kmsURIs []string,
 	resolvedSubdir string,
-) (string, error) {
+	hasBeenPlanned bool,
+) (*tree.Backup, error) {
 	b := &tree.Backup{
 		AsOf:    backup.AsOf,
 		Targets: backup.Targets,
@@ -326,14 +311,14 @@ func backupJobDescription(
 	// LATEST, where we are appending an incremental BACKUP.
 	// - For `BACKUP INTO x` this would be the sub-directory we have selected to
 	// write the BACKUP to.
-	if b.Nested {
+	if b.Nested && hasBeenPlanned {
 		b.Subdir = tree.NewDString(resolvedSubdir)
 	}
 
 	for _, t := range to {
 		sanitizedTo, err := cloudimpl.SanitizeExternalStorageURI(t, nil /* extraParams */)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		b.To = append(b.To, tree.NewDString(sanitizedTo))
 	}
@@ -341,16 +326,32 @@ func backupJobDescription(
 	for _, from := range incrementalFrom {
 		sanitizedFrom, err := cloudimpl.SanitizeExternalStorageURI(from, nil /* extraParams */)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		b.IncrementalFrom = append(b.IncrementalFrom, tree.NewDString(sanitizedFrom))
 	}
 
 	resolvedOpts, err := resolveOptionsForBackupJobDescription(backup.Options, kmsURIs)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	b.Options = resolvedOpts
+	return b, nil
+}
+
+func backupJobDescription(
+	p sql.PlanHookState,
+	backup *tree.Backup,
+	to []string,
+	incrementalFrom []string,
+	kmsURIs []string,
+	resolvedSubdir string,
+) (string, error) {
+	b, err := GetRedactedBackupNode(backup, to, incrementalFrom, kmsURIs, resolvedSubdir,
+		true /* hasBeenPlanned */)
+	if err != nil {
+		return "", err
+	}
 
 	ann := p.ExtendedEvalContext().Annotations
 	return tree.AsStringWithFQNames(b, ann), nil
@@ -432,6 +433,65 @@ func getBackupStatement(stmt tree.Statement) *annotatedBackupStatement {
 	}
 }
 
+func checkPrivilegesForBackup(
+	ctx context.Context,
+	backupStmt *annotatedBackupStatement,
+	p sql.PlanHookState,
+	targetDescs []catalog.Descriptor,
+	to []string,
+) error {
+	hasAdmin, err := p.HasAdminRole(ctx)
+	if err != nil {
+		return err
+	}
+	if hasAdmin {
+		return nil
+	}
+	// Do not allow full cluster backups.
+	if backupStmt.Coverage() == tree.AllDescriptors {
+		return pgerror.Newf(
+			pgcode.InsufficientPrivilege,
+			"only users with the admin role are allowed to perform full cluster backups")
+	}
+	// Do not allow tenant backups.
+	if backupStmt.Targets != nil && backupStmt.Targets.Tenant != (roachpb.TenantID{}) {
+		return pgerror.Newf(
+			pgcode.InsufficientPrivilege,
+			"only users with the admin role can perform BACKUP TENANT")
+	}
+	for _, desc := range targetDescs {
+		switch desc := desc.(type) {
+		case catalog.DatabaseDescriptor, catalog.TableDescriptor:
+			if err := p.CheckPrivilege(ctx, desc, privilege.SELECT); err != nil {
+				return err
+			}
+		case catalog.TypeDescriptor, catalog.SchemaDescriptor:
+			if err := p.CheckPrivilege(ctx, desc, privilege.USAGE); err != nil {
+				return err
+			}
+		}
+	}
+	knobs := p.ExecCfg().BackupRestoreTestingKnobs
+	if knobs != nil && knobs.AllowImplicitAccess {
+		return nil
+	}
+	// Check that none of the destinations require an admin role.
+	for _, uri := range to {
+		hasExplicitAuth, uriScheme, err := cloudimpl.AccessIsWithExplicitAuth(uri)
+		if err != nil {
+			return err
+		}
+		if !hasExplicitAuth {
+			return pgerror.Newf(
+				pgcode.InsufficientPrivilege,
+				"only users with the admin role are allowed to BACKUP to the specified %s URI",
+				uriScheme)
+		}
+	}
+
+	return nil
+}
+
 // backupPlanHook implements PlanHookFn.
 func backupPlanHook(
 	ctx context.Context, stmt tree.Statement, p sql.PlanHookState,
@@ -499,11 +559,7 @@ func backupPlanHook(
 	fn := func(ctx context.Context, _ []sql.PlanNode, resultsCh chan<- tree.Datums) error {
 		// TODO(dan): Move this span into sql.
 		ctx, span := tracing.ChildSpan(ctx, stmt.StatementTag())
-		defer tracing.FinishSpan(span)
-
-		if err := p.RequireAdminRole(ctx, "BACKUP"); err != nil {
-			return err
-		}
+		defer span.Finish()
 
 		if !(p.ExtendedEvalContext().TxnImplicit || backupStmt.Options.Detached) {
 			return errors.Errorf("BACKUP cannot be used inside a transaction without DETACHED option")
@@ -565,30 +621,26 @@ func backupPlanHook(
 			return errors.Wrap(err, "failed to resolve targets specified in the BACKUP stmt")
 		}
 
+		if backupStmt.Coverage() == tree.AllDescriptors && len(targetDescs) == 0 {
+			return errors.New("no descriptors available to backup at selected time")
+		}
+
+		// Check BACKUP privileges.
+		err = checkPrivilegesForBackup(ctx, backupStmt, p, targetDescs, to)
+		if err != nil {
+			return err
+		}
+
 		var tables []catalog.TableDescriptor
 		statsFiles := make(map[descpb.ID]string)
-		// N.B.: These privilege checks currently do nothing since we require the
-		// user running the backup to be an admin. If the user is an Admin, they
-		// should have ALL privileges on these descriptors anyway.
 		for _, desc := range targetDescs {
 			switch desc := desc.(type) {
-			case catalog.DatabaseDescriptor:
-				if err := p.CheckPrivilege(ctx, desc, privilege.SELECT); err != nil {
-					return err
-				}
 			case catalog.TableDescriptor:
-				if err := p.CheckPrivilege(ctx, desc, privilege.SELECT); err != nil {
-					return err
-				}
 				tables = append(tables, desc)
 
 				// TODO (anzo): look into the tradeoffs of having all objects in the array to be in the same file,
 				// vs having each object in a separate file, or somewhere in between.
 				statsFiles[desc.GetID()] = backupStatisticsFileName
-			case catalog.TypeDescriptor, catalog.SchemaDescriptor:
-				if err := p.CheckPrivilege(ctx, desc, privilege.USAGE); err != nil {
-					return err
-				}
 			}
 		}
 
@@ -626,12 +678,12 @@ func backupPlanHook(
 		// TODO(pbardea): Refactor (defaultURI and urisByLocalityKV) pairs into a
 		// backupDestination struct.
 		collectionURI, defaultURI, resolvedSubdir, urisByLocalityKV, prevs, err :=
-			resolveDest(ctx, p, backupStmt, defaultURI, urisByLocalityKV, makeCloudStorage, endTime,
-				to, incrementalFrom, subdir)
+			resolveDest(ctx, p.User(), backupStmt.Nested, backupStmt.AppendToLatest, defaultURI,
+				urisByLocalityKV, makeCloudStorage, endTime, to, incrementalFrom, subdir)
 		if err != nil {
 			return err
 		}
-		prevBackups, encryptionOptions, err := fetchPreviousBackups(ctx, p, makeCloudStorage, prevs,
+		prevBackups, encryptionOptions, err := fetchPreviousBackups(ctx, p.User(), makeCloudStorage, prevs,
 			encryptionParams)
 		if err != nil {
 			return err
@@ -717,19 +769,20 @@ func backupPlanHook(
 			}
 		}
 
-		var tenants []BackupManifest_Tenant
+		var tenants []descpb.TenantInfo
 		for _, row := range tenantRows {
 			// TODO isn't there a general problem here with tenant IDs > MaxInt64?
 			id := uint64(tree.MustBeDInt(row[0]))
 
-			var info []byte
-			if row[2] != tree.DNull {
-				info = []byte(tree.MustBeDBytes(row[2]))
+			info := descpb.TenantInfo{ID: id}
+			infoBytes := []byte(tree.MustBeDBytes(row[2]))
+			if err := protoutil.Unmarshal(infoBytes, &info); err != nil {
+				return err
 			}
+			tenants = append(tenants, info)
 
 			prefix := keys.MakeTenantPrefix(roachpb.MakeTenantID(id))
 			spans = append(spans, roachpb.Span{Key: prefix, EndKey: prefix.PrefixEnd()})
-			tenants = append(tenants, BackupManifest_Tenant{ID: id, Info: info})
 		}
 
 		if len(tenants) > 0 && backupStmt.Options.CaptureRevisionHistory {
@@ -754,6 +807,11 @@ func backupPlanHook(
 
 			if backupStmt.Coverage() != tree.AllDescriptors {
 				if err := checkForNewTables(ctx, p.ExecCfg().DB, targetDescs, tablesInPrev, dbsInPrev, priorIDs, startTime, endTime); err != nil {
+					return err
+				}
+				// Let's check that we're not widening the scope of this backup to an
+				// entire database, even if no tables were created in the meantime.
+				if err := checkForNewCompleteDatabases(targetDescs, completeDBs, dbsInPrev); err != nil {
 					return err
 				}
 			}
@@ -886,39 +944,64 @@ func backupPlanHook(
 		}
 
 		collectTelemetry := func() {
-			telemetry.Count("backup.total.started")
+			// sourceSuffix specifies if this schedule was created by a schedule.
+			sourceSuffix := ".manual"
+			if backupStmt.CreatedByInfo != nil &&
+				backupStmt.CreatedByInfo.Name == jobs.CreatedByScheduledJobs {
+				sourceSuffix = ".scheduled"
+			}
+
+			// countSource emits a telemetry counter and also adds a ".scheduled"
+			// suffix if the job was created by a schedule.
+			countSource := func(feature string) {
+				telemetry.Count(feature + sourceSuffix)
+			}
+
+			countSource("backup.total.started")
 			if isEnterprise {
-				telemetry.Count("backup.licensed")
-				telemetry.Count("backup.using-enterprise-features")
+				countSource("backup.licensed")
+				countSource("backup.using-enterprise-features")
 			} else {
 				if err := utilccl.CheckEnterpriseEnabled(
 					p.ExecCfg().Settings, p.ExecCfg().ClusterID(), p.ExecCfg().Organization(), "",
 				); err == nil {
-					telemetry.Count("backup.licensed")
+					countSource("backup.licensed")
 				} else {
-					telemetry.Count("backup.free")
+					countSource("backup.free")
 				}
 			}
 			if startTime.IsEmpty() {
-				telemetry.Count("backup.span.full")
+				countSource("backup.span.full")
 			} else {
-				telemetry.Count("backup.span.incremental")
+				countSource("backup.span.incremental")
 				telemetry.CountBucketed("backup.incremental-span-sec", int64(timeutil.Since(startTime.GoTime()).Seconds()))
 				if len(incrementalFrom) == 0 {
-					telemetry.Count("backup.auto-incremental")
+					countSource("backup.auto-incremental")
 				}
 			}
 			if len(backupStmt.To) > 1 {
-				telemetry.Count("backup.partitioned")
+				countSource("backup.partitioned")
 			}
 			if mvccFilter == MVCCFilter_All {
-				telemetry.Count("backup.revision-history")
+				countSource("backup.revision-history")
 			}
 			if encryptionOptions != nil {
-				telemetry.Count("backup.encrypted")
+				countSource("backup.encrypted")
+				switch encryptionOptions.Mode {
+				case jobspb.EncryptionMode_Passphrase:
+					countSource("backup.encryption.passphrase")
+				case jobspb.EncryptionMode_KMS:
+					countSource("backup.encryption.kms")
+				}
+			}
+			if backupStmt.Nested {
+				countSource("backup.nested")
+				if backupStmt.AppendToLatest {
+					countSource("backup.into-latest")
+				}
 			}
 			if backupStmt.Coverage() == tree.AllDescriptors {
-				telemetry.Count("backup.targets.full_cluster")
+				countSource("backup.targets.full_cluster")
 			}
 		}
 
@@ -975,6 +1058,7 @@ func backupPlanHook(
 					log.Warningf(ctx, "failed to cleanup StartableJob: %v", cleanupErr)
 				}
 			}
+			return err
 		}
 
 		collectTelemetry()
@@ -1123,6 +1207,28 @@ func getEncryptedDataKeyByKMSMasterKeyID(
 	}
 
 	return encryptedDataKeyByKMSMasterKeyID, kmsInfo, nil
+}
+
+// checkForNewDatabases returns an error if any new complete databases were
+// introduced.
+func checkForNewCompleteDatabases(
+	targetDescs []catalog.Descriptor, curDBs []descpb.ID, prevDBs map[descpb.ID]struct{},
+) error {
+	for _, dbID := range curDBs {
+		if _, inPrevious := prevDBs[dbID]; !inPrevious {
+			// Search for the name for a nicer error message.
+			violatingDatabase := strconv.Itoa(int(dbID))
+			for _, desc := range targetDescs {
+				if desc.GetID() == dbID {
+					violatingDatabase = desc.GetName()
+					break
+				}
+			}
+			return errors.Errorf("previous backup does not contain the complete database %q",
+				violatingDatabase)
+		}
+	}
+	return nil
 }
 
 // checkForNewTables returns an error if any new tables were introduced with the

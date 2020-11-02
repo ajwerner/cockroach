@@ -103,7 +103,12 @@ func getResultColumns(
 
 	case invertedJoinOp:
 		a := args.(*invertedJoinArgs)
-		return joinColumns(a.JoinType, inputs[0], tableColumns(a.Table, a.LookupCols)), nil
+		cols := joinColumns(a.JoinType, inputs[0], tableColumns(a.Table, a.LookupCols))
+		// The following matches the behavior of execFactory.ConstructInvertedJoin.
+		if a.IsFirstJoinInPairedJoiner {
+			cols = append(cols, colinfo.ResultColumn{Name: "cont", Typ: types.Bool})
+		}
+		return cols, nil
 
 	case zigzagJoinOp:
 		a := args.(*zigzagJoinArgs)
@@ -160,9 +165,6 @@ func getResultColumns(
 	case explainOp:
 		switch o := args.(*explainArgs).Options; o.Mode {
 		case tree.ExplainPlan:
-			if o.Flags[tree.ExplainFlagVerbose] || o.Flags[tree.ExplainFlagTypes] {
-				return colinfo.ExplainPlanVerboseColumns, nil
-			}
 			return colinfo.ExplainPlanColumns, nil
 		case tree.ExplainDistSQL:
 			return colinfo.ExplainDistSQLColumns, nil
@@ -173,10 +175,6 @@ func getResultColumns(
 		}
 
 	case explainPlanOp:
-		o := args.(*explainPlanArgs).Options
-		if o.Flags[tree.ExplainFlagVerbose] || o.Flags[tree.ExplainFlagTypes] {
-			return colinfo.ExplainPlanVerboseColumns, nil
-		}
 		return colinfo.ExplainPlanColumns, nil
 
 	case explainOptOp:

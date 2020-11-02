@@ -252,6 +252,13 @@ func (oc *optCatalog) ResolveTypeByOID(ctx context.Context, oid oid.Oid) (*types
 	return oc.planner.ResolveTypeByOID(ctx, oid)
 }
 
+// ResolveType is part of the cat.Catalog interface.
+func (oc *optCatalog) ResolveType(
+	ctx context.Context, name *tree.UnresolvedObjectName,
+) (*types.T, error) {
+	return oc.planner.ResolveType(ctx, name)
+}
+
 func getDescFromCatalogObjectForPermissions(o cat.Object) (catalog.Descriptor, error) {
 	switch t := o.(type) {
 	case *optSchema:
@@ -730,7 +737,7 @@ func newOptTable(
 			// read data directly into a DBytes (i.e., don't call
 			// encoding.DecodeBytesAscending).
 			typ := ot.Column(invertedSourceColOrdinal).DatumType()
-			virtualCol.InitVirtual(
+			virtualCol.InitVirtualInverted(
 				virtualColOrd,
 				tree.Name(string(ot.Column(invertedSourceColOrdinal).ColName())+"_inverted_key"),
 				typ,
@@ -1157,13 +1164,6 @@ func (oi *optIndex) ColumnCount() int {
 	return oi.numCols
 }
 
-// Predicate is part of the cat.Index interface. It returns the predicate
-// expression and true if the index is a partial index. If the index is not
-// partial, the empty string and false is returned.
-func (oi *optIndex) Predicate() (string, bool) {
-	return oi.desc.Predicate, oi.desc.Predicate != ""
-}
-
 // KeyColumnCount is part of the cat.Index interface.
 func (oi *optIndex) KeyColumnCount() int {
 	return oi.numKeyCols
@@ -1200,6 +1200,22 @@ func (oi *optIndex) Column(i int) cat.IndexColumn {
 	i -= length
 	ord, _ := oi.tab.lookupColumnOrdinal(oi.storedCols[i])
 	return cat.IndexColumn{Column: oi.tab.Column(ord), Descending: false}
+}
+
+// VirtualInvertedColumn is part of the cat.Index interface.
+func (oi *optIndex) VirtualInvertedColumn() cat.IndexColumn {
+	if !oi.IsInverted() {
+		panic("non-inverted indexes do not have inverted virtual columns")
+	}
+	ord := len(oi.desc.ColumnIDs) - 1
+	return oi.Column(ord)
+}
+
+// Predicate is part of the cat.Index interface. It returns the predicate
+// expression and true if the index is a partial index. If the index is not
+// partial, the empty string and false is returned.
+func (oi *optIndex) Predicate() (string, bool) {
+	return oi.desc.Predicate, oi.desc.Predicate != ""
 }
 
 // Zone is part of the cat.Index interface.
@@ -1282,6 +1298,11 @@ func (oi *optIndex) InterleavedBy(i int) (table, index cat.StableID) {
 // GeoConfig is part of the cat.Index interface.
 func (oi *optIndex) GeoConfig() *geoindex.Config {
 	return &oi.desc.GeoConfig
+}
+
+// Version is part of the cat.Index interface.
+func (oi *optIndex) Version() descpb.IndexDescriptorVersion {
+	return oi.desc.Version
 }
 
 type optTableStat struct {
@@ -1812,11 +1833,6 @@ func (oi *optVirtualIndex) ColumnCount() int {
 	return oi.numCols
 }
 
-// Predicate is part of the cat.Index interface.
-func (oi *optVirtualIndex) Predicate() (string, bool) {
-	return "", false
-}
-
 // KeyColumnCount is part of the cat.Index interface.
 func (oi *optVirtualIndex) KeyColumnCount() int {
 	// Virtual indexes for the time being always have exactly 2 key columns,
@@ -1869,6 +1885,16 @@ func (oi *optVirtualIndex) Column(i int) cat.IndexColumn {
 	return cat.IndexColumn{Column: oi.tab.Column(ord)}
 }
 
+// VirtualInvertedColumn is part of the cat.Index interface.
+func (oi *optVirtualIndex) VirtualInvertedColumn() cat.IndexColumn {
+	panic("virtual indexes do not have inverted virtual columns")
+}
+
+// Predicate is part of the cat.Index interface.
+func (oi *optVirtualIndex) Predicate() (string, bool) {
+	return "", false
+}
+
 // Zone is part of the cat.Index interface.
 func (oi *optVirtualIndex) Zone() cat.Zone {
 	panic("no zone")
@@ -1917,6 +1943,11 @@ func (oi *optVirtualIndex) InterleavedBy(i int) (table, index cat.StableID) {
 // GeoConfig is part of the cat.Index interface.
 func (oi *optVirtualIndex) GeoConfig() *geoindex.Config {
 	return nil
+}
+
+// Version is part of the cat.Index interface.
+func (oi *optVirtualIndex) Version() descpb.IndexDescriptorVersion {
+	return 0
 }
 
 // optVirtualFamily is a dummy implementation of cat.Family for the only family

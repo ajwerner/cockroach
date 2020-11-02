@@ -52,7 +52,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -64,6 +63,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/logtags"
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/raft"
@@ -592,9 +592,7 @@ func (t *multiTestContextKVTransport) SendNext(
 	// the multi test context, so we can derive the index for stoppers
 	// and senders by subtracting 1 from the node ID.
 	nodeIndex := int(rep.NodeID) - 1
-	if log.V(1) {
-		log.Infof(ctx, "SendNext nodeIndex=%d", nodeIndex)
-	}
+	log.VEventf(ctx, 2, "SendNext nodeIndex=%d", nodeIndex)
 
 	// This method crosses store boundaries: it is possible that the
 	// destination store is stopped while the source is still running.
@@ -618,7 +616,14 @@ func (t *multiTestContextKVTransport) SendNext(
 	var br *roachpb.BatchResponse
 	var pErr *roachpb.Error
 	if err := s.RunTask(ctx, "mtc send", func(ctx context.Context) {
-		br, pErr = sender.Send(ctx, ba)
+		// Clear the caller's tags to simulate going to a different node. Otherwise
+		// logs get tags from both the sender node and the receiver node,
+		// confusingly.
+		// TODO(andrei): Don't clear the tags if the RPC is going to the same node
+		// as the sender. We'd have to tell the multiTestContextKVTransport who the
+		// sender is.
+		callCtx := logtags.WithTags(ctx, nil /* tags */)
+		br, pErr = sender.Send(callCtx, ba)
 	}); err != nil {
 		pErr = roachpb.NewError(err)
 	}
@@ -906,10 +911,11 @@ func (m *multiTestContext) addStore(idx int) {
 	ambient := log.AmbientContext{Tracer: cfg.Settings.Tracer}
 	m.populateDB(idx, cfg.Settings, stopper)
 	nlActive, nlRenewal := cfg.NodeLivenessDurations()
-	m.nodeLivenesses[idx] = kvserver.NewNodeLiveness(
-		ambient, m.clocks[idx], m.dbs[idx], m.gossips[idx],
-		nlActive, nlRenewal, cfg.Settings, metric.TestSampleInterval,
-	)
+	m.nodeLivenesses[idx] = kvserver.NewNodeLiveness(kvserver.NodeLivenessOptions{
+		AmbientCtx: ambient, Clock: m.clocks[idx], DB: m.dbs[idx], Gossip: m.gossips[idx],
+		LivenessThreshold: nlActive, RenewalDuration: nlRenewal, Settings: cfg.Settings,
+		HistogramWindowInterval: metric.TestSampleInterval,
+	})
 	m.populateStorePool(idx, cfg, m.nodeLivenesses[idx])
 	cfg.DB = m.dbs[idx]
 	cfg.NodeLiveness = m.nodeLivenesses[idx]
@@ -1018,15 +1024,19 @@ func (m *multiTestContext) addStore(idx int) {
 			m.t.Fatal(err)
 		}
 	}
-	m.nodeLivenesses[idx].StartHeartbeat(ctx, stopper, m.engines[idx:idx+1], func(ctx context.Context) {
-		now := clock.Now()
-		if err := store.WriteLastUpTimestamp(ctx, now); err != nil {
-			log.Warningf(ctx, "%v", err)
-		}
-		ran.Do(func() {
-			close(ran.ch)
-		})
-	})
+	m.nodeLivenesses[idx].Start(ctx,
+		kvserver.NodeLivenessStartOptions{
+			Stopper: stopper,
+			Engines: m.engines[idx : idx+1],
+			OnSelfLive: func(ctx context.Context) {
+				now := clock.Now()
+				if err := store.WriteLastUpTimestamp(ctx, now); err != nil {
+					log.Warningf(ctx, "%v", err)
+				}
+				ran.Do(func() {
+					close(ran.ch)
+				})
+			}})
 
 	store.WaitForInit()
 
@@ -1095,10 +1105,11 @@ func (m *multiTestContext) restartStoreWithoutHeartbeat(i int) {
 	cfg := m.makeStoreConfig(i)
 	m.populateDB(i, m.storeConfig.Settings, stopper)
 	nlActive, nlRenewal := cfg.NodeLivenessDurations()
-	m.nodeLivenesses[i] = kvserver.NewNodeLiveness(
-		log.AmbientContext{Tracer: m.storeConfig.Settings.Tracer}, m.clocks[i], m.dbs[i],
-		m.gossips[i], nlActive, nlRenewal, cfg.Settings, metric.TestSampleInterval,
-	)
+	m.nodeLivenesses[i] = kvserver.NewNodeLiveness(kvserver.NodeLivenessOptions{
+		AmbientCtx: log.AmbientContext{Tracer: m.storeConfig.Settings.Tracer}, Clock: m.clocks[i], DB: m.dbs[i],
+		Gossip: m.gossips[i], LivenessThreshold: nlActive, RenewalDuration: nlRenewal, Settings: cfg.Settings,
+		HistogramWindowInterval: metric.TestSampleInterval,
+	})
 	m.populateStorePool(i, cfg, m.nodeLivenesses[i])
 	cfg.DB = m.dbs[i]
 	cfg.NodeLiveness = m.nodeLivenesses[i]
@@ -1115,11 +1126,15 @@ func (m *multiTestContext) restartStoreWithoutHeartbeat(i int) {
 	m.transport.GetCircuitBreaker(m.idents[i].NodeID, rpc.DefaultClass).Reset()
 	m.transport.GetCircuitBreaker(m.idents[i].NodeID, rpc.SystemClass).Reset()
 	m.mu.Unlock()
-	cfg.NodeLiveness.StartHeartbeat(ctx, stopper, m.engines[i:i+1], func(ctx context.Context) {
-		now := m.clocks[i].Now()
-		if err := store.WriteLastUpTimestamp(ctx, now); err != nil {
-			log.Warningf(ctx, "%v", err)
-		}
+	cfg.NodeLiveness.Start(ctx, kvserver.NodeLivenessStartOptions{
+		Stopper: stopper,
+		Engines: m.engines[i : i+1],
+		OnSelfLive: func(ctx context.Context) {
+			now := m.clocks[i].Now()
+			if err := store.WriteLastUpTimestamp(ctx, now); err != nil {
+				log.Warningf(ctx, "%v", err)
+			}
+		},
 	})
 }
 
@@ -1361,14 +1376,6 @@ func (m *multiTestContext) readIntFromEngines(key roachpb.Key) []int64 {
 // testing.T which may differ from m.t.
 func (m *multiTestContext) waitForValuesT(t testing.TB, key roachpb.Key, expected []int64) {
 	t.Helper()
-	// This test relies on concurrently waiting for a value to change in the
-	// underlying engine(s). Since the teeing engine does not respond well to
-	// value mismatches, whether transient or permanent, skip this test if the
-	// teeing engine is being used. See
-	// https://github.com/cockroachdb/cockroach/issues/42656 for more context.
-	if storage.DefaultStorageEngine == enginepb.EngineTypeTeePebbleRocksDB {
-		skip.IgnoreLint(t, "disabled on teeing engine")
-	}
 	testutils.SucceedsSoon(t, func() error {
 		actual := m.readIntFromEngines(key)
 		if !reflect.DeepEqual(expected, actual) {
@@ -1435,11 +1442,12 @@ func (m *multiTestContext) heartbeatLiveness(ctx context.Context, store int) err
 	m.mu.RLock()
 	nl := m.nodeLivenesses[store]
 	m.mu.RUnlock()
-	l, err := nl.Self()
-	if err != nil {
-		return err
+	l, ok := nl.Self()
+	if !ok {
+		return errors.New("liveness not found")
 	}
 
+	var err error
 	for r := retry.StartWithCtx(ctx, retry.Options{MaxRetries: 5}); r.Next(); {
 		if err = nl.Heartbeat(ctx, l); !errors.Is(err, kvserver.ErrEpochIncremented) {
 			break

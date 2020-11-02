@@ -236,11 +236,24 @@ func (c *CustomFuncs) makeSTDWithin(
 			name = incName
 		}
 	}
-	props, overload, ok := memo.FindFunction(&args, name)
+
+	newArgs := make(memo.ScalarListExpr, len(args)+1)
+	const distanceIdx, useSpheroidIdx = 2, 3
+	copy(newArgs, args[:distanceIdx])
+
+	// The distance parameter must be type float.
+	newArgs[distanceIdx] = c.f.ConstructCast(bound, types.Float)
+
+	// Add the use_spheroid parameter if it exists.
+	if len(newArgs) > useSpheroidIdx {
+		newArgs[useSpheroidIdx] = args[useSpheroidIdx-1]
+	}
+
+	props, overload, ok := memo.FindFunction(&newArgs, name)
 	if !ok {
 		panic(errors.AssertionFailedf("could not find overload for %s", name))
 	}
-	within := c.f.ConstructFunction(append(args, bound), &memo.FunctionPrivate{
+	within := c.f.ConstructFunction(newArgs, &memo.FunctionPrivate{
 		Name:       name,
 		Typ:        types.Bool,
 		Properties: props,

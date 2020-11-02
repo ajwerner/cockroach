@@ -11,9 +11,11 @@
 package geomfn
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/cockroachdb/cockroach/pkg/geo"
+	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/errors"
 	"github.com/twpayne/go-geom"
 )
@@ -116,6 +118,7 @@ func translate(t geom.T, deltas []float64) (geom.T, error) {
 }
 
 // Scale returns a modified Geometry whose coordinates are multiplied by the factors.
+// REQUIRES: len(factors) >= 2.
 func Scale(g geo.Geometry, factors []float64) (geo.Geometry, error) {
 	var zFactor float64
 	if len(factors) > 2 {
@@ -132,7 +135,8 @@ func Scale(g geo.Geometry, factors []float64) (geo.Geometry, error) {
 	)
 }
 
-// ScaleRelativeToOrigin returns a modified Geometry whose coordinates are multiplied by the factors relative to the origin
+// ScaleRelativeToOrigin returns a modified Geometry whose coordinates are
+// multiplied by the factors relative to the origin.
 func ScaleRelativeToOrigin(
 	g geo.Geometry, factor geo.Geometry, origin geo.Geometry,
 ) (geo.Geometry, error) {
@@ -173,6 +177,13 @@ func ScaleRelativeToOrigin(
 		return geo.Geometry{}, errors.Wrap(err, "number of dimensions for the scaling factor and origin must be equal")
 	}
 
+	// This is inconsistent with PostGIS, which allows a POINT EMPTY, but whose
+	// behavior seems to depend on previous queries in the session, and not
+	// desirable to reproduce.
+	if len(originPointG.FlatCoords()) < 2 {
+		return geo.Geometry{}, errors.Newf("the origin must have at least 2 coordinates")
+	}
+
 	// Offset by the origin, scale, and translate it back to the origin.
 	offsetDeltas := make([]float64, 0, 3)
 	offsetDeltas = append(offsetDeltas, -originPointG.X(), -originPointG.Y())
@@ -184,11 +195,18 @@ func ScaleRelativeToOrigin(
 		return geo.Geometry{}, err
 	}
 
-	xFactor, yFactor := factorPointG.X(), factorPointG.Y()
-	var zFactor float64 = 1
-	if factorPointG.Layout().ZIndex() != -1 {
-		zFactor = factorPointG.Z()
+	var xFactor, yFactor, zFactor float64
+	zFactor = 1
+	if len(factorPointG.FlatCoords()) < 2 {
+		// POINT EMPTY results in factors of 0, similar to PostGIS.
+		xFactor, yFactor = 0, 0
+	} else {
+		xFactor, yFactor = factorPointG.X(), factorPointG.Y()
+		if factorPointG.Layout().ZIndex() != -1 {
+			zFactor = factorPointG.Z()
+		}
 	}
+
 	retT, err = affine(
 		retT,
 		AffineMatrix([][]float64{
@@ -224,5 +242,42 @@ func Rotate(g geo.Geometry, rotRadians float64) (geo.Geometry, error) {
 			{0, 0, 1, 0},
 			{0, 0, 0, 1},
 		}),
+	)
+}
+
+// ErrPointOriginEmpty is an error to compare point origin is empty.
+var ErrPointOriginEmpty = fmt.Errorf("origin is an empty point")
+
+// RotateWithPointOrigin returns a modified Geometry whose coordinates are rotated
+// around the pointOrigin by a rotRadians.
+func RotateWithPointOrigin(
+	g geo.Geometry, rotRadians float64, pointOrigin geo.Geometry,
+) (geo.Geometry, error) {
+	if pointOrigin.ShapeType() != geopb.ShapeType_Point {
+		return g, errors.New("origin is not a POINT")
+	}
+	t, err := pointOrigin.AsGeomT()
+	if err != nil {
+		return g, err
+	}
+	if t.Empty() {
+		return g, ErrPointOriginEmpty
+	}
+
+	return RotateWithXY(g, rotRadians, t.FlatCoords()[0], t.FlatCoords()[1])
+}
+
+// RotateWithXY returns a modified Geometry whose coordinates are rotated
+// around the X and Y by a rotRadians.
+func RotateWithXY(g geo.Geometry, rotRadians, x, y float64) (geo.Geometry, error) {
+	cos, sin := math.Cos(rotRadians), math.Sin(rotRadians)
+	return Affine(
+		g,
+		AffineMatrix{
+			{cos, -sin, 0, x - x*cos + y*sin},
+			{sin, cos, 0, y - x*sin - y*cos},
+			{0, 0, 1, 0},
+			{0, 0, 0, 1},
+		},
 	)
 }

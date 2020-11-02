@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
@@ -102,7 +103,7 @@ func (r BackupFileDescriptors) Less(i, j int) bool {
 func ReadBackupManifestFromURI(
 	ctx context.Context,
 	uri string,
-	user string,
+	user security.SQLUsername,
 	makeExternalStorageFromURI cloud.ExternalStorageFromURIFactory,
 	encryption *jobspb.BackupEncryptionOptions,
 ) (BackupManifest, error) {
@@ -256,6 +257,8 @@ func readBackupManifest(
 		// the ModificationTime for table descriptors. When performing a restore
 		// we no longer have access to that MVCC timestamp but we can set it
 		// to a value we know will be safe.
+		//
+		// nolint:descriptormarshal
 		if t := d.GetTable(); t == nil {
 			continue
 		} else if t.Version == 1 && t.ModificationTime.IsEmpty() {
@@ -501,7 +504,7 @@ func writeTableStatistics(
 func loadBackupManifests(
 	ctx context.Context,
 	uris []string,
-	user string,
+	user security.SQLUsername,
 	makeExternalStorageFromURI cloud.ExternalStorageFromURIFactory,
 	encryption *jobspb.BackupEncryptionOptions,
 ) ([]BackupManifest, error) {
@@ -552,7 +555,8 @@ func getLocalityInfo(
 				origLocalityKV := desc.LocalityKV
 				kv := roachpb.Tier{}
 				if err := kv.FromString(origLocalityKV); err != nil {
-					return info, errors.Wrapf(err, "reading backup manifest from %s", uris[i])
+					return info, errors.Wrapf(err, "reading backup manifest from %s",
+						RedactURIForErrorMessage(uris[i]))
 				}
 				if _, ok := urisByOrigLocality[origLocalityKV]; ok {
 					return info, errors.Errorf("duplicate locality %s found in backup", origLocalityKV)
@@ -626,7 +630,7 @@ func resolveBackupManifests(
 	from [][]string,
 	endTime hlc.Timestamp,
 	encryption *jobspb.BackupEncryptionOptions,
-	user string,
+	user security.SQLUsername,
 ) (
 	defaultURIs []string,
 	mainBackupManifests []BackupManifest,
@@ -972,25 +976,36 @@ func createCheckpointIfNotExists(
 	return nil
 }
 
+// RedactURIForErrorMessage redacts any storage secrets before returning a URI which is safe to
+// return to the client in an error message.
+func RedactURIForErrorMessage(uri string) string {
+	redactedURI, err := cloudimpl.SanitizeExternalStorageURI(uri, []string{})
+	if err != nil {
+		return "<uri_failed_to_redact>"
+	}
+	return redactedURI
+}
+
 // checkForPreviousBackup ensures that the target location does not already
 // contain a BACKUP or checkpoint, locking out accidental concurrent operations
 // on that location. Note that the checkpoint file should be written as soon as
 // the job actually starts.
 func checkForPreviousBackup(
-	ctx context.Context, exportStore cloud.ExternalStorage, readable string,
+	ctx context.Context, exportStore cloud.ExternalStorage, defaultURI string,
 ) error {
+	redactedURI := RedactURIForErrorMessage(defaultURI)
 	r, err := exportStore.ReadFile(ctx, backupManifestName)
 	if err == nil {
 		r.Close()
 		return pgerror.Newf(pgcode.FileAlreadyExists,
 			"%s already contains a %s file",
-			readable, backupManifestName)
+			redactedURI, backupManifestName)
 	}
 
 	if !errors.Is(err, cloudimpl.ErrFileDoesNotExist) {
 		return errors.Wrapf(err,
 			"%s returned an unexpected error when checking for the existence of %s file",
-			readable, backupManifestName)
+			redactedURI, backupManifestName)
 	}
 
 	r, err = exportStore.ReadFile(ctx, backupManifestCheckpointName)
@@ -998,13 +1013,13 @@ func checkForPreviousBackup(
 		r.Close()
 		return pgerror.Newf(pgcode.FileAlreadyExists,
 			"%s already contains a %s file (is another operation already in progress?)",
-			readable, backupManifestCheckpointName)
+			redactedURI, backupManifestCheckpointName)
 	}
 
 	if !errors.Is(err, cloudimpl.ErrFileDoesNotExist) {
 		return errors.Wrapf(err,
 			"%s returned an unexpected error when checking for the existence of %s file",
-			readable, backupManifestCheckpointName)
+			redactedURI, backupManifestCheckpointName)
 	}
 
 	return nil
@@ -1016,7 +1031,7 @@ func checkForPreviousBackup(
 // enforce that this file be deleted.
 func verifyWriteableDestination(
 	ctx context.Context,
-	user string,
+	user security.SQLUsername,
 	makeCloudStorage cloud.ExternalStorageFromURIFactory,
 	baseURI string,
 ) error {
@@ -1029,8 +1044,9 @@ func verifyWriteableDestination(
 	// Write arbitrary bytes to a sentinel file in the backup directory to ensure
 	// that we're able to write to this directory.
 	arbitraryBytes := bytes.NewReader([]byte("✇"))
+	redactedURI := RedactURIForErrorMessage(baseURI)
 	if err := baseStore.WriteFile(ctx, backupSentinelWriteFile, arbitraryBytes); err != nil {
-		return errors.Wrapf(err, "writing sentinel file to %s", baseURI)
+		return errors.Wrapf(err, "writing sentinel file to %s", redactedURI)
 	}
 
 	if err := baseStore.Delete(ctx, backupSentinelWriteFile); err != nil {
@@ -1039,7 +1055,7 @@ func verifyWriteableDestination(
 		// Let's still log if we can't clean up.
 		log.Warningf(ctx,
 			"could not clean up sentinel backup %s file in %s: %+v",
-			backupSentinelWriteFile, baseURI, err)
+			backupSentinelWriteFile, redactedURI, err)
 	}
 
 	return nil

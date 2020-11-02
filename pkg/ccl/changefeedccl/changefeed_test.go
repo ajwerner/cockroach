@@ -842,6 +842,58 @@ func TestChangefeedSchemaChangeAllowBackfill(t *testing.T) {
 	}
 }
 
+// Test schema changes that require a backfill on only some watched tables within a changefeed.
+func TestChangefeedSchemaChangeBackfillScope(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	testFn := func(t *testing.T, db *gosql.DB, f cdctest.TestFeedFactory) {
+		sqlDB := sqlutils.MakeSQLRunner(db)
+
+		t.Run(`add column with default`, func(t *testing.T) {
+			sqlDB.Exec(t, `CREATE TABLE add_column_def (a INT PRIMARY KEY)`)
+			sqlDB.Exec(t, `CREATE TABLE no_def_change (a INT PRIMARY KEY)`)
+			sqlDB.Exec(t, `INSERT INTO add_column_def VALUES (1)`)
+			sqlDB.Exec(t, `INSERT INTO add_column_def VALUES (2)`)
+			sqlDB.Exec(t, `INSERT INTO no_def_change VALUES (3)`)
+			combinedFeed := feed(t, f, `CREATE CHANGEFEED FOR add_column_def, no_def_change WITH updated`)
+			defer closeFeed(t, combinedFeed)
+			assertPayloadsStripTs(t, combinedFeed, []string{
+				`add_column_def: [1]->{"after": {"a": 1}}`,
+				`add_column_def: [2]->{"after": {"a": 2}}`,
+				`no_def_change: [3]->{"after": {"a": 3}}`,
+			})
+			sqlDB.Exec(t, `ALTER TABLE add_column_def ADD COLUMN b STRING DEFAULT 'd'`)
+			ts := fetchDescVersionModificationTime(t, db, f, `add_column_def`, 4)
+			// Schema change backfill
+			assertPayloadsStripTs(t, combinedFeed, []string{
+				`add_column_def: [1]->{"after": {"a": 1}}`,
+				`add_column_def: [2]->{"after": {"a": 2}}`,
+			})
+			// Changefeed level backfill
+			assertPayloads(t, combinedFeed, []string{
+				fmt.Sprintf(`add_column_def: [1]->{"after": {"a": 1, "b": "d"}, "updated": "%s"}`,
+					ts.AsOfSystemTime()),
+				fmt.Sprintf(`add_column_def: [2]->{"after": {"a": 2, "b": "d"}, "updated": "%s"}`,
+					ts.AsOfSystemTime()),
+			})
+		})
+
+	}
+
+	t.Run(`sinkless`, sinklessTest(testFn))
+	t.Run(`enterprise`, enterpriseTest(testFn))
+	log.Flush()
+	entries, err := log.FetchEntriesFromFiles(0, math.MaxInt64, 1,
+		regexp.MustCompile("cdc ux violation"), log.WithFlattenedSensitiveData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) > 0 {
+		t.Fatalf("Found violation of CDC's guarantees: %v", entries)
+	}
+}
+
 // fetchDescVersionModificationTime fetches the `ModificationTime` of the specified
 // `version` of `tableName`'s table descriptor.
 func fetchDescVersionModificationTime(
@@ -1355,8 +1407,26 @@ func TestChangefeedTruncateRenameDrop(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	assertFailuresCounter := func(t *testing.T, m *Metrics, exp int64) {
+		t.Helper()
+		// If this changefeed is running as a job, we anticipate that it will move
+		// through the failed state and will increment the metric. Sinkless feeds
+		// don't contribute to the failures counter.
+		if strings.Contains(t.Name(), `sinkless`) {
+			return
+		}
+		testutils.SucceedsSoon(t, func() error {
+			if got := m.Failures.Count(); got != exp {
+				return errors.Errorf("expected %d failures, got %d", exp, got)
+			}
+			return nil
+		})
+	}
+
 	testFn := func(t *testing.T, db *gosql.DB, f cdctest.TestFeedFactory) {
 		sqlDB := sqlutils.MakeSQLRunner(db)
+		registry := f.Server().JobRegistry().(*jobs.Registry)
+		metrics := registry.MetricsStruct().Changefeed.(*Metrics)
 
 		sqlDB.Exec(t, `CREATE TABLE truncate (a INT PRIMARY KEY)`)
 		sqlDB.Exec(t, `CREATE TABLE truncate_cascade (b INT PRIMARY KEY REFERENCES truncate (a))`)
@@ -1377,6 +1447,7 @@ func TestChangefeedTruncateRenameDrop(t *testing.T) {
 		) {
 			t.Fatalf(`expected ""truncate_cascade" was truncated" error got: %+v`, err)
 		}
+		assertFailuresCounter(t, metrics, 2)
 
 		sqlDB.Exec(t, `CREATE TABLE rename (a INT PRIMARY KEY)`)
 		sqlDB.Exec(t, `INSERT INTO rename VALUES (1)`)
@@ -1388,6 +1459,7 @@ func TestChangefeedTruncateRenameDrop(t *testing.T) {
 		if _, err := rename.Next(); !testutils.IsError(err, `"rename" was renamed to "renamed"`) {
 			t.Errorf(`expected ""rename" was renamed to "renamed"" error got: %+v`, err)
 		}
+		assertFailuresCounter(t, metrics, 3)
 
 		sqlDB.Exec(t, `CREATE TABLE drop (a INT PRIMARY KEY)`)
 		sqlDB.Exec(t, `INSERT INTO drop VALUES (1)`)
@@ -1398,6 +1470,7 @@ func TestChangefeedTruncateRenameDrop(t *testing.T) {
 		if _, err := drop.Next(); !testutils.IsError(err, `"drop" was dropped or truncated`) {
 			t.Errorf(`expected ""drop" was dropped or truncated" error got: %+v`, err)
 		}
+		assertFailuresCounter(t, metrics, 4)
 	}
 
 	t.Run(`sinkless`, sinklessTest(testFn))
@@ -1464,6 +1537,9 @@ func TestChangefeedMonitoring(t *testing.T) {
 			if c := s.MustGetSQLCounter(`changefeed.flushes`); c <= 0 {
 				return errors.Errorf(`expected > 0 got %d`, c)
 			}
+			if c := s.MustGetSQLCounter(`changefeed.running`); c != 1 {
+				return errors.Errorf(`expected 1 got %d`, c)
+			}
 			if c := s.MustGetSQLCounter(`changefeed.flush_nanos`); c <= 0 {
 				return errors.Errorf(`expected > 0 got %d`, c)
 			}
@@ -1529,11 +1605,15 @@ func TestChangefeedMonitoring(t *testing.T) {
 			return nil
 		})
 
-		// Cancel all the changefeeds and check that max_behind_nanos returns to 0.
+		// Cancel all the changefeeds and check that max_behind_nanos returns to 0
+		// and the number running returns to 0.
 		require.NoError(t, foo.Close())
 		require.NoError(t, fooCopy.Close())
 		testutils.SucceedsSoon(t, func() error {
 			if c := s.MustGetSQLCounter(`changefeed.max_behind_nanos`); c != 0 {
+				return errors.Errorf(`expected 0 got %d`, c)
+			}
+			if c := s.MustGetSQLCounter(`changefeed.running`); c != 0 {
 				return errors.Errorf(`expected 0 got %d`, c)
 			}
 			return nil

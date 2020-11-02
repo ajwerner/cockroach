@@ -24,7 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/lex"
+	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
@@ -91,7 +91,7 @@ func (m *mysqldumpReader) readFiles(
 	resumePos map[int32]int64,
 	format roachpb.IOFileFormat,
 	makeExternalStorage cloud.ExternalStorageFactory,
-	user string,
+	user security.SQLUsername,
 ) error {
 	return readInputFiles(ctx, dataFiles, resumePos, format, m.readFile, makeExternalStorage, user)
 }
@@ -126,7 +126,7 @@ func (m *mysqldumpReader) readFile(
 		switch i := stmt.(type) {
 		case *mysql.Insert:
 			name := safeString(i.Table.Name)
-			conv, ok := m.tables[lex.NormalizeName(name)]
+			conv, ok := m.tables[lexbase.NormalizeName(name)]
 			if !ok {
 				// not importing this table.
 				continue
@@ -285,13 +285,14 @@ func readMysqlCreateTable(
 	ctx context.Context,
 	input io.Reader,
 	evalCtx *tree.EvalContext,
-	p sql.PlanHookState,
+	p sql.JobExecContext,
 	startingID, parentID descpb.ID,
 	match string,
 	fks fkHandler,
 	seqVals map[descpb.ID]int64,
+	owner security.SQLUsername,
 ) ([]*tabledesc.Mutable, error) {
-	match = lex.NormalizeName(match)
+	match = lexbase.NormalizeName(match)
 	r := bufio.NewReaderSize(input, 1024*64)
 	tokens := mysql.NewTokenizer(r)
 	tokens.SkipSpecialComments = true
@@ -321,7 +322,7 @@ func readMysqlCreateTable(
 				continue
 			}
 			id := descpb.ID(int(startingID) + len(ret))
-			tbl, moreFKs, err := mysqlTableToCockroach(ctx, evalCtx, p, parentID, id, name, i.TableSpec, fks, seqVals)
+			tbl, moreFKs, err := mysqlTableToCockroach(ctx, evalCtx, p, parentID, id, name, i.TableSpec, fks, seqVals, owner)
 			if err != nil {
 				return nil, err
 			}
@@ -348,7 +349,7 @@ func readMysqlCreateTable(
 type mysqlIdent interface{ CompliantName() string }
 
 func safeString(in mysqlIdent) string {
-	return lex.NormalizeName(in.CompliantName())
+	return lexbase.NormalizeName(in.CompliantName())
 }
 
 func safeName(in mysqlIdent) tree.Name {
@@ -361,12 +362,13 @@ func safeName(in mysqlIdent) tree.Name {
 func mysqlTableToCockroach(
 	ctx context.Context,
 	evalCtx *tree.EvalContext,
-	p sql.PlanHookState,
+	p sql.JobExecContext,
 	parentID, id descpb.ID,
 	name string,
 	in *mysql.TableSpec,
 	fks fkHandler,
 	seqVals map[descpb.ID]int64,
+	owner security.SQLUsername,
 ) ([]*tabledesc.Mutable, []delayedFK, error) {
 	if in == nil {
 		return nil, nil, errors.Errorf("could not read definition for table %q (possible unsupported type?)", name)
@@ -400,7 +402,6 @@ func mysqlTableToCockroach(
 
 	var seqDesc *tabledesc.Mutable
 	// If we have an auto-increment seq, create it and increment the id.
-	owner := security.AdminRole
 	if seqName != "" {
 		var opts tree.SequenceOptions
 		if startingValue != 0 {
@@ -409,12 +410,9 @@ func mysqlTableToCockroach(
 		}
 		var err error
 		if p != nil {
-			params := p.RunParams(ctx)
-			if params.SessionData() != nil {
-				owner = params.SessionData().User
-			}
 			priv := descpb.NewDefaultPrivilegeDescriptor(owner)
 			seqDesc, err = sql.NewSequenceTableDesc(
+				ctx,
 				seqName,
 				opts,
 				parentID,
@@ -423,11 +421,12 @@ func mysqlTableToCockroach(
 				time,
 				priv,
 				tree.PersistencePermanent,
-				&params,
+				nil, /* params */
 			)
 		} else {
 			priv := descpb.NewDefaultPrivilegeDescriptor(owner)
 			seqDesc, err = sql.NewSequenceTableDesc(
+				ctx,
 				seqName,
 				opts,
 				parentID,
@@ -491,7 +490,7 @@ func mysqlTableToCockroach(
 	if p != nil {
 		semaCtxPtr = p.SemaCtx()
 	}
-	desc, err := MakeSimpleTableDescriptor(evalCtx.Ctx(), semaCtxPtr, evalCtx.Settings, stmt, parentID, keys.PublicSchemaID, id, fks, time.WallTime)
+	desc, err := MakeSimpleTableDescriptor(ctx, semaCtxPtr, evalCtx.Settings, stmt, parentID, keys.PublicSchemaID, id, fks, time.WallTime)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -513,7 +512,7 @@ func mysqlTableToCockroach(
 			)
 			toCols := i.ReferencedColumns
 			d := &tree.ForeignKeyConstraintTableDef{
-				Name:     tree.Name(lex.NormalizeName(raw.Name)),
+				Name:     tree.Name(lexbase.NormalizeName(raw.Name)),
 				FromCols: toNameList(fromCols),
 				ToCols:   toNameList(toCols),
 			}
@@ -567,7 +566,7 @@ func addDelayedFKs(
 		if err := fixDescriptorFKState(def.tbl); err != nil {
 			return err
 		}
-		if err := def.tbl.AllocateIDs(); err != nil {
+		if err := def.tbl.AllocateIDs(ctx); err != nil {
 			return err
 		}
 	}

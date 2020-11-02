@@ -17,7 +17,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/sql"
@@ -25,11 +27,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/stretchr/testify/require"
 )
 
@@ -44,7 +48,7 @@ func TestInternalExecutor(t *testing.T) {
 
 	ie := s.InternalExecutor().(*sql.InternalExecutor)
 	row, err := ie.QueryRowEx(ctx, "test", nil, /* txn */
-		sessiondata.InternalExecutorOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		"SELECT 1")
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +68,7 @@ func TestInternalExecutor(t *testing.T) {
 	// The following statement will succeed on the 2nd try.
 	row, err = ie.QueryRowEx(
 		ctx, "test", nil, /* txn */
-		sessiondata.InternalExecutorOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		"select case nextval('test.seq') when 1 then crdb_internal.force_retry('1h') else 99 end",
 	)
 	if err != nil {
@@ -87,9 +91,12 @@ func TestInternalExecutor(t *testing.T) {
 		cnt++
 		row, err = ie.QueryRowEx(
 			ctx, "test", txn,
-			sessiondata.InternalExecutorOverride{User: security.RootUser},
+			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 			"select case nextval('test.seq') when 2 then crdb_internal.force_retry('1h') else 99 end",
 		)
+		if cnt == 1 {
+			require.Regexp(t, "crdb_internal.force_retry", err)
+		}
 		if err != nil {
 			return err
 		}
@@ -142,10 +149,14 @@ func TestInternalFullTableScan(t *testing.T) {
 	)
 	ie.SetSessionData(
 		&sessiondata.SessionData{
-			Database:               "db",
-			SequenceState:          &sessiondata.SequenceState{},
-			User:                   security.RootUser,
-			DisallowFullTableScans: true,
+			SessionData: sessiondatapb.SessionData{
+				Database:  "db",
+				UserProto: security.RootUserName().EncodeProto(),
+			},
+			LocalOnlySessionData: sessiondata.LocalOnlySessionData{
+				DisallowFullTableScans: true,
+			},
+			SequenceState: &sessiondata.SequenceState{},
 		})
 
 	// Internal queries that perform full table scans shouldn't fail because of
@@ -170,16 +181,16 @@ func TestQueryIsAdminWithNoTxn(t *testing.T) {
 	ie := s.InternalExecutor().(*sql.InternalExecutor)
 
 	testData := []struct {
-		user     string
+		user     security.SQLUsername
 		expAdmin bool
 	}{
-		{security.NodeUser, true},
-		{security.RootUser, true},
-		{"testuser", false},
+		{security.NodeUserName(), true},
+		{security.RootUserName(), true},
+		{security.TestUserName(), false},
 	}
 
 	for _, tc := range testData {
-		t.Run(tc.user, func(t *testing.T) {
+		t.Run(tc.user.Normalized(), func(t *testing.T) {
 			rows, cols, err := ie.QueryWithCols(ctx, "test", nil, /* txn */
 				sessiondata.InternalExecutorOverride{User: tc.user},
 				"SELECT crdb_internal.is_admin()")
@@ -228,8 +239,9 @@ GRANT admin TO testadmin`
 		{"testadmin", roleoption.CREATEROLE.String(), true, ""},
 		{"testadmin", "nonexistent", false, "unrecognized role option"},
 	} {
+		username := security.MakeSQLUsernameFromPreNormalizedString(tc.user)
 		rows, cols, err := ie.QueryWithCols(ctx, "test", nil, /* txn */
-			sessiondata.InternalExecutorOverride{User: tc.user},
+			sessiondata.InternalExecutorOverride{User: username},
 			"SELECT crdb_internal.has_role_option($1)", tc.option)
 		if tc.expectedErr != "" {
 			if !testutils.IsError(err, tc.expectedErr) {
@@ -271,9 +283,11 @@ func TestSessionBoundInternalExecutor(t *testing.T) {
 	)
 	ie.SetSessionData(
 		&sessiondata.SessionData{
-			Database:      expDB,
+			SessionData: sessiondatapb.SessionData{
+				Database:  expDB,
+				UserProto: security.RootUserName().EncodeProto(),
+			},
 			SequenceState: &sessiondata.SequenceState{},
-			User:          security.RootUser,
 		})
 
 	row, err := ie.QueryRowEx(ctx, "test", nil, /* txn */
@@ -337,10 +351,12 @@ func TestInternalExecAppNameInitialization(t *testing.T) {
 		)
 		ie.SetSessionData(
 			&sessiondata.SessionData{
-				User:            security.RootUser,
-				Database:        "defaultdb",
-				ApplicationName: "appname_findme",
-				SequenceState:   &sessiondata.SequenceState{},
+				SessionData: sessiondatapb.SessionData{
+					UserProto:       security.RootUserName().EncodeProto(),
+					Database:        "defaultdb",
+					ApplicationName: "appname_findme",
+				},
+				SequenceState: &sessiondata.SequenceState{},
 			})
 		testInternalExecutorAppNameInitialization(
 			t, sem,
@@ -458,6 +474,66 @@ func testInternalExecutorAppNameInitialization(
 	} else if appName := string(*rows[0][0].(*tree.DString)); appName != expectedAppNameInStats {
 		t.Fatalf("unexpected app name: expected %q, got %q", expectedAppNameInStats, appName)
 	}
+}
+
+// Test that, when executing inside a higher-level txn, the internal executor
+// does not attempt to auto-retry statements when it detects the transaction to
+// be pushed. The executor cannot auto-retry by itself, so let's make sure that
+// it also doesn't eagerly generate retriable errors when it detects pushed
+// transactions.
+func TestInternalExecutorPushDetectionInTxn(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	params, _ := tests.CreateTestServerParams()
+	s, _, db := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(ctx)
+
+	// Setup a pushed txn.
+	txn := db.NewTxn(ctx, "test")
+	keyA := roachpb.Key("a")
+	_, err := db.Get(ctx, keyA)
+	require.NoError(t, err)
+	require.NoError(t, txn.Put(ctx, keyA, "x"))
+	require.NotEqual(t, txn.ReadTimestamp(), txn.ProvisionalCommitTimestamp(), "expect txn wts to be pushed")
+
+	// Fix the txn's timestamp, such that
+	// txn.IsSerializablePushAndRefreshNotPossible() and the connExecutor is
+	// tempted to generate a retriable error eagerly.
+	txn.CommitTimestamp()
+	require.True(t, txn.IsSerializablePushAndRefreshNotPossible())
+
+	execCtx, collect, cancel := tracing.ContextWithRecordingSpan(ctx, "test-recording")
+	defer cancel()
+	ie := s.InternalExecutor().(*sql.InternalExecutor)
+	_, err = ie.Exec(execCtx, "test", txn, "select 42")
+	require.NoError(t, err)
+	require.NoError(t, testutils.MatchInOrder(collect().String(),
+		"push detected for non-refreshable txn but auto-retry not possible"))
+	require.NotEqual(t, txn.ReadTimestamp(), txn.ProvisionalCommitTimestamp(), "expect txn wts to be pushed")
+
+	require.NoError(t, txn.Rollback(ctx))
+}
+
+func TestInternalExecutorInLeafTxnDoesNotPanic(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	s, _, kvDB := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop(ctx)
+
+	rootTxn := kvDB.NewTxn(ctx, "root-txn")
+
+	ltis := rootTxn.GetLeafTxnInputState(ctx)
+	leafTxn := kv.NewLeafTxn(ctx, kvDB, roachpb.NodeID(1), &ltis)
+
+	ie := s.InternalExecutor().(*sql.InternalExecutor)
+	_, err := ie.QueryEx(
+		ctx, "leaf-query", leafTxn, sessiondata.InternalExecutorOverride{User: security.RootUserName()}, "SELECT 1",
+	)
+	require.NoError(t, err)
 }
 
 // TODO(andrei): Test that descriptor leases are released by the

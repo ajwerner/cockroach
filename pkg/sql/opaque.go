@@ -51,12 +51,20 @@ func buildOpaque(
 	switch n := stmt.(type) {
 	case *tree.AlterDatabaseOwner:
 		plan, err = p.AlterDatabaseOwner(ctx, n)
+	case *tree.AlterDatabaseAddRegion:
+		plan, err = p.AlterDatabaseAddRegion(ctx, n)
+	case *tree.AlterDatabaseDropRegion:
+		plan, err = p.AlterDatabaseDropRegion(ctx, n)
+	case *tree.AlterDatabaseSurvive:
+		plan, err = p.AlterDatabaseSurvive(ctx, n)
 	case *tree.AlterIndex:
 		plan, err = p.AlterIndex(ctx, n)
 	case *tree.AlterSchema:
 		plan, err = p.AlterSchema(ctx, n)
 	case *tree.AlterTable:
 		plan, err = p.AlterTable(ctx, n)
+	case *tree.AlterTableRegionalAffinity:
+		plan, err = p.AlterTableRegionalAffinity(ctx, n)
 	case *tree.AlterTableSetSchema:
 		plan, err = p.AlterTableSetSchema(ctx, n)
 	case *tree.AlterType:
@@ -89,6 +97,8 @@ func buildOpaque(
 		plan, err = p.CreateSequence(ctx, n)
 	case *tree.CreateStats:
 		plan, err = p.CreateStatistics(ctx, n)
+	case *tree.CreateExtension:
+		plan, err = p.CreateExtension(ctx, n)
 	case *tree.Deallocate:
 		plan, err = p.Deallocate(ctx, n)
 	case *tree.Discard:
@@ -97,22 +107,26 @@ func buildOpaque(
 		plan, err = p.DropDatabase(ctx, n)
 	case *tree.DropIndex:
 		plan, err = p.DropIndex(ctx, n)
+	case *tree.DropOwnedBy:
+		plan, err = p.DropOwnedBy(ctx)
 	case *tree.DropRole:
 		plan, err = p.DropRole(ctx, n)
 	case *tree.DropSchema:
 		plan, err = p.DropSchema(ctx, n)
+	case *tree.DropSequence:
+		plan, err = p.DropSequence(ctx, n)
 	case *tree.DropTable:
 		plan, err = p.DropTable(ctx, n)
 	case *tree.DropType:
 		plan, err = p.DropType(ctx, n)
 	case *tree.DropView:
 		plan, err = p.DropView(ctx, n)
-	case *tree.DropSequence:
-		plan, err = p.DropSequence(ctx, n)
 	case *tree.Grant:
 		plan, err = p.Grant(ctx, n)
 	case *tree.GrantRole:
 		plan, err = p.GrantRole(ctx, n)
+	case *tree.ReassignOwnedBy:
+		plan, err = p.ReassignOwnedBy(ctx, n)
 	case *tree.RefreshMaterializedView:
 		plan, err = p.RefreshMaterializedView(ctx, n)
 	case *tree.RenameColumn:
@@ -181,10 +195,14 @@ func buildOpaque(
 
 func init() {
 	for _, stmt := range []tree.Statement{
+		&tree.AlterDatabaseAddRegion{},
+		&tree.AlterDatabaseDropRegion{},
 		&tree.AlterDatabaseOwner{},
+		&tree.AlterDatabaseSurvive{},
 		&tree.AlterIndex{},
 		&tree.AlterSchema{},
 		&tree.AlterTable{},
+		&tree.AlterTableRegionalAffinity{},
 		&tree.AlterTableSetSchema{},
 		&tree.AlterType{},
 		&tree.AlterSequence{},
@@ -195,6 +213,7 @@ func init() {
 		&tree.CommentOnIndex{},
 		&tree.CommentOnTable{},
 		&tree.CreateDatabase{},
+		&tree.CreateExtension{},
 		&tree.CreateIndex{},
 		&tree.CreateSchema{},
 		&tree.CreateSequence{},
@@ -205,14 +224,16 @@ func init() {
 		&tree.Discard{},
 		&tree.DropDatabase{},
 		&tree.DropIndex{},
+		&tree.DropOwnedBy{},
+		&tree.DropRole{},
 		&tree.DropSchema{},
+		&tree.DropSequence{},
 		&tree.DropTable{},
 		&tree.DropType{},
 		&tree.DropView{},
-		&tree.DropRole{},
-		&tree.DropSequence{},
 		&tree.Grant{},
 		&tree.GrantRole{},
+		&tree.ReassignOwnedBy{},
 		&tree.RefreshMaterializedView{},
 		&tree.RenameColumn{},
 		&tree.RenameDatabase{},

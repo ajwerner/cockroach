@@ -715,7 +715,7 @@ func TestLint(t *testing.T) {
 			":!util/timeutil/time.go",
 			":!util/timeutil/now_unix.go",
 			":!util/timeutil/now_windows.go",
-			":!util/tracing/tracer_span.go",
+			":!util/tracing/span.go",
 			":!util/tracing/tracer.go",
 		)
 		if err != nil {
@@ -1008,6 +1008,42 @@ func TestLint(t *testing.T) {
 		}
 	})
 
+	// TestProtoEqual forbids use of proto's Equal() function. It panics
+	// on types which alias the Go string type.
+	t.Run("TestProtoEqual", func(t *testing.T) {
+		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
+		cmd, stderr, filter, err := dirCmd(
+			pkgDir,
+			"git",
+			"grep",
+			"-nEw",
+			`proto\.Equal`,
+			"--",
+			"*.go",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := stream.ForEach(stream.Sequence(
+			filter,
+		), func(s string) {
+			t.Errorf("\n%s <- forbidden; use '.Equal()' method instead or  reflect.DeepEqual()", s)
+		}); err != nil {
+			t.Error(err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			if out := stderr.String(); len(out) > 0 {
+				t.Fatalf("err=%s, stderr=%s", err, out)
+			}
+		}
+	})
+
 	t.Run("TestProtoMessage", func(t *testing.T) {
 		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
 		cmd, stderr, filter, err := dirCmd(
@@ -1020,6 +1056,7 @@ func TestLint(t *testing.T) {
 			"*.go",
 			":!*.pb.go",
 			":!*.pb.gw.go",
+			":!sql/pgwire/pgerror/constraint_name.go",
 			":!sql/pgwire/pgerror/severity.go",
 			":!sql/pgwire/pgerror/with_candidate_code.go",
 			":!sql/pgwire/pgwirebase/too_big_error.go",
@@ -1027,7 +1064,7 @@ func TestLint(t *testing.T) {
 			":!util/protoutil/jsonpb_marshal.go",
 			":!util/protoutil/marshal.go",
 			":!util/protoutil/marshaler.go",
-			":!util/tracing/tracer_span.go",
+			":!util/tracing/span.go",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -1822,6 +1859,10 @@ func TestLint(t *testing.T) {
 			// Ignore types that can change by system.
 			stream.GrepNot(`pkg/util/sysutil/sysutil_unix.go:`),
 
+			// Ignore jemalloc issues warnings.
+			stream.GrepNot(`In file included from.*(start|runtime)_jemalloc\.go`),
+			stream.GrepNot(`include/jemalloc/jemalloc\.h`),
+
 			stream.GrepNot(`declaration of "?(pE|e)rr"? shadows`),
 			stream.GrepNot(`\.pb\.gw\.go:[0-9:]+: declaration of "?ctx"? shadows`),
 			stream.GrepNot(`\.[eo]g\.go:[0-9:]+: declaration of ".*" shadows`),
@@ -1843,6 +1884,8 @@ func TestLint(t *testing.T) {
 			// error encode/decode, it can be dropped from the linter
 			// exception as well.
 			stream.GrepNot(`pkg/roachpb/errors\.go:.*invalid direct cast on error object`),
+			// Cast in decode handler.
+			stream.GrepNot(`pkg/sql/pgwire/pgerror/constraint_name\.go:.*invalid direct cast on error object`),
 			// pgerror's pgcode logic uses its own custom cause recursion
 			// algorithm and thus cannot use errors.If() which mandates a
 			// different recursion order.

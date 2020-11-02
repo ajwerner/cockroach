@@ -69,6 +69,8 @@ func newIndexBackfiller(
 	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
 ) (*indexBackfiller, error) {
+	indexBackfillerMon := execinfra.NewMonitor(ctx, flowCtx.Cfg.BackfillerMonitor,
+		"index-backfill-mon")
 	ib := &indexBackfiller{
 		desc: tabledesc.NewImmutable(spec.Table),
 		backfiller: backfiller{
@@ -82,7 +84,8 @@ func newIndexBackfiller(
 	}
 	ib.backfiller.chunks = ib
 
-	if err := ib.IndexBackfiller.InitForDistributedUse(ctx, flowCtx, ib.desc); err != nil {
+	if err := ib.IndexBackfiller.InitForDistributedUse(ctx, flowCtx, ib.desc,
+		indexBackfillerMon); err != nil {
 		return nil, err
 	}
 
@@ -110,6 +113,7 @@ func (ib *indexBackfiller) prepare(ctx context.Context) error {
 }
 
 func (ib *indexBackfiller) close(ctx context.Context) {
+	ib.IndexBackfiller.Close(ctx)
 	ib.adder.Close(ctx)
 }
 
@@ -157,7 +161,7 @@ func (ib *indexBackfiller) runChunk(
 	}
 
 	ctx, traceSpan := tracing.ChildSpan(tctx, "chunk")
-	defer tracing.FinishSpan(traceSpan)
+	defer traceSpan.Finish()
 
 	var key roachpb.Key
 
@@ -168,7 +172,8 @@ func (ib *indexBackfiller) runChunk(
 
 		// TODO(knz): do KV tracing in DistSQL processors.
 		var err error
-		entries, key, err = ib.BuildIndexEntriesChunk(ctx, txn, ib.desc, sp, chunkSize, false /*traceKV*/)
+		entries, key, err = ib.BuildIndexEntriesChunk(ctx, txn, ib.desc, sp,
+			chunkSize, false /*traceKV*/)
 		return err
 	}); err != nil {
 		return nil, err
@@ -181,6 +186,13 @@ func (ib *indexBackfiller) runChunk(
 			return nil, ib.wrapDupError(ctx, err)
 		}
 	}
+
+	// After the index KVs have been copied to the underlying BulkAdder, we can
+	// free the memory which was accounted when building the index entries of the
+	// current chunk.
+	entries = nil
+	ib.Clear(ctx)
+
 	if knobs.RunAfterBackfillChunk != nil {
 		if err := ib.adder.Flush(ctx); err != nil {
 			return nil, ib.wrapDupError(ctx, err)

@@ -89,8 +89,8 @@ func (p *pebbleBatch) Closed() bool {
 	return p.closed
 }
 
-// ExportToSst is part of the engine.Reader interface.
-func (p *pebbleBatch) ExportToSst(
+// ExportMVCCToSst is part of the engine.Reader interface.
+func (p *pebbleBatch) ExportMVCCToSst(
 	startKey, endKey roachpb.Key,
 	startTS, endTS hlc.Timestamp,
 	exportAllRevisions bool,
@@ -101,7 +101,7 @@ func (p *pebbleBatch) ExportToSst(
 }
 
 // Get implements the Batch interface.
-func (p *pebbleBatch) Get(key MVCCKey) ([]byte, error) {
+func (p *pebbleBatch) MVCCGet(key MVCCKey) ([]byte, error) {
 	r := pebble.Reader(p.batch)
 	if !p.isDistinct {
 		if !p.batch.Indexed() {
@@ -130,8 +130,8 @@ func (p *pebbleBatch) Get(key MVCCKey) ([]byte, error) {
 	return ret, err
 }
 
-// GetProto implements the Batch interface.
-func (p *pebbleBatch) GetProto(
+// MVCCGetProto implements the Batch interface.
+func (p *pebbleBatch) MVCCGetProto(
 	key MVCCKey, msg protoutil.Message,
 ) (ok bool, keyBytes, valBytes int64, err error) {
 	r := pebble.Reader(p.batch)
@@ -165,18 +165,18 @@ func (p *pebbleBatch) GetProto(
 	return false, 0, 0, err
 }
 
-// Iterate implements the Batch interface.
-func (p *pebbleBatch) Iterate(
-	start, end roachpb.Key, f func(MVCCKeyValue) (stop bool, err error),
+// MVCCIterate implements the Batch interface.
+func (p *pebbleBatch) MVCCIterate(
+	start, end roachpb.Key, iterKind MVCCIterKind, f func(MVCCKeyValue) error,
 ) error {
 	if p.distinctOpen {
 		panic("distinct batch open")
 	}
-	return iterateOnReader(p, start, end, f)
+	return iterateOnReader(p, start, end, iterKind, f)
 }
 
-// NewIterator implements the Batch interface.
-func (p *pebbleBatch) NewIterator(opts IterOptions) Iterator {
+// NewMVCCIterator implements the Batch interface.
+func (p *pebbleBatch) NewMVCCIterator(iterKind MVCCIterKind, opts IterOptions) MVCCIterator {
 	if !opts.Prefix && len(opts.UpperBound) == 0 && len(opts.LowerBound) == 0 {
 		panic("iterator must set prefix or upper bound or lower bound")
 	}
@@ -189,7 +189,7 @@ func (p *pebbleBatch) NewIterator(opts IterOptions) Iterator {
 	}
 
 	if opts.MinTimestampHint != (hlc.Timestamp{}) {
-		// Iterators that specify timestamp bounds cannot be cached.
+		// MVCCIterators that specify timestamp bounds cannot be cached.
 		return newPebbleIterator(p.batch, opts)
 	}
 
@@ -213,7 +213,7 @@ func (p *pebbleBatch) NewIterator(opts IterOptions) Iterator {
 	return iter
 }
 
-// NewIterator implements the Batch interface.
+// NewMVCCIterator implements the Batch interface.
 func (p *pebbleBatch) ApplyBatchRepr(repr []byte, sync bool) error {
 	if p.distinctOpen {
 		panic("distinct batch open")
@@ -265,12 +265,11 @@ func (p *pebbleBatch) ClearRange(start, end MVCCKey) error {
 }
 
 // Clear implements the Batch interface.
-func (p *pebbleBatch) ClearIterRange(iter Iterator, start, end roachpb.Key) error {
+func (p *pebbleBatch) ClearIterRange(iter MVCCIterator, start, end roachpb.Key) error {
 	if p.distinctOpen {
 		panic("distinct batch open")
 	}
 
-	type unsafeRawKeyGetter interface{ unsafeRawKey() []byte }
 	// Note that this method has the side effect of modifying iter's bounds.
 	// Since all calls to `ClearIterRange` are on new throwaway iterators with no
 	// lower bounds, calling SetUpperBound should be sufficient and safe.
@@ -287,7 +286,7 @@ func (p *pebbleBatch) ClearIterRange(iter Iterator, start, end roachpb.Key) erro
 			break
 		}
 
-		err = p.batch.Delete(iter.(unsafeRawKeyGetter).unsafeRawKey(), nil)
+		err = p.batch.Delete(iter.UnsafeRawKey(), nil)
 		if err != nil {
 			return err
 		}

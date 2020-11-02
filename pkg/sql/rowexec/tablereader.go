@@ -28,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 // tableReader is the start of a computation flow; it performs KV operations to
@@ -160,7 +159,7 @@ func newTableReader(
 		tr.spans[i] = s.Span
 	}
 
-	if sp := opentracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && sp.IsRecording() {
 		tr.fetcher = newRowFetcherStatCollector(&fetcher)
 		tr.FinishTrace = tr.outputStatsToTrace
 	} else {
@@ -299,8 +298,8 @@ func (tr *tableReader) outputStatsToTrace() {
 	if !ok {
 		return
 	}
-	if sp := opentracing.SpanFromContext(tr.Ctx); sp != nil {
-		tracing.SetSpanStats(sp, &TableReaderStats{
+	if sp := tracing.SpanFromContext(tr.Ctx); sp != nil {
+		sp.SetSpanStats(&TableReaderStats{
 			InputStats: is,
 			BytesRead:  tr.GetBytesRead(),
 		})

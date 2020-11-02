@@ -29,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
+	"github.com/cockroachdb/cockroach/pkg/docs"
 	"github.com/cockroachdb/cockroach/pkg/geo/geos"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
@@ -54,7 +55,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
-	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 )
@@ -249,11 +249,11 @@ func runStartSingleNode(cmd *cobra.Command, args []string) error {
 	// Make the node auto-init the cluster if not done already.
 	serverCfg.AutoInitializeCluster = true
 
-	return runStart(cmd, args, true /*disableReplication*/)
+	return runStart(cmd, args, true /*startSingleNode*/)
 }
 
 func runStartJoin(cmd *cobra.Command, args []string) error {
-	return runStart(cmd, args, false /*disableReplication*/)
+	return runStart(cmd, args, false /*startSingleNode*/)
 }
 
 // runStart starts the cockroach node using --store as the list of
@@ -261,9 +261,9 @@ func runStartJoin(cmd *cobra.Command, args []string) error {
 // of other active nodes used to join this node to the cockroach
 // cluster, if this is its first time connecting.
 //
-// If the argument disableReplication is set the replication factor
-// will be set to 1 all zone configs.
-func runStart(cmd *cobra.Command, args []string, disableReplication bool) error {
+// If the argument startSingleNode is set the replication factor
+// will be set to 1 all zone configs (see initial_sql.go).
+func runStart(cmd *cobra.Command, args []string, startSingleNode bool) error {
 	tBegin := timeutil.Now()
 
 	// First things first: if the user wants background processing,
@@ -322,8 +322,8 @@ func runStart(cmd *cobra.Command, args []string, disableReplication bool) error 
 	// has completed.
 	// TODO(andrei): we don't close the span on the early returns below.
 	tracer := serverCfg.Settings.Tracer
-	sp := tracer.StartRootSpan("server start", nil /* logTags */, tracing.NonRecordableSpan)
-	ctx = opentracing.ContextWithSpan(ctx, sp)
+	sp := tracer.StartSpan("server start")
+	ctx = tracing.ContextWithSpan(ctx, sp)
 
 	// Set up the logging and profiling output.
 	//
@@ -484,7 +484,7 @@ func runStart(cmd *cobra.Command, args []string, disableReplication bool) error 
 - running the 'cockroach init' command if you are trying to initialize a new cluster.
 
 If problems persist, please see %s.`
-		docLink := base.DocsURL("cluster-setup-troubleshooting.html")
+		docLink := docs.URL("cluster-setup-troubleshooting.html")
 		if !startCtx.inBackground {
 			log.Shoutf(context.Background(), log.Severity_WARNING, msg, docLink)
 		} else {
@@ -564,7 +564,7 @@ If problems persist, please see %s.`
 			}
 
 			// Attempt to start the server.
-			if err := s.Start(ctx); err != nil {
+			if err := s.PreStart(ctx); err != nil {
 				if le := (*server.ListenError)(nil); errors.As(err, &le) {
 					const errorPrefix = "consider changing the port via --%s"
 					if le.Addr == serverCfg.Addr {
@@ -587,20 +587,18 @@ If problems persist, please see %s.`
 			if !cluster.TelemetryOptOut() {
 				s.PeriodicallyCheckForUpdates(ctx)
 			}
-
 			initialStart := s.InitialStart()
 
-			if disableReplication && initialStart {
-				// For start-single-node, set the default replication factor to
-				// 1 so as to avoid warning message and unnecessary rebalance
-				// churn.
-				if err := cliDisableReplication(ctx, s); err != nil {
-					log.Errorf(ctx, "could not disable replication: %v", err)
-					return err
-				}
-				log.Shout(ctx, log.Severity_INFO,
-					"Replication was disabled for this cluster.\n"+
-						"When/if adding nodes in the future, update zone configurations to increase the replication factor.")
+			// Run SQL for new clusters.
+			// TODO(knz): If/when we want auto-creation of an initial admin user,
+			// this can be achieved here.
+			if _, err := runInitialSQL(ctx, s, startSingleNode, "" /* adminUser */); err != nil {
+				return err
+			}
+
+			// Now let SQL clients in.
+			if err := s.AcceptClients(ctx); err != nil {
+				return err
 			}
 
 			// Now inform the user that the server is running and tell the
@@ -698,7 +696,7 @@ If problems persist, please see %s.`
 	// We'll want to log any shutdown activity against a separate span.
 	shutdownSpan := tracer.StartSpan("server shutdown")
 	defer shutdownSpan.Finish()
-	shutdownCtx := opentracing.ContextWithSpan(context.Background(), shutdownSpan)
+	shutdownCtx := tracing.ContextWithSpan(context.Background(), shutdownSpan)
 
 	// returnErr will be populated with the error to use to exit the
 	// process (reported to the shell).
@@ -1083,7 +1081,6 @@ func setupAndInitializeLoggingAndProfiling(
 				// for the storage engines. We need to do this at the end
 				// because we need to register the loggers.
 				stopper.AddCloser(storage.InitPebbleLogger(ctx))
-				stopper.AddCloser(storage.InitRocksDBLogger(ctx))
 			}
 		}()
 	}
@@ -1133,16 +1130,26 @@ func setupAndInitializeLoggingAndProfiling(
 		// particularly to new users (made worse by it always printing as [n?]).
 		addr := startCtx.serverListenAddr
 		if addr == "" {
-			addr = "<all your IP addresses>"
+			addr = "any of your IP addresses"
 		}
 		log.Shoutf(context.Background(), log.Severity_WARNING,
-			"RUNNING IN INSECURE MODE!\n\n"+
-				"- Your cluster is open for any client that can access %s.\n"+
-				"- Any user, even root, can log in without providing a password.\n"+
-				"- Any user, connecting as root, can read or write any data in your cluster.\n"+
-				"- There is no network encryption nor authentication, and thus no confidentiality.\n\n"+
-				"Check out how to secure your cluster: %s",
-			addr, log.Safe(base.DocsURL("secure-a-cluster.html")))
+			"ALL SECURITY CONTROLS HAVE BEEN DISABLED!\n\n"+
+				"This mode is intended for non-production testing only.\n"+
+				"\n"+
+				"In this mode:\n"+
+				"- Your cluster is open to any client that can access %s.\n"+
+				"- Intruders with access to your machine or network can observe client-server traffic.\n"+
+				"- Intruders can log in without password and read or write any data in the cluster.\n"+
+				"- Intruders can consume all your server's resources and cause unavailability.",
+			addr)
+		log.Shoutf(context.Background(), log.Severity_INFO,
+			"To start a secure server without mandating TLS for clients,\n"+
+				"consider --accept-sql-without-tls instead. For other options, see:\n\n"+
+				"- %s\n"+
+				"- %s",
+			unimplemented.MakeURL(53404),
+			log.Safe(docs.URL("secure-a-cluster.html")),
+		)
 	}
 
 	maybeWarnMemorySizes(ctx)

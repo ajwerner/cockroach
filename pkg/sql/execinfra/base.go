@@ -22,9 +22,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 // RowChannelBufSize is the default buffer size of a RowChannel.
@@ -234,9 +234,9 @@ func DrainAndForwardMetadata(ctx context.Context, src RowSource, dst RowReceiver
 }
 
 // GetTraceData returns the trace data.
-func GetTraceData(ctx context.Context) []tracing.RecordedSpan {
-	if sp := opentracing.SpanFromContext(ctx); sp != nil {
-		return tracing.GetRecording(sp)
+func GetTraceData(ctx context.Context) []tracingpb.RecordedSpan {
+	if sp := tracing.SpanFromContext(ctx); sp != nil {
+		return sp.GetRecording()
 	}
 	return nil
 }

@@ -362,7 +362,7 @@ func (v virtualSchemaEntry) GetObjectByName(
 		}
 
 		return virtualTypeEntry{
-			desc:    typedesc.MakeSimpleAlias(typ),
+			desc:    typedesc.MakeSimpleAlias(typ, catconstants.PgCatalogID),
 			mutable: flags.RequireMutable,
 		}, nil
 	default:
@@ -669,7 +669,7 @@ func NewVirtualSchemaHolder(
 // For instance, information_schema will only expose rows to a given user which that
 // user has access to.
 var publicSelectPrivileges = descpb.NewPrivilegeDescriptor(
-	security.PublicRole, privilege.List{privilege.SELECT}, security.NodeUser,
+	security.PublicRoleName(), privilege.List{privilege.SELECT}, security.NodeUserName(),
 )
 
 func initVirtualDatabaseDesc(id descpb.ID, name string) *dbdesc.Immutable {

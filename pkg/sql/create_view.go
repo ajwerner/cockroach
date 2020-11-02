@@ -15,6 +15,7 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
@@ -58,11 +59,27 @@ type createViewNode struct {
 func (n *createViewNode) ReadingOwnWrites() {}
 
 func (n *createViewNode) startExec(params runParams) error {
-	telemetry.Inc(sqltelemetry.SchemaChangeCreateCounter("view"))
+	if n.replace {
+		telemetry.Inc(sqltelemetry.SchemaChangeCreateCounter("or_replace_view"))
+	} else {
+		telemetry.Inc(sqltelemetry.SchemaChangeCreateCounter("view"))
+	}
 
 	viewName := n.viewName.Object()
 	persistence := n.persistence
 	log.VEventf(params.ctx, 2, "dependencies for view %s:\n%s", viewName, n.planDeps.String())
+
+	// Check that the view does not contain references to other databases.
+	if !allowCrossDatabaseViews.Get(&params.p.execCfg.Settings.SV) {
+		for _, dep := range n.planDeps {
+			if dbID := dep.desc.ParentID; dbID != n.dbDesc.ID && dbID != keys.SystemDatabaseID {
+				return pgerror.Newf(pgcode.FeatureNotSupported,
+					"the view cannot refer to other databases; (see the '%s' cluster setting)",
+					allowCrossDatabaseViewsSetting,
+				)
+			}
+		}
+	}
 
 	// First check the backrefs and see if any of them are temporary.
 	// If so, promote this view to temporary.
@@ -74,7 +91,7 @@ func (n *createViewNode) startExec(params runParams) error {
 		}
 		if !persistence.IsTemporary() && backRefMutable.Temporary {
 			// This notice is sent from pg, let's imitate.
-			params.p.SendClientNotice(
+			params.p.BufferClientNotice(
 				params.ctx,
 				pgnotice.Newf(`view "%s" will be a temporary view`, viewName),
 			)
@@ -119,7 +136,7 @@ func (n *createViewNode) startExec(params runParams) error {
 		telemetry.Inc(sqltelemetry.CreateTempViewCounter)
 	}
 
-	privs := createInheritedPrivilegesFromDBDesc(n.dbDesc, params.SessionData().User)
+	privs := CreateInheritedPrivilegesFromDBDesc(n.dbDesc, params.SessionData().User())
 
 	var newDesc *tabledesc.Mutable
 
@@ -176,7 +193,7 @@ func (n *createViewNode) startExec(params runParams) error {
 			desc.IsMaterializedView = true
 			desc.State = descpb.DescriptorState_ADD
 			desc.CreateAsOfTime = params.p.Txn().ReadTimestamp()
-			if err := desc.AllocateIDs(); err != nil {
+			if err := desc.AllocateIDs(params.ctx); err != nil {
 				return err
 			}
 		}
@@ -253,7 +270,7 @@ func (n *createViewNode) startExec(params runParams) error {
 		}{
 			ViewName:  n.viewName.FQString(),
 			ViewQuery: n.viewQuery,
-			User:      params.SessionData().User,
+			User:      params.p.User().Normalized(),
 		},
 	)
 }
@@ -394,7 +411,7 @@ func addResultColumns(
 		}
 		desc.AddColumn(col)
 	}
-	if err := desc.AllocateIDs(); err != nil {
+	if err := desc.AllocateIDs(ctx); err != nil {
 		return err
 	}
 	return nil

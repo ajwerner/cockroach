@@ -28,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 // hashJoinerInitialBufferSize controls the size of the initial buffering phase
@@ -149,10 +148,6 @@ func newHashJoiner(
 		rightSource:       rightSource,
 	}
 
-	numMergedColumns := 0
-	if spec.MergedColumns {
-		numMergedColumns = len(spec.LeftEqColumns)
-	}
 	if err := h.joinerBase.init(
 		h,
 		flowCtx,
@@ -163,7 +158,6 @@ func newHashJoiner(
 		spec.OnExpr,
 		spec.LeftEqColumns,
 		spec.RightEqColumns,
-		uint32(numMergedColumns),
 		post,
 		output,
 		execinfra.ProcStateOpts{
@@ -197,7 +191,7 @@ func newHashJoiner(
 	}
 
 	// If the trace is recording, instrument the hashJoiner to collect stats.
-	if sp := opentracing.SpanFromContext(ctx); sp != nil && tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(ctx); sp != nil && sp.IsRecording() {
 		h.leftSource = newInputStatCollector(h.leftSource)
 		h.rightSource = newInputStatCollector(h.rightSource)
 		h.FinishTrace = h.outputStatsToTrace
@@ -748,7 +742,7 @@ func (h *hashJoiner) initStoredRows() error {
 		)
 		h.storedRows = hrc
 	} else {
-		hrc := rowcontainer.MakeHashMemRowContainer(&h.rows[h.storedSide])
+		hrc := rowcontainer.MakeHashMemRowContainer(&h.rows[h.storedSide], h.MemMonitor)
 		h.storedRows = &hrc
 	}
 	return h.storedRows.Init(
@@ -809,9 +803,8 @@ func (h *hashJoiner) outputStatsToTrace() {
 	if !ok {
 		return
 	}
-	if sp := opentracing.SpanFromContext(h.Ctx); sp != nil {
-		tracing.SetSpanStats(
-			sp,
+	if sp := tracing.SpanFromContext(h.Ctx); sp != nil {
+		sp.SetSpanStats(
 			&HashJoinerStats{
 				LeftInputStats:   lis,
 				RightInputStats:  ris,

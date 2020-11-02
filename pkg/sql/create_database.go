@@ -68,6 +68,23 @@ func (p *planner) CreateDatabase(ctx context.Context, n *tree.CreateDatabase) (p
 		}
 	}
 
+	if n.ConnectionLimit != -1 {
+		return nil, unimplemented.NewWithIssueDetailf(
+			54241,
+			"create.db.connection_limit",
+			"only connection limit -1 is supported, got: %d",
+			n.ConnectionLimit,
+		)
+	}
+
+	if n.Regions != nil {
+		return nil, unimplemented.New("create database with region", "implementation pending")
+	}
+
+	if n.Survive != tree.SurviveDefault {
+		return nil, unimplemented.New("create database survive", "implementation pending")
+	}
+
 	hasCreateDB, err := p.HasRoleOption(ctx, roleoption.CREATEDB)
 	if err != nil {
 		return nil, err
@@ -100,7 +117,7 @@ func (n *createDatabaseNode) startExec(params runParams) error {
 				DatabaseName string
 				Statement    string
 				User         string
-			}{n.n.Name.String(), n.n.String(), params.SessionData().User},
+			}{n.n.Name.String(), n.n.String(), params.p.User().Normalized()},
 		); err != nil {
 			return err
 		}

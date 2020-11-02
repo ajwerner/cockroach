@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	opentracing "github.com/opentracing/opentracing-go"
 )
 
 // Processor is a common interface implemented by all processors, used by the
@@ -476,7 +475,7 @@ type ProcessorBase struct {
 	// (i.e. hasn't been closed). Initialized using flowCtx.Ctx (which should not be otherwise
 	// used).
 	Ctx  context.Context
-	span opentracing.Span
+	span *tracing.Span
 	// origCtx is the context from which ctx was derived. InternalClose() resets
 	// ctx to this.
 	origCtx context.Context
@@ -598,7 +597,10 @@ func (pb *ProcessorBase) MoveToDraining(err error) {
 		// However, calling it with an error in states other than StateRunning is
 		// not permitted.
 		if err != nil {
-			log.Fatalf(pb.Ctx, "MoveToDraining called in state %s with err: %s",
+			log.ReportOrPanic(
+				pb.Ctx,
+				&pb.FlowCtx.Cfg.Settings.SV,
+				"MoveToDraining called in state %s with err: %+v",
 				pb.State, err)
 		}
 		return
@@ -625,7 +627,11 @@ func (pb *ProcessorBase) MoveToDraining(err error) {
 // also moves from StateDraining to StateTrailingMeta when appropriate.
 func (pb *ProcessorBase) DrainHelper() *execinfrapb.ProducerMetadata {
 	if pb.State == StateRunning {
-		log.Fatal(pb.Ctx, "drain helper called in StateRunning")
+		log.ReportOrPanic(
+			pb.Ctx,
+			&pb.FlowCtx.Cfg.Settings.SV,
+			"drain helper called in StateRunning",
+		)
 	}
 
 	// trailingMeta always has priority; it seems like a good idea because it
@@ -696,7 +702,12 @@ func (pb *ProcessorBase) popTrailingMeta() *execinfrapb.ProducerMetadata {
 // draining its inputs (if it wants to drain them).
 func (pb *ProcessorBase) moveToTrailingMeta() {
 	if pb.State == StateTrailingMeta || pb.State == StateExhausted {
-		log.Fatalf(pb.Ctx, "moveToTrailingMeta called in state: %s", pb.State)
+		log.ReportOrPanic(
+			pb.Ctx,
+			&pb.FlowCtx.Cfg.Settings.SV,
+			"moveToTrailingMeta called in state: %s",
+			pb.State,
+		)
 	}
 
 	if pb.FinishTrace != nil {
@@ -837,7 +848,7 @@ func (pb *ProcessorBase) AppendTrailingMeta(meta execinfrapb.ProducerMetadata) {
 
 // ProcessorSpan creates a child span for a processor (if we are doing any
 // tracing). The returned span needs to be finished using tracing.FinishSpan.
-func ProcessorSpan(ctx context.Context, name string) (context.Context, opentracing.Span) {
+func ProcessorSpan(ctx context.Context, name string) (context.Context, *tracing.Span) {
 	return tracing.ChildSpanSeparateRecording(ctx, name)
 }
 
@@ -846,7 +857,7 @@ func ProcessorSpan(ctx context.Context, name string) (context.Context, opentraci
 func (pb *ProcessorBase) StartInternal(ctx context.Context, name string) context.Context {
 	pb.origCtx = ctx
 	pb.Ctx, pb.span = ProcessorSpan(ctx, name)
-	if pb.span != nil && tracing.IsRecording(pb.span) {
+	if pb.span != nil && pb.span.IsRecording() {
 		pb.span.SetTag(execinfrapb.FlowIDTagKey, pb.FlowCtx.ID.String())
 		pb.span.SetTag(execinfrapb.ProcessorIDTagKey, pb.processorID)
 	}
@@ -874,7 +885,7 @@ func (pb *ProcessorBase) InternalClose() bool {
 		}
 
 		pb.Closed = true
-		tracing.FinishSpan(pb.span)
+		pb.span.Finish()
 		pb.span = nil
 		// Reset the context so that any incidental uses after this point do not
 		// access the finished span.
