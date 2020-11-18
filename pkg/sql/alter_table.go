@@ -339,232 +339,11 @@ func (n *alterTableNode) startExec(params runParams) error {
 				}
 				return err
 			}
-
-			colToDrop, dropped, err := n.tableDesc.FindColumnByName(t.Column)
-			if err != nil {
-				if t.IfExists {
-					// Noop.
-					continue
-				}
-				return err
-			}
-			if dropped {
-				continue
-			}
-
-			// If the dropped column uses a sequence, remove references to it from that sequence.
-			if len(colToDrop.UsesSequenceIds) > 0 {
-				if err := params.p.removeSequenceDependencies(params.ctx, n.tableDesc, colToDrop); err != nil {
-					return err
-				}
-			}
-
-			// You can't remove a column that owns a sequence that is depended on
-			// by another column
-			if err := params.p.canRemoveAllColumnOwnedSequences(params.ctx, n.tableDesc, colToDrop, t.DropBehavior); err != nil {
-				return err
-			}
-
-			if err := params.p.dropSequencesOwnedByCol(params.ctx, colToDrop, true /* queueJob */); err != nil {
-				return err
-			}
-
-			// You can't drop a column depended on by a view unless CASCADE was
-			// specified.
-			for _, ref := range n.tableDesc.DependedOnBy {
-				found := false
-				for _, colID := range ref.ColumnIDs {
-					if colID == colToDrop.ID {
-						found = true
-						break
-					}
-				}
-				if !found {
-					continue
-				}
-				err := params.p.canRemoveDependentViewGeneric(
-					params.ctx, "column", string(t.Column), n.tableDesc.ParentID, ref, t.DropBehavior,
-				)
-				if err != nil {
-					return err
-				}
-				viewDesc, err := params.p.getViewDescForCascade(
-					params.ctx, "column", string(t.Column), n.tableDesc.ParentID, ref.ID, t.DropBehavior,
-				)
-				if err != nil {
-					return err
-				}
-				jobDesc := fmt.Sprintf("removing view %q dependent on column %q which is being dropped",
-					viewDesc.Name, colToDrop.ColName())
-				droppedViews, err = params.p.removeDependentView(params.ctx, n.tableDesc, viewDesc, jobDesc)
-				if err != nil {
-					return err
-				}
-			}
-
-			// We cannot remove this column if there are computed columns that use it.
-			computedColValidator := schemaexpr.MakeComputedColumnValidator(
-				params.ctx,
-				n.tableDesc,
-				&params.p.semaCtx,
-				tn,
-			)
-			if err := computedColValidator.ValidateNoDependents(colToDrop); err != nil {
-				return err
-			}
-
-			if n.tableDesc.PrimaryIndex.ContainsColumnID(colToDrop.ID) {
-				return pgerror.Newf(pgcode.InvalidColumnReference,
-					"column %q is referenced by the primary key", colToDrop.Name)
-			}
-			var idxNamesToDelete []string
-			for _, idx := range n.tableDesc.AllNonDropIndexes() {
-				// We automatically drop indexes that reference the column
-				// being dropped.
-
-				// containsThisColumn becomes true if the index is defined
-				// over the column being dropped.
-				containsThisColumn := false
-
-				// Analyze the index.
-				for _, id := range idx.ColumnIDs {
-					if id == colToDrop.ID {
-						containsThisColumn = true
-						break
-					}
-				}
-				if !containsThisColumn {
-					for _, id := range idx.ExtraColumnIDs {
-						if n.tableDesc.PrimaryIndex.ContainsColumnID(id) {
-							// All secondary indices necessary contain the PK
-							// columns, too. (See the comments on the definition of
-							// IndexDescriptor). The presence of a PK column in the
-							// secondary index should thus not be seen as a
-							// sufficient reason to reject the DROP.
-							continue
-						}
-						if id == colToDrop.ID {
-							containsThisColumn = true
-							break
-						}
-					}
-				}
-				if !containsThisColumn {
-					// The loop above this comment is for the old STORING encoding. The
-					// loop below is for the new encoding (where the STORING columns are
-					// always in the value part of a KV).
-					for _, id := range idx.StoreColumnIDs {
-						if id == colToDrop.ID {
-							containsThisColumn = true
-							break
-						}
-					}
-				}
-
-				// If the column being dropped is referenced in the partial
-				// index predicate, then the index should be dropped.
-				if !containsThisColumn && idx.IsPartial() {
-					expr, err := parser.ParseExpr(idx.Predicate)
-					if err != nil {
-						return err
-					}
-
-					colIDs, err := schemaexpr.ExtractColumnIDs(n.tableDesc, expr)
-					if err != nil {
-						return err
-					}
-
-					if colIDs.Contains(colToDrop.ID) {
-						containsThisColumn = true
-					}
-				}
-
-				// Perform the DROP.
-				if containsThisColumn {
-					idxNamesToDelete = append(idxNamesToDelete, idx.Name)
-				}
-			}
-
-			for _, idxName := range idxNamesToDelete {
-				jobDesc := fmt.Sprintf("removing index %q dependent on column %q which is being"+
-					" dropped; full details: %s", idxName, colToDrop.ColName(),
-					tree.AsStringWithFQNames(n.n, params.Ann()))
-				if err := params.p.dropIndexByName(
-					params.ctx, tn, tree.UnrestrictedName(idxName), n.tableDesc, false,
-					t.DropBehavior, ignoreIdxConstraint, jobDesc,
-				); err != nil {
-					return err
-				}
-			}
-
-			// Drop check constraints which reference the column.
-			validChecks := n.tableDesc.Checks[:0]
-			for _, check := range n.tableDesc.AllActiveAndInactiveChecks() {
-				if used, err := n.tableDesc.CheckConstraintUsesColumn(check, colToDrop.ID); err != nil {
-					return err
-				} else if used {
-					if check.Validity == descpb.ConstraintValidity_Validating {
-						return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
-							"referencing constraint %q in the middle of being added, try again later", check.Name)
-					}
-				} else {
-					validChecks = append(validChecks, check)
-				}
-			}
-
-			if len(validChecks) != len(n.tableDesc.Checks) {
-				n.tableDesc.Checks = validChecks
-				descriptorChanged = true
-			}
-
+			var err error
+			descriptorChanged, err = dropColumnImpl(params, n, t, droppedViews, tn)
 			if err != nil {
 				return err
 			}
-			if err := params.p.removeColumnComment(params.ctx, n.tableDesc.ID, colToDrop.ID); err != nil {
-				return err
-			}
-
-			// Since we are able to drop indexes used by foreign keys on the origin side,
-			// the drop index codepaths aren't going to remove dependent FKs, so we
-			// need to do that here.
-			if params.p.ExecCfg().Settings.Version.IsActive(params.ctx, clusterversion.VersionNoOriginFKIndexes) {
-				// We update the FK's slice in place here.
-				sliceIdx := 0
-				for i := range n.tableDesc.OutboundFKs {
-					n.tableDesc.OutboundFKs[sliceIdx] = n.tableDesc.OutboundFKs[i]
-					sliceIdx++
-					fk := &n.tableDesc.OutboundFKs[i]
-					if descpb.ColumnIDs(fk.OriginColumnIDs).Contains(colToDrop.ID) {
-						sliceIdx--
-						if err := params.p.removeFKBackReference(params.ctx, n.tableDesc, fk); err != nil {
-							return err
-						}
-					}
-				}
-				n.tableDesc.OutboundFKs = n.tableDesc.OutboundFKs[:sliceIdx]
-			}
-
-			found := false
-			for i := range n.tableDesc.Columns {
-				if n.tableDesc.Columns[i].ID == colToDrop.ID {
-					n.tableDesc.AddColumnMutation(colToDrop, descpb.DescriptorMutation_DROP)
-					// Use [:i:i] to prevent reuse of existing slice, or outstanding refs
-					// to ColumnDescriptors may unexpectedly change.
-					n.tableDesc.Columns = append(n.tableDesc.Columns[:i:i], n.tableDesc.Columns[i+1:]...)
-					found = true
-					break
-				}
-			}
-			if !found {
-				return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
-					"column %q in the middle of being added, try again later", t.Column)
-			}
-			if err := n.tableDesc.Validate(
-				params.ctx, catalogkv.NewOneLevelUncachedDescGetter(params.p.Txn(), params.ExecCfg().Codec),
-			); err != nil {
-				return err
-			}
-
 		case *tree.AlterTableDropConstraint:
 			info, err := n.tableDesc.GetConstraintInfo(params.ctx, nil)
 			if err != nil {
@@ -840,6 +619,388 @@ func (n *alterTableNode) startExec(params runParams) error {
 			params.SessionData().User().Normalized(),
 			uint32(mutationID), droppedViews},
 	)
+}
+
+func movePublicColumnToDeleteAndWriteOnly(
+	ctx context.Context,
+	columnID descpb.ColumnID,
+	semaCtx *tree.SemaContext,
+	tn *tree.TableName,
+	t *tabledesc.Mutable,
+) (*dropColumnSideEffects, error) {
+	// TODO(ajwerner): Figure out what deals with InboundFKs.
+	col, err := t.FindActiveColumnByID(columnID)
+	if err != nil {
+		return nil, err
+	}
+	// TODO(ajwerner): Decide whether this validation should be happening above
+	// this point.
+	computedColValidator := schemaexpr.MakeComputedColumnValidator(
+		ctx, t, semaCtx, tn,
+	)
+	if err := computedColValidator.ValidateNoDependents(col); err != nil {
+		return nil, err
+	}
+
+	effects := dropColumnSideEffects{
+		usedSequences:  make(map[descpb.ID]struct{}),
+		ownedSequences: make(map[descpb.ID]struct{}),
+	}
+	// Copy because the column is backed by the descriptor's Columns slice.
+	col = protoutil.Clone(col).(*descpb.ColumnDescriptor)
+	for _, id := range col.OwnsSequenceIds {
+		effects.ownedSequences[id] = struct{}{}
+	}
+	for _, id := range col.UsesSequenceIds {
+		if _, owned := effects.ownedSequences[id]; owned {
+			continue
+		}
+		effects.usedSequences[id] = struct{}{}
+	}
+
+	// TODO(ajwerner): If we supported cascading to drop computed columns depended
+	// on by this column then we'd need to check for those transitive dependencies
+	// too.
+	updatedDependedOnBy := t.DependedOnBy[:0]
+	for _, ref := range t.DependedOnBy {
+		if !columnIDsContainsColumn(ref.ColumnIDs, col.ID) {
+			updatedDependedOnBy = append(updatedDependedOnBy, ref)
+			continue
+		}
+
+		// If this dependency is due to a sequence, detect that and move on.
+		if _, ownedSeq := effects.ownedSequences[ref.ID]; ownedSeq {
+			continue
+		}
+		if _, usedSeq := effects.usedSequences[ref.ID]; usedSeq {
+			continue
+		}
+		// Otherwise we know it to be due to a view.
+		effects.dependentViews = append(effects.dependentViews, ref)
+	}
+	t.DependedOnBy = updatedDependedOnBy
+
+	// Find the indexes to drop.
+	if err := t.ForeachNonDropIndex(func(idx *descpb.IndexDescriptor) error {
+		// The index can contain the column if it has it in its set of columns,
+		// its extra columns, its stored columns, or if it uses it in a computed
+		// expression.
+		if columnIDsContainsColumn(idx.ColumnIDs, col.ID) ||
+			columnIDsContainsColumn(idx.ExtraColumnIDs, col.ID) ||
+			columnIDsContainsColumn(idx.StoreColumnIDs, col.ID) ||
+			computedExprContainsColumn() {
+
+		}
+
+	}); err != nil {
+		return nil, err
+	}
+}
+
+func computedExprContainsColumn(
+	t *tabledesc.Mutable, predicate string, needle descpb.ColumnID,
+) (bool, error) {
+	expr, err := parser.ParseExpr(predicate)
+	if err != nil {
+		return false, err
+	}
+
+	colIDs, err := schemaexpr.ExtractColumnIDs(n.tableDesc, expr)
+	if err != nil {
+		return false, err
+	}
+
+	if colIDs.Contains(colToDrop.ID) {
+		containsThisColumn = true
+	}
+}
+
+func columnIDsContainsColumn(haystack descpb.ColumnIDs, needle descpb.ColumnID) bool {
+	for _, colID := range haystack {
+		if colID == needle {
+			return true
+		}
+	}
+	return false
+}
+
+type dropColumnSideEffects struct {
+	// NB: These dropped elements have been removed from t at this point and
+	// are not backed by any slices in t. These pointers have been explicitly
+	// copied out.
+	droppedColumns          []*descpb.ColumnDescriptor
+	droppedIndexes          []*descpb.IndexDescriptor
+	droppedCheckConstraints []*descpb.TableDescriptor_CheckConstraint
+	droppedOutboundFKs      []*descpb.ForeignKeyReference
+	ownedSequences          map[descpb.ID]struct{}
+	// TODO(ajwerner): Figure out if ownedSequences and usedSequences can overlap.
+	usedSequences map[descpb.ID]struct{}
+	// dependentView are the references exclusively for views, not sequences.
+	dependentViews []descpb.TableDescriptor_Reference
+}
+
+func dropColumnImplNew(
+	params runParams,
+	n *alterTableNode,
+	t *tree.AlterTableDropColumn,
+	droppedViews []string,
+	tn *tree.TableName,
+) (descriptorChanged bool, _ error) {
+	// Find the column to drop.
+	colToDrop, dropped, err := n.tableDesc.FindColumnByName(t.Column)
+	if err != nil {
+		if t.IfExists {
+			// Noop.
+			return false, nil
+		}
+		return false, err
+	}
+	// TODO(ajwerner): Better understand how we can get to this point with
+	// it already dropped. Is it valid to drop the same column twice in an
+	// ALTER?
+	if dropped {
+		return false, nil
+	}
+	effects, err := movePublicColumnToDeleteAndWriteOnly(params.ctx, colToDrop.ID, &params.p.semaCtx, tn, n.tableDesc)
+	if err != nil {
+		return false, nil
+	}
+
+}
+
+func dropColumnImpl(
+	params runParams,
+	n *alterTableNode,
+	t *tree.AlterTableDropColumn,
+	droppedViews []string,
+	tn *tree.TableName,
+) (descriptorChanged bool, _ error) {
+
+	colToDrop, dropped, err := n.tableDesc.FindColumnByName(t.Column)
+	if err != nil {
+		if t.IfExists {
+			// Noop.
+			return false, nil
+		}
+		return false, err
+	}
+	if dropped {
+		return false, nil
+	}
+
+	// If the dropped column uses a sequence, remove references to it from that sequence.
+	if len(colToDrop.UsesSequenceIds) > 0 {
+		if err := params.p.removeSequenceDependencies(params.ctx, n.tableDesc, colToDrop); err != nil {
+			return false, err
+		}
+	}
+
+	// You can't remove a column that owns a sequence that is depended on
+	// by another column
+	if err := params.p.canRemoveAllColumnOwnedSequences(params.ctx, n.tableDesc, colToDrop, t.DropBehavior); err != nil {
+		return false, err
+	}
+
+	if err := params.p.dropSequencesOwnedByCol(params.ctx, colToDrop, true /* queueJob */); err != nil {
+		return false, err
+	}
+
+	// You can't drop a column depended on by a view unless CASCADE was
+	// specified.
+	for _, ref := range n.tableDesc.DependedOnBy {
+		found := false
+		for _, colID := range ref.ColumnIDs {
+			if colID == colToDrop.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		err := params.p.canRemoveDependentViewGeneric(
+			params.ctx, "column", string(t.Column), n.tableDesc.ParentID, ref, t.DropBehavior,
+		)
+		if err != nil {
+			return false, err
+		}
+		viewDesc, err := params.p.getViewDescForCascade(
+			params.ctx, "column", string(t.Column), n.tableDesc.ParentID, ref.ID, t.DropBehavior,
+		)
+		if err != nil {
+			return false, err
+		}
+		jobDesc := fmt.Sprintf("removing view %q dependent on column %q which is being dropped",
+			viewDesc.Name, colToDrop.ColName())
+		droppedViews, err = params.p.removeDependentView(params.ctx, n.tableDesc, viewDesc, jobDesc)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	// We cannot remove this column if there are computed columns that use it.
+	computedColValidator := schemaexpr.MakeComputedColumnValidator(
+		params.ctx,
+		n.tableDesc,
+		&params.p.semaCtx,
+		tn,
+	)
+	if err := computedColValidator.ValidateNoDependents(colToDrop); err != nil {
+		return false, err
+	}
+
+	if n.tableDesc.PrimaryIndex.ContainsColumnID(colToDrop.ID) {
+		return false, pgerror.Newf(pgcode.InvalidColumnReference,
+			"column %q is referenced by the primary key", colToDrop.Name)
+	}
+	var idxNamesToDelete []string
+	for _, idx := range n.tableDesc.AllNonDropIndexes() {
+		// We automatically drop indexes that reference the column
+		// being dropped.
+
+		// containsThisColumn becomes true if the index is defined
+		// over the column being dropped.
+		containsThisColumn := false
+
+		// Analyze the index.
+		for _, id := range idx.ColumnIDs {
+			if id == colToDrop.ID {
+				containsThisColumn = true
+				break
+			}
+		}
+		if !containsThisColumn {
+			for _, id := range idx.ExtraColumnIDs {
+				if n.tableDesc.PrimaryIndex.ContainsColumnID(id) {
+					// All secondary indices necessary contain the PK
+					// columns, too. (See the comments on the definition of
+					// IndexDescriptor). The presence of a PK column in the
+					// secondary index should thus not be seen as a
+					// sufficient reason to reject the DROP.
+					continue
+				}
+				if id == colToDrop.ID {
+					containsThisColumn = true
+					break
+				}
+			}
+		}
+		if !containsThisColumn {
+			// The loop above this comment is for the old STORING encoding. The
+			// loop below is for the new encoding (where the STORING columns are
+			// always in the value part of a KV).
+			for _, id := range idx.StoreColumnIDs {
+				if id == colToDrop.ID {
+					containsThisColumn = true
+					break
+				}
+			}
+		}
+
+		// If the column being dropped is referenced in the partial
+		// index predicate, then the index should be dropped.
+		if !containsThisColumn && idx.IsPartial() {
+			expr, err := parser.ParseExpr(idx.Predicate)
+			if err != nil {
+				return false, err
+			}
+
+			colIDs, err := schemaexpr.ExtractColumnIDs(n.tableDesc, expr)
+			if err != nil {
+				return false, err
+			}
+
+			if colIDs.Contains(colToDrop.ID) {
+				containsThisColumn = true
+			}
+		}
+
+		// Perform the DROP.
+		if containsThisColumn {
+			idxNamesToDelete = append(idxNamesToDelete, idx.Name)
+		}
+	}
+
+	for _, idxName := range idxNamesToDelete {
+		jobDesc := fmt.Sprintf("removing index %q dependent on column %q which is being"+
+			" dropped; full details: %s", idxName, colToDrop.ColName(),
+			tree.AsStringWithFQNames(n.n, params.Ann()))
+		if err := params.p.dropIndexByName(
+			params.ctx, tn, tree.UnrestrictedName(idxName), n.tableDesc, false,
+			t.DropBehavior, ignoreIdxConstraint, jobDesc,
+		); err != nil {
+			return false, err
+		}
+	}
+
+	// Drop check constraints which reference the column.
+	validChecks := n.tableDesc.Checks[:0]
+	for _, check := range n.tableDesc.AllActiveAndInactiveChecks() {
+		if used, err := n.tableDesc.CheckConstraintUsesColumn(check, colToDrop.ID); err != nil {
+			return false, err
+		} else if used {
+			if check.Validity == descpb.ConstraintValidity_Validating {
+				return false, pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+					"referencing constraint %q in the middle of being added, try again later", check.Name)
+			}
+		} else {
+			validChecks = append(validChecks, check)
+		}
+	}
+
+	if len(validChecks) != len(n.tableDesc.Checks) {
+		n.tableDesc.Checks = validChecks
+		descriptorChanged = true
+	}
+
+	if err != nil {
+		return false, err
+	}
+	if err := params.p.removeColumnComment(params.ctx, n.tableDesc.ID, colToDrop.ID); err != nil {
+		return false, err
+	}
+
+	// Since we are able to drop indexes used by foreign keys on the origin side,
+	// the drop index codepaths aren't going to remove dependent FKs, so we
+	// need to do that here.
+	if params.p.ExecCfg().Settings.Version.IsActive(params.ctx, clusterversion.VersionNoOriginFKIndexes) {
+		// We update the FK's slice in place here.
+		sliceIdx := 0
+		for i := range n.tableDesc.OutboundFKs {
+			n.tableDesc.OutboundFKs[sliceIdx] = n.tableDesc.OutboundFKs[i]
+			sliceIdx++
+			fk := &n.tableDesc.OutboundFKs[i]
+			if descpb.ColumnIDs(fk.OriginColumnIDs).Contains(colToDrop.ID) {
+				sliceIdx--
+				if err := params.p.removeFKBackReference(params.ctx, n.tableDesc, fk); err != nil {
+					return false, err
+				}
+			}
+		}
+		n.tableDesc.OutboundFKs = n.tableDesc.OutboundFKs[:sliceIdx]
+	}
+
+	found := false
+	for i := range n.tableDesc.Columns {
+		if n.tableDesc.Columns[i].ID == colToDrop.ID {
+			n.tableDesc.AddColumnMutation(colToDrop, descpb.DescriptorMutation_DROP)
+			// Use [:i:i] to prevent reuse of existing slice, or outstanding refs
+			// to ColumnDescriptors may unexpectedly change.
+			n.tableDesc.Columns = append(n.tableDesc.Columns[:i:i], n.tableDesc.Columns[i+1:]...)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false, pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+			"column %q in the middle of being added, try again later", t.Column)
+	}
+	if err := n.tableDesc.Validate(
+		params.ctx, catalogkv.NewOneLevelUncachedDescGetter(params.p.Txn(), params.ExecCfg().Codec),
+	); err != nil {
+		return false, err
+	}
+	return descriptorChanged, nil
 }
 
 func (p *planner) setAuditMode(
