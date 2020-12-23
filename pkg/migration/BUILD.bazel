@@ -13,6 +13,7 @@ go_library(
         "//pkg/clusterversion",
         "//pkg/kv",
         "//pkg/roachpb",
+        "//pkg/security",
         "//pkg/server/serverpb",
         "//pkg/util/log",
         "//vendor/github.com/cockroachdb/logtags",

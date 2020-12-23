@@ -19,6 +19,7 @@ import "roachpb/io-formats.proto";
 import "sql/catalog/descpb/structured.proto";
 import "sql/catalog/descpb/tenant.proto";
 import "util/hlc/timestamp.proto";
+import "clusterversion/cluster_version.proto";
 
 message Lease {
   option (gogoproto.equal) = true;
@@ -491,6 +492,14 @@ message CreateStatsProgress {
 
 }
 
+message LongRunningMigrationDetails {
+  clusterversion.ClusterVersion cluster_version = 1;
+}
+
+message LongRunningMigrationProgress {
+
+}
+
 message Payload {
   string description = 1;
   // If empty, the description is assumed to be the statement.
@@ -531,6 +540,7 @@ message Payload {
     CreateStatsDetails createStats = 15;
     SchemaChangeGCDetails schemaChangeGC = 21;
     TypeSchemaChangeDetails typeSchemaChange = 22;
+    LongRunningMigrationDetails longRunningMigration = 23;
   }
 }
 
@@ -551,6 +561,7 @@ message Progress {
     CreateStatsProgress createStats = 15;
     SchemaChangeGCProgress schemaChangeGC = 16;
     TypeSchemaChangeProgress typeSchemaChange = 17;
+    LongRunningMigrationProgress longRunningMigration = 18;
   }
 }
 
@@ -570,6 +581,7 @@ enum Type {
   // We can't name this TYPE_SCHEMA_CHANGE due to how proto generates actual
   // names for this enum, which cause a conflict with the SCHEMA_CHANGE entry.
   TYPEDESC_SCHEMA_CHANGE = 9 [(gogoproto.enumvalue_customname) = "TypeTypeSchemaChange"];
+  LONG_RUNNING_MIGRATION = 10 [(gogoproto.enumvalue_customname) = "TypeLongRunningMigration"];
 }
 
 message Job {
