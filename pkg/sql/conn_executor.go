@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs"
+	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -35,6 +36,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
@@ -1033,6 +1037,8 @@ type connExecutor struct {
 		// still need the statementID hash to disambiguate beyond the capped
 		// statements.
 		transactionStatementsHash util.FNV64
+
+		schemaChangerState SchemaChangerState
 	}
 
 	// sessionData contains the user-configurable connection variables.
@@ -1219,6 +1225,9 @@ func (ns *prepStmtNamespace) resetTo(
 // commits, rolls back or restarts.
 func (ex *connExecutor) resetExtraTxnState(ctx context.Context, ev txnEvent) error {
 	ex.extraTxnState.jobs = nil
+	ex.extraTxnState.schemaChangerState = SchemaChangerState{
+		inUse: ex.sessionData.UseNewSchemaChanger,
+	}
 
 	for k := range ex.extraTxnState.schemaChangeJobsCache {
 		delete(ex.extraTxnState.schemaChangeJobsCache, k)
@@ -2161,6 +2170,7 @@ func (ex *connExecutor) resetEvalCtx(evalCtx *extendedEvalContext, txn *kv.Txn, 
 	evalCtx.Mon = ex.state.mon
 	evalCtx.PrepareOnly = false
 	evalCtx.SkipNormalize = false
+	evalCtx.SchemaChangerState = &ex.extraTxnState.schemaChangerState
 }
 
 // getTransactionState retrieves a text representation of the given state.
@@ -2497,6 +2507,81 @@ func (ex *connExecutor) notifyStatsRefresherOfNewTables(ctx context.Context) {
 				NotifyMutation(desc.ID, math.MaxInt32 /* rowsAffected */)
 		}
 	}
+}
+
+// runPreCommitStages is part of the new schema changer infrastructure to
+// mutate descriptors prior to committing a SQL transaction.
+func (ex *connExecutor) runPreCommitStages(ctx context.Context) error {
+	if len(ex.extraTxnState.schemaChangerState.nodes) == 0 {
+		return nil
+	}
+	if err := ex.runNewSchemaChanger(
+		ctx, scplan.PreCommitPhase, ex.withNewSchemaChangeExecutorDuringTxn,
+	); err != nil {
+		return err
+	}
+
+	scs := &ex.extraTxnState.schemaChangerState
+	targetSlice := make([]*scpb.Target, len(scs.nodes))
+	states := make([]scpb.State, len(scs.nodes))
+	for i := range scs.nodes {
+		targetSlice[i] = scs.nodes[i].Target
+		states[i] = scs.nodes[i].State
+	}
+	_, err := ex.planner.extendedEvalCtx.QueueJob(jobs.Record{
+		Description:   "Schema change job", // TODO(ajwerner): use const
+		Statement:     "",                  // TODO(ajwerner): combine all of the DDL statements together
+		Username:      ex.planner.User(),
+		DescriptorIDs: nil, // TODO(ajwerner): populate
+		Details:       jobspb.NewSchemaChangeDetails{Targets: targetSlice},
+		Progress:      jobspb.NewSchemaChangeProgress{States: states},
+		RunningStatus: "",
+		NonCancelable: false,
+	})
+	return err
+}
+
+func (ex *connExecutor) runPostStatementStages(ctx context.Context) error {
+	if !ex.extraTxnState.schemaChangerState.changed {
+		return nil
+	}
+	return ex.runNewSchemaChanger(ctx, scplan.PostStatementPhase, ex.withNewSchemaChangeExecutorDuringTxn)
+}
+
+func (ex *connExecutor) runNewSchemaChanger(
+	ctx context.Context,
+	phase scplan.Phase,
+	executorRunner func(context.Context, func(context.Context, *scexec.Executor) error) error,
+) error {
+	sc, err := scplan.MakePlan(ex.extraTxnState.schemaChangerState.nodes, scplan.Params{
+		ExecutionPhase: phase,
+		// TODO(ajwerner): Populate the set of new descriptors
+	})
+	if err != nil {
+		return err
+	}
+	after := ex.extraTxnState.schemaChangerState.nodes
+	for _, s := range sc.Stages {
+		if err := executorRunner(ctx, func(ctx context.Context, e *scexec.Executor) error {
+			return e.ExecuteOps(ctx, s.Ops)
+		}); err != nil {
+			return err
+		}
+		after = s.After
+	}
+	ex.extraTxnState.schemaChangerState.nodes = after
+	ex.extraTxnState.schemaChangerState.changed = false
+	return nil
+}
+
+func (ex *connExecutor) withNewSchemaChangeExecutorDuringTxn(
+	ctx context.Context, f func(context.Context, *scexec.Executor) error,
+) error {
+	// TODO(ajwerner): Provide a transaction-scoped index backfiller.
+	return f(ctx, scexec.New(
+		ex.planner.txn, &ex.extraTxnState.descCollection, ex.server.cfg.Codec,
+		nil /* backfiller */, nil, /* jobTracker */
+	))
 }
 
 // StatementCounters groups metrics for counting different types of
