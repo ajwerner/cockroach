@@ -101,6 +101,9 @@ func getEncoder(
 type jsonEncoder struct {
 	updatedField, mvccTimestampField, beforeField, wrapped, keyOnly, keyInValue bool
 
+	scratch struct {
+		before, after, meta, outer map[string]interface{}
+	}
 	alloc rowenc.DatumAlloc
 	buf   bytes.Buffer
 }
@@ -111,6 +114,14 @@ func makeJSONEncoder(opts map[string]string) (*jsonEncoder, error) {
 	e := &jsonEncoder{
 		keyOnly: changefeedbase.EnvelopeType(opts[changefeedbase.OptEnvelope]) == changefeedbase.OptEnvelopeKeyOnly,
 		wrapped: changefeedbase.EnvelopeType(opts[changefeedbase.OptEnvelope]) == changefeedbase.OptEnvelopeWrapped,
+		scratch: struct {
+			before, after, meta, outer map[string]interface{}
+		}{
+			before: map[string]interface{}{},
+			after:  map[string]interface{}{},
+			meta:   map[string]interface{}{},
+			outer:  map[string]interface{}{},
+		},
 	}
 	_, e.updatedField = opts[changefeedbase.OptUpdatedTimestamps]
 	_, e.mvccTimestampField = opts[changefeedbase.OptMVCCTimestamps]
@@ -166,52 +177,50 @@ func (e *jsonEncoder) encodeKeyRaw(row encodeRow) ([]interface{}, error) {
 	return jsonEntries, nil
 }
 
+func (e *jsonEncoder) clearScratch() {
+	for _, m := range [...]map[string]interface{}{
+		e.scratch.after,
+		e.scratch.before,
+		e.scratch.meta,
+		e.scratch.outer,
+	} {
+		for k := range m {
+			delete(m, k)
+		}
+	}
+}
+
 // EncodeValue implements the Encoder interface.
 func (e *jsonEncoder) EncodeValue(_ context.Context, row encodeRow) ([]byte, error) {
 	if e.keyOnly || (!e.wrapped && row.deleted) {
 		return nil, nil
 	}
-
-	var after map[string]interface{}
+	defer e.clearScratch()
+	after := e.scratch.after
 	if !row.deleted {
-		columns := row.tableDesc.PublicColumns()
-		after = make(map[string]interface{}, len(columns))
-		for i, col := range columns {
-			datum := row.datums[i]
-			if err := datum.EnsureDecoded(col.GetType(), &e.alloc); err != nil {
-				return nil, err
-			}
-			var err error
-			after[col.GetName()], err = tree.AsJSON(datum.Datum, time.UTC)
-			if err != nil {
-				return nil, err
-			}
+		if err := e.encodeRowInMap(
+			row.tableDesc.PublicColumns(), row.datums, after,
+		); err != nil {
+			return nil, err
 		}
 	}
-
 	var before map[string]interface{}
 	if row.prevDatums != nil && !row.prevDeleted {
-		columns := row.prevTableDesc.PublicColumns()
-		before = make(map[string]interface{}, len(columns))
-		for i, col := range columns {
-			datum := row.prevDatums[i]
-			if err := datum.EnsureDecoded(col.GetType(), &e.alloc); err != nil {
-				return nil, err
-			}
-			var err error
-			before[col.GetName()], err = tree.AsJSON(datum.Datum, time.UTC)
-			if err != nil {
-				return nil, err
-			}
+		before = e.scratch.before
+		if err := e.encodeRowInMap(
+			row.prevTableDesc.PublicColumns(), row.prevDatums, before,
+		); err != nil {
+			return nil, err
 		}
 	}
 
 	var jsonEntries map[string]interface{}
 	if e.wrapped {
+		jsonEntries = e.scratch.outer
 		if after != nil {
-			jsonEntries = map[string]interface{}{`after`: after}
+			jsonEntries[`after`] = after
 		} else {
-			jsonEntries = map[string]interface{}{`after`: nil}
+			jsonEntries[`after`] = nil
 		}
 		if e.beforeField {
 			if before != nil {
@@ -236,7 +245,7 @@ func (e *jsonEncoder) EncodeValue(_ context.Context, row encodeRow) ([]byte, err
 		if e.wrapped {
 			meta = jsonEntries
 		} else {
-			meta = make(map[string]interface{}, 1)
+			meta = e.scratch.meta
 			jsonEntries[jsonMetaSentinel] = meta
 		}
 		if e.updatedField {
@@ -247,13 +256,24 @@ func (e *jsonEncoder) EncodeValue(_ context.Context, row encodeRow) ([]byte, err
 		}
 	}
 
-	j, err := json.MakeJSON(jsonEntries)
-	if err != nil {
-		return nil, err
+	return gojson.Marshal(jsonEntries)
+}
+
+func (e *jsonEncoder) encodeRowInMap(
+	columns []catalog.Column, row rowenc.EncDatumRow, after map[string]interface{},
+) error {
+	for i, col := range columns {
+		datum := row[i]
+		if err := datum.EnsureDecoded(col.GetType(), &e.alloc); err != nil {
+			return err
+		}
+		var err error
+		after[col.GetName()], err = tree.AsJSON(datum.Datum, time.UTC)
+		if err != nil {
+			return err
+		}
 	}
-	e.buf.Reset()
-	j.Format(&e.buf)
-	return e.buf.Bytes(), nil
+	return nil
 }
 
 // EncodeResolvedTimestamp implements the Encoder interface.

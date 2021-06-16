@@ -64,6 +64,7 @@ const (
 
 // JSON represents a JSON value.
 type JSON interface {
+	json.Marshaler
 	fmt.Stringer
 
 	Compare(JSON) (int, error)
@@ -423,6 +424,42 @@ type jsonObject []jsonKeyValuePair
 
 var emptyJSONObject = jsonObject(nil)
 var emptyJSONArray = jsonArray(nil)
+
+func (j jsonNull) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	j.Format(&buf)
+	return buf.Bytes(), nil
+}
+func (j jsonFalse) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	j.Format(&buf)
+	return buf.Bytes(), nil
+}
+func (j jsonTrue) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	j.Format(&buf)
+	return buf.Bytes(), nil
+}
+func (j jsonNumber) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	j.Format(&buf)
+	return buf.Bytes(), nil
+}
+func (j jsonString) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	j.Format(&buf)
+	return buf.Bytes(), nil
+}
+func (j jsonArray) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	j.Format(&buf)
+	return buf.Bytes(), nil
+}
+func (j jsonObject) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	j.Format(&buf)
+	return buf.Bytes(), nil
+}
 
 func (jsonNull) Type() Type   { return NullJSONType }
 func (jsonFalse) Type() Type  { return FalseJSONType }

@@ -41,6 +41,10 @@ type jsonEncoded struct {
 	}
 }
 
+func (j *jsonEncoded) MarshalJSON() ([]byte, error) {
+	return j.value, nil
+}
+
 const jsonEncodedSize = unsafe.Sizeof(jsonEncoded{})
 
 // alreadyDecoded returns a decoded JSON value if this jsonEncoded has already
