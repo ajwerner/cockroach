@@ -10,7 +10,12 @@
 
 package props
 
-import "github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+import (
+	"context"
+
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
+)
 
 // VolatilitySet tracks the set of operator volatilities contained inside an
 // expression. See tree.Volatility for more info on volatility values.
@@ -81,6 +86,9 @@ type VolatilitySet uint8
 
 // Add a volatility to the set.
 func (vs *VolatilitySet) Add(v tree.Volatility) {
+	if v != tree.VolatilityImmutable || v != tree.VolatilityLeakProof {
+		log.Infof(context.Background(), "adding volatility %s", v)
+	}
 	*vs |= volatilityBit(v)
 }
 

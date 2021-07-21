@@ -1,0 +1,23 @@
+
+
+statement ok
+SET experimental_enable_hash_sharded_indexes = true;
+
+
+statement ok
+CREATE TABLE sharded_primary_with_many_column_types  (
+    f4    FLOAT4,
+    PRIMARY KEY (f4) USING HASH WITH BUCKET_COUNT = 7
+);
+
+query T
+EXPLAIN (VERBOSE) SELECT * FROM sharded_primary_with_many_column_types WHERE f4 = 1;
+----
+distribution: local
+vectorized: true
+·
+• scan
+  columns: (f4)
+  estimated row count: 10 (missing stats)
+  table: sharded_primary_with_many_column_types@primary
+  spans: /0/1/0 /1/1/0 /2/1/0 /3/1/0 /4/1/0 /5/1/0 /6/1/0

@@ -11,6 +11,7 @@
 package tree
 
 import (
+	"context"
 	"math"
 	"math/big"
 	"strconv"
@@ -30,6 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
@@ -354,7 +356,10 @@ func lookupCast(from, to types.Family) *castInfo {
 }
 
 // LookupCastVolatility returns the volatility of a valid cast.
-func LookupCastVolatility(from, to *types.T) (_ Volatility, ok bool) {
+func LookupCastVolatility(from, to *types.T) (v Volatility, ok bool) {
+	defer func() {
+		log.Infof(context.Background(), "cast %v to %v: %v %v", from, to, v, ok)
+	}()
 	fromFamily := from.Family()
 	toFamily := to.Family()
 	// Special case for casting between arrays.
