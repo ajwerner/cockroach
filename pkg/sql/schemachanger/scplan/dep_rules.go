@@ -1,7 +1,10 @@
 package scplan
 
 import (
+	"reflect"
+
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
 	q "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav/eavquery"
 	. "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/errors"
@@ -49,11 +52,11 @@ func init() {
 					SchemaElement,
 				)},
 			})
-			b.Filter(func(result q.Result) bool {
-				db := result.Entity("db").(Entity).GetElement().(*Database)
-				other := result.Entity("other").(Entity)
+			b.Filter(makeFilter(b, []string{
+				"db", "other",
+			}, func(db *Database, other Entity) bool {
 				return idInIDs(db.DependentObjects, GetDescID(other))
-			})
+			}))
 		}))
 
 	depRules.Register(
@@ -75,11 +78,11 @@ func init() {
 					SequenceElement,
 				)},
 			})
-			b.Filter(func(result q.Result) bool {
-				db := result.Entity("schema").(Entity).GetElement().(*Schema)
-				other := result.Entity("other").(Entity)
-				return idInIDs(db.DependentObjects, GetDescID(other))
-			})
+			b.Filter(makeFilter(b, []string{
+				"schema", "other",
+			}, func(schema *Schema, other Entity) bool {
+				return idInIDs(schema.DependentObjects, GetDescID(other))
+			}))
 		}))
 
 	depRules.Register(
@@ -131,11 +134,11 @@ func init() {
 				{AttrDirection, DropDirection},
 				{AttrElementType, DefaultExpressionElement},
 			})
-			b.Filter(func(result q.Result) bool {
-				seq := result.Entity("seq").(Entity).GetElement().(*Sequence)
-				defExpr := result.Entity("def_expr").(Entity).GetElement().(*DefaultExpression)
+			b.Filter(makeFilter(b, []string{
+				"seq", "def_expr",
+			}, func(seq *Sequence, defExpr *DefaultExpression) bool {
 				return defaultExprReferencesColumn(seq, defExpr)
-			})
+			}))
 		}))
 
 	dropViewAbsent := []q.AttributeValue{
@@ -149,12 +152,12 @@ func init() {
 		q.MustBuild(func(b q.Builder) {
 			q.Constrain(b, "from", dropViewAbsent)
 			q.Constrain(b, "to", dropViewAbsent)
-			b.Filter(func(result q.Result) bool {
-				from := result.Entity("from").(Entity).GetElement().(*View)
-				to := result.Entity("to").(Entity)
+			b.Filter(makeFilter(b, []string{
+				"from", "to",
+			}, func(from *View, to Entity) bool {
 				toID := GetDescID(to)
 				return GetDescID(from) != toID && idInIDs(from.DependedOnBy, toID)
-			})
+			}))
 		}),
 	)
 	depRules.Register(
@@ -185,11 +188,11 @@ func init() {
 				{AttrStatus, from.Reference(AttrStatus)},
 				{AttrElementType, q.Any(PrimaryIndexElement, SecondaryIndexElement)},
 			})
-			b.Filter(func(result q.Result) bool {
-				from := result.Entity("from").(Entity).GetElement().(*Column)
-				to := result.Entity("to").(Entity).GetElement()
+			b.Filter(makeFilter(b, []string{
+				"from", "to",
+			}, func(from *Column, to Entity) bool {
 				var idx *descpb.IndexDescriptor
-				switch to := to.(type) {
+				switch to := to.GetElement().(type) {
 				case *PrimaryIndex:
 					idx = &to.Index
 				case *SecondaryIndex:
@@ -198,7 +201,7 @@ func init() {
 					panic(errors.AssertionFailedf("unexpected type %T", to))
 				}
 				return indexContainsColumn(idx, from.Column.ID)
-			})
+			}))
 		}))
 
 	primaryIndexReferenceEachOther := q.MustBuild(func(b q.Builder) {
@@ -213,11 +216,11 @@ func init() {
 			{AttrStatus, DeleteAndWriteOnlyStatus},
 			{AttrDescID, add.Reference(AttrDescID)},
 		})
-		b.Filter(func(result q.Result) bool {
-			add := result.Entity("add").(Entity).GetElement().(*PrimaryIndex)
-			drop := result.Entity("drop").(Entity).GetElement().(*PrimaryIndex)
+		b.Filter(makeFilter(b, []string{
+			"add", "drop",
+		}, func(add, drop *PrimaryIndex) bool {
 			return add.OtherPrimaryIndexID == drop.Index.ID
-		})
+		}))
 	})
 	depRules.Register(
 		"primary index add depends on drop",
@@ -230,4 +233,68 @@ func init() {
 		primaryIndexReferenceEachOther,
 	)
 
+}
+
+var (
+	boolType    = reflect.TypeOf((*bool)(nil)).Elem()
+	elementType = reflect.TypeOf((*Element)(nil)).Elem()
+)
+
+func makeFilter(b q.Builder, nodeNames []string, fn interface{}) q.Filter {
+	fv := reflect.ValueOf(fn)
+	ft := fv.Type()
+	if ft.Kind() != reflect.Func {
+		panic(errors.AssertionFailedf("expected %v to be a func, %s", ft))
+	}
+	if ft.NumIn() != len(nodeNames) {
+		panic(errors.AssertionFailedf(
+			"expected %v to have %d arguments corresponding to %q",
+			ft, len(nodeNames), nodeNames))
+	}
+	if ft.NumOut() != 1 || ft.Out(0) != boolType {
+		panic(errors.AssertionFailedf(
+			"expected %v to have one bool return value",
+			ft))
+	}
+	nodes := make([]q.Entity, len(nodeNames))
+	for i, name := range nodeNames {
+		nodes[i] = b.Entity(name)
+	}
+	// We want to then make sure that we do the proper conversions.
+	convertFuncs := make([]func(n eav.Entity) reflect.Value, ft.NumIn())
+	for i := 0; i < ft.NumIn(); i++ {
+		i := i // for closure
+		arg := ft.In(i)
+		switch {
+		case arg == elementType:
+			convertFuncs[i] = func(n eav.Entity) reflect.Value {
+				return reflect.ValueOf(n.(Entity).GetElement()).Convert(elementType)
+			}
+		case arg.Implements(elementType):
+			nodes[i].Constrain(
+				AttrElementType,
+				GetElementType(reflect.Zero(arg).Interface().(Element)),
+			)
+			convertFuncs[i] = func(n eav.Entity) reflect.Value {
+				v := reflect.ValueOf(n.(Entity).GetElement())
+				if v.Type() != arg {
+					panic(errors.AssertionFailedf("expected %v, got type %v for entity %q",
+						arg, v.Type(), nodeNames[i]))
+				}
+				return v
+			}
+		default:
+			panic(errors.AssertionFailedf(
+				"unsupported filter argument type %v for entity %s",
+				arg, nodeNames[i]))
+		}
+	}
+	return func(result q.Result) bool {
+		resContainers := make([]reflect.Value, len(nodes))
+		for i, conv := range convertFuncs {
+			resContainers[i] = conv(result.Entity(nodeNames[i]))
+		}
+		out := fv.Call(resContainers)
+		return out[0].Interface().(bool)
+	}
 }
