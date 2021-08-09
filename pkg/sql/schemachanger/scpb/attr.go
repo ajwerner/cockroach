@@ -50,10 +50,14 @@ const (
 	AttrName
 	// AttrIndexID is the index ID to which this element corresponds.
 	AttrIndexID
-	// AttrDirection is the direction of a Target or Node.
+	// AttrDirection is the direction of a Target.
 	AttrDirection
 	// AttrStatus is the Status of a Node.
 	AttrStatus
+	// AttrElement references an element.
+	AttrElement
+	// AttrTarget is the reference from a node to a target.
+	AttrTarget
 
 	NumAttrs int = iota
 )
@@ -74,6 +78,8 @@ var attrSet = attributes{
 	AttrIndexID,
 	AttrDirection,
 	AttrStatus,
+	AttrElement,
+	AttrTarget,
 }
 
 var attributeOrdinals = eav.MakeOrdinalSetWithAttributes(attrSet[:])

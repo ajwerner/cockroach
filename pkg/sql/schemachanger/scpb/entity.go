@@ -49,6 +49,16 @@ type Node struct {
 	Status Status
 }
 
+type ElementStatus struct {
+	Element   *ElementProto
+	Direction Target_Direction
+	Status    Status
+}
+
+func (es *ElementStatus) GetElement() Element {
+	return es.Element.GetElement()
+}
+
 // GetElement returns the target's element.
 func (n *Node) GetElement() Element {
 	return n.Target.GetElement()

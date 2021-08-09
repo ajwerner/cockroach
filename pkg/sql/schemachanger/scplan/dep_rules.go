@@ -238,6 +238,7 @@ func init() {
 var (
 	boolType    = reflect.TypeOf((*bool)(nil)).Elem()
 	elementType = reflect.TypeOf((*Element)(nil)).Elem()
+	entityType  = reflect.TypeOf((*Entity)(nil)).Elem()
 )
 
 func makeFilter(b q.Builder, nodeNames []string, fn interface{}) q.Filter {
@@ -269,6 +270,10 @@ func makeFilter(b q.Builder, nodeNames []string, fn interface{}) q.Filter {
 		case arg == elementType:
 			convertFuncs[i] = func(n eav.Entity) reflect.Value {
 				return reflect.ValueOf(n.(Entity).GetElement()).Convert(elementType)
+			}
+		case arg == entityType:
+			convertFuncs[i] = func(n eav.Entity) reflect.Value {
+				return reflect.ValueOf(n.(Entity))
 			}
 		case arg.Implements(elementType):
 			nodes[i].Constrain(
