@@ -88,7 +88,7 @@ var _ Attribute = a("")
 
 func TestMusicInfo(t *testing.T) {
 	sc := NewSchema(Mappings{
-		TypeMappings: map[reflect.Type]TypeMappings{
+		TypeMappings: map[reflect.Type]map[string]Attribute{
 			reflect.TypeOf((*Artist)(nil)): {
 				"Name": a("artist"),
 			},

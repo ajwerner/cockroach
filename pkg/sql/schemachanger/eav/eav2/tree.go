@@ -73,7 +73,7 @@ func (t *Tree) insert(e Entity) error {
 	})
 	if removedItem != nil && !Equal(t.schema, removedItem.(*containerItem).Entity, e) {
 		return errors.AssertionFailedf(
-			"expected to remove the item each time: %v %v", removedItem, e,
+			"expected to remove the item each time: %v", removedItem,
 		)
 	}
 	dims := t.dims[1:]

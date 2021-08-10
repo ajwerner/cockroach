@@ -92,6 +92,33 @@ func compare(a, b interface{}) (less, eq bool) {
 	}
 }
 
+var kindTypeMap = map[reflect.Kind]reflect.Type{
+	reflect.Int:     reflect.TypeOf((*int)(nil)).Elem(),
+	reflect.Int64:   reflect.TypeOf((*int64)(nil)).Elem(),
+	reflect.Int32:   reflect.TypeOf((*int32)(nil)).Elem(),
+	reflect.Int16:   reflect.TypeOf((*int16)(nil)).Elem(),
+	reflect.Int8:    reflect.TypeOf((*int8)(nil)).Elem(),
+	reflect.Uint:    reflect.TypeOf((*uint)(nil)).Elem(),
+	reflect.Uint64:  reflect.TypeOf((*uint64)(nil)).Elem(),
+	reflect.Uint32:  reflect.TypeOf((*uint32)(nil)).Elem(),
+	reflect.Uint16:  reflect.TypeOf((*uint16)(nil)).Elem(),
+	reflect.Uint8:   reflect.TypeOf((*uint8)(nil)).Elem(),
+	reflect.Uintptr: reflect.TypeOf((*uintptr)(nil)).Elem(),
+	reflect.String:  reflect.TypeOf((*string)(nil)).Elem(),
+	reflect.Ptr:     reflect.TypeOf((*uintptr)(nil)).Elem(),
+}
+
+func getComparableType(t reflect.Type) reflect.Type {
+	ct, ok := kindTypeMap[t.Kind()]
+	if !ok {
+		panic(errors.AssertionFailedf(
+			"unsupported type %T of kind %v",
+			t, t.Kind(),
+		))
+	}
+	return ct
+}
+
 type Entity struct {
 	ptr uintptr // interface{}
 	typ uintptr // *entityTypeSchema

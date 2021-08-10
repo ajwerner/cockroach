@@ -15,7 +15,7 @@ func TestEav(t *testing.T) {
 		AttributeTypes: map[eav2.Attribute]reflect.Type{
 			scpb.AttrElement: reflect.TypeOf((*protoutil.Message)(nil)).Elem(),
 		},
-		TypeMappings: map[reflect.Type]eav2.TypeMappings{
+		TypeMappings: map[reflect.Type]map[string]eav2.Attribute{
 			reflect.TypeOf((*scpb.Database)(nil)): {
 				"DatabaseID": scpb.AttrDescID,
 			},
@@ -71,8 +71,4 @@ func TestEav(t *testing.T) {
 		t.Logf("here %T %v", entity.Interface(), entity.Interface())
 		return nil
 	}))
-
-	/*
-		require.Equal(t, descpb.ColumnID(1), *sc.GetAttribute(scpb.AttrColumnID, ).(*descpb.ColumnID))
-	*/
 }
