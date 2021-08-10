@@ -1,6 +1,7 @@
 package eav2
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -87,18 +88,18 @@ var _ Attribute = a("")
 
 func TestMusicInfo(t *testing.T) {
 	sc := NewSchema(Mappings{
-		TypeFieldMappings: map[interface{}]FieldMappings{
-			(*Artist)(nil): {
+		TypeMappings: map[reflect.Type]TypeMappings{
+			reflect.TypeOf((*Artist)(nil)): {
 				"Name": a("artist"),
 			},
-			(*Album)(nil): {
+			reflect.TypeOf((*Album)(nil)): {
 				"Name":              a("album"),
 				"Artist":            a("artist"),
 				"ReleaseDate.Day":   a("day"),
 				"ReleaseDate.Month": a("month"),
 				"ReleaseDate.Year":  a("year"),
 			},
-			(*Track)(nil): {
+			reflect.TypeOf((*Track)(nil)): {
 				"Artist":   a("artist"),
 				"Album":    a("album"),
 				"Name":     a("track"),
@@ -106,7 +107,6 @@ func TestMusicInfo(t *testing.T) {
 				"Duration": a("duration"),
 			},
 		},
-		TypeChildMappings: nil,
 	})
 	tr := NewTree(sc, nil)
 	for _, d := range []interface{}{
@@ -116,8 +116,9 @@ func TestMusicInfo(t *testing.T) {
 	} {
 		require.Nil(t, tr.Insert(d))
 	}
-	v := GetValues(sc)
-	sc.Set(v, a("artist"), ArtistName("The Beatles!"))
+	v := sc.MakeValues(Map{
+		a("artist"): ArtistName("The Beatles!"),
+	})
 	_ = tr.Iterate(v, EntityIteratorFunc(func(entity Entity) error {
 		t.Log(entity)
 		return nil

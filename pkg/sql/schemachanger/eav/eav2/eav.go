@@ -64,19 +64,73 @@ func (s *Schema) At(o Ordinal) Attribute {
 	return attr
 }
 
-// GetAttribute returns the attribute value for the provided attribute for
-// an entity. It returns nil if the entity type is not defined or the
-// entity does not contain this type.
-func (s *Schema) GetAttribute(a Attribute, v interface{}) interface{} {
-	t, vv, ok := s.getValueInfo(v)
-	if !ok {
-		return nil
+type SystemAttribute int8
+
+//go:generate stringer -type SystemAttribute
+
+func (s SystemAttribute) Ordinal() Ordinal {
+	return Ordinal(s)
+}
+
+const (
+	_ SystemAttribute = 64 - iota
+
+	// TypeAttribute is an attribute which stores the type of an entity.
+	TypeAttribute
+
+	// IDAttribute is an attribute which stores the ID of an entity.
+	IDAttribute
+
+	maxUserAttribute Ordinal = 64 - iota
+)
+
+var _ Attribute = SystemAttribute(0)
+
+func (e *Entity) init(value reflect.Value, ti *entityTypeSchema, f func(child Entity) error) error {
+	e.ptr = value.Pointer()
+	e.typ = uintptr(unsafe.Pointer(ti))
+	e.Values.m = make(map[Ordinal]interface{})
+	e.Values.m[TypeAttribute.Ordinal()] = &e.typ
+	e.Values.m[IDAttribute.Ordinal()] = &e.ptr
+	for _, field := range ti.fields {
+		if field.inherit {
+			val := field.value(e.ptr)
+			if val == nil {
+				continue
+			}
+			ti.sc.asEntities(val, func(entity Entity) error {
+				if err := f(entity); err != nil {
+					return err
+				}
+				if entity.Interface() == val {
+					e.copyFrom(entity.Values)
+				}
+				return nil
+			})
+		}
+		if e.attrs.Contains(field.attr.Ordinal()) {
+			panicf("%v already contains %v %v", ti.typ, field.attr, field)
+		}
+		compVal := field.comparableValue(e.ptr)
+		e.attrs = e.attrs.Add(field.attr.Ordinal())
+		e.m[field.attr.Ordinal()] = compVal
 	}
-	f, ok := t.attrValues[a]
+	return nil
+}
+
+// AsValues converts an entity into a Values map.
+// If the Entity is not a known type to the Schema, then an
+// error will be returned.
+func (s *Schema) asEntities(e interface{}, f func(Entity) error) error {
+	ti, v, ok := s.getValueInfo(e)
 	if !ok {
-		return nil
+		return errors.Errorf("unknown type %T", e)
 	}
-	return f(vv.Pointer())
+	var entity Entity
+	if err := entity.init(v, ti, f); err != nil {
+		return err
+	}
+	return f(entity)
 }
 
 func (s *Schema) getValueInfo(v interface{}) (*entityTypeSchema, reflect.Value, bool) {
@@ -91,126 +145,82 @@ func (s *Schema) getValueInfo(v interface{}) (*entityTypeSchema, reflect.Value, 
 	return t, vv, ok
 }
 
-func (s *Schema) getComparableValue(attr Attribute, e Entity) interface{} {
-	if v, ok := e.(Values); ok {
-		vv := v.Get(attr)
-		if vv == nil {
-			return nil
-		}
-		vvv := reflect.ValueOf(vv)
-		compType := s.comparableTypeMap[vvv.Type()]
-		if compType == nil {
-			panic(errors.AssertionFailedf("failed to get comparable type for %T %v", vv, s.comparableTypeMap))
-		}
-		return vvv.Convert(compType).Interface()
-	}
-	t, vv, ok := s.getValueInfo(e)
-	if !ok {
-		return nil
-	}
-	f, ok := t.attrComparableValues[attr]
-	if !ok {
-		return nil
-	}
-	return f(vv.Pointer())
-}
-
-func (sc *Schema) GetAttributes(entity Entity) OrdinalSet {
-	if v, ok := entity.(Values); ok {
-		return v.Attributes()
-	}
-	ei, _, ok := sc.getValueInfo(entity)
-	if !ok {
-		panic("here")
-	}
-	return ei.attributes
-}
-
-func (sc *Schema) Set(vm Values, a Attribute, v interface{}) {
-	if vm.sc != sc {
-		panic("here")
-	}
-	typ := sc.attributeTypes[a]
-	vv := reflect.ValueOf(v)
-	if vv.Type().Kind() == reflect.Ptr && vv.Type().Elem() == typ {
-		vm.m[a.Ordinal()] = v
-		return
-	}
-	if vv.Type() == typ {
-		vp := reflect.New(vv.Type())
-		vp.Elem().Set(vv)
-		vm.m[a.Ordinal()] = vp.Interface()
-		return
-	}
-	panic(errors.AssertionFailedf("expected %v for attribute %s, got %T", typ, a, v))
-}
-
-var AttrType Attribute = attrType{}
-
-type attrType struct{}
-
-func (a attrType) String() string {
-	return "type"
-}
-
-func (a attrType) Ordinal() Ordinal {
-	return 0
+func panicf(format string, args ...interface{}) {
+	panic(errors.AssertionFailedWithDepthf(1, format, args...))
 }
 
 func NewSchema(m Mappings) *Schema {
-	panicf := func(format string, args ...interface{}) {
-		panic(errors.AssertionFailedWithDepthf(1, format, args...))
-	}
-	structTypeFromStructPointer := func(t interface{}) reflect.Type {
-		tt := reflect.TypeOf(t)
-		if tt.Kind() != reflect.Ptr {
-			panicf("%T is not a pointer to a struct", t)
-		}
-		if tt.Elem().Kind() != reflect.Struct {
-			panicf("%T is not a pointer to a struct", t)
-		}
-		return tt.Elem()
+	isStructPointer := func(tt reflect.Type) bool {
+		return tt.Kind() == reflect.Ptr && tt.Elem().Kind() == reflect.Struct
 	}
 	attrTypes := make(map[Attribute]reflect.Type)
 	attrByOrd := make(map[Ordinal]Attribute)
+	sc := &Schema{}
 	maybeAddAttribute := func(a Attribute, typ reflect.Type) {
 		// TODO(ajwerner): Validate that t is an okay type for an attribute
 		// to be.
-		if prev, exists := attrTypes[a]; exists && prev != typ {
-			panicf(
-				"%T not %T as previously defined for %s",
-				typ, prev, a,
-			)
+		if prev, exists := attrTypes[a]; exists {
+			if prev.Kind() == reflect.Interface {
+				if !typ.Implements(prev) {
+					panicf(
+						"%v does not implement %v as previously defined for %s",
+						typ, prev, a,
+					)
+				}
+			} else if prev != typ {
+				panicf(
+					"%v is not %v as previously defined for %s",
+					typ, prev, a,
+				)
+			}
+		} else {
+			attrTypes[a] = typ
+			attrByOrd[a.Ordinal()] = a
 		}
-		attrTypes[a] = typ
-		if prev, exists := attrByOrd[a.Ordinal()]; exists && prev != a {
-			panicf(
-				"%s not %s as previously defined for %d",
-				prev, a, a.Ordinal(),
-			)
-		}
-		attrByOrd[a.Ordinal()] = a
 	}
 	for a, t := range m.AttributeTypes {
-		maybeAddAttribute(a, reflect.TypeOf(t))
+		maybeAddAttribute(a, t)
 	}
-	maybeAddAttribute(AttrType, reflectTypeType)
+
 	// We want to know what all of the entity types are
 	entityTypeHandlers := make(map[reflect.Type]*entityTypeSchema)
 	typeToComparableType := make(map[reflect.Type]reflect.Type)
-	for t, fields := range m.TypeFieldMappings {
-		toValue := make(map[Attribute]func(uintptr) interface{})
-		toComparableValue := make(map[Attribute]func(uintptr) interface{})
-		tet := structTypeFromStructPointer(t)
-		var attrs OrdinalSet
-		toValue[AttrType] = func(uintptr uintptr) interface{} { return reflect.TypeOf(t) }
-		toComparableValue[AttrType] = toValue[AttrType]
 
+	getComparableTypeMapping := func(typ reflect.Type) reflect.Type {
+		compType, ok := typeToComparableType[reflect.PtrTo(typ)]
+		if !ok {
+			compType = getComparableType(typ)
+			typeToComparableType[reflect.PtrTo(typ)] = compType
+		}
+		return compType
+	}
+
+	var maybeAddTypeMapping func(t reflect.Type, fields TypeMappings)
+	maybeAddTypeMapping = func(t reflect.Type, fields TypeMappings) {
+		// We mark the type as being added by putting a nil entry in the map.
+		// This way, if we recurse into this closure, we'll detect the cycle.
+		// TODO(ajwerner): Better cycle error reporting.
+		{
+			existing, ok := entityTypeHandlers[t]
+			if ok {
+				if existing != nil {
+					return
+				}
+				panicf("cycle detected for type %v", t)
+			}
+			entityTypeHandlers[t] = nil
+		}
+
+		if !isStructPointer(t) {
+			panicf("%v is not a pointer to a struct", t)
+		}
+		var fieldInfos []fieldInfo
 		for fieldName, attr := range fields {
 			names := strings.Split(fieldName, ".")
-			// TODO(ajwerner): Decide if we're willing to go pointer chasing.
+			// TODO(ajwerner): Decide if we're willing to go pointer chasing
+			// and, if so, figure out how to reason about nil.
 			var offset uintptr
-			cur := tet
+			cur := t.Elem()
 			for _, n := range names {
 				sf, ok := cur.FieldByName(n)
 				if !ok {
@@ -219,52 +229,79 @@ func NewSchema(m Mappings) *Schema {
 				offset += sf.Offset
 				cur = sf.Type
 			}
-
-			// Check to make sure this is not re-defining the attribute.
-			// Compute the lookup function.
-			attrs = attrs.Add(attr.Ordinal())
-
+			// TODO(ajwerner): Deal with making entities out of structs themselves.
 			maybeAddAttribute(attr, cur)
-			compType, ok := typeToComparableType[reflect.PtrTo(cur)]
-			if !ok {
-				compType = getComparableType(cur)
-				typeToComparableType[reflect.PtrTo(cur)] = compType
+			curIsPtr := isStructPointer(cur)
+			if curIsPtr {
+				curFields, ok := m.TypeMappings[cur]
+				if !ok {
+					maybeAddTypeMapping(cur, curFields)
+				}
 			}
-			f := makeValueGetter(cur, offset)
-			toValue[attr] = func(u uintptr) interface{} {
-				return f(u).Interface()
+
+			f := fieldInfo{
+				attr:    attr,
+				inherit: curIsPtr,
 			}
-			toComparableValue[attr] = func(u uintptr) interface{} {
-				return f(u).Convert(compType).Interface()
+			{
+				vg := makeValueGetter(cur, offset)
+				if curIsPtr {
+					f.value = func(u uintptr) interface{} {
+						got := vg(u)
+						if got.Elem().IsNil() {
+							return nil
+						}
+						return got.Elem().Interface()
+					}
+				} else {
+					f.value = func(u uintptr) interface{} { return vg(u).Interface() }
+				}
 			}
+			{
+				compType := getComparableTypeMapping(cur)
+				vg := makeValueGetter(compType, offset)
+				f.comparableValue = func(u uintptr) interface{} {
+					return vg(u).Interface()
+				}
+			}
+			fieldInfos = append(fieldInfos, f)
 		}
-		entityTypeHandlers[reflect.TypeOf(t)] = &entityTypeSchema{
-			attributes:           attrs,
-			attrComparableValues: toComparableValue,
-			attrValues:           toValue,
+
+		entityTypeHandlers[t] = &entityTypeSchema{
+			typ:    t,
+			sc:     sc,
+			fields: fieldInfos,
 		}
 	}
-	return &Schema{
+
+	for t, fields := range m.TypeMappings {
+		maybeAddTypeMapping(t, fields)
+	}
+
+	*sc = Schema{
 		attributes:          nil,
 		attributesByOrdinal: attrByOrd,
 		attributeTypes:      attrTypes,
 		entityTypeHandlers:  entityTypeHandlers,
 		comparableTypeMap:   typeToComparableType,
 	}
+	return sc
 }
 
 var kindTypeMap = map[reflect.Kind]reflect.Type{
-	reflect.Int:    reflect.TypeOf((*int)(nil)),
-	reflect.Int64:  reflect.TypeOf((*int64)(nil)),
-	reflect.Int32:  reflect.TypeOf((*int32)(nil)),
-	reflect.Int16:  reflect.TypeOf((*int16)(nil)),
-	reflect.Int8:   reflect.TypeOf((*int8)(nil)),
-	reflect.Uint:   reflect.TypeOf((*uint)(nil)),
-	reflect.Uint64: reflect.TypeOf((*uint64)(nil)),
-	reflect.Uint32: reflect.TypeOf((*uint32)(nil)),
-	reflect.Uint16: reflect.TypeOf((*uint16)(nil)),
-	reflect.Uint8:  reflect.TypeOf((*uint8)(nil)),
-	reflect.String: reflect.TypeOf((*string)(nil)),
+	reflect.Int:     reflect.TypeOf((*int)(nil)).Elem(),
+	reflect.Int64:   reflect.TypeOf((*int64)(nil)).Elem(),
+	reflect.Int32:   reflect.TypeOf((*int32)(nil)).Elem(),
+	reflect.Int16:   reflect.TypeOf((*int16)(nil)).Elem(),
+	reflect.Int8:    reflect.TypeOf((*int8)(nil)).Elem(),
+	reflect.Uint:    reflect.TypeOf((*uint)(nil)).Elem(),
+	reflect.Uint64:  reflect.TypeOf((*uint64)(nil)).Elem(),
+	reflect.Uint32:  reflect.TypeOf((*uint32)(nil)).Elem(),
+	reflect.Uint16:  reflect.TypeOf((*uint16)(nil)).Elem(),
+	reflect.Uint8:   reflect.TypeOf((*uint8)(nil)).Elem(),
+	reflect.Uintptr: reflect.TypeOf((*uintptr)(nil)).Elem(),
+	reflect.String:  reflect.TypeOf((*string)(nil)).Elem(),
+	reflect.Ptr:     reflect.TypeOf((*uintptr)(nil)).Elem(),
 }
 
 func getComparableType(t reflect.Type) reflect.Type {
@@ -300,28 +337,56 @@ type value interface {
 	compare(other value) int
 }
 
+type childMap struct {
+	attr Attribute
+	ti   *entityTypeSchema
+	gen  func(parent, childPtr interface{})
+}
+
 type entityTypeSchema struct {
-	attributes           OrdinalSet
-	attrComparableValues map[Attribute]func(uintptr) interface{}
-	attrValues           map[Attribute]func(uintptr) interface{}
+	sc     *Schema
+	typ    reflect.Type
+	fields []fieldInfo
+	// intensional          bool
 }
 
-func (s *entityTypeSchema) getComparableValue(attr Attribute, av reflect.Value) interface{} {
-	f, ok := s.attrComparableValues[attr]
-	if !ok {
-		return nil
-	}
-	return f(av.Pointer())
+type fieldInfo struct {
+	attr            Attribute
+	comparableValue func(uintptr) interface{}
+	value           func(uintptr) interface{}
+	inherit         bool
 }
 
-type FieldMappings map[string]Attribute
+type TypeMappings map[string]Attribute
 
-type ChildMappings map[Attribute]interface{}
+type junk struct {
+	// Fields is a map from public field names to the corresponding attribute.
+	Fields interface{}
+	// Children is a mapping of Attribute to functions to generate child
+	// entity objects.
+	Children map[Attribute]interface{} // map[Attribute]func(this ThisT, child *ChildT)
+	// Intensional indicates that there may be more than one entity in the
+	// database which has all of the fields with values the same as this one,
+	// other than its address. This is as opposed to extensional, meaning it
+	// has an identity is defined as the setting of its attributes (other than
+	// address). If false, a unique constraint will be added for values of this
+	// type such that attempts to insert an equivalent value into the database
+	// will result in an error and such that containment queries will return
+	// results based on properties and not address equality.
+	Intensional bool
+}
+
+type ParentMappings map[Attribute]interface{}
+
+type UniqueConstraint struct {
+	Name  string
+	Attrs []Attribute
+}
 
 type Mappings struct {
 	// Will be inferred from fields. Must be defined for
 	// attributes which are not in fields.
-	AttributeTypes    map[Attribute]interface{}
-	TypeFieldMappings map[interface{}]FieldMappings
-	TypeChildMappings map[interface{}]ChildMappings
+	AttributeTypes map[Attribute]reflect.Type
+	TypeMappings   map[reflect.Type]TypeMappings
+	// TODO(ajwerner): Unique constraints, extensional types
 }

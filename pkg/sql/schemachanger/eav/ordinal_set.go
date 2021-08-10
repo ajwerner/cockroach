@@ -16,6 +16,9 @@ import "math/bits"
 // Attribute.
 func MakeOrdinalSetWithAttributes(attrs []Attribute) (m OrdinalSet) {
 	for _, a := range attrs {
+		if a == nil {
+			continue
+		}
 		m = m.Add(a.Ordinal())
 	}
 	return m

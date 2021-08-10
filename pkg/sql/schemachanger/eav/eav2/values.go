@@ -10,68 +10,57 @@
 
 package eav2
 
-import "sync"
+import (
+	"reflect"
 
-// Values is used to store a select elements from a Tree.
+	"github.com/cockroachdb/errors"
+)
+
+// Values is a container for data.
+//
+// It stores the data in a format which is convenient for performing
+// comparisons and lookups. If you want strongly typed data out of it,
+// you need to use a Schema to retrieve that data.
 type Values struct {
-	sc *Schema
-	m  map[Ordinal]interface{}
+	attrs OrdinalSet
+	m     map[Ordinal]interface{}
 }
 
-// GetValues retrieves a Values instance from the sync pool. Use
-// Release to put it back in the pool. Values are often used in
-// contexts with well-defined lifecycles, hence the pooling.
-func GetValues(sc *Schema) Values {
-	m := valuesSyncPool.Get().(map[Ordinal]interface{})
-	return Values{
-		sc: sc,
-		m:  m,
+// get retrieves the primitive values stores in the values
+// struct.
+func (v Values) get(a Attribute) interface{} {
+	return v.m[a.Ordinal()]
+}
+
+func (vv *Values) copyFrom(values Values) {
+	for ord, v := range values.m {
+		if ord < maxUserAttribute {
+			vv.attrs = vv.attrs.Add(ord)
+			vv.m[ord] = v
+		}
 	}
 }
 
-// Copy clones the Values into a newly allocated map.
-func (vv *Values) Copy() Values {
-	cpy := GetValues(vv.sc)
-	for k, v := range vv.m {
-		cpy.m[k] = v
+type Map map[Attribute]interface{}
+
+func (s *Schema) MakeValues(m Map) Values {
+	vm := Values{
+		m: make(map[Ordinal]interface{}),
 	}
-	return cpy
-}
-
-// Release releases the Values back into the pool.
-func (v *Values) Release() {
-	for k := range v.m {
-		delete(v.m, k)
+	for a, v := range m {
+		vv := reflect.ValueOf(v)
+		typ := s.attributeTypes[a]
+		if vv.Type().Kind() == reflect.Ptr && vv.Type().Elem() == typ {
+			vm.m[a.Ordinal()] = v
+			continue
+		}
+		if vv.Type() == typ {
+			vp := reflect.New(vv.Type())
+			vp.Elem().Set(vv)
+			vm.m[a.Ordinal()] = vp.Interface()
+			continue
+		}
+		panic(errors.AssertionFailedf("expected %v for attribute %s, got %T", typ, a, v))
 	}
-	valuesSyncPool.Put(v.m)
-	*v = Values{}
-}
-
-// Attributes returns the set of attributes defined on this Values.
-func (vv Values) Attributes() OrdinalSet {
-	var ret OrdinalSet
-	for o := range vv.m {
-		ret = ret.Add(o)
-	}
-	return ret
-}
-
-// Set sets the given attribute value. Note that v may be nil and it will
-// still set mark this attribute as being set.
-func (vv Values) Set(attr Attribute, v interface{}) {
-	// TODO(ajwerner): Type checking.
-	if v != nil {
-		vv.m[attr.Ordinal()] = v
-	}
-}
-
-// Get retrieves the given attribute value.
-func (vv Values) Get(a Attribute) interface{} {
-	return vv.m[a.Ordinal()]
-}
-
-var valuesSyncPool = sync.Pool{
-	New: func() interface{} {
-		return make(map[Ordinal]interface{})
-	},
+	return vm
 }

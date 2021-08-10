@@ -8,23 +8,26 @@ func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
 	// Re-run the stringer command to generate them again.
 	var x [1]struct{}
-	_ = x[AttrElementType-0]
-	_ = x[AttrDescID-1]
-	_ = x[AttrReferencedDescID-2]
-	_ = x[AttrColumnID-3]
-	_ = x[AttrName-4]
-	_ = x[AttrIndexID-5]
-	_ = x[AttrDirection-6]
-	_ = x[AttrStatus-7]
+	_ = x[AttrElementType-1]
+	_ = x[AttrDescID-2]
+	_ = x[AttrReferencedDescID-3]
+	_ = x[AttrColumnID-4]
+	_ = x[AttrName-5]
+	_ = x[AttrIndexID-6]
+	_ = x[AttrDirection-7]
+	_ = x[AttrStatus-8]
+	_ = x[AttrElement-9]
+	_ = x[AttrTarget-10]
 }
 
-const _Attr_name = "ElementTypeDescIDReferencedDescIDColumnIDNameIndexIDDirectionStatus"
+const _Attr_name = "ElementTypeDescIDReferencedDescIDColumnIDNameIndexIDDirectionStatusElementTarget"
 
-var _Attr_index = [...]uint8{0, 11, 17, 33, 41, 45, 52, 61, 67}
+var _Attr_index = [...]uint8{0, 11, 17, 33, 41, 45, 52, 61, 67, 74, 80}
 
 func (i Attr) String() string {
+	i -= 1
 	if i < 0 || i >= Attr(len(_Attr_index)-1) {
-		return "Attr(" + strconv.FormatInt(int64(i), 10) + ")"
+		return "Attr(" + strconv.FormatInt(int64(i+1), 10) + ")"
 	}
 	return _Attr_name[_Attr_index[i]:_Attr_index[i+1]]
 }

@@ -12,6 +12,7 @@ package eav2
 
 import (
 	"reflect"
+	"unsafe"
 
 	"github.com/cockroachdb/errors"
 )
@@ -86,21 +87,25 @@ func compare(a, b interface{}) (less, eq bool) {
 			return true, false
 		}
 		return false, *a == *b
-	case reflect.Type:
-		b := b.(reflect.Type)
-		if a == b {
-			return false, true
-		}
-		if a.PkgPath() == b.PkgPath() {
-			return a.Name() < b.Name(), false
-		}
-		return a.PkgPath() < b.PkgPath(), false
 	default:
 		panic(errors.AssertionFailedf("incomparable types %T and %T", a, b))
 	}
 }
 
-type Entity interface{}
+type Entity struct {
+	ptr uintptr // interface{}
+	typ uintptr // *entityTypeSchema
+	Values
+}
+
+func (e *Entity) Interface() interface{} {
+	ti := e.getTypeInfo()
+	return reflect.NewAt(ti.typ.Elem(), unsafe.Pointer(e.ptr)).Interface()
+}
+
+func (e *Entity) getTypeInfo() *entityTypeSchema {
+	return (*entityTypeSchema)(unsafe.Pointer(e.typ))
+}
 
 // compareOn compares two elements on a given attribute.
 // If the entities do not return the same type of value for the
@@ -108,9 +113,9 @@ type Entity interface{}
 // either or both do not contain this attribute. The lack of a
 // value is considered the highest value; you can think of this
 // library as sorting with NULLS LAST.
-func (sc *Schema) compareOn(attr Attribute, a, b Entity) (less, eq bool) {
-	av := sc.getComparableValue(attr, a)
-	bv := sc.getComparableValue(attr, b)
+func compareOn(attr Attribute, a, b Values) (less, eq bool) {
+	av := a.get(attr)
+	bv := b.get(attr)
 	switch {
 	case av == nil && bv == nil:
 		return false, true
@@ -124,11 +129,14 @@ func (sc *Schema) compareOn(attr Attribute, a, b Entity) (less, eq bool) {
 }
 
 // Compare compares two elements by their attributes.
-func Compare(s *Schema, a, b Entity) (less, eq bool) {
+func compareEntities(s *Schema, a, b Entity) (less, eq bool) {
+	if a.ptr == b.ptr {
+		return false, true
+	}
 	OrdinalSet.Union(
-		s.GetAttributes(a), s.GetAttributes(b),
+		a.attrs, b.attrs,
 	).ForEach(s, func(attr Attribute) (wantMore bool) {
-		less, eq = s.compareOn(attr, a, b)
+		less, eq = compareOn(attr, a.Values, b.Values)
 		return eq
 	})
 	return less, eq
@@ -136,6 +144,6 @@ func Compare(s *Schema, a, b Entity) (less, eq bool) {
 
 // Equal returns true if the two elements have identical attributes.
 func Equal(s *Schema, a, b Entity) bool {
-	_, eq := Compare(s, a, b)
+	_, eq := compareEntities(s, a, b)
 	return eq
 }

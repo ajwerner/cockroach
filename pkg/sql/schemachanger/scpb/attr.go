@@ -37,9 +37,9 @@ var _ eav.Attribute = Attr(0)
 
 //go:generate stringer -type=Attr -trimprefix=Attr
 const (
-
+	_ Attr = iota // reserve 0 for eav2.TypeAttribute
 	// AttrElementType type id of the element.
-	AttrElementType Attr = iota
+	AttrElementType
 	// AttrDescID is the descriptor ID to which this element belongs.
 	AttrDescID
 	// AttrReferencedDescID is the descriptor ID to which this element refers.

@@ -1,51 +1,78 @@
 package eav2_test
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav/eav2"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
-	"github.com/stretchr/testify/require"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 )
 
 func TestEav(t *testing.T) {
 	sc := eav2.NewSchema(eav2.Mappings{
-		TypeFieldMappings: map[interface{}]eav2.FieldMappings{
-			(*scpb.Database)(nil): {
+		AttributeTypes: map[eav2.Attribute]reflect.Type{
+			scpb.AttrElement: reflect.TypeOf((*protoutil.Message)(nil)).Elem(),
+		},
+		TypeMappings: map[reflect.Type]eav2.TypeMappings{
+			reflect.TypeOf((*scpb.Database)(nil)): {
 				"DatabaseID": scpb.AttrDescID,
 			},
-			(*scpb.Table)(nil): {
+			reflect.TypeOf((*scpb.Table)(nil)): {
 				"TableID": scpb.AttrDescID,
 			},
-			(*scpb.Column)(nil): {
+			reflect.TypeOf((*scpb.Column)(nil)): {
 				"TableID":   scpb.AttrDescID,
 				"Column.ID": scpb.AttrColumnID,
 			},
-			(*scpb.Target)(nil): {
-				"Direction": scpb.AttrDirection,
+			reflect.TypeOf((*scpb.Target)(nil)): {
+				"Direction":            scpb.AttrDirection,
+				"Column":               scpb.AttrElement,
+				"PrimaryIndex":         scpb.AttrElement,
+				"SecondaryIndex":       scpb.AttrElement,
+				"SequenceDependency":   scpb.AttrElement,
+				"UniqueConstraint":     scpb.AttrElement,
+				"CheckConstraint":      scpb.AttrElement,
+				"Sequence":             scpb.AttrElement,
+				"DefaultExpression":    scpb.AttrElement,
+				"View":                 scpb.AttrElement,
+				"TypeRef":              scpb.AttrElement,
+				"Table":                scpb.AttrElement,
+				"OutForeignKey":        scpb.AttrElement,
+				"InForeignKey":         scpb.AttrElement,
+				"RelationDependedOnBy": scpb.AttrElement,
+				"SequenceOwner":        scpb.AttrElement,
+				"Type":                 scpb.AttrElement,
+				"Schema":               scpb.AttrElement,
+				"Database":             scpb.AttrElement,
 			},
-			(*scpb.Node)(nil): {
+			reflect.TypeOf((*scpb.Node)(nil)): {
 				"Status": scpb.AttrStatus,
-			},
-		},
-		TypeChildMappings: map[interface{}]eav2.ChildMappings{
-			(*scpb.Target)(nil): {
-				scpb.AttrElement: (*scpb.Target).GetElement,
-			},
-			(*scpb.Node)(nil): {
-				scpb.AttrTarget: func(n *scpb.Node) *scpb.Target { return n.Target },
+				"Target": scpb.AttrTarget,
 			},
 		},
 	})
 
-	require.Equal(t, descpb.ColumnID(1), *sc.GetAttribute(scpb.AttrColumnID, &scpb.Column{
-		TableID:    1,
-		FamilyID:   1,
-		FamilyName: "asdf",
-		Column: descpb.ColumnDescriptor{
-			ID: 1,
-		},
-	}).(*descpb.ColumnID))
+	n := &scpb.Node{
+		Target: scpb.NewTarget(scpb.Target_DROP, &scpb.Column{
+			TableID:    1,
+			FamilyID:   1,
+			FamilyName: "asdf",
+			Column: descpb.ColumnDescriptor{
+				ID: 1,
+			},
+		}),
+		Status: scpb.Status_ABSENT,
+	}
+	tr := eav2.NewTree(sc, nil)
+	tr.Insert(n)
+	tr.Iterate(eav2.Values{}, eav2.EntityIteratorFunc(func(entity eav2.Entity) error {
+		t.Logf("here %T %v", entity.Interface(), entity.Interface())
+		return nil
+	}))
 
+	/*
+		require.Equal(t, descpb.ColumnID(1), *sc.GetAttribute(scpb.AttrColumnID, ).(*descpb.ColumnID))
+	*/
 }

@@ -12,7 +12,6 @@ package eav2
 
 import (
 	"math"
-	"reflect"
 	"sync"
 	"unsafe"
 
@@ -59,13 +58,23 @@ func NewTree(sc *Schema, indexes [][]Attribute) *Tree {
 }
 
 // Insert inserts an entity.
-func (t *Tree) Insert(e Entity) (removed Entity) {
+func (t *Tree) Insert(e interface{}) error {
+	// I think what it means is that if we already have the object, then
+	// it's a no-op? If we do not, then it's got to be something else.
+	return t.schema.asEntities(e, func(entity Entity) error {
+		return t.insert(entity)
+	})
+}
+
+func (t *Tree) insert(e Entity) error {
 	removedItem := t.t.ReplaceOrInsert(&containerItem{
 		Entity:    e,
-		indexSpec: &t.dims[0]},
-	)
-	if removedItem != nil && !Equal(t.schema, removedItem.(item).getEntity(), e) {
-		panic("here")
+		indexSpec: &t.dims[0],
+	})
+	if removedItem != nil && !Equal(t.schema, removedItem.(*containerItem).Entity, e) {
+		return errors.AssertionFailedf(
+			"expected to remove the item each time: %v %v", removedItem, e,
+		)
 	}
 	dims := t.dims[1:]
 	for i := range dims {
@@ -73,13 +82,10 @@ func (t *Tree) Insert(e Entity) (removed Entity) {
 			Entity:    e,
 			indexSpec: &dims[i],
 		}); (removedItem == nil) != (g == nil) {
-			panic(errors.AssertionFailedf(
+			return errors.AssertionFailedf(
 				"expected to remove the item each time: %v %v", removedItem, g,
-			))
+			)
 		}
-	}
-	if removedItem != nil {
-		return removedItem.(*containerItem).Entity
 	}
 	return nil
 }
@@ -94,9 +100,9 @@ type indexSpec struct {
 func (t *Tree) Iterate(where Values, f EntityIterator) (err error) {
 	var all, nils, nonNils OrdinalSet
 	{
-		all = where.Attributes()
+		all = where.attrs
 		all.ForEach(t.schema, func(a Attribute) (wantMore bool) {
-			if where.Get(a) == nil {
+			if where.get(a) == nil {
 				nils = nils.Add(a.Ordinal())
 			}
 			return true
@@ -112,13 +118,13 @@ func (t *Tree) Iterate(where Values, f EntityIterator) (err error) {
 		// We want to skip items which do not have values set for
 		// all members of the where clause or which have values set
 		// for attributes where we explicitly do not want them.
-		if cAttrs := t.schema.GetAttributes(c.Entity); nonNils.Without(cAttrs) != 0 ||
+		if cAttrs := c.Entity.attrs; nonNils.Without(cAttrs) != 0 ||
 			nils.Intersection(cAttrs) != 0 {
 			return true
 		}
 		var failed bool
 		toCheck.ForEach(t.schema, func(a Attribute) (wantMore bool) {
-			_, eq := t.schema.compareOn(a, c.Entity, where)
+			_, eq := compareOn(a, c.Values, where)
 			failed = !eq
 			return !failed
 		})
@@ -139,7 +145,7 @@ type item interface {
 	btree.Item
 	getIndexSpec() *indexSpec
 	compareAttrs() OrdinalSet
-	getEntity() Entity
+	getValues() Values
 }
 
 var _ item = (*containerItem)(nil)
@@ -198,24 +204,12 @@ type valuesItem struct {
 	end bool
 }
 
-func (v *valuesItem) getEntity() Entity {
-	return v.Values
-}
-
-func (v *valuesItem) Get(attr Attribute) interface{} {
-	// TODO(ajwerner): Convert to the comparable type.
-	vv := reflect.ValueOf(v.Values.Get(attr))
-	if !vv.IsValid() {
-		return nil
-	}
-	return vv.Convert(v.sc.comparableTypeMap[vv.Type()]).Interface()
-}
-
 func (v *valuesItem) compareAttrs() OrdinalSet {
 	return v.m
 }
 
 func (v *valuesItem) getIndexSpec() *indexSpec { return v.indexSpec }
+func (v *valuesItem) getValues() Values        { return v.Values }
 
 var valuesItemPool = sync.Pool{
 	New: func() interface{} { return new(valuesItem) },
@@ -248,8 +242,8 @@ type containerItem struct {
 	Entity
 }
 
-func (c *containerItem) getEntity() Entity {
-	return c.Entity
+func (c *containerItem) getValues() Values {
+	return c.Values
 }
 
 func (c *containerItem) compareAttrs() OrdinalSet {
@@ -261,7 +255,7 @@ func (c *containerItem) getIndexSpec() *indexSpec {
 }
 
 func (c *containerItem) Get(attr Attribute) interface{} {
-	return c.s.getComparableValue(attr, c.Entity)
+	return c.Entity.get(attr)
 }
 
 func (c *containerItem) Less(than btree.Item) bool {
@@ -284,7 +278,7 @@ func compareItems(a, b item) (less bool) {
 		if !toCompare.Contains(at.Ordinal()) {
 			break
 		}
-		less, eq = index.s.compareOn(at, a.getEntity(), b.getEntity())
+		less, eq = compareOn(at, a.getValues(), b.getValues())
 		if !eq {
 			return less
 		}
@@ -298,6 +292,6 @@ func compareItems(a, b item) (less bool) {
 	}
 
 	// Compare the entities across all the attributes.
-	less, _ = Compare(index.s, a.getEntity(), b.getEntity())
+	less, _ = compareEntities(index.s, a.(*containerItem).Entity, b.(*containerItem).Entity)
 	return less
 }
