@@ -58,6 +58,9 @@ const (
 	AttrElement
 	// AttrTarget is the reference from a node to a target.
 	AttrTarget
+	// AttrParentID is the parent of this descriptor.
+	AttrParentID
+	AttrParentSchemaID
 
 	NumAttrs int = iota
 )

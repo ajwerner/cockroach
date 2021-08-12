@@ -9,23 +9,26 @@ import (
 )
 
 type Schema struct {
-	attributesByOrdinal map[Ordinal]Attribute
-	attributeTypes      map[Attribute]reflect.Type
-	entityTypeSchemas   map[reflect.Type]*entityTypeSchema
+	attributesByOrdinal  map[Ordinal]Attribute
+	attributeTypes       map[Attribute]reflect.Type
+	entityTypeSchemas    map[reflect.Type]*entityTypeSchema
+	typeToComparableType map[reflect.Type]reflect.Type
 }
 
 type entityTypeSchema struct {
-	sc     *Schema
-	typ    reflect.Type
-	fields []fieldInfo
+	sc               *Schema
+	typ              reflect.Type
+	fields           []fieldInfo
+	scalarAttrFields map[Attribute]*fieldInfo
 	// intensional          bool
 }
 
 type fieldInfo struct {
+	typ             reflect.Type
 	attr            Attribute
 	comparableValue func(uintptr) interface{}
 	value           func(uintptr) interface{}
-	inherit         bool
+	isEntity        bool
 }
 
 // Mappings defines how to map data types to attributes.
@@ -35,13 +38,13 @@ type Mappings struct {
 	// attributes which are not in fields.
 	AttributeTypes map[Attribute]reflect.Type
 
-	// TypeMappings is a map from a type to a map of fields to attributes.
+	// TypeMappings is A map from A type to A map of fields to attributes.
 	// The types must be struct pointers. The fields must be exported and
 	// may be either primitive types or struct pointers.
 	//
 	// For struct pointers, new entities will be added and the reference to
 	// that type will be stored in the current entity. An attribute may appear
-	// more than once in a mapping in the case that all of the times it appears
+	// more than once in A mapping in the case that all of the times it appears
 	// are for pointers and at most one of those pointers is non-nil.
 	//
 	// TODO(ajwerner): Support pointers to primitive types as well as interface
@@ -83,23 +86,25 @@ func NewSchema(m Mappings) *Schema {
 	for a, t := range m.AttributeTypes {
 		maybeAddAttribute(a, t)
 	}
+	maybeAddAttribute(TypeAttribute, reflect.TypeOf((*reflect.Type)(nil)).Elem())
+	maybeAddAttribute(IDAttribute, reflect.TypeOf((*interface{})(nil)).Elem())
 
 	// We want to know what all of the entity types are
 	entityTypeHandlers := make(map[reflect.Type]*entityTypeSchema)
 	typeToComparableType := make(map[reflect.Type]reflect.Type)
 
 	getComparableTypeMapping := func(typ reflect.Type) reflect.Type {
-		compType, ok := typeToComparableType[reflect.PtrTo(typ)]
+		compType, ok := typeToComparableType[typ]
 		if !ok {
 			compType = getComparableType(typ)
-			typeToComparableType[reflect.PtrTo(typ)] = compType
+			typeToComparableType[typ] = compType
 		}
 		return compType
 	}
 
 	var maybeAddTypeMapping func(t reflect.Type, fields map[string]Attribute)
 	maybeAddTypeMapping = func(t reflect.Type, fields map[string]Attribute) {
-		// We mark the type as being added by putting a nil entry in the map.
+		// We mark the type as being added by putting A nil entry in the map.
 		// This way, if we recurse into this closure, we'll detect the cycle.
 		// TODO(ajwerner): Better cycle error reporting.
 		{
@@ -114,7 +119,7 @@ func NewSchema(m Mappings) *Schema {
 		}
 
 		if !isStructPointer(t) {
-			panicf("%v is not a pointer to a struct", t)
+			panicf("%v is not A pointer to A struct", t)
 		}
 		var fieldInfos []fieldInfo
 		for fieldName, attr := range fields {
@@ -126,7 +131,7 @@ func NewSchema(m Mappings) *Schema {
 			for _, n := range names {
 				sf, ok := cur.FieldByName(n)
 				if !ok {
-					panicf("%T.%s is not a field", t, fieldName)
+					panicf("%T.%s is not A field", t, fieldName)
 				}
 				offset += sf.Offset
 				cur = sf.Type
@@ -142,8 +147,9 @@ func NewSchema(m Mappings) *Schema {
 			}
 
 			f := fieldInfo{
-				attr:    attr,
-				inherit: curIsPtr,
+				attr:     attr,
+				isEntity: curIsPtr,
+				typ:      cur,
 			}
 			{
 				vg := makeValueGetter(cur, offset)
@@ -168,11 +174,19 @@ func NewSchema(m Mappings) *Schema {
 			}
 			fieldInfos = append(fieldInfos, f)
 		}
-
+		scalarAttrFields := make(map[Attribute]*fieldInfo)
+		for i := range fieldInfos {
+			fi := &fieldInfos[i]
+			if fi.isEntity {
+				continue
+			}
+			scalarAttrFields[fi.attr] = fi
+		}
 		entityTypeHandlers[t] = &entityTypeSchema{
-			typ:    t,
-			sc:     sc,
-			fields: fieldInfos,
+			typ:              t,
+			sc:               sc,
+			fields:           fieldInfos,
+			scalarAttrFields: scalarAttrFields,
 		}
 	}
 
@@ -181,9 +195,10 @@ func NewSchema(m Mappings) *Schema {
 	}
 
 	*sc = Schema{
-		attributesByOrdinal: attrByOrd,
-		attributeTypes:      attrTypes,
-		entityTypeSchemas:   entityTypeHandlers,
+		attributesByOrdinal:  attrByOrd,
+		attributeTypes:       attrTypes,
+		entityTypeSchemas:    entityTypeHandlers,
+		typeToComparableType: typeToComparableType,
 	}
 	return sc
 }

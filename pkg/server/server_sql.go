@@ -712,7 +712,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 	execCfg.StmtDiagnosticsRecorder = stmtDiagnosticsRegistry
 
 	{
-		// We only need to attach a version upgrade hook if we're the system
+		// We only need to attach a version a hook if we're the system
 		// tenant. Regular tenants are disallowed from changing cluster
 		// versions.
 		var c migration.Cluster

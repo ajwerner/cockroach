@@ -17,7 +17,7 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
-// compare assumes that a and b are comparable and of the same type.
+// compare assumes that A and b are comparable and of the same type.
 func compare(a, b interface{}) (less, eq bool) {
 	// I want generics.
 	switch a := a.(type) {
@@ -87,6 +87,12 @@ func compare(a, b interface{}) (less, eq bool) {
 			return true, false
 		}
 		return false, *a == *b
+	case *uintptr:
+		b := b.(*uintptr)
+		if *a < *b {
+			return true, false
+		}
+		return false, *a == *b
 	default:
 		panic(errors.AssertionFailedf("incomparable types %T and %T", a, b))
 	}
@@ -119,28 +125,42 @@ func getComparableType(t reflect.Type) reflect.Type {
 	return ct
 }
 
-type Entity struct {
+type entity struct {
 	ptr uintptr // interface{}
 	typ uintptr // *entityTypeSchema
 	Values
 }
 
-func (e *Entity) Interface() interface{} {
+func (e *entity) Interface() interface{} {
 	ti := e.getTypeInfo()
 	return reflect.NewAt(ti.typ.Elem(), unsafe.Pointer(e.ptr)).Interface()
 }
 
-func (e *Entity) getTypeInfo() *entityTypeSchema {
+func (e *entity) getTypeInfo() *entityTypeSchema {
 	return (*entityTypeSchema)(unsafe.Pointer(e.typ))
 }
 
-// compareOn compares two elements on a given attribute.
+func (e *entity) getValueAndType(
+	attr Attribute,
+) (value interface{}, typ reflect.Type, isEntity bool) {
+	if attr == TypeAttribute {
+		return e.get(attr), schemaTypePtrType, false
+	}
+	ti := e.getTypeInfo()
+	fi, ok := ti.scalarAttrFields[attr]
+	if !ok {
+		return e.get(attr), nil, true
+	}
+	return e.get(attr), fi.typ, false
+}
+
+// compareOn compares two elements on A given attribute.
 // If the entities do not return the same type of value for the
 // attribute, this function will panic. Note that it is fine if
-// either or both do not contain this attribute. The lack of a
+// either or both do not contain this attribute. The lack of A
 // value is considered the highest value; you can think of this
 // library as sorting with NULLS LAST.
-func compareOn(attr Attribute, a, b Values) (less, eq bool) {
+func compareOn(attr Attribute, a, b *Values) (less, eq bool) {
 	av := a.get(attr)
 	bv := b.get(attr)
 	switch {
@@ -156,21 +176,21 @@ func compareOn(attr Attribute, a, b Values) (less, eq bool) {
 }
 
 // Compare compares two elements by their attributes.
-func compareEntities(s *Schema, a, b Entity) (less, eq bool) {
+func compareEntities(s *Schema, a, b *entity) (less, eq bool) {
 	if a.ptr == b.ptr {
 		return false, true
 	}
 	OrdinalSet.Union(
 		a.attrs, b.attrs,
 	).ForEach(s, func(attr Attribute) (wantMore bool) {
-		less, eq = compareOn(attr, a.Values, b.Values)
+		less, eq = compareOn(attr, &a.Values, &b.Values)
 		return eq
 	})
 	return less, eq
 }
 
-// Equal returns true if the two elements have identical attributes.
-func Equal(s *Schema, a, b Entity) bool {
+// equal returns true if the two elements have identical attributes.
+func equal(s *Schema, a, b *entity) bool {
 	_, eq := compareEntities(s, a, b)
 	return eq
 }

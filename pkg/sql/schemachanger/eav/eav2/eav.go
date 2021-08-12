@@ -16,28 +16,32 @@ type Database interface {
 	Schema() *Schema
 
 	// Iterate iterates the database for all entities which have the
-	// value settings specified by where. Use a nil where to iterate
+	// value settings specified by where. Use A nil where to iterate
 	// all entities.
-	Iterate(where Values, iterator EntityIterator) error
+	Iterate(where *Values, iterator EntityIterator) error
 }
 
-// DatabaseWriter is used to a database.
+// DatabaseWriter is used to A database.
 type DatabaseWriter interface {
 	Database
 
-	// Insert will insert the Entity into the database. If another entity with
+	// Insert will insert the entity into the database. If another entity with
 	// all of the same attribute values exists in the database, it will be
 	// overwritten and returned.
-	Insert(entity Entity) (replaced Entity)
+	Insert(entity interface{}) error
 
 	// TODO(ajwerner): Consider adding Delete and DeleteWhere.
 }
 
 // EntityIterator is used to iterate Entities.
 type EntityIterator interface {
-	// Visit visits an Entity. If iterutil.StopIteration
+	// Visit visits an entity. If iterutil.StopIteration
 	// is returned, iteration will stop but no error is returned.
 	Visit(Entity) error
+}
+
+type Entity interface {
+	Interface() interface{}
 }
 
 // EntityIteratorFunc implements EntityIterator.
@@ -53,7 +57,7 @@ type Attribute interface {
 	Ordinal() Ordinal
 }
 
-// Ordinal is used to correlate attributes in a schema.
+// Ordinal is used to correlate attributes in A schema.
 // It enables use of the OrdinalSet.
 type Ordinal = eav.Ordinal
 
@@ -79,44 +83,42 @@ const (
 
 var _ Attribute = SystemAttribute(0)
 
-func (s *Schema) makeEntity(v interface{}, f func(child Entity) error) (Entity, error) {
+func (s *Schema) makeEntity(v interface{}, f func(child entity) error) (entity, error) {
 	ti, value, ok := s.getValueInfo(v)
 	if !ok {
-		return Entity{}, errors.Errorf("invalid nil entity of type %T", v)
+		return entity{}, errors.Errorf("invalid nil entity of type %T", v)
 	}
 
-	var e Entity
+	var e entity
 	e.ptr = value.Pointer()
 	e.typ = uintptr(unsafe.Pointer(ti))
 	e.Values.m = make(map[Ordinal]interface{})
-	e.Values.m[TypeAttribute.Ordinal()] = &e.typ
-	e.Values.m[IDAttribute.Ordinal()] = &e.ptr
+	e.add(TypeAttribute.Ordinal(), &e.typ)
+	e.add(IDAttribute.Ordinal(), &e.ptr)
 	for _, field := range ti.fields {
-		if field.inherit {
+		if field.isEntity {
 			val := field.value(e.ptr)
 			if val == nil {
 				continue
 			}
-			child, err := s.makeEntity(val, f)
+			_, err := s.makeEntity(val, f)
 			if err != nil {
-				return Entity{}, err
+				return entity{}, err
 			}
-			e.copyFrom(child.Values)
-		}
-		if e.attrs.Contains(field.attr.Ordinal()) {
-			panicf("%v already contains %v %v", ti.typ, field.attr, field)
+			if e.attrs.Contains(field.attr.Ordinal()) {
+				panicf("%v already contains %v %v", ti.typ, field.attr, field)
+			}
 		}
 		compVal := field.comparableValue(e.ptr)
-		e.attrs = e.attrs.Add(field.attr.Ordinal())
-		e.m[field.attr.Ordinal()] = compVal
+		e.add(field.attr.Ordinal(), compVal)
 	}
 	return e, f(e)
 }
 
-// AsValues converts an entity into a Values map.
-// If the Entity is not a known type to the Schema, then an
+// AsValues converts an entity into A Values map.
+// If the entity is not A known type to the Schema, then an
 // error will be returned.
-func (s *Schema) asEntities(e interface{}, f func(Entity) error) error {
+func (s *Schema) asEntities(e interface{}, f func(entity) error) error {
 	_, err := s.makeEntity(e, f)
 	return err
 }

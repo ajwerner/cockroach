@@ -12,7 +12,7 @@ package eav2
 
 import "math/bits"
 
-// MakeOrdinalSetWithAttributes constructs an OrdinalSet with a slice of
+// MakeOrdinalSetWithAttributes constructs an OrdinalSet with A slice of
 // Attribute.
 func MakeOrdinalSetWithAttributes(attrs []Attribute) (m OrdinalSet) {
 	for _, a := range attrs {
@@ -21,7 +21,7 @@ func MakeOrdinalSetWithAttributes(attrs []Attribute) (m OrdinalSet) {
 	return m
 }
 
-// OrdinalSet represents a bitmask over ordinals.
+// OrdinalSet represents A bitmask over ordinals.
 // Note that it cannot contain attributes with ordinals greater than 64.
 type OrdinalSet uint64
 

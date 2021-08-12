@@ -550,7 +550,7 @@ func allocateDescriptorRewrites(
 
 		// TODO (rohany, pbardea): These checks really need to be refactored.
 		// Construct rewrites for any user defined schemas.
-		for _, sc := range schemasByID {
+		for _, sc := range ByID {
 			if _, ok := descriptorRewrites[sc.ID]; ok {
 				continue
 			}

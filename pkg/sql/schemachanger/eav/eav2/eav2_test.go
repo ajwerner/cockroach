@@ -51,9 +51,9 @@ var (
 	}
 )
 
-type a string
+type A string
 
-var attrs = [...]a{
+var attrs = [...]A{
 	"artist",
 	"album",
 	"day",
@@ -64,19 +64,17 @@ var attrs = [...]a{
 	"duration",
 }
 
-var attrOrdinals = func() map[a]Ordinal {
-	ret := make(map[a]Ordinal, len(attrs))
+var attrOrdinals = func() map[A]Ordinal {
+	ret := make(map[A]Ordinal, len(attrs))
 	for i, v := range attrs {
 		ret[v] = Ordinal(i + 1)
 	}
 	return ret
 }()
 
-func (a a) String() string {
-	return string("a")
-}
+func (a A) String() string { return string(a) }
 
-func (a a) Ordinal() Ordinal {
+func (a A) Ordinal() Ordinal {
 	ord, ok := attrOrdinals[a]
 	if !ok {
 		panic(errors.AssertionFailedf("unknown attribute %s", a))
@@ -84,27 +82,27 @@ func (a a) Ordinal() Ordinal {
 	return ord
 }
 
-var _ Attribute = a("")
+var _ Attribute = A("")
 
 func TestMusicInfo(t *testing.T) {
 	sc := NewSchema(Mappings{
 		TypeMappings: map[reflect.Type]map[string]Attribute{
 			reflect.TypeOf((*Artist)(nil)): {
-				"Name": a("artist"),
+				"Name": A("artist"),
 			},
 			reflect.TypeOf((*Album)(nil)): {
-				"Name":              a("album"),
-				"Artist":            a("artist"),
-				"ReleaseDate.Day":   a("day"),
-				"ReleaseDate.Month": a("month"),
-				"ReleaseDate.Year":  a("year"),
+				"Name":              A("album"),
+				"Artist":            A("artist"),
+				"ReleaseDate.Day":   A("day"),
+				"ReleaseDate.Month": A("month"),
+				"ReleaseDate.Year":  A("year"),
 			},
 			reflect.TypeOf((*Track)(nil)): {
-				"Artist":   a("artist"),
-				"Album":    a("album"),
-				"Name":     a("track"),
-				"Order":    a("order"),
-				"Duration": a("duration"),
+				"Artist":   A("artist"),
+				"Album":    A("album"),
+				"Name":     A("track"),
+				"Order":    A("order"),
+				"Duration": A("duration"),
 			},
 		},
 	})
@@ -116,11 +114,11 @@ func TestMusicInfo(t *testing.T) {
 	} {
 		require.Nil(t, tr.Insert(d))
 	}
-	v := sc.MakeValues(Map{
-		a("artist"): ArtistName("The Beatles!"),
-	})
-	_ = tr.Iterate(v, EntityIteratorFunc(func(entity Entity) error {
-		t.Log(entity)
+
+	q := Prepare(sc,
+		Datom("a", A("artist"), ArtistName("The Beatles!")),
+	)
+	require.NoError(t, q.Evaluate(tr, func(r Result) error {
 		return nil
 	}))
 }

@@ -12,18 +12,39 @@ package eav2
 
 import (
 	"reflect"
+	"sync"
 
 	"github.com/cockroachdb/errors"
 )
 
-// Values is a container for data.
+// Values is A container for data.
 //
-// It stores the data in a format which is convenient for performing
+// It stores the data in A format which is convenient for performing
 // comparisons and lookups. If you want strongly typed data out of it,
-// you need to use a Schema to retrieve that data.
+// you need to use A Schema to retrieve that data.
 type Values struct {
 	attrs OrdinalSet
 	m     map[Ordinal]interface{}
+}
+
+var valuesSyncPool = sync.Pool{
+	New: func() interface{} {
+		return &Values{
+			m: make(map[Ordinal]interface{}),
+		}
+	},
+}
+
+func getValues() *Values {
+	return valuesSyncPool.Get().(*Values)
+}
+
+func putValues(v *Values) {
+	for k := range v.m {
+		delete(v.m, k)
+	}
+	v.attrs = 0
+	valuesSyncPool.Put(v)
 }
 
 // get retrieves the primitive values stores in the values
@@ -35,10 +56,14 @@ func (v Values) get(a Attribute) interface{} {
 func (vv *Values) copyFrom(values Values) {
 	for ord, v := range values.m {
 		if ord < maxUserAttribute {
-			vv.attrs = vv.attrs.Add(ord)
-			vv.m[ord] = v
+			vv.add(ord, v)
 		}
 	}
+}
+
+func (vv *Values) add(ord Ordinal, v interface{}) {
+	vv.attrs = vv.attrs.Add(ord)
+	vv.m[ord] = v
 }
 
 type Map map[Attribute]interface{}

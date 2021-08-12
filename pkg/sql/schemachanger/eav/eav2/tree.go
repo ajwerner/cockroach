@@ -20,9 +20,8 @@ import (
 	"github.com/google/btree"
 )
 
-// Tree is a data structure for indexing elements.
+// Tree is A data structure for indexing elements.
 type Tree struct {
-	t      *btree.BTree
 	schema *Schema
 
 	// dims stores the specifications of all of the indexes in which
@@ -30,7 +29,8 @@ type Tree struct {
 	// inserted, it is inserted into each of the indexes. The first
 	// entry in the list is the "primary index" which compares entities
 	// based on all attributes.
-	dims []indexSpec
+	indexes  []index
+	entities map[uintptr]*entity
 }
 
 // Schema returns the schema associated with the tree.
@@ -38,21 +38,32 @@ func (t *Tree) Schema() *Schema {
 	return t.schema
 }
 
-// NewTree constructs a new Tree with the specified indexes.
+// NewTree constructs A new Tree with the specified indexes.
 // Note that the schema must not contain more than 64 attributes.
 func NewTree(sc *Schema, indexes [][]Attribute) *Tree {
 	t := &Tree{
-		schema: sc,
-		t:      btree.New(8 /* degree */),
-		dims:   make([]indexSpec, len(indexes)+1),
+		schema:   sc,
+		indexes:  make([]index, len(indexes)+1),
+		entities: make(map[uintptr]*entity),
 	}
 	// Index everything by all of the attributes. This serves as the primary
 	// index.
-	t.dims[0] = indexSpec{s: sc}
-	dims := t.dims[1:]
+	const degree = 8
+	fl := btree.NewFreeList(len(indexes) + 1)
+	{
+		var primaryIndex index
+		primaryIndex.s = sc
+		primaryIndex.tree = btree.NewWithFreeList(8, fl)
+		t.indexes[0] = primaryIndex
+	}
+	secondaryIndexes := t.indexes[1:]
 	for i, attrs := range indexes {
 		m := MakeOrdinalSetWithAttributes(attrs)
-		dims[i] = indexSpec{mask: m, attrs: attrs, s: sc}
+		spec := indexSpec{mask: m, attrs: attrs, s: sc}
+		secondaryIndexes[i] = index{
+			indexSpec: spec,
+			tree:      btree.NewWithFreeList(degree, fl),
+		}
 	}
 	return t
 }
@@ -60,27 +71,29 @@ func NewTree(sc *Schema, indexes [][]Attribute) *Tree {
 // Insert inserts an entity.
 func (t *Tree) Insert(e interface{}) error {
 	// I think what it means is that if we already have the object, then
-	// it's a no-op? If we do not, then it's got to be something else.
-	return t.schema.asEntities(e, func(entity Entity) error {
-		return t.insert(entity)
+	// it's A no-op? If we do not, then it's got to be something else.
+	return t.schema.asEntities(e, func(entity entity) error {
+		return t.insert(&entity)
 	})
 }
 
-func (t *Tree) insert(e Entity) error {
-	removedItem := t.t.ReplaceOrInsert(&containerItem{
-		Entity:    e,
-		indexSpec: &t.dims[0],
+func (t *Tree) insert(e *entity) error {
+	t.entities[e.ptr] = e
+	removedItem := t.indexes[0].tree.ReplaceOrInsert(&containerItem{
+		entity:    e,
+		indexSpec: &t.indexes[0].indexSpec,
 	})
-	if removedItem != nil && !Equal(t.schema, removedItem.(*containerItem).Entity, e) {
+	if removedItem != nil && !equal(t.schema, removedItem.(*containerItem).entity, e) {
 		return errors.AssertionFailedf(
 			"expected to remove the item each time: %v", removedItem,
 		)
 	}
-	dims := t.dims[1:]
-	for i := range dims {
-		if g := t.t.ReplaceOrInsert(&containerItem{
-			Entity:    e,
-			indexSpec: &dims[i],
+	secondaryIndexes := t.indexes[1:]
+	for i := range secondaryIndexes {
+		idx := &secondaryIndexes[i]
+		if g := idx.tree.ReplaceOrInsert(&containerItem{
+			entity:    e,
+			indexSpec: &idx.indexSpec,
 		}); (removedItem == nil) != (g == nil) {
 			return errors.AssertionFailedf(
 				"expected to remove the item each time: %v %v", removedItem, g,
@@ -90,6 +103,11 @@ func (t *Tree) insert(e Entity) error {
 	return nil
 }
 
+type index struct {
+	indexSpec
+	tree *btree.BTree
+}
+
 type indexSpec struct {
 	s     *Schema
 	mask  OrdinalSet
@@ -97,7 +115,7 @@ type indexSpec struct {
 }
 
 // Iterate will iterate the containers which match the specified values.
-func (t *Tree) Iterate(where Values, f EntityIterator) (err error) {
+func (t *Tree) Iterate(where *Values, f EntityIterator) (err error) {
 	var all, nils, nonNils OrdinalSet
 	{
 		all = where.attrs
@@ -111,25 +129,25 @@ func (t *Tree) Iterate(where Values, f EntityIterator) (err error) {
 	}
 
 	idx, toCheck := t.chooseIndex(all)
-	from, to := getValuesItems(idx, where, all)
+	from, to := getValuesItems(&idx.indexSpec, where, all)
 	defer putValuesItems(from, to)
-	t.t.AscendRange(from, to, func(i btree.Item) (wantMore bool) {
+	idx.tree.AscendRange(from, to, func(i btree.Item) (wantMore bool) {
 		c := i.(*containerItem)
 		// We want to skip items which do not have values set for
 		// all members of the where clause or which have values set
 		// for attributes where we explicitly do not want them.
-		if cAttrs := c.Entity.attrs; nonNils.Without(cAttrs) != 0 ||
+		if cAttrs := c.entity.attrs; nonNils.Without(cAttrs) != 0 ||
 			nils.Intersection(cAttrs) != 0 {
 			return true
 		}
 		var failed bool
 		toCheck.ForEach(t.schema, func(a Attribute) (wantMore bool) {
-			_, eq := compareOn(a, c.Values, where)
+			_, eq := compareOn(a, &c.Values, where)
 			failed = !eq
 			return !failed
 		})
 		if !failed {
-			err = f.Visit(c.Entity)
+			err = f.Visit(c.entity)
 		}
 		return err == nil
 	})
@@ -145,32 +163,32 @@ type item interface {
 	btree.Item
 	getIndexSpec() *indexSpec
 	compareAttrs() OrdinalSet
-	getValues() Values
+	getValues() *Values
 }
 
 var _ item = (*containerItem)(nil)
 var _ item = (*valuesItem)(nil)
 
-// chooseIndex chooses an index which has a prefix with the highest number of
+// chooseIndex chooses an index which has A prefix with the highest number of
 // attributes which overlap with m. It also returns the ordinals of the
 // attributes which are not covered by the index prefix.
 //
 // TODO(ajwerner): Consider something about selectivity by tracking
 // the number of entries under each index (i.e. which have non-NULL values)
 // for the given dimension.
-func (t *Tree) chooseIndex(m OrdinalSet) (_ *indexSpec, toCheck OrdinalSet) {
+func (t *Tree) chooseIndex(m OrdinalSet) (_ *index, toCheck OrdinalSet) {
 	// Default to the "primary" index.
 	best, bestOverlap := 0, OrdinalSet(0)
-	dims := t.dims[1:]
+	dims := t.indexes[1:]
 	for i := range dims {
 		if overlap := dims[i].overlap(m); overlap.Len() > bestOverlap.Len() {
 			best, bestOverlap = i+1, overlap
 		}
 	}
-	return &t.dims[best], m.Without(bestOverlap)
+	return &t.indexes[best], m.Without(bestOverlap)
 }
 
-// overlap returns the ordinals from m which overlap with a prefix of
+// overlap returns the ordinals from m which overlap with A prefix of
 // attributes in s.
 func (s *indexSpec) overlap(m OrdinalSet) OrdinalSet {
 	var overlap OrdinalSet
@@ -199,7 +217,7 @@ func compareIndexSpecs(a, b *indexSpec) (eq, less bool) {
 // tree.
 type valuesItem struct {
 	*indexSpec
-	Values
+	*Values
 	m   OrdinalSet
 	end bool
 }
@@ -209,16 +227,16 @@ func (v *valuesItem) compareAttrs() OrdinalSet {
 }
 
 func (v *valuesItem) getIndexSpec() *indexSpec { return v.indexSpec }
-func (v *valuesItem) getValues() Values        { return v.Values }
+func (v *valuesItem) getValues() *Values       { return v.Values }
 
 var valuesItemPool = sync.Pool{
 	New: func() interface{} { return new(valuesItem) },
 }
 
 // getValuesItems uses the valuesItemPool to get the bounding valuesItems for
-// a given where clause and indexSpec. The valuesItems have a well defined
-// lifetime which is bound to a query so we may as well pool them.
-func getValuesItems(idx *indexSpec, values Values, m OrdinalSet) (from, to *valuesItem) {
+// A given where clause and indexSpec. The valuesItems have A well defined
+// lifetime which is bound to A query so we may as well pool them.
+func getValuesItems(idx *indexSpec, values *Values, m OrdinalSet) (from, to *valuesItem) {
 	from = valuesItemPool.Get().(*valuesItem)
 	to = valuesItemPool.Get().(*valuesItem)
 	*from = valuesItem{indexSpec: idx, Values: values, m: m, end: false}
@@ -239,11 +257,11 @@ func (v *valuesItem) Less(than btree.Item) bool {
 
 type containerItem struct {
 	*indexSpec
-	Entity
+	*entity
 }
 
-func (c *containerItem) getValues() Values {
-	return c.Values
+func (c *containerItem) getValues() *Values {
+	return &c.Values
 }
 
 func (c *containerItem) compareAttrs() OrdinalSet {
@@ -255,7 +273,7 @@ func (c *containerItem) getIndexSpec() *indexSpec {
 }
 
 func (c *containerItem) Get(attr Attribute) interface{} {
-	return c.Entity.get(attr)
+	return c.entity.get(attr)
 }
 
 func (c *containerItem) Less(than btree.Item) bool {
@@ -283,7 +301,7 @@ func compareItems(a, b item) (less bool) {
 			return less
 		}
 	}
-	// If this is a query, respect the bounds.
+	// If this is A query, respect the bounds.
 	if aValuesItem, ok := a.(*valuesItem); ok {
 		return !aValuesItem.end
 	}
@@ -292,6 +310,6 @@ func compareItems(a, b item) (less bool) {
 	}
 
 	// Compare the entities across all the attributes.
-	less, _ = compareEntities(index.s, a.(*containerItem).Entity, b.(*containerItem).Entity)
+	less, _ = compareEntities(index.s, a.(*containerItem).entity, b.(*containerItem).entity)
 	return less
 }
