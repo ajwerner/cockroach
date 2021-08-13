@@ -20,8 +20,8 @@ import (
 	"github.com/google/btree"
 )
 
-// Tree is A data structure for indexing elements.
-type Tree struct {
+// Database is a data structure for indexing entities.
+type Database struct {
 	schema *Schema
 
 	// dims stores the specifications of all of the indexes in which
@@ -34,14 +34,14 @@ type Tree struct {
 }
 
 // Schema returns the schema associated with the tree.
-func (t *Tree) Schema() *Schema {
+func (t *Database) Schema() *Schema {
 	return t.schema
 }
 
-// NewTree constructs A new Tree with the specified indexes.
+// NewDatabase constructs A new Database with the specified indexes.
 // Note that the schema must not contain more than 64 attributes.
-func NewTree(sc *Schema, indexes [][]Attribute) *Tree {
-	t := &Tree{
+func NewDatabase(sc *Schema, indexes [][]Attribute) *Database {
+	t := &Database{
 		schema:   sc,
 		indexes:  make([]index, len(indexes)+1),
 		entities: make(map[uintptr]*entity),
@@ -58,7 +58,7 @@ func NewTree(sc *Schema, indexes [][]Attribute) *Tree {
 	}
 	secondaryIndexes := t.indexes[1:]
 	for i, attrs := range indexes {
-		m := MakeOrdinalSetWithAttributes(attrs)
+		m := makeOrdinalSetWithAttributes(attrs)
 		spec := indexSpec{mask: m, attrs: attrs, s: sc}
 		secondaryIndexes[i] = index{
 			indexSpec: spec,
@@ -69,7 +69,7 @@ func NewTree(sc *Schema, indexes [][]Attribute) *Tree {
 }
 
 // Insert inserts an entity.
-func (t *Tree) Insert(e interface{}) error {
+func (t *Database) Insert(e interface{}) error {
 	// I think what it means is that if we already have the object, then
 	// it's A no-op? If we do not, then it's got to be something else.
 	return t.schema.asEntities(e, func(entity entity) error {
@@ -77,7 +77,7 @@ func (t *Tree) Insert(e interface{}) error {
 	})
 }
 
-func (t *Tree) insert(e *entity) error {
+func (t *Database) insert(e *entity) error {
 	t.entities[e.ptr] = e
 	removedItem := t.indexes[0].tree.ReplaceOrInsert(&containerItem{
 		entity:    e,
@@ -110,13 +110,13 @@ type index struct {
 
 type indexSpec struct {
 	s     *Schema
-	mask  OrdinalSet
+	mask  ordinalSet
 	attrs []Attribute
 }
 
 // Iterate will iterate the containers which match the specified values.
-func (t *Tree) Iterate(where *Values, f EntityIterator) (err error) {
-	var all, nils, nonNils OrdinalSet
+func (t *Database) Iterate(where *values, f entityIterator) (err error) {
+	var all, nils, nonNils ordinalSet
 	{
 		all = where.attrs
 		all.ForEach(t.schema, func(a Attribute) (wantMore bool) {
@@ -142,12 +142,12 @@ func (t *Tree) Iterate(where *Values, f EntityIterator) (err error) {
 		}
 		var failed bool
 		toCheck.ForEach(t.schema, func(a Attribute) (wantMore bool) {
-			_, eq := compareOn(a, &c.Values, where)
+			_, eq := compareOn(a, &c.values, where)
 			failed = !eq
 			return !failed
 		})
 		if !failed {
-			err = f.Visit(c.entity)
+			err = f.visit(c.entity)
 		}
 		return err == nil
 	})
@@ -162,8 +162,8 @@ func (t *Tree) Iterate(where *Values, f EntityIterator) (err error) {
 type item interface {
 	btree.Item
 	getIndexSpec() *indexSpec
-	compareAttrs() OrdinalSet
-	getValues() *Values
+	compareAttrs() ordinalSet
+	getValues() *values
 }
 
 var _ item = (*containerItem)(nil)
@@ -176,9 +176,9 @@ var _ item = (*valuesItem)(nil)
 // TODO(ajwerner): Consider something about selectivity by tracking
 // the number of entries under each index (i.e. which have non-NULL values)
 // for the given dimension.
-func (t *Tree) chooseIndex(m OrdinalSet) (_ *index, toCheck OrdinalSet) {
+func (t *Database) chooseIndex(m ordinalSet) (_ *index, toCheck ordinalSet) {
 	// Default to the "primary" index.
-	best, bestOverlap := 0, OrdinalSet(0)
+	best, bestOverlap := 0, ordinalSet(0)
 	dims := t.indexes[1:]
 	for i := range dims {
 		if overlap := dims[i].overlap(m); overlap.Len() > bestOverlap.Len() {
@@ -190,8 +190,8 @@ func (t *Tree) chooseIndex(m OrdinalSet) (_ *index, toCheck OrdinalSet) {
 
 // overlap returns the ordinals from m which overlap with A prefix of
 // attributes in s.
-func (s *indexSpec) overlap(m OrdinalSet) OrdinalSet {
-	var overlap OrdinalSet
+func (s *indexSpec) overlap(m ordinalSet) ordinalSet {
+	var overlap ordinalSet
 	for _, a := range s.attrs {
 		if m.Contains(a.Ordinal()) {
 			overlap = overlap.Add(a.Ordinal())
@@ -217,17 +217,17 @@ func compareIndexSpecs(a, b *indexSpec) (eq, less bool) {
 // tree.
 type valuesItem struct {
 	*indexSpec
-	*Values
-	m   OrdinalSet
+	*values
+	m   ordinalSet
 	end bool
 }
 
-func (v *valuesItem) compareAttrs() OrdinalSet {
+func (v *valuesItem) compareAttrs() ordinalSet {
 	return v.m
 }
 
 func (v *valuesItem) getIndexSpec() *indexSpec { return v.indexSpec }
-func (v *valuesItem) getValues() *Values       { return v.Values }
+func (v *valuesItem) getValues() *values       { return v.values }
 
 var valuesItemPool = sync.Pool{
 	New: func() interface{} { return new(valuesItem) },
@@ -236,11 +236,11 @@ var valuesItemPool = sync.Pool{
 // getValuesItems uses the valuesItemPool to get the bounding valuesItems for
 // A given where clause and indexSpec. The valuesItems have A well defined
 // lifetime which is bound to A query so we may as well pool them.
-func getValuesItems(idx *indexSpec, values *Values, m OrdinalSet) (from, to *valuesItem) {
+func getValuesItems(idx *indexSpec, values *values, m ordinalSet) (from, to *valuesItem) {
 	from = valuesItemPool.Get().(*valuesItem)
 	to = valuesItemPool.Get().(*valuesItem)
-	*from = valuesItem{indexSpec: idx, Values: values, m: m, end: false}
-	*to = valuesItem{indexSpec: idx, Values: values, m: m, end: true}
+	*from = valuesItem{indexSpec: idx, values: values, m: m, end: false}
+	*to = valuesItem{indexSpec: idx, values: values, m: m, end: true}
 	return from, to
 }
 
@@ -260,11 +260,11 @@ type containerItem struct {
 	*entity
 }
 
-func (c *containerItem) getValues() *Values {
-	return &c.Values
+func (c *containerItem) getValues() *values {
+	return &c.values
 }
 
-func (c *containerItem) compareAttrs() OrdinalSet {
+func (c *containerItem) compareAttrs() ordinalSet {
 	return math.MaxUint64
 }
 

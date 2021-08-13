@@ -8,28 +8,25 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package eav
+package eav2
 
 import "math/bits"
 
-// MakeOrdinalSetWithAttributes constructs an OrdinalSet with a slice of
+// makeOrdinalSetWithAttributes constructs an ordinalSet with A slice of
 // Attribute.
-func MakeOrdinalSetWithAttributes(attrs []Attribute) (m OrdinalSet) {
+func makeOrdinalSetWithAttributes(attrs []Attribute) (m ordinalSet) {
 	for _, a := range attrs {
-		if a == nil {
-			continue
-		}
 		m = m.Add(a.Ordinal())
 	}
 	return m
 }
 
-// OrdinalSet represents a bitmask over ordinals.
+// ordinalSet represents A bitmask over ordinals.
 // Note that it cannot contain attributes with ordinals greater than 64.
-type OrdinalSet uint64
+type ordinalSet uint64
 
 // ForEach iterates the set of attributes.
-func (m OrdinalSet) ForEach(s Schema, f func(a Attribute) (wantMore bool)) {
+func (m ordinalSet) ForEach(s *Schema, f func(a Attribute) (wantMore bool)) {
 	rem := m
 	for rem > 0 {
 		ord := Ordinal(bits.TrailingZeros64(uint64(rem)))
@@ -41,36 +38,36 @@ func (m OrdinalSet) ForEach(s Schema, f func(a Attribute) (wantMore bool)) {
 }
 
 // Remove returns the set constructed by removing ord from m.
-func (m OrdinalSet) Remove(ord Ordinal) OrdinalSet {
+func (m ordinalSet) Remove(ord Ordinal) ordinalSet {
 	return m & ^(1 << ord)
 }
 
 // Contains tests if m contains ord.
-func (m OrdinalSet) Contains(ord Ordinal) bool {
+func (m ordinalSet) Contains(ord Ordinal) bool {
 	return m&(1<<ord) != 0
 }
 
 // Add returns the set constructed by adding ord to m.
-func (m OrdinalSet) Add(ord Ordinal) OrdinalSet {
+func (m ordinalSet) Add(ord Ordinal) ordinalSet {
 	return m | (1 << ord)
 }
 
 // Without returns the set constructed by removing the members of other from m.
-func (m OrdinalSet) Without(other OrdinalSet) OrdinalSet {
+func (m ordinalSet) Without(other ordinalSet) ordinalSet {
 	return m & ^other
 }
 
 // Intersection returns the set constructing with the intersection of m and other.
-func (m OrdinalSet) Intersection(other OrdinalSet) OrdinalSet {
+func (m ordinalSet) Intersection(other ordinalSet) ordinalSet {
 	return m & other
 }
 
 // Union returns the set constructing with the union of m and other.
-func (m OrdinalSet) Union(other OrdinalSet) OrdinalSet {
+func (m ordinalSet) Union(other ordinalSet) ordinalSet {
 	return m | other
 }
 
 // Len returns the number of ordinals in the set.
-func (m OrdinalSet) Len() int {
+func (m ordinalSet) Len() int {
 	return bits.OnesCount64(uint64(m))
 }

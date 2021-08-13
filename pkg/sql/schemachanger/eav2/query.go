@@ -20,16 +20,18 @@ type Term interface {
 
 type any []interface{}
 
+// Any is a mechanism to create a value which accepts
+// more than one value.
+//
+// TOOD(ajwerner): Consider replacing with the more general Or
+// that takes terms.
 func Any(v ...interface{}) interface{} {
 	return any(v)
 }
 
+// Datom is a basic fact.
 func Datom(entity Var, attr Attribute, value interface{}) Term {
 	return &factDecl{e: entity, a: attr, v: value}
-}
-
-func (v Var) Constrain(a Attribute, value interface{}) Term {
-	return &factDecl{e: v, a: a, v: value}
 }
 
 type factDecl struct {

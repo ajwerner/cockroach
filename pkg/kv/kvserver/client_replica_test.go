@@ -2898,6 +2898,7 @@ func TestChangeReplicasLeaveAtomicRacesWithMerge(t *testing.T) {
 		rangeToBlockRangeDescriptorRead.Store(roachpb.RangeID(0))
 		blockRangeDescriptorReadChan := make(chan struct{}, 1)
 		blockOnChangeReplicasRead := kvserverbase.ReplicaRequestFilter(func(ctx context.Context, ba roachpb.BatchRequest) *roachpb.Error {
+
 			if req, isGet := ba.GetArg(roachpb.Get); !isGet ||
 				ba.RangeID != rangeToBlockRangeDescriptorRead.Load().(roachpb.RangeID) ||
 				!ba.IsSingleRequest() ||

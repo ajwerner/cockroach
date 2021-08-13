@@ -10,17 +10,7 @@
 
 package scpb
 
-import (
-	"reflect"
-	"strconv"
-	"strings"
-	"sync"
-
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
-	"github.com/cockroachdb/errors"
-	"google.golang.org/protobuf/proto"
-)
+/*
 
 // GetDescID returns the ID stored in the Entity.
 func GetDescID(e Entity) descpb.ID {
@@ -108,3 +98,5 @@ func initElementTypes() {
 		elementNames[elementID] = strings.TrimPrefix(f.Type.String(), "*scpb.")
 	}
 }
+
+*/

@@ -3,7 +3,6 @@ package opgen
 import (
 	"reflect"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scgraph"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"

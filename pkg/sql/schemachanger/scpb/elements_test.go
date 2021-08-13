@@ -14,7 +14,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
 	"github.com/stretchr/testify/require"
 )
 

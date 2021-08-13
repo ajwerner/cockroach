@@ -106,19 +106,19 @@ func TestMusicInfo(t *testing.T) {
 			},
 		},
 	})
-	tr := NewTree(sc, nil)
+	db := NewDatabase(sc, nil)
 	for _, d := range []interface{}{
 		&Beatles,
 		&RollingStones,
 		&PleasePleaseMe,
 	} {
-		require.Nil(t, tr.Insert(d))
+		require.Nil(t, db.Insert(d))
 	}
 
 	q := Prepare(sc,
 		Datom("a", A("artist"), ArtistName("The Beatles!")),
 	)
-	require.NoError(t, q.Evaluate(tr, func(r Result) error {
+	require.NoError(t, db.Evaluate(q, func(r Result) error {
 		return nil
 	}))
 }

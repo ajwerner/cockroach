@@ -11,7 +11,6 @@
 package scpb
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
 )
@@ -20,7 +19,6 @@ import (
 // It is implemented by all of the concrete Element types (which return
 // themselves) as well as Node and Target.
 type Entity interface {
-	eav.Entity
 
 	// GetElement returns the underlying element. The returned value should be
 	// an actual element struct which is part of the Ele
@@ -62,36 +60,6 @@ func (es *ElementStatus) GetElement() Element {
 // GetElement returns the target's element.
 func (n *Node) GetElement() Element {
 	return n.Target.GetElement()
-}
-
-// Attributes is part of the eav.Entity interface.
-func (n *Node) Attributes() eav.OrdinalSet {
-	return n.Target.Attributes().Add(AttrStatus.Ordinal())
-}
-
-// Get is part of the eav.Entity interface.
-func (n *Node) Get(a eav.Attribute) eav.Value {
-	switch a {
-	case AttrStatus:
-		return (*eav.Int32)(&n.Status)
-	default:
-		return n.Target.Get(a)
-	}
-}
-
-// Attributes is part of the eav.Entity interface.
-func (m *Target) Attributes() eav.OrdinalSet {
-	return m.GetElement().Attributes().Add(AttrDirection.Ordinal())
-}
-
-// Get is part of the eav.Entity interface.
-func (m *Target) Get(a eav.Attribute) eav.Value {
-	switch a {
-	case AttrDirection:
-		return (*eav.Int32)(&m.Direction)
-	default:
-		return m.GetElement().Get(a)
-	}
 }
 
 // GetElement returns an Element from its wrapper for serialization.

@@ -15,8 +15,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav/eavquery"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eavasdf/eavquery"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/stretchr/testify/require"
 )

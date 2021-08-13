@@ -10,30 +10,21 @@
 
 package scpb
 
-import "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
+import (
+	"reflect"
+
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav2"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+)
 
 // Attr are keys used for finger prints of objects
 // for comparing uniqueness
 type Attr int
 
-// Ordinal is part of the eav.Attribute interface.
-func (i Attr) Ordinal() eav.Ordinal { return eav.Ordinal(i) }
+// Ordinal is part of the eavasdf.Attribute interface.
+func (i Attr) Ordinal() eav2.Ordinal { return eav2.Ordinal(i) }
 
-// Type is part of the eav.Attribute interface.
-func (i Attr) Type() eav.Type { return attrTypes[i] }
-
-var attrTypes = [...]eav.Type{
-	AttrElementType:      eav.TypeInt32,
-	AttrDescID:           eav.TypeUint32,
-	AttrReferencedDescID: eav.TypeUint32,
-	AttrColumnID:         eav.TypeUint32,
-	AttrName:             eav.TypeString,
-	AttrIndexID:          eav.TypeUint32,
-	AttrDirection:        eav.TypeInt32,
-	AttrStatus:           eav.TypeInt32,
-}
-
-var _ eav.Attribute = Attr(0)
+var _ eav2.Attribute = Attr(0)
 
 //go:generate stringer -type=Attr -trimprefix=Attr
 const (
@@ -65,37 +56,47 @@ const (
 	NumAttrs int = iota
 )
 
-// AttrSchema returns the eav.Schema used for entities.
-func AttrSchema() eav.Schema {
-	return &attrSet
-}
-
-type attributes [NumAttrs]eav.Attribute
-
-var attrSet = attributes{
-	AttrElementType,
-	AttrDescID,
-	AttrReferencedDescID,
-	AttrColumnID,
-	AttrName,
-	AttrIndexID,
-	AttrDirection,
-	AttrStatus,
-	AttrElement,
-	AttrTarget,
-}
-
-var attributeOrdinals = eav.MakeOrdinalSetWithAttributes(attrSet[:])
-
-func (a attributes) Attributes() eav.OrdinalSet     { return attributeOrdinals }
-func (a attributes) At(i eav.Ordinal) eav.Attribute { return a[i] }
-
-// Compare compares two elements by their attributes.
-func Compare(a, b Entity) (less, eq bool) {
-	return eav.Compare(&attrSet, a, b)
-}
-
-// Equal compares two elements by their attributes.
-func Equal(a, b Entity) (eq bool) {
-	return eav.Equal(&attrSet, a, b)
-}
+var AttrSchema = eav2.NewSchema(eav2.Mappings{
+	AttributeTypes: map[eav2.Attribute]reflect.Type{
+		AttrElement: reflect.TypeOf((*protoutil.Message)(nil)).Elem(),
+	},
+	TypeMappings: map[reflect.Type]map[string]eav2.Attribute{
+		reflect.TypeOf((*Node)(nil)): {
+			"Status": AttrStatus,
+			"Target": AttrTarget,
+		},
+		reflect.TypeOf((*Target)(nil)): {
+			"Direction":            AttrDirection,
+			"Column":               AttrElement,
+			"PrimaryIndex":         AttrElement,
+			"SecondaryIndex":       AttrElement,
+			"SequenceDependency":   AttrElement,
+			"UniqueConstraint":     AttrElement,
+			"CheckConstraint":      AttrElement,
+			"Sequence":             AttrElement,
+			"DefaultExpression":    AttrElement,
+			"View":                 AttrElement,
+			"TypeRef":              AttrElement,
+			"Table":                AttrElement,
+			"OutForeignKey":        AttrElement,
+			"InForeignKey":         AttrElement,
+			"RelationDependedOnBy": AttrElement,
+			"SequenceOwner":        AttrElement,
+			"Type":                 AttrElement,
+			"Schema":               AttrElement,
+			"Database":             AttrElement,
+		},
+		reflect.TypeOf((*Database)(nil)): {
+			"DatabaseID": AttrDescID,
+		},
+		reflect.TypeOf((*Table)(nil)): {
+			"TableID":        AttrDescID,
+			"ParentID":       AttrParentID,
+			"ParentSchemaID": AttrParentSchemaID,
+		},
+		reflect.TypeOf((*Column)(nil)): {
+			"TableID":   AttrDescID,
+			"Column.ID": AttrColumnID,
+		},
+	},
+})

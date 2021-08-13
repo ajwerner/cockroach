@@ -10,8 +10,7 @@
 
 package scpb
 
-import "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
-
+/*
 func makeElementAttrs(extra ...Attr) eav.OrdinalSet {
 	attributes := []eav.Attribute{
 		AttrElementType,
@@ -44,61 +43,61 @@ var (
 	databaseAttributes             = makeElementAttrs()
 )
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *Column) Attributes() eav.OrdinalSet { return columnAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *PrimaryIndex) Attributes() eav.OrdinalSet { return primaryIndexAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *SecondaryIndex) Attributes() eav.OrdinalSet { return secondaryIndexAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *SequenceDependency) Attributes() eav.OrdinalSet { return sequenceDependencyAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *UniqueConstraint) Attributes() eav.OrdinalSet { return uniqueConstraintAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *CheckConstraint) Attributes() eav.OrdinalSet { return checkConstraintAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *Sequence) Attributes() eav.OrdinalSet { return sequenceAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *DefaultExpression) Attributes() eav.OrdinalSet { return defaultExpressionAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *View) Attributes() eav.OrdinalSet { return viewAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *TypeReference) Attributes() eav.OrdinalSet { return typeReferenceAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *Table) Attributes() eav.OrdinalSet { return tableAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *InboundForeignKey) Attributes() eav.OrdinalSet { return inboundForeinKeyAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *OutboundForeignKey) Attributes() eav.OrdinalSet { return outboundForeinKeyAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *RelationDependedOnBy) Attributes() eav.OrdinalSet { return relationDependedOnByAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *SequenceOwnedBy) Attributes() eav.OrdinalSet { return sequenceOwnedByAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *Type) Attributes() eav.OrdinalSet { return typeAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *Schema) Attributes() eav.OrdinalSet { return schemaAttributes }
 
-// Attributes is part of the eav.Entity interface.
+// Attributes is part of the eavasdf.Entity interface.
 func (m *Database) Attributes() eav.OrdinalSet { return databaseAttributes }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *Column) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -114,7 +113,7 @@ func (m *Column) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *PrimaryIndex) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -130,7 +129,7 @@ func (m *PrimaryIndex) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *SecondaryIndex) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -146,7 +145,7 @@ func (m *SecondaryIndex) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *SequenceDependency) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -162,7 +161,7 @@ func (m *SequenceDependency) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *UniqueConstraint) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -176,7 +175,7 @@ func (m *UniqueConstraint) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *CheckConstraint) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -190,7 +189,7 @@ func (m *CheckConstraint) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *Sequence) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -202,7 +201,7 @@ func (m *Sequence) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *DefaultExpression) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -216,7 +215,7 @@ func (m *DefaultExpression) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *View) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -228,7 +227,7 @@ func (m *View) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *TypeReference) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -242,7 +241,7 @@ func (m *TypeReference) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *Table) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -254,7 +253,7 @@ func (m *Table) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *InboundForeignKey) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -270,7 +269,7 @@ func (m *InboundForeignKey) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *OutboundForeignKey) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -286,7 +285,7 @@ func (m *OutboundForeignKey) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *RelationDependedOnBy) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -300,7 +299,7 @@ func (m *RelationDependedOnBy) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *SequenceOwnedBy) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -314,7 +313,7 @@ func (m *SequenceOwnedBy) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *Type) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -326,7 +325,7 @@ func (m *Type) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *Schema) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -338,7 +337,7 @@ func (m *Schema) Get(a eav.Attribute) eav.Value {
 	}
 }
 
-// Get is part of the eav.Entity interface.
+// Get is part of the eavasdf.Entity interface.
 func (m *Database) Get(a eav.Attribute) eav.Value {
 	switch a {
 	case AttrElementType:
@@ -349,3 +348,4 @@ func (m *Database) Get(a eav.Attribute) eav.Value {
 		return nil
 	}
 }
+*/

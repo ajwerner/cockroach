@@ -45,10 +45,6 @@ type Query struct {
 	c evalContextCache
 }
 
-type queryDisjuncts struct {
-	remaining []fact
-}
-
 // cache exactly one evalContext for this query.
 // This optimization allows single-threaded execution to avoid allocating
 // upon iterative evaluation, which is going to be A common pattern.
@@ -59,18 +55,13 @@ type evalContextCache struct {
 	ec *evalContext
 }
 
-type evalFrame struct {
-	factOffset int
-	slots      util.FastIntSet
-}
-
 type scope []slotData
 
 // evalContext implements Result and accumulates the state during the
 // evaluation of A query.
 type evalContext struct {
 	q  *Query
-	db Database
+	db *Database
 	ri ResultIterator
 
 	facts      []fact
@@ -88,7 +79,7 @@ type Result interface {
 // Iteration can be halted with the use of iterutils.StopIteration.
 type ResultIterator func(r Result) error
 
-func newEvalContext(q *Query, db Database, ri ResultIterator) *evalContext {
+func newEvalContext(q *Query, db *Database, ri ResultIterator) *evalContext {
 	return &evalContext{
 		ri:    ri,
 		q:     q,
@@ -99,7 +90,7 @@ func newEvalContext(q *Query, db Database, ri ResultIterator) *evalContext {
 }
 
 // Evaluate will evaluate the query against the database.
-func (q *Query) Evaluate(db Database, f ResultIterator) error {
+func (db *Database) Evaluate(q *Query, f ResultIterator) error {
 	// TODO(ajwerner): Assert that the schema is the same.
 	if len(q.entities) == 0 {
 		return nil
@@ -125,7 +116,7 @@ func (ec *evalContext) eval() error {
 	return ec.db.Iterate(where, ec)
 }
 
-func (q *Query) getEvalContext(db Database, f ResultIterator) (ec *evalContext) {
+func (q *Query) getEvalContext(db *Database, f ResultIterator) (ec *evalContext) {
 	q.c.Lock()
 	if ec = q.c.ec; ec != nil {
 		q.c.ec = nil
@@ -184,7 +175,7 @@ func unify(facts []fact, s scope, set *util.FastIntSet) (contradictionFound bool
 	}
 }
 
-func (ec *evalContext) buildWhere() *Values {
+func (ec *evalContext) buildWhere() *values {
 	cur := ec.cur
 	where := getValues()
 	for _, f := range ec.facts {
@@ -273,7 +264,7 @@ func checkNotNil(v reflect.Value) error {
 	return nil
 }
 
-func (ec *evalContext) Visit(ei Entity) error {
+func (ec *evalContext) visit(ei Entity) error {
 	var slotsFilled util.FastIntSet
 	defer func() {
 		slotsFilled.ForEach(func(i int) {
@@ -305,7 +296,7 @@ func (ec *evalContext) Visit(ei Entity) error {
 		// TODO(ajwerner): We need to get some type data down here.
 		got, typ, isEntity := e.getValueAndType(f.attr)
 		if isEntity {
-			ee := ec.db.(*Tree).entities[*got.(*uintptr)]
+			ee := ec.db.entities[*got.(*uintptr)]
 			typ = ee.getTypeInfo().typ
 		}
 

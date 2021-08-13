@@ -11,7 +11,7 @@
 package scgraph
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav2"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/errors"
@@ -47,15 +47,15 @@ type Graph struct {
 
 	edges []Edge
 
-	entities *eav.Tree
+	entities *eav2.Database
 }
 
-func (g *Graph) Schema() eav.Schema {
-	return scpb.AttrSchema()
+func (g *Graph) Schema() *eav2.Schema {
+	return g.Database().Schema()
 }
 
-func (g *Graph) Iterate(where eav.Values, iterator eav.Iterator) error {
-	return g.entities.Iterate(where, iterator)
+func (g *Graph) Database() *eav2.Database {
+	return g.entities
 }
 
 // New constructs a new Graph. All initial nodes ought to correspond to distinct
@@ -66,9 +66,11 @@ func New(initial scpb.State) (*Graph, error) {
 		nodeOpEdges:  map[*scpb.Node]*OpEdge{},
 		nodeDepEdges: map[*scpb.Node][]*DepEdge{},
 		opToNode:     map[scop.Op]*scpb.Node{},
-		entities: eav.NewTree(scpb.AttrSchema(), [][]eav.Attribute{
-			{scpb.AttrElementType, scpb.AttrDescID},
-			{scpb.AttrDescID, scpb.AttrElementType},
+		entities: eav2.NewDatabase(scpb.AttrSchema, [][]eav2.Attribute{
+			{eav2.TypeAttribute, scpb.AttrDescID},
+			{scpb.AttrDescID, eav2.TypeAttribute},
+			{scpb.AttrElement},
+			{scpb.AttrTarget},
 			// TODO(ajwerner): Decide what more predicates are needed
 		}),
 	}
@@ -176,8 +178,6 @@ func (g *Graph) AddDepEdge(
 	g.edges = append(g.edges, de)
 	g.nodeDepEdges[de.from] = append(g.nodeDepEdges[de.from], de)
 }
-
-var _ eav.Database = (*Graph)(nil)
 
 // Edge represents a relationship between two Nodes.
 //

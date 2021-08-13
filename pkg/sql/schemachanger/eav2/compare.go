@@ -128,7 +128,7 @@ func getComparableType(t reflect.Type) reflect.Type {
 type entity struct {
 	ptr uintptr // interface{}
 	typ uintptr // *entityTypeSchema
-	Values
+	values
 }
 
 func (e *entity) Interface() interface{} {
@@ -160,7 +160,7 @@ func (e *entity) getValueAndType(
 // either or both do not contain this attribute. The lack of A
 // value is considered the highest value; you can think of this
 // library as sorting with NULLS LAST.
-func compareOn(attr Attribute, a, b *Values) (less, eq bool) {
+func compareOn(attr Attribute, a, b *values) (less, eq bool) {
 	av := a.get(attr)
 	bv := b.get(attr)
 	switch {
@@ -180,10 +180,10 @@ func compareEntities(s *Schema, a, b *entity) (less, eq bool) {
 	if a.ptr == b.ptr {
 		return false, true
 	}
-	OrdinalSet.Union(
+	ordinalSet.Union(
 		a.attrs, b.attrs,
 	).ForEach(s, func(attr Attribute) (wantMore bool) {
-		less, eq = compareOn(attr, &a.Values, &b.Values)
+		less, eq = compareOn(attr, &a.values, &b.values)
 		return eq
 	})
 	return less, eq

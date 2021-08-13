@@ -17,7 +17,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav/eav2"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,7 +57,7 @@ func BenchmarkLinkedList(b *testing.B) {
 	// ID, next, prev. Then we want to define A set of queries for the
 	// specified depth.
 	runDepth := func(b *testing.B, lists, depth int, attrs [][]eav2.Attribute) {
-		db := eav2.NewTree(sc, attrs)
+		db := eav2.NewDatabase(sc, attrs)
 		links := rand.Perm(lists + depth)
 		for i, j := range links {
 			db.Insert(&ListNode{ID: i, Next: j})
@@ -70,22 +70,23 @@ func BenchmarkLinkedList(b *testing.B) {
 		for i := 0; i < depth+1; i++ {
 			names = append(names, eav2.Var(strconv.Itoa(i)))
 		}
+
 		for i, start := range p {
-			var rules []eav2.Term
+			var terms []eav2.Term
 			for i := 0; i < depth; i++ {
-				rules = append(rules,
-					names[i].Constrain(nextAttr, names[i+1]+"id"),
-					names[i+1].Constrain(idAttr, names[i+1]+"id"),
+				terms = append(terms,
+					eav2.Datom(names[i], nextAttr, names[i+1]+"id"),
+					eav2.Datom(names[i+1], idAttr, names[i+1]+"id"),
 				)
 			}
-			rules = append(rules,
-				eav2.Var("0").Constrain(idAttr, start),
+			terms = append(terms,
+				eav2.Datom("0", idAttr, start),
 			)
-			queries[i] = eav2.Prepare(sc, rules...)
+			queries[i] = eav2.Prepare(sc, terms...)
 		}
 		var q int
 		f := func(r eav2.Result) error {
-			const checkFrac = .00
+			const checkFrac = .01
 			if rand.Float64() > checkFrac {
 				return nil
 			}
@@ -106,7 +107,7 @@ func BenchmarkLinkedList(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			q = rand.Intn(numQueries)
-			queries[q].Evaluate(db, f)
+			require.NoError(b, db.Evaluate(queries[q], f))
 		}
 	}
 	for _, attrs := range [][][]eav2.Attribute{

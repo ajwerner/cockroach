@@ -10,14 +10,7 @@
 
 package scpb
 
-import (
-	"fmt"
-	"io"
-	"strings"
-
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
-	"github.com/cockroachdb/errors"
-)
+/*
 
 // ToString renders an element's attributes to a string.
 func ToString(e Entity) string {
@@ -107,3 +100,4 @@ func Format(e Entity, w io.Writer) (err error) {
 	}
 	return nil
 }
+*/
