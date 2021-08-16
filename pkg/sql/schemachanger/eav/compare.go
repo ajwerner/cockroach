@@ -8,7 +8,7 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package eav2
+package eav
 
 import (
 	"reflect"
@@ -112,6 +112,8 @@ var kindTypeMap = map[reflect.Kind]reflect.Type{
 	reflect.Uintptr: reflect.TypeOf((*uintptr)(nil)).Elem(),
 	reflect.String:  reflect.TypeOf((*string)(nil)).Elem(),
 	reflect.Ptr:     reflect.TypeOf((*uintptr)(nil)).Elem(),
+
+	// TODO(ajwerner): Fill out all of the kinds.
 }
 
 func getComparableType(t reflect.Type) reflect.Type {
@@ -125,21 +127,33 @@ func getComparableType(t reflect.Type) reflect.Type {
 	return ct
 }
 
+// entity is the internal representation of a struct pointer.
+// The idea is that ptr is the pointer itself and typ is a
+// pointer to the entityTypeSchema.
 type entity struct {
+	// Part of the reason ptr exists her and not just in the map is that we need
+	// to store a pointer to a value everywhere. Where better to attach that
+	// pointer than here, to this struct? The value stored in values will be
+	// pointing to this field.
 	ptr uintptr // interface{}
 	typ uintptr // *entityTypeSchema
-	values
-}
 
-func (e *entity) Interface() interface{} {
-	ti := e.getTypeInfo()
-	return reflect.NewAt(ti.typ.Elem(), unsafe.Pointer(e.ptr)).Interface()
+	// values stores all of the attributes, including the types and pointer.
+	// TODO(ajwerner): I seem to recall that we were not setting the type or
+	// pointer value in the bitmap. Figure that out.
+	values
 }
 
 func (e *entity) getTypeInfo() *entityTypeSchema {
 	return (*entityTypeSchema)(unsafe.Pointer(e.typ))
 }
 
+// TODO(ajwerner): document what's going on here. For scalar fields we know
+// the type because we do not permit oneOf behavior. For entity fields, we
+// don't store the type because it's dynamic. Instead we know that if the
+// field points to an entity, then the database has the entity indexed by
+// its address and the entity knows its type. Because of that, typ will
+// be nil if isEntity is true.
 func (e *entity) getValueAndType(
 	attr Attribute,
 ) (value interface{}, typ reflect.Type, isEntity bool) {

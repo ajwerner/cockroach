@@ -13,7 +13,7 @@ package scplan
 import (
 	"sort"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav2"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scgraph"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
@@ -71,7 +71,7 @@ func MakePlan(initial scpb.State, params Params) (_ Plan, err error) {
 	}
 
 	for _, dr := range depRules.rules {
-		if err := g.Database().Evaluate(dr.q, func(r eav2.Result) error {
+		if err := g.Database().Evaluate(dr.q, func(r eav.Result) error {
 			defer func() {
 				if r := recover(); r != nil {
 					panic(errors.AssertionFailedf("%s: %v", dr.name, r))

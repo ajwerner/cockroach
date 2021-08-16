@@ -13,7 +13,7 @@ package scpb
 import (
 	"reflect"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav2"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 )
 
@@ -22,13 +22,13 @@ import (
 type Attr int
 
 // Ordinal is part of the eavasdf.Attribute interface.
-func (i Attr) Ordinal() eav2.Ordinal { return eav2.Ordinal(i) }
+func (i Attr) Ordinal() eav.Ordinal { return eav.Ordinal(i) }
 
-var _ eav2.Attribute = Attr(0)
+var _ eav.Attribute = Attr(0)
 
 //go:generate stringer -type=Attr -trimprefix=Attr
 const (
-	_ Attr = iota // reserve 0 for eav2.TypeAttribute
+	_ Attr = iota // reserve 0 for eav.TypeAttribute
 	// AttrElementType type id of the element.
 	AttrElementType
 	// AttrDescID is the descriptor ID to which this element belongs.
@@ -56,11 +56,11 @@ const (
 	NumAttrs int = iota
 )
 
-var AttrSchema = eav2.NewSchema(eav2.Mappings{
-	AttributeTypes: map[eav2.Attribute]reflect.Type{
+var AttrSchema = eav.NewSchema("", eav.Mappings{
+	AttributeTypes: map[eav.Attribute]reflect.Type{
 		AttrElement: reflect.TypeOf((*protoutil.Message)(nil)).Elem(),
 	},
-	TypeMappings: map[reflect.Type]map[string]eav2.Attribute{
+	TypeMappings: map[reflect.Type]map[string]eav.Attribute{
 		reflect.TypeOf((*Node)(nil)): {
 			"Status": AttrStatus,
 			"Target": AttrTarget,
@@ -89,6 +89,13 @@ var AttrSchema = eav2.NewSchema(eav2.Mappings{
 		reflect.TypeOf((*Database)(nil)): {
 			"DatabaseID": AttrDescID,
 		},
+		reflect.TypeOf((*TypeReference)(nil)): {
+			"DescID": AttrDescID,
+			"TypeID": AttrReferencedDescID,
+		},
+		reflect.TypeOf((*Type)(nil)): {
+			"TypeID": AttrDescID,
+		},
 		reflect.TypeOf((*Table)(nil)): {
 			"TableID":        AttrDescID,
 			"ParentID":       AttrParentID,
@@ -100,3 +107,19 @@ var AttrSchema = eav2.NewSchema(eav2.Mappings{
 		},
 	},
 })
+
+var d, any, t = eav.Datom, eav.Any, reflect.TypeOf
+
+func NodeRule(element eav.Var, direction, status interface{}) eav.Clause {
+	node := element + "-node"
+	target := element + "-target"
+	clauses := []eav.Clause{
+		eav.EntityType(target, (*Target)(nil)),
+		d(target, AttrElement, element),
+		d(target, AttrDirection, direction),
+		eav.EntityType(node, (*Node)(nil)),
+		d(node, AttrTarget, target),
+		d(node, AttrStatus, status),
+	}
+	return eav.And(clauses...)
+}

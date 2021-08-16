@@ -1,4 +1,4 @@
-package eav2_test
+package eav_test
 
 import (
 	"fmt"
@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	. "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav2"
+	. "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/stretchr/testify/require"
 )
@@ -53,30 +53,25 @@ func TestEav(t *testing.T) {
 
 	typ := reflect.TypeOf
 	d := Datom
-	var (
-		table, tableID, parent, parentID, column, parentTarget, parentNode Var = "table",
-			"tableID", "parent", "parentID", "column", "parentTarget", "parentNode"
-	)
-	q := Prepare(scpb.AttrSchema,
-		d(table, TypeAttribute, typ((*scpb.Table)(nil))),
+	var table, tableID, parent, parentID, column Var = "table",
+		"table-id", "parent", "parent-id", "column"
+	q, err := NewQuery(scpb.AttrSchema,
+		EntityType(table, (*scpb.Table)(nil)),
+		EntityType(parent, (*scpb.Database)(nil)),
+		EntityType(column, (*scpb.Column)(nil)),
 		d(table, scpb.AttrDescID, tableID),
 		d(table, scpb.AttrParentID, parentID),
 		d(parent, scpb.AttrDescID, parentID),
 		d(column, scpb.AttrDescID, tableID),
-		d(column, TypeAttribute, typ((*scpb.Column)(nil))),
-		d(parentTarget, TypeAttribute, typ((*scpb.Target)(nil))),
-		d(parentTarget, scpb.AttrElement, table),
-		d(parentNode, TypeAttribute, typ((*scpb.Node)(nil))),
-		d(parentNode, scpb.AttrTarget, parentTarget),
-		d(parentTarget, scpb.AttrDirection, scpb.Target_DROP),
-		d(parentNode, scpb.AttrStatus, scpb.Status_ABSENT),
+		scpb.NodeRule(parent, scpb.Target_DROP, scpb.Status_ABSENT),
 	)
-	_ = db.Evaluate(q, func(r Result) error {
-		fmt.Printf("%T %v", r.Var(table), r.Var(table))
+	require.NoError(t, err)
+	_ = q.Prepare().Iterate(db, func(r Result) error {
+		fmt.Printf("%T %v\n", r.Var(table), r.Var(table))
 		return nil
 	})
 	type v = Var
-	Prepare(scpb.AttrSchema,
+	NewQuery(scpb.AttrSchema,
 		d(v("parent"), TypeAttribute, typ((*scpb.Database)(nil))),
 		d(v("parent"), scpb.AttrDescID, v("parentID")),
 		d(v("parentNode"), scpb.AttrElement, v("parent")),

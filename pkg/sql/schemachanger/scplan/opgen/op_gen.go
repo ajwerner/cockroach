@@ -3,6 +3,7 @@ package opgen
 import (
 	"reflect"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scgraph"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
@@ -22,19 +23,22 @@ func (r *Registry) BuildGraph(initial scpb.State) (*scgraph.Graph, error) {
 	if err != nil {
 		return nil, err
 	}
-	tr := eav.NewTree(scpb.AttrSchema(), [][]eav.Attribute{
+	tr := eav.NewDatabase(scpb.AttrSchema, [][]eav.Attribute{
 		{scpb.AttrElementType, scpb.AttrDirection},
 	})
 	for _, n := range initial {
 		tr.Insert(n)
 	}
-	v := eav.GetValues()
-	defer v.Release()
+
 	for _, t := range r.targets {
-		v.Set(scpb.AttrElementType, scpb.GetElementType(t.element))
-		v.Set(scpb.AttrDirection, (*eav.Int32)(&t.dir))
-		_ = tr.Iterate(v, eav.IteratorFunc(func(container eav.Entity) error {
-			n := container.(*scpb.Node)
+		// TODO(ajwerner): Make it easy to parameterize queries.
+		q := eav.NewQuery(scpb.AttrSchema,
+			scpb.TypeRule("el", t.element),
+			scpb.NodeRule("el")("elTarget", "elNode"),
+			eav.Datom("elTarget", scpb.AttrDirection, t.dir),
+		)
+		if err := tr.Evaluate(q, func(r eav.Result) error {
+			n := r.Var("el").(*scpb.Node)
 			var in bool
 			for _, op := range t.ops {
 				if in = in || op.From == n.Status; !in {
@@ -47,7 +51,9 @@ func (r *Registry) BuildGraph(initial scpb.State) (*scgraph.Graph, error) {
 				}
 			}
 			return nil
-		}))
+		}); err != nil {
+			return nil, err
+		}
 	}
 	return g, nil
 }

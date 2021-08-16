@@ -1,4 +1,4 @@
-package eav2
+package eav
 
 import (
 	"reflect"
@@ -85,7 +85,7 @@ func (a A) Ordinal() Ordinal {
 var _ Attribute = A("")
 
 func TestMusicInfo(t *testing.T) {
-	sc := NewSchema(Mappings{
+	sc := NewSchema("", Mappings{
 		TypeMappings: map[reflect.Type]map[string]Attribute{
 			reflect.TypeOf((*Artist)(nil)): {
 				"Name": A("artist"),
@@ -115,10 +115,11 @@ func TestMusicInfo(t *testing.T) {
 		require.Nil(t, db.Insert(d))
 	}
 
-	q := Prepare(sc,
+	q, err := NewQuery(sc,
 		Datom("a", A("artist"), ArtistName("The Beatles!")),
 	)
-	require.NoError(t, db.Evaluate(q, func(r Result) error {
+	require.Nil(t, err)
+	require.NoError(t, q.Prepare().Iterate(db, func(r Result) error {
 		return nil
 	}))
 }

@@ -1,4 +1,4 @@
-package eav2
+package eav
 
 import (
 	"reflect"
@@ -9,6 +9,7 @@ import (
 )
 
 type Schema struct {
+	name                 string
 	attributesByOrdinal  map[Ordinal]Attribute
 	attributeTypes       map[Attribute]reflect.Type
 	entityTypeSchemas    map[reflect.Type]*entityTypeSchema
@@ -51,10 +52,10 @@ type Mappings struct {
 	// values. Interface values get tricky.
 	TypeMappings map[reflect.Type]map[string]Attribute
 
-	// TODO(ajwerner): Unique constraints, extensional types
+	// TODO(ajwerner): Consider adding support for unique constraints.
 }
 
-func NewSchema(m Mappings) *Schema {
+func NewSchema(name string, m Mappings) *Schema {
 	isStructPointer := func(tt reflect.Type) bool {
 		return tt.Kind() == reflect.Ptr && tt.Elem().Kind() == reflect.Struct
 	}
@@ -195,6 +196,7 @@ func NewSchema(m Mappings) *Schema {
 	}
 
 	*sc = Schema{
+		name:                 name,
 		attributesByOrdinal:  attrByOrd,
 		attributeTypes:       attrTypes,
 		entityTypeSchemas:    entityTypeHandlers,

@@ -1,52 +1,10 @@
-package eav2
+package eav
 
 import (
 	"unsafe"
 
 	"github.com/cockroachdb/errors"
 )
-
-// entityIterator is used to iterate Entities.
-type entityIterator interface {
-	// Visit visits an entity. If iterutil.StopIteration
-	// is returned, iteration will stop but no error is returned.
-	visit(Entity) error
-}
-
-type Entity interface {
-	Interface() interface{}
-}
-
-type Attribute interface {
-	String() string
-	Ordinal() Ordinal
-}
-
-// Ordinal is used to correlate attributes in A schema.
-// It enables use of the ordinalSet.
-type Ordinal uint64
-
-type SystemAttribute int8
-
-//go:generate stringer -type SystemAttribute
-
-func (s SystemAttribute) Ordinal() Ordinal {
-	return Ordinal(s)
-}
-
-const (
-	_ SystemAttribute = 64 - iota
-
-	// TypeAttribute is an attribute which stores the type of an entity.
-	TypeAttribute
-
-	// IDAttribute is an attribute which stores the ID of an entity.
-	IDAttribute
-
-	maxUserAttribute Ordinal = 64 - iota
-)
-
-var _ Attribute = SystemAttribute(0)
 
 func (s *Schema) makeEntity(v interface{}, f func(child entity) error) (entity, error) {
 	ti, value, ok := s.getValueInfo(v)
@@ -86,8 +44,4 @@ func (s *Schema) makeEntity(v interface{}, f func(child entity) error) (entity, 
 func (s *Schema) asEntities(e interface{}, f func(entity) error) error {
 	_, err := s.makeEntity(e, f)
 	return err
-}
-
-func panicf(format string, args ...interface{}) {
-	panic(errors.AssertionFailedWithDepthf(1, format, args...))
 }

@@ -10,18 +10,7 @@
 
 package scpb_test
 
-import (
-	"fmt"
-	"math/rand"
-	"strings"
-	"testing"
-
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
-	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
-	"github.com/stretchr/testify/require"
-)
-
+/*
 func TestTreeBasic(t *testing.T) {
 	nodes := []scpb.Node{
 		{
@@ -49,7 +38,7 @@ func TestTreeBasic(t *testing.T) {
 			Status: scpb.Status_ABSENT,
 		},
 	}
-	tr := eav.NewTree(scpb.AttrSchema(), nil)
+	tr := eav.NewDatabase(scpb.AttrSchema, nil)
 	for i := range nodes {
 		tr.Insert(&nodes[i])
 	}
@@ -162,3 +151,4 @@ func BenchmarkTree(b *testing.B) {
 		})
 	}
 }
+*/

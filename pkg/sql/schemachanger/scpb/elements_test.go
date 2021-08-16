@@ -10,13 +10,7 @@
 
 package scpb
 
-import (
-	"reflect"
-	"testing"
-
-	"github.com/stretchr/testify/require"
-)
-
+/*
 // TestElementAttributeValueTypesMatch ensure that for all elements which
 // have a given Attribute, that the values all have the same type.
 func TestElementAttributeValueTypesMatch(t *testing.T) {
@@ -92,3 +86,4 @@ func TestAllElementsHaveExpectedAttributes(t *testing.T) {
 		})
 	}
 }
+*/

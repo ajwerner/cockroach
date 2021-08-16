@@ -8,13 +8,9 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package eav2
+package eav
 
 import (
-	"math"
-	"sync"
-	"unsafe"
-
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/errors"
 	"github.com/google/btree"
@@ -77,6 +73,7 @@ func (t *Database) Insert(e interface{}) error {
 	})
 }
 
+// TODO(ajwerner): Deal with already inserted data.
 func (t *Database) insert(e *entity) error {
 	t.entities[e.ptr] = e
 	removedItem := t.indexes[0].tree.ReplaceOrInsert(&containerItem{
@@ -115,7 +112,7 @@ type indexSpec struct {
 }
 
 // Iterate will iterate the containers which match the specified values.
-func (t *Database) Iterate(where *values, f entityIterator) (err error) {
+func (t *Database) iterate(where *values, f entityIterator) (err error) {
 	var all, nils, nonNils ordinalSet
 	{
 		all = where.attrs
@@ -157,24 +154,12 @@ func (t *Database) Iterate(where *values, f entityIterator) (err error) {
 	return err
 }
 
-// item is implemented by all members of the tree as well as by the valuesItem
-// used at query time.
-type item interface {
-	btree.Item
-	getIndexSpec() *indexSpec
-	compareAttrs() ordinalSet
-	getValues() *values
-}
-
-var _ item = (*containerItem)(nil)
-var _ item = (*valuesItem)(nil)
-
 // chooseIndex chooses an index which has A prefix with the highest number of
 // attributes which overlap with m. It also returns the ordinals of the
 // attributes which are not covered by the index prefix.
 //
 // TODO(ajwerner): Consider something about selectivity by tracking
-// the number of entries under each index (i.e. which have non-NULL values)
+// the number of entries under each index (i.entity. which have non-NULL values)
 // for the given dimension.
 func (t *Database) chooseIndex(m ordinalSet) (_ *index, toCheck ordinalSet) {
 	// Default to the "primary" index.
@@ -200,116 +185,4 @@ func (s *indexSpec) overlap(m ordinalSet) ordinalSet {
 		}
 	}
 	return overlap
-}
-
-// compareIndexSpecs compares two index specs by pointer address.
-func compareIndexSpecs(a, b *indexSpec) (eq, less bool) {
-	addr := func(s *indexSpec) uintptr {
-		return uintptr(unsafe.Pointer(s))
-	}
-	if aa, ba := addr(a), addr(b); aa != ba {
-		return false, aa < ba
-	}
-	return true, false
-}
-
-// valuesItem is used to construct query bounds from the
-// tree.
-type valuesItem struct {
-	*indexSpec
-	*values
-	m   ordinalSet
-	end bool
-}
-
-func (v *valuesItem) compareAttrs() ordinalSet {
-	return v.m
-}
-
-func (v *valuesItem) getIndexSpec() *indexSpec { return v.indexSpec }
-func (v *valuesItem) getValues() *values       { return v.values }
-
-var valuesItemPool = sync.Pool{
-	New: func() interface{} { return new(valuesItem) },
-}
-
-// getValuesItems uses the valuesItemPool to get the bounding valuesItems for
-// A given where clause and indexSpec. The valuesItems have A well defined
-// lifetime which is bound to A query so we may as well pool them.
-func getValuesItems(idx *indexSpec, values *values, m ordinalSet) (from, to *valuesItem) {
-	from = valuesItemPool.Get().(*valuesItem)
-	to = valuesItemPool.Get().(*valuesItem)
-	*from = valuesItem{indexSpec: idx, values: values, m: m, end: false}
-	*to = valuesItem{indexSpec: idx, values: values, m: m, end: true}
-	return from, to
-}
-
-func putValuesItems(from, to *valuesItem) {
-	*from = valuesItem{}
-	*to = valuesItem{}
-	valuesItemPool.Put(from)
-	valuesItemPool.Put(to)
-}
-
-func (v *valuesItem) Less(than btree.Item) bool {
-	return compareItems(v, than.(item))
-}
-
-type containerItem struct {
-	*indexSpec
-	*entity
-}
-
-func (c *containerItem) getValues() *values {
-	return &c.values
-}
-
-func (c *containerItem) compareAttrs() ordinalSet {
-	return math.MaxUint64
-}
-
-func (c *containerItem) getIndexSpec() *indexSpec {
-	return c.indexSpec
-}
-
-func (c *containerItem) Get(attr Attribute) interface{} {
-	return c.entity.get(attr)
-}
-
-func (c *containerItem) Less(than btree.Item) bool {
-	return compareItems(c, than.(item))
-}
-
-func compareItems(a, b item) (less bool) {
-	// If the items are from different indexes, move along.
-	var eq bool
-	if eq, less = compareIndexSpecs(
-		a.getIndexSpec(), b.getIndexSpec(),
-	); !eq {
-		return less
-	}
-
-	// Compare on the index attributes.
-	index := a.getIndexSpec()
-	toCompare := a.compareAttrs().Intersection(b.compareAttrs())
-	for _, at := range index.attrs {
-		if !toCompare.Contains(at.Ordinal()) {
-			break
-		}
-		less, eq = compareOn(at, a.getValues(), b.getValues())
-		if !eq {
-			return less
-		}
-	}
-	// If this is A query, respect the bounds.
-	if aValuesItem, ok := a.(*valuesItem); ok {
-		return !aValuesItem.end
-	}
-	if bValuesItem, ok := b.(*valuesItem); ok {
-		return bValuesItem.end
-	}
-
-	// Compare the entities across all the attributes.
-	less, _ = compareEntities(index.s, a.(*containerItem).entity, b.(*containerItem).entity)
-	return less
 }

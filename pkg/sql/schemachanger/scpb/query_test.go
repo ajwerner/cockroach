@@ -11,11 +11,13 @@
 package scpb_test
 
 import (
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eavasdf/eavquery"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/stretchr/testify/require"
 )
@@ -54,25 +56,25 @@ func TestQueryBasic(t *testing.T) {
 			mkTypeRef(typID, tabID),
 		}
 	}
+	type v = eav.Var
 	var (
-		pathJoinQuery = eavquery.MustBuild(func(b eavquery.Builder) {
-			table := b.Entity("table")
-			typRef := b.Entity("ref")
-			typ := b.Entity("type")
-
-			table.Constrain(scpb.AttrElementType, scpb.TableElement)
-			table.Constrain(scpb.AttrDescID, typRef.Reference(scpb.AttrDescID))
-			table.Constrain(scpb.AttrStatus, typRef.Reference(scpb.AttrStatus))
-
-			typ.Constrain(scpb.AttrElementType, scpb.TypeElement)
-			typ.Constrain(scpb.AttrStatus, typRef.Reference(scpb.AttrStatus))
-			typ.Constrain(scpb.AttrDescID, typRef.Reference(scpb.AttrReferencedDescID))
-
-			typRef.Constrain(scpb.AttrElementType, scpb.TypeRefElement)
-		})
+		d             = eav.Datom
+		pathJoinQuery = eav.MustQuery(scpb.AttrSchema,
+			eav.EntityType("table", (*scpb.Table)(nil)),
+			eav.EntityType("ref", (*scpb.TypeReference)(nil)),
+			eav.EntityType("type", (*scpb.Type)(nil)),
+			d("table", scpb.AttrDescID, v("table-id")),
+			d("ref", scpb.AttrDescID, v("table-id")),
+			d("ref", scpb.AttrReferencedDescID, v("type-id")),
+			d("type", eav.TypeAttribute, reflect.TypeOf((*scpb.Type)(nil))),
+			d("type", scpb.AttrDescID, v("type-id")),
+			scpb.NodeRule("table", v("direction"), v("status")),
+			scpb.NodeRule("ref", v("direction"), v("status")),
+			scpb.NodeRule("type", v("direction"), v("status")),
+		).Prepare()
 	)
 	type queryExpectations struct {
-		query *eavquery.Query
+		query eav.PreparedQuery
 		nodes []string
 		exp   []string
 	}
@@ -122,7 +124,7 @@ func TestQueryBasic(t *testing.T) {
 		},
 	} {
 		t.Run("", func(t *testing.T) {
-			tr := eav.NewTree(scpb.AttrSchema(), [][]eav.Attribute{
+			tr := eav.NewDatabase(scpb.AttrSchema, [][]eav.Attribute{
 				{scpb.AttrColumnID},
 			})
 			for _, n := range c.nodes {
@@ -131,7 +133,7 @@ func TestQueryBasic(t *testing.T) {
 			for _, q := range c.queries {
 				t.Run("", func(t *testing.T) {
 					var results []string
-					require.NoError(t, q.query.Evaluate(tr, func(r eavquery.Result) error {
+					require.NoError(t, q.query.Iterate(tr, func(r eav.Result) error {
 						results = append(results, formatResults(r, q.nodes))
 						return nil
 					}))
@@ -144,23 +146,21 @@ func TestQueryBasic(t *testing.T) {
 
 func TestContradiction(t *testing.T) {
 	require.Panics(t, func() {
-		eavquery.MustBuild(func(b eavquery.Builder) {
-			na := b.Entity("a")
-			nb := b.Entity("b")
-			na.Constrain(scpb.AttrElementType, scpb.TypeElement)
-			nb.Constrain(scpb.AttrElementType, scpb.TableElement)
-			na.Constrain(scpb.AttrElementType, nb.Reference(scpb.AttrElementType))
-		})
+		eav.NewQuery(scpb.AttrSchema,
+			eav.EntityType("a", (*scpb.Type)(nil)),
+			eav.EntityType("b", (*scpb.Table)(nil)),
+			eav.Datom("a", eav.TypeAttribute, eav.Var("typ")),
+			eav.Datom("b", eav.TypeAttribute, eav.Var("typ")),
+		)
 	})
 }
 
-func formatResults(r eavquery.Result, nodes []string) string {
+func formatResults(r eav.Result, nodes []string) string {
 	var buf strings.Builder
 	for _, n := range nodes {
 		buf.WriteString("\n")
-		if err := scpb.Format(r.Entity(n).(scpb.Entity), &buf); err != nil {
-			panic(err)
-		}
+		got := r.Var(eav.Var(n))
+		fmt.Fprintf(&buf, "%T: %v", got, got)
 	}
 	return buf.String()
 }

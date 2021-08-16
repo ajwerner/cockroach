@@ -10,13 +10,7 @@
 
 package scpb
 
-import (
-	"strings"
-	"testing"
-
-	"github.com/stretchr/testify/require"
-)
-
+/*
 func TestGetAttribute(t *testing.T) {
 	seqElem := &SequenceDependency{
 		TableID:    1,
@@ -82,3 +76,4 @@ func BenchmarkCompareElements(b *testing.B) {
 		}
 	}
 }
+*/

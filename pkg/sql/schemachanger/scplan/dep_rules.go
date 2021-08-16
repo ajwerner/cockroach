@@ -3,7 +3,7 @@ package scplan
 import (
 	"reflect"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav2"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
 	. "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 )
 
@@ -13,11 +13,11 @@ type depRegistry struct {
 
 type depRule struct {
 	name     string
-	from, to eav2.Var
-	q        *eav2.Query
+	from, to eav.Var
+	q        *eav.Query
 }
 
-func (r *depRegistry) Register(ruleName string, from, to eav2.Var, query *eav2.Query) {
+func (r *depRegistry) Register(ruleName string, from, to eav.Var, query *eav.Query) {
 	r.rules = append(r.rules, depRule{
 		name: ruleName,
 		from: from,
@@ -28,40 +28,38 @@ func (r *depRegistry) Register(ruleName string, from, to eav2.Var, query *eav2.Q
 
 var depRules depRegistry
 
+type v = eav.Var
+
+var d, any, t = eav.Datom, eav.Any, reflect.TypeOf
+
 func init() {
-	var d, any, t = eav2.Datom, eav2.Any, reflect.TypeOf
-	type v = eav2.Var
+	typ := TypeRule
+	node := NodeRule
 	depRules.Register(
 		"database dependencies",
 		"db", "other",
-		eav2.Prepare(AttrSchema,
-			d("db", eav2.TypeAttribute, t((*Database)(nil))),
-			d("db", AttrDescID, v("dbID")),
-			d("dbTarget", AttrElement, v("db")),
-			d("dbNode", AttrTarget, v("dbTarget")),
-			d("dbNode", AttrStatus, v("status")),
-			d("dbNode", AttrStatus, Status_DELETE_ONLY),
-			d("dbTarget", AttrDirection, Target_DROP),
+		eav.MustQuery(AttrSchema,
+			typ("db", (*Database)(nil)),
+			d("db", AttrDescID, v("db-id")),
+			node("db", Target_DROP, any(Status_DELETE_ONLY, Status_DELETE_AND_WRITE_ONLY)),
+			d("db-node", AttrStatus, v("status")),
 			d("other", AttrParentID, v("dbID")),
-			d("other", eav2.TypeAttribute, any(
-				t((*Type)(nil)),
-				t((*Table)(nil)),
-				t((*View)(nil)),
-				t((*Sequence)(nil)),
-				t((*Schema)(nil)),
-			)),
-			d("otherTarget", AttrElement, v("other")),
-			d("otherTarget", AttrDirection, Target_DROP),
-			d("otherNode", AttrTarget, v("otherTarget")),
-			d("otherNode", AttrStatus, v("status")),
+			node("other", Target_DROP, v("status")),
+			typ("other",
+				(*Type)(nil),
+				(*Table)(nil),
+				(*View)(nil),
+				(*Sequence)(nil),
+				(*Schema)(nil),
+			),
 		),
 	)
 
 	depRules.Register(
 		"schema dependencies",
-		"schema", "other",
-		eav2.Prepare(AttrSchema,
-			d("schema", eav2.TypeAttribute, t((*Database)(nil))),
+		"schemaNode", "otherNode",
+		eav.MustQuery(AttrSchema,
+			d("schema", eav.TypeAttribute, t((*Database)(nil))),
 			d("schema", AttrDescID, v("schemaID")),
 			d("schemaTarget", AttrElement, v("schema")),
 			d("schemaTarget", AttrDirection, Target_DROP),
@@ -69,7 +67,7 @@ func init() {
 			d("schemaNode", AttrStatus, v("status")),
 			d("schemaNode", AttrStatus, Status_DELETE_ONLY),
 			d("other", AttrParentID, v("dbID")),
-			d("other", eav2.TypeAttribute, any(
+			d("other", eav.TypeAttribute, any(
 				t((*Type)(nil)),
 				t((*Table)(nil)),
 				t((*View)(nil)),
@@ -84,14 +82,14 @@ func init() {
 	depRules.Register(
 		"sequence owned by being dropped relies on sequence entering delete only",
 		"ownedBy", "seq",
-		eav2.Prepare(AttrSchema,
-			d("ownedBy", eav2.TypeAttribute, t((*SequenceOwnedBy)(nil))),
+		eav.MustQuery(AttrSchema,
+			d("ownedBy", eav.TypeAttribute, t((*SequenceOwnedBy)(nil))),
 			d("ownedBy", AttrDescID, v("id")),
 			d("ownedByTarget", AttrElement, v("ownedBy")),
 			d("ownedByTarget", AttrDirection, Target_DROP),
 			d("ownedByNode", AttrTarget, v("ownedByTarget")),
 			d("ownedByNode", AttrDirection, Status_ABSENT),
-			d("seq", eav2.TypeAttribute, t((*Sequence)(nil))),
+			d("seq", eav.TypeAttribute, t((*Sequence)(nil))),
 			d("seq", AttrDescID, v("id")),
 			d("seqTarget", AttrElement, v("seq")),
 			d("seqNode", AttrTarget, v("seqTarget")),
@@ -150,8 +148,8 @@ func init() {
 		depRules.Register(
 			"view depends on view",
 			"from", "to",
-			eav2.Prepare(AttrSchema,
-				d("from", eav2.TypeAttribute, t((*View)(nil))),
+			eav.NewQuery(AttrSchema,
+				d("from", eav.TypeAttribute, t((*View)(nil))),
 
 			)),
 			q.MustBuild(func(b q.Builder) {
