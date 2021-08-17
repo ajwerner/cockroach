@@ -1,4 +1,4 @@
-package eav
+package rel
 
 import (
 	"reflect"

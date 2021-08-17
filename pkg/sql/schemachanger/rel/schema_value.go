@@ -1,4 +1,14 @@
-package eav
+// Copyright 2021 The Cockroach Authors.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
+package rel
 
 import (
 	"reflect"
@@ -7,6 +17,9 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
+// schemaTypePtr is an internal type used to mark pointers to
+// entityTypeSchema but which want to ultimately return a value
+// of reflect.Type
 type schemaTypePtr uintptr
 
 var schemaTypePtrType = reflect.TypeOf((*schemaTypePtr)(nil)).Elem()
@@ -14,7 +27,7 @@ var schemaTypePtrType = reflect.TypeOf((*schemaTypePtr)(nil)).Elem()
 func makeComparableValue(sc *Schema, attr Attribute, val interface{}) (typedValue, error) {
 	switch attr {
 	case TypeAttribute:
-		// We want to accept only values of type reflect.Type but even
+		// We want to accept only valuesMap of type reflect.Type but even
 		// then we only want to accept the types we know about as they
 		// are the only types we'll ever accept for entities (right?).
 		// I think there's some oddness when it comes to interfaces.

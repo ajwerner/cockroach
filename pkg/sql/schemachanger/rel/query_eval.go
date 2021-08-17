@@ -8,7 +8,7 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package eav
+package rel
 
 import (
 	"reflect"
@@ -41,14 +41,14 @@ func newEvalContext(q *Query) *evalContext {
 
 type evalResult evalContext
 
-func (ec *evalResult) IterateVars(f func(Var, interface{})) {
-	for v := range ec.q.variables {
-		f(v, ec.Var(v))
+func (ec *evalResult) IterateVars(f func(Var)) {
+	for _, v := range ec.q.variables {
+		f(v)
 	}
 }
 
 func (ec *evalResult) Var(name Var) interface{} {
-	n, ok := ec.q.variables[name]
+	n, ok := ec.q.variableSlots[name]
 	if !ok {
 		// TODO(ajwerner): it is far from clear that this should ever happen.
 		return nil
@@ -137,9 +137,9 @@ func (ec *evalContext) maybeFoundResult() (done bool, _ error) {
 		return false, nil
 	}
 	// We're at the bottom of the join.
-	// Check to see if all the variables have been assigned a value.
+	// Check to see if all the variableSlots have been assigned a value.
 	// If not, then we did not successfully unify everything (right?).
-	for _, v := range ec.q.variables {
+	for _, v := range ec.q.variableSlots {
 		if ec.slots[v].value == nil {
 			return true, nil
 		}
@@ -147,13 +147,13 @@ func (ec *evalContext) maybeFoundResult() (done bool, _ error) {
 	return true, ec.ri((*evalResult)(ec))
 }
 
-// Construct a where clause with all of the bound values.
+// Construct a where clause with all of the bound valuesMap.
 // The logic here is that if there's an any for a slotIdx with a fact for the
 // current entity, maybe we want to use it to bound our search. In general
 // it will help if we have an index that covers the current facts plus this
 // value. There may be more than one any, in which case, this is not going
 // to be very smart.
-func (ec *evalContext) buildWhere() (where *values, anyAttr Attribute, anyValues []typedValue) {
+func (ec *evalContext) buildWhere() (where *valuesMap, anyAttr Attribute, anyValues []typedValue) {
 	where = getValues()
 
 	// TODO(ajwerner): Make this filter push-down smarter based on the indexes

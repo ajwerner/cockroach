@@ -3,7 +3,7 @@ package scplan
 import (
 	"reflect"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
 	. "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 )
 
@@ -13,11 +13,11 @@ type depRegistry struct {
 
 type depRule struct {
 	name     string
-	from, to eav.Var
-	q        *eav.Query
+	from, to rel.Var
+	q        *rel.Query
 }
 
-func (r *depRegistry) Register(ruleName string, from, to eav.Var, query *eav.Query) {
+func (r *depRegistry) Register(ruleName string, from, to rel.Var, query *rel.Query) {
 	r.rules = append(r.rules, depRule{
 		name: ruleName,
 		from: from,
@@ -28,17 +28,17 @@ func (r *depRegistry) Register(ruleName string, from, to eav.Var, query *eav.Que
 
 var depRules depRegistry
 
-type v = eav.Var
+type v = rel.Var
 
-var d, any, t = eav.Datom, eav.Any, reflect.TypeOf
+var d, any, t = rel.Datom, rel.Any, reflect.TypeOf
 
 func init() {
-	typ := TypeRule
+	typ := rel.EntityType
 	node := NodeRule
 	depRules.Register(
 		"database dependencies",
 		"db", "other",
-		eav.MustQuery(AttrSchema,
+		rel.MustQuery(AttrSchema,
 			typ("db", (*Database)(nil)),
 			d("db", AttrDescID, v("db-id")),
 			node("db", Target_DROP, any(Status_DELETE_ONLY, Status_DELETE_AND_WRITE_ONLY)),
@@ -58,8 +58,8 @@ func init() {
 	depRules.Register(
 		"schema dependencies",
 		"schemaNode", "otherNode",
-		eav.MustQuery(AttrSchema,
-			d("schema", eav.TypeAttribute, t((*Database)(nil))),
+		rel.MustQuery(AttrSchema,
+			d("schema", rel.TypeAttribute, t((*Database)(nil))),
 			d("schema", AttrDescID, v("schemaID")),
 			d("schemaTarget", AttrElement, v("schema")),
 			d("schemaTarget", AttrDirection, Target_DROP),
@@ -67,7 +67,7 @@ func init() {
 			d("schemaNode", AttrStatus, v("status")),
 			d("schemaNode", AttrStatus, Status_DELETE_ONLY),
 			d("other", AttrParentID, v("dbID")),
-			d("other", eav.TypeAttribute, any(
+			d("other", rel.TypeAttribute, any(
 				t((*Type)(nil)),
 				t((*Table)(nil)),
 				t((*View)(nil)),
@@ -82,14 +82,14 @@ func init() {
 	depRules.Register(
 		"sequence owned by being dropped relies on sequence entering delete only",
 		"ownedBy", "seq",
-		eav.MustQuery(AttrSchema,
-			d("ownedBy", eav.TypeAttribute, t((*SequenceOwnedBy)(nil))),
+		rel.MustQuery(AttrSchema,
+			d("ownedBy", rel.TypeAttribute, t((*SequenceOwnedBy)(nil))),
 			d("ownedBy", AttrDescID, v("id")),
 			d("ownedByTarget", AttrElement, v("ownedBy")),
 			d("ownedByTarget", AttrDirection, Target_DROP),
 			d("ownedByNode", AttrTarget, v("ownedByTarget")),
 			d("ownedByNode", AttrDirection, Status_ABSENT),
-			d("seq", eav.TypeAttribute, t((*Sequence)(nil))),
+			d("seq", rel.TypeAttribute, t((*Sequence)(nil))),
 			d("seq", AttrDescID, v("id")),
 			d("seqTarget", AttrElement, v("seq")),
 			d("seqNode", AttrTarget, v("seqTarget")),

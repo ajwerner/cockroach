@@ -11,7 +11,7 @@
 package scgraph
 
 import (
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/errors"
@@ -47,14 +47,14 @@ type Graph struct {
 
 	edges []Edge
 
-	entities *eav.Database
+	entities *rel.Database
 }
 
-func (g *Graph) Schema() *eav.Schema {
+func (g *Graph) Schema() *rel.Schema {
 	return g.Database().Schema()
 }
 
-func (g *Graph) Database() *eav.Database {
+func (g *Graph) Database() *rel.Database {
 	return g.entities
 }
 
@@ -66,9 +66,9 @@ func New(initial scpb.State) (*Graph, error) {
 		nodeOpEdges:  map[*scpb.Node]*OpEdge{},
 		nodeDepEdges: map[*scpb.Node][]*DepEdge{},
 		opToNode:     map[scop.Op]*scpb.Node{},
-		entities: eav.NewDatabase(scpb.AttrSchema, [][]eav.Attribute{
-			{eav.TypeAttribute, scpb.AttrDescID},
-			{scpb.AttrDescID, eav.TypeAttribute},
+		entities: rel.NewDatabase(scpb.AttrSchema, [][]rel.Attribute{
+			{rel.TypeAttribute, scpb.AttrDescID},
+			{scpb.AttrDescID, rel.TypeAttribute},
 			{scpb.AttrElement},
 			{scpb.AttrTarget},
 			// TODO(ajwerner): Decide what more predicates are needed

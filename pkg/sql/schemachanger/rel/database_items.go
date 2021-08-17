@@ -1,4 +1,4 @@
-package eav
+package rel
 
 import (
 	"math"
@@ -13,7 +13,7 @@ type item interface {
 	btree.Item
 	getIndexSpec() *indexSpec
 	compareAttrs() ordinalSet
-	getValues() *values
+	getValues() *valuesMap
 }
 
 var _ item = (*containerItem)(nil)
@@ -55,12 +55,12 @@ type containerItem struct {
 	*entity
 }
 
-func (c *containerItem) getValues() *values { return &c.values }
+func (c *containerItem) getValues() *valuesMap { return &c.valuesMap }
 
 // TODO(ajwerner): We are returning MaxUint64 here to say that we do
-// store nil values in the index. I don't think there's any value in this
+// store nil valuesMap in the index. I don't think there's any value in this
 // so we should go back and stop storing entries for entities which do not
-// have values for all of the attributes of the index.
+// have valuesMap for all of the attributes of the index.
 func (c *containerItem) compareAttrs() ordinalSet { return math.MaxUint64 }
 func (c *containerItem) getIndexSpec() *indexSpec { return c.indexSpec }
 
@@ -72,14 +72,14 @@ func (c *containerItem) Less(than btree.Item) bool {
 // tree.
 type valuesItem struct {
 	*indexSpec
-	*values
+	*valuesMap
 	m   ordinalSet
 	end bool
 }
 
 func (v *valuesItem) getIndexSpec() *indexSpec { return v.indexSpec }
 func (v *valuesItem) compareAttrs() ordinalSet { return v.m }
-func (v *valuesItem) getValues() *values       { return v.values }
+func (v *valuesItem) getValues() *valuesMap    { return v.valuesMap }
 
 var valuesItemPool = sync.Pool{
 	New: func() interface{} { return new(valuesItem) },
@@ -88,11 +88,11 @@ var valuesItemPool = sync.Pool{
 // getValuesItems uses the valuesItemPool to get the bounding valuesItems for
 // A given where clause and indexSpec. The valuesItems have A well defined
 // lifetime which is bound to A query so we may as well pool them.
-func getValuesItems(idx *indexSpec, values *values, m ordinalSet) (from, to *valuesItem) {
+func getValuesItems(idx *indexSpec, values *valuesMap, m ordinalSet) (from, to *valuesItem) {
 	from = valuesItemPool.Get().(*valuesItem)
 	to = valuesItemPool.Get().(*valuesItem)
-	*from = valuesItem{indexSpec: idx, values: values, m: m, end: false}
-	*to = valuesItem{indexSpec: idx, values: values, m: m, end: true}
+	*from = valuesItem{indexSpec: idx, valuesMap: values, m: m, end: false}
+	*to = valuesItem{indexSpec: idx, valuesMap: values, m: m, end: true}
 	return from, to
 }
 

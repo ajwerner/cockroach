@@ -13,7 +13,7 @@ package scpb
 import (
 	"reflect"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 )
 
@@ -22,13 +22,13 @@ import (
 type Attr int
 
 // Ordinal is part of the eavasdf.Attribute interface.
-func (i Attr) Ordinal() eav.Ordinal { return eav.Ordinal(i) }
+func (i Attr) Ordinal() rel.Ordinal { return rel.Ordinal(i) }
 
-var _ eav.Attribute = Attr(0)
+var _ rel.Attribute = Attr(0)
 
 //go:generate stringer -type=Attr -trimprefix=Attr
 const (
-	_ Attr = iota // reserve 0 for eav.TypeAttribute
+	_ Attr = iota // reserve 0 for rel.TypeAttribute
 	// AttrElementType type id of the element.
 	AttrElementType
 	// AttrDescID is the descriptor ID to which this element belongs.
@@ -56,11 +56,11 @@ const (
 	NumAttrs int = iota
 )
 
-var AttrSchema = eav.NewSchema("", eav.Mappings{
-	AttributeTypes: map[eav.Attribute]reflect.Type{
+var AttrSchema = rel.NewSchema("", rel.Mappings{
+	AttributeTypes: map[rel.Attribute]reflect.Type{
 		AttrElement: reflect.TypeOf((*protoutil.Message)(nil)).Elem(),
 	},
-	TypeMappings: map[reflect.Type]map[string]eav.Attribute{
+	TypeMappings: map[reflect.Type]map[string]rel.Attribute{
 		reflect.TypeOf((*Node)(nil)): {
 			"Status": AttrStatus,
 			"Target": AttrTarget,
@@ -108,18 +108,17 @@ var AttrSchema = eav.NewSchema("", eav.Mappings{
 	},
 })
 
-var d, any, t = eav.Datom, eav.Any, reflect.TypeOf
+var d, any, t = rel.Datom, rel.Any, reflect.TypeOf
 
-func NodeRule(element eav.Var, direction, status interface{}) eav.Clause {
+func NodeRule(element rel.Var, direction, status interface{}) rel.Clause {
 	node := element + "-node"
 	target := element + "-target"
-	clauses := []eav.Clause{
-		eav.EntityType(target, (*Target)(nil)),
+	return rel.And(
+		rel.EntityType(target, (*Target)(nil)),
 		d(target, AttrElement, element),
 		d(target, AttrDirection, direction),
-		eav.EntityType(node, (*Node)(nil)),
+		rel.EntityType(node, (*Node)(nil)),
 		d(node, AttrTarget, target),
 		d(node, AttrStatus, status),
-	}
-	return eav.And(clauses...)
+	)
 }

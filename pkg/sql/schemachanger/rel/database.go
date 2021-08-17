@@ -8,7 +8,7 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package eav
+package rel
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
@@ -65,10 +65,14 @@ func NewDatabase(sc *Schema, indexes [][]Attribute) *Database {
 }
 
 // Insert inserts an entity.
+//
+// TODO(ajwerner): Figure out what to do if the entity already
+// exists. We need to nail down what existence means: is it
+// intentional, as in, does the unique pointer exist, or is it
+// extensional, as in, does some entity exist with the same attributes
+// ignoring pointer value? Either way, what we have here does not fly.
 func (t *Database) Insert(e interface{}) error {
-	// I think what it means is that if we already have the object, then
-	// it's A no-op? If we do not, then it's got to be something else.
-	return t.schema.asEntities(e, func(entity entity) error {
+	return asEntities(t.schema, e, func(entity entity) error {
 		return t.insert(&entity)
 	})
 }
@@ -111,8 +115,8 @@ type indexSpec struct {
 	attrs []Attribute
 }
 
-// Iterate will iterate the containers which match the specified values.
-func (t *Database) iterate(where *values, f entityIterator) (err error) {
+// Iterate will iterate the containers which match the specified valuesMap.
+func (t *Database) iterate(where *valuesMap, f entityIterator) (err error) {
 	var all, nils, nonNils ordinalSet
 	{
 		all = where.attrs
@@ -130,8 +134,8 @@ func (t *Database) iterate(where *values, f entityIterator) (err error) {
 	defer putValuesItems(from, to)
 	idx.tree.AscendRange(from, to, func(i btree.Item) (wantMore bool) {
 		c := i.(*containerItem)
-		// We want to skip items which do not have values set for
-		// all members of the where clause or which have values set
+		// We want to skip items which do not have valuesMap set for
+		// all members of the where clause or which have valuesMap set
 		// for attributes where we explicitly do not want them.
 		if cAttrs := c.entity.attrs; nonNils.Without(cAttrs) != 0 ||
 			nils.Intersection(cAttrs) != 0 {
@@ -139,7 +143,7 @@ func (t *Database) iterate(where *values, f entityIterator) (err error) {
 		}
 		var failed bool
 		toCheck.ForEach(t.schema, func(a Attribute) (wantMore bool) {
-			_, eq := compareOn(a, &c.values, where)
+			_, eq := compareOn(a, &c.valuesMap, where)
 			failed = !eq
 			return !failed
 		})
@@ -159,7 +163,7 @@ func (t *Database) iterate(where *values, f entityIterator) (err error) {
 // attributes which are not covered by the index prefix.
 //
 // TODO(ajwerner): Consider something about selectivity by tracking
-// the number of entries under each index (i.entity. which have non-NULL values)
+// the number of entries under each index (i.entity. which have non-NULL valuesMap)
 // for the given dimension.
 func (t *Database) chooseIndex(m ordinalSet) (_ *index, toCheck ordinalSet) {
 	// Default to the "primary" index.
@@ -173,7 +177,7 @@ func (t *Database) chooseIndex(m ordinalSet) (_ *index, toCheck ordinalSet) {
 	return &t.indexes[best], m.Without(bestOverlap)
 }
 
-// overlap returns the ordinals from m which overlap with A prefix of
+// overlap returns the ordinals from m which overlap with a prefix of
 // attributes in s.
 func (s *indexSpec) overlap(m ordinalSet) ordinalSet {
 	var overlap ordinalSet

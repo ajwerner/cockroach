@@ -17,7 +17,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/stretchr/testify/require"
 )
@@ -56,17 +56,17 @@ func TestQueryBasic(t *testing.T) {
 			mkTypeRef(typID, tabID),
 		}
 	}
-	type v = eav.Var
+	type v = rel.Var
 	var (
-		d             = eav.Datom
-		pathJoinQuery = eav.MustQuery(scpb.AttrSchema,
-			eav.EntityType("table", (*scpb.Table)(nil)),
-			eav.EntityType("ref", (*scpb.TypeReference)(nil)),
-			eav.EntityType("type", (*scpb.Type)(nil)),
+		d             = rel.Datom
+		pathJoinQuery = rel.MustQuery(scpb.AttrSchema,
+			rel.EntityType("table", (*scpb.Table)(nil)),
+			rel.EntityType("ref", (*scpb.TypeReference)(nil)),
+			rel.EntityType("type", (*scpb.Type)(nil)),
 			d("table", scpb.AttrDescID, v("table-id")),
 			d("ref", scpb.AttrDescID, v("table-id")),
 			d("ref", scpb.AttrReferencedDescID, v("type-id")),
-			d("type", eav.TypeAttribute, reflect.TypeOf((*scpb.Type)(nil))),
+			d("type", rel.TypeAttribute, reflect.TypeOf((*scpb.Type)(nil))),
 			d("type", scpb.AttrDescID, v("type-id")),
 			scpb.NodeRule("table", v("direction"), v("status")),
 			scpb.NodeRule("ref", v("direction"), v("status")),
@@ -74,7 +74,7 @@ func TestQueryBasic(t *testing.T) {
 		).Prepare()
 	)
 	type queryExpectations struct {
-		query eav.PreparedQuery
+		query rel.PreparedQuery
 		nodes []string
 		exp   []string
 	}
@@ -124,7 +124,7 @@ func TestQueryBasic(t *testing.T) {
 		},
 	} {
 		t.Run("", func(t *testing.T) {
-			tr := eav.NewDatabase(scpb.AttrSchema, [][]eav.Attribute{
+			tr := rel.NewDatabase(scpb.AttrSchema, [][]rel.Attribute{
 				{scpb.AttrColumnID},
 			})
 			for _, n := range c.nodes {
@@ -133,7 +133,7 @@ func TestQueryBasic(t *testing.T) {
 			for _, q := range c.queries {
 				t.Run("", func(t *testing.T) {
 					var results []string
-					require.NoError(t, q.query.Iterate(tr, func(r eav.Result) error {
+					require.NoError(t, q.query.Iterate(tr, func(r rel.Result) error {
 						results = append(results, formatResults(r, q.nodes))
 						return nil
 					}))
@@ -146,20 +146,20 @@ func TestQueryBasic(t *testing.T) {
 
 func TestContradiction(t *testing.T) {
 	require.Panics(t, func() {
-		eav.NewQuery(scpb.AttrSchema,
-			eav.EntityType("a", (*scpb.Type)(nil)),
-			eav.EntityType("b", (*scpb.Table)(nil)),
-			eav.Datom("a", eav.TypeAttribute, eav.Var("typ")),
-			eav.Datom("b", eav.TypeAttribute, eav.Var("typ")),
+		rel.NewQuery(scpb.AttrSchema,
+			rel.EntityType("a", (*scpb.Type)(nil)),
+			rel.EntityType("b", (*scpb.Table)(nil)),
+			rel.Datom("a", rel.TypeAttribute, rel.Var("typ")),
+			rel.Datom("b", rel.TypeAttribute, rel.Var("typ")),
 		)
 	})
 }
 
-func formatResults(r eav.Result, nodes []string) string {
+func formatResults(r rel.Result, nodes []string) string {
 	var buf strings.Builder
 	for _, n := range nodes {
 		buf.WriteString("\n")
-		got := r.Var(eav.Var(n))
+		got := r.Var(rel.Var(n))
 		fmt.Fprintf(&buf, "%T: %v", got, got)
 	}
 	return buf.String()

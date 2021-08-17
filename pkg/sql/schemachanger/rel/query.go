@@ -1,4 +1,4 @@
-package eav
+package rel
 
 import (
 	"sort"
@@ -9,11 +9,13 @@ import (
 // Query searches for sets of entities which uphold A set of constraints.
 type Query struct {
 	schema *Schema
-	// rules are the original rules. They exist for debugging.
-	rules []Clause
-
-	// variables is the mapping of names to slots.
-	variables map[Var]slotIdx
+	// clauses are the original clauses. They exist for debugging.
+	clauses []Clause
+	// variables is the set of variables used in the query
+	// stored in the order in which they appear.
+	variables []Var
+	// variableSlots is the mapping of names to slots.
+	variableSlots map[Var]slotIdx
 	// entities is the mapping of entities to slots.
 	entities []slotIdx
 	// slots store the data and metadata about the slots.
@@ -26,7 +28,7 @@ type Query struct {
 // constraints of its corresponding query. It is a rather low-level
 // interface.
 type Result interface {
-	IterateVars(func(Var, interface{}))
+	IterateVars(func(Var))
 
 	Var(name Var) interface{}
 }
@@ -69,8 +71,8 @@ func NewQuery(sc *Schema, clauses ...Clause) (_ *Query, err error) {
 
 func newQuery(sc *Schema, clauses []Clause) *Query {
 	p := &queryBuilder{
-		sc:   sc,
-		vars: map[Var]slotIdx{},
+		sc:            sc,
+		variableSlots: map[Var]slotIdx{},
 	}
 	for _, t := range clauses {
 		p.processClause(t)
@@ -98,12 +100,13 @@ func newQuery(sc *Schema, clauses []Clause) *Query {
 		panic(errors.Errorf("query contains contradiction"))
 	}
 	return &Query{
-		schema:    sc,
-		variables: p.vars,
-		rules:     clauses,
-		entities:  entities,
-		facts:     p.facts,
-		slots:     p.slots,
+		schema:        sc,
+		variables:     p.variables,
+		variableSlots: p.variableSlots,
+		clauses:       clauses,
+		entities:      entities,
+		facts:         p.facts,
+		slots:         p.slots,
 	}
 }
 

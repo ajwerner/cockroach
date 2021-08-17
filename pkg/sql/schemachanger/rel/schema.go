@@ -1,11 +1,8 @@
-package eav
+package rel
 
 import (
 	"reflect"
 	"strings"
-	"unsafe"
-
-	"github.com/cockroachdb/errors"
 )
 
 type Schema struct {
@@ -21,10 +18,10 @@ type entityTypeSchema struct {
 	typ              reflect.Type
 	fields           []fieldInfo
 	scalarAttrFields map[Attribute]*fieldInfo
-	// intensional          bool
 }
 
 type fieldInfo struct {
+	path            string
 	typ             reflect.Type
 	attr            Attribute
 	comparableValue func(uintptr) interface{}
@@ -35,8 +32,16 @@ type fieldInfo struct {
 // Mappings defines how to map data types to attributes.
 type Mappings struct {
 
-	// Will be inferred from fields. Must be defined for
-	// attributes which are not in fields.
+	// AttributeTypes sets the type of values for an Attribute. Values do not
+	// need to be provided for most attribute; types will be inferred from
+	// fields.
+	//
+	// Types must be defined for any attributes which are not in fields.
+	// Otherwise, the schema will have no way of knowing about the attribute.
+	//
+	// It also must be defined for attributes which may take on more than one
+	// type. In that case it must be defined to some interface type to which
+	// all of the possible types conform.
 	AttributeTypes map[Attribute]reflect.Type
 
 	// TypeMappings is A map from A type to A map of fields to attributes.
@@ -51,8 +56,6 @@ type Mappings struct {
 	// TODO(ajwerner): Support pointers to primitive types as well as interface
 	// values. Interface values get tricky.
 	TypeMappings map[reflect.Type]map[string]Attribute
-
-	// TODO(ajwerner): Consider adding support for unique constraints.
 }
 
 func NewSchema(name string, m Mappings) *Schema {
@@ -139,8 +142,8 @@ func NewSchema(name string, m Mappings) *Schema {
 			}
 			// TODO(ajwerner): Deal with making entities out of structs themselves.
 			maybeAddAttribute(attr, cur)
-			curIsPtr := isStructPointer(cur)
-			if curIsPtr {
+			curIsStructPointer := isStructPointer(cur)
+			if curIsStructPointer {
 				curFields, ok := m.TypeMappings[cur]
 				if !ok {
 					maybeAddTypeMapping(cur, curFields)
@@ -149,12 +152,12 @@ func NewSchema(name string, m Mappings) *Schema {
 
 			f := fieldInfo{
 				attr:     attr,
-				isEntity: curIsPtr,
+				isEntity: curIsStructPointer,
 				typ:      cur,
 			}
 			{
 				vg := makeValueGetter(cur, offset)
-				if curIsPtr {
+				if curIsStructPointer {
 					f.value = func(u uintptr) interface{} {
 						got := vg(u)
 						if got.Elem().IsNil() {
@@ -208,22 +211,4 @@ func NewSchema(name string, m Mappings) *Schema {
 func (s *Schema) At(o Ordinal) Attribute {
 	attr, _ := s.attributesByOrdinal[o]
 	return attr
-}
-
-func (s *Schema) getValueInfo(v interface{}) (*entityTypeSchema, reflect.Value, bool) {
-	vv := reflect.ValueOf(v)
-	if !vv.IsValid() {
-		return nil, reflect.Value{}, false
-	}
-	t, ok := s.entityTypeSchemas[vv.Type()]
-	if !ok {
-		panic(errors.AssertionFailedf("unknown type handler for %T", v))
-	}
-	return t, vv, ok
-}
-
-func makeValueGetter(t reflect.Type, offset uintptr) func(uintptr) reflect.Value {
-	return func(u uintptr) reflect.Value {
-		return reflect.NewAt(t, unsafe.Pointer(u+offset))
-	}
 }

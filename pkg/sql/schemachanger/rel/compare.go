@@ -8,18 +8,18 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package eav
+package rel
 
 import (
 	"reflect"
-	"unsafe"
 
 	"github.com/cockroachdb/errors"
 )
 
-// compare assumes that A and b are comparable and of the same type.
+// compare assumes that a and b are comparable and of the same type.
+// comparable here
 func compare(a, b interface{}) (less, eq bool) {
-	// I want generics.
+	// Note: this would be nice and easy to represent generics
 	switch a := a.(type) {
 	case *int:
 		b := b.(*int)
@@ -127,54 +127,13 @@ func getComparableType(t reflect.Type) reflect.Type {
 	return ct
 }
 
-// entity is the internal representation of a struct pointer.
-// The idea is that ptr is the pointer itself and typ is a
-// pointer to the entityTypeSchema.
-type entity struct {
-	// Part of the reason ptr exists her and not just in the map is that we need
-	// to store a pointer to a value everywhere. Where better to attach that
-	// pointer than here, to this struct? The value stored in values will be
-	// pointing to this field.
-	ptr uintptr // interface{}
-	typ uintptr // *entityTypeSchema
-
-	// values stores all of the attributes, including the types and pointer.
-	// TODO(ajwerner): I seem to recall that we were not setting the type or
-	// pointer value in the bitmap. Figure that out.
-	values
-}
-
-func (e *entity) getTypeInfo() *entityTypeSchema {
-	return (*entityTypeSchema)(unsafe.Pointer(e.typ))
-}
-
-// TODO(ajwerner): document what's going on here. For scalar fields we know
-// the type because we do not permit oneOf behavior. For entity fields, we
-// don't store the type because it's dynamic. Instead we know that if the
-// field points to an entity, then the database has the entity indexed by
-// its address and the entity knows its type. Because of that, typ will
-// be nil if isEntity is true.
-func (e *entity) getValueAndType(
-	attr Attribute,
-) (value interface{}, typ reflect.Type, isEntity bool) {
-	if attr == TypeAttribute {
-		return e.get(attr), schemaTypePtrType, false
-	}
-	ti := e.getTypeInfo()
-	fi, ok := ti.scalarAttrFields[attr]
-	if !ok {
-		return e.get(attr), nil, true
-	}
-	return e.get(attr), fi.typ, false
-}
-
 // compareOn compares two elements on A given attribute.
 // If the entities do not return the same type of value for the
 // attribute, this function will panic. Note that it is fine if
 // either or both do not contain this attribute. The lack of A
 // value is considered the highest value; you can think of this
 // library as sorting with NULLS LAST.
-func compareOn(attr Attribute, a, b *values) (less, eq bool) {
+func compareOn(attr Attribute, a, b *valuesMap) (less, eq bool) {
 	av := a.get(attr)
 	bv := b.get(attr)
 	switch {
@@ -197,7 +156,7 @@ func compareEntities(s *Schema, a, b *entity) (less, eq bool) {
 	ordinalSet.Union(
 		a.attrs, b.attrs,
 	).ForEach(s, func(attr Attribute) (wantMore bool) {
-		less, eq = compareOn(attr, &a.values, &b.values)
+		less, eq = compareOn(attr, &a.valuesMap, &b.valuesMap)
 		return eq
 	})
 	return less, eq

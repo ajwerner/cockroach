@@ -3,7 +3,7 @@ package opgen
 import (
 	"reflect"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/eav"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scgraph"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
@@ -23,7 +23,7 @@ func (r *Registry) BuildGraph(initial scpb.State) (*scgraph.Graph, error) {
 	if err != nil {
 		return nil, err
 	}
-	tr := eav.NewDatabase(scpb.AttrSchema, [][]eav.Attribute{
+	tr := rel.NewDatabase(scpb.AttrSchema, [][]rel.Attribute{
 		{scpb.AttrElementType, scpb.AttrDirection},
 	})
 	for _, n := range initial {
@@ -32,12 +32,12 @@ func (r *Registry) BuildGraph(initial scpb.State) (*scgraph.Graph, error) {
 
 	for _, t := range r.targets {
 		// TODO(ajwerner): Make it easy to parameterize queries.
-		q := eav.NewQuery(scpb.AttrSchema,
+		q := rel.NewQuery(scpb.AttrSchema,
 			scpb.TypeRule("el", t.element),
 			scpb.NodeRule("el")("elTarget", "elNode"),
-			eav.Datom("elTarget", scpb.AttrDirection, t.dir),
+			rel.Datom("elTarget", scpb.AttrDirection, t.dir),
 		)
-		if err := tr.Evaluate(q, func(r eav.Result) error {
+		if err := tr.Evaluate(q, func(r rel.Result) error {
 			n := r.Var("el").(*scpb.Node)
 			var in bool
 			for _, op := range t.ops {

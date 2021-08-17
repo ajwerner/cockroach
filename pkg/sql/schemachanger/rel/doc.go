@@ -8,7 +8,7 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-// Package eav provides mechanisms to model, index, and query go structs
+// Package rel provides mechanisms to model, index, and query go structs
 // using a relational paradigm.
 //
 // The package provides a means to map a struct fields to a set of Attributes
@@ -31,10 +31,25 @@
 //
 // Query Language
 //
+// The query language provides a mechanism to reason relationally about data
+// stored in regular structs which may themselves have hierarchy between them.
+// The structure of the query language is motivated by datomic which is itself
+// motivated by datalog. However, the implementation requirements are simpler
+// than datomic. We don't need durability and we know that we're embedded in a
+// running program. The language is not a true datalog: it does not really
+// have the notion of a rule and it certainly doesn't have a means to express
+// recursion during the execution of queries. This means that the queries can
+// only represent fixed depth joins between relations. Of course, users of
+// libraries can generate queries of an arbitrary depth. Furthermore, users
+// can implement their own forms of recursion.
+//
 // Future work
 //
-// Arrays, Maps, Slices
-// Note that arrays of bytes can probably be used as slice
+// * Arrays, Maps, Slices
+//
+// TODO(ajwerner): Note that arrays of bytes can probably be used as slice but
+// that would probably be unfortunate. We'd probably prefer to shove them into
+// a string using some unsafe magic
 //
 // Motivation
 //
@@ -63,19 +78,18 @@
 // expressive and much more verbose.
 //
 // At the end of the day, for each statement we're going to evaluate some
-// constant number of rules, each of which is going to apply to some subset of
+// constant number of clauses, each of which is going to apply to some subset of
 // the elements and is going to need to explore some other constrained subset of
 // the elements. If we assume that our queries are generally depth 2 (i.entity. just
 // direct references), then maybe this isn't so bad, it'd mean that we'd do at
 // most N^2 work for each statement. However, it gets worse when you think about
 // transactions which contain many statements (think big migrations). In that
 // case, we'd have to do N^2 work N times (N^3). N^3 is starting to get bad even
-// if each step only takes less than a microsecond. Again, all of this
-// could be defeated with maps on the right attributes. However, I had a hard
-// time coming up with a nice way to reason about writing rules declaratively
-// which allows us to utilizing map-based indexing structures, at least, without
-// generating code and writing a DSL. This seems less complex than code
-// generation.
+// if each step only takes a microsecond. Again, all of this could be defeated with
+// maps on the right attributes. However, I had a hard time coming up with a nice way
+// to reason about writing clauses declaratively which allows us to utilizing map-based
+// indexing structures, at least, without generating code and writing a DSL. This seems
+// less complex than code generation.
 //
 // To demonstrate the importance of this, I've added a benchmark that created
 // lists+depth = N entities which are tuples (id, next) and the data just points
@@ -89,4 +103,4 @@
 // indexes in O(N*log(N)) per statement meaning at worst N^2 log(N) which is
 // acceptable for an N of ~1000 as opposed to N^3 which isn't really.
 //
-package eav
+package rel

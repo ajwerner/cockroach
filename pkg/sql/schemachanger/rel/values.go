@@ -8,33 +8,34 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package eav
+package rel
 
 import "sync"
 
-// values is a container for data.
+// valuesMap is a container for attributes.
 //
 // It stores the data in a format which is convenient for performing
 // comparisons and lookups. If you want strongly typed data out of it,
-// you need to use A Schema to retrieve that data.
-type values struct {
+// you need to use a Schema to retrieve that data. Note that the library
+// expects all values to be stored in the map in the
+type valuesMap struct {
 	attrs ordinalSet
 	m     map[Ordinal]interface{}
 }
 
 var valuesSyncPool = sync.Pool{
 	New: func() interface{} {
-		return &values{
+		return &valuesMap{
 			m: make(map[Ordinal]interface{}),
 		}
 	},
 }
 
-func getValues() *values {
-	return valuesSyncPool.Get().(*values)
+func getValues() *valuesMap {
+	return valuesSyncPool.Get().(*valuesMap)
 }
 
-func putValues(v *values) {
+func putValues(v *valuesMap) {
 	for k := range v.m {
 		delete(v.m, k)
 	}
@@ -42,13 +43,13 @@ func putValues(v *values) {
 	valuesSyncPool.Put(v)
 }
 
-// get retrieves the primitive values stores in the values
+// get retrieves the primitive valuesMap stores in the valuesMap
 // struct.
-func (v values) get(a Attribute) interface{} {
+func (v valuesMap) get(a Attribute) interface{} {
 	return v.m[a.Ordinal()]
 }
 
-func (vv *values) copyFrom(values values) {
+func (vv *valuesMap) copyFrom(values valuesMap) {
 	for ord, v := range values.m {
 		if ord < maxUserAttribute {
 			vv.add(ord, v)
@@ -56,7 +57,7 @@ func (vv *values) copyFrom(values values) {
 	}
 }
 
-func (vv *values) add(ord Ordinal, v interface{}) {
-	vv.attrs = vv.attrs.Add(ord)
-	vv.m[ord] = v
+func (vm *valuesMap) add(ord Ordinal, v interface{}) {
+	vm.attrs = vm.attrs.Add(ord)
+	vm.m[ord] = v
 }

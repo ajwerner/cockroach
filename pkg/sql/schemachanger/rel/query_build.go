@@ -1,12 +1,13 @@
-package eav
+package rel
 
 import "github.com/cockroachdb/errors"
 
 type queryBuilder struct {
-	sc    *Schema
-	vars  map[Var]slotIdx
-	facts []fact
-	slots []slot
+	sc            *Schema
+	variables     []Var
+	variableSlots map[Var]slotIdx
+	facts         []fact
+	slots         []slot
 
 	// Track whether the slotIdx holds an entity separately. We want to
 	// know this in planning but it'll be implicit during execution.
@@ -59,7 +60,7 @@ func (p *queryBuilder) processFactDecl(fd *datomDecl) {
 }
 
 func (p *queryBuilder) maybeAddVar(v Var, entity bool) slotIdx {
-	id, exists := p.vars[v]
+	id, exists := p.variableSlots[v]
 	if exists {
 		if entity && !p.slotIsEntity[id] {
 			p.slotIsEntity[id] = entity
@@ -67,7 +68,8 @@ func (p *queryBuilder) maybeAddVar(v Var, entity bool) slotIdx {
 		return id
 	}
 	id = p.fillSlot(slot{}, entity)
-	p.vars[v] = id
+	p.variables = append(p.variables, v)
+	p.variableSlots[v] = id
 	return id
 }
 
@@ -78,7 +80,7 @@ func (p *queryBuilder) fillSlot(sd slot, isEntity bool) slotIdx {
 	return s
 }
 
-// findEntitySlots finds the slots which correspond to entity variables in
+// findEntitySlots finds the slots which correspond to entity variableSlots in
 // the order in which they appear. This will imply the user-requested join
 // order.
 func (p *queryBuilder) findEntitySlots() (entitySlots []slotIdx) {

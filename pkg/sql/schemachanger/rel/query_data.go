@@ -1,4 +1,4 @@
-package eav
+package rel
 
 import "reflect"
 
@@ -14,7 +14,7 @@ type fact struct {
 type slot struct {
 	typedValue
 
-	// any holds the acceptable values which may occupy this slot as
+	// any holds the acceptable valuesMap which may occupy this slot as
 	// indicated from an Any value.
 	any []typedValue
 }

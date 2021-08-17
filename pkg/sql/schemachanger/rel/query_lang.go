@@ -1,4 +1,4 @@
-package eav
+package rel
 
 import (
 	"reflect"
@@ -7,8 +7,8 @@ import (
 )
 
 // Var is a variable name. Everything is convention, but, when you create
-// rules and use variable names which are not part of the defined scope of
-// the rule, the new variables which will be created will have a scope prefix
+// clauses and use variable names which are not part of the defined scope of
+// the rule, the new variableSlots which will be created will have a scope prefix
 // to try to ensure that they are unique. Given that, don't put `:` in your
 // variable names.
 type Var string
@@ -63,8 +63,8 @@ type and []Clause
 func (a *and) clause() {}
 
 // EntityType returns a clause enforcing that the entity has one of the types
-// passed by constraining its TypeAttribute. The function panics if no values
-// are passed. Note that this is expecting values and will call reflect.TypeOf
+// passed by constraining its TypeAttribute. The function panics if no valuesMap
+// are passed. Note that this is expecting valuesMap and will call reflect.TypeOf
 // internally; do not pass a reflect.Type here.
 func EntityType(entity Var, valuesForTypeOf ...interface{}) Clause {
 	switch len(valuesForTypeOf) {
