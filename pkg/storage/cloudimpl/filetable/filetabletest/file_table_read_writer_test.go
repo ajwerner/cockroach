@@ -20,10 +20,12 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl/filetable"
+	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
@@ -36,28 +38,32 @@ const qualifiedTableName = database + ".public.file_table_read_writer"
 // uploadFile generates random data and copies it to the FileTableSystem via
 // the FileWriter.
 func uploadFile(
-	ctx context.Context, filename string, fileSize, chunkSize int, ft *filetable.FileToTableSystem,
+	ctx context.Context,
+	filename string,
+	fileSize, chunkSize int,
+	ft *filetable.FileToTableSystem,
+	db *kv.DB,
 ) ([]byte, error) {
 	data := make([]byte, fileSize)
 	randGen, _ := randutil.NewPseudoRand()
 	randutil.ReadTestdataBytes(randGen, data)
 
-	writer, err := ft.NewFileWriter(ctx, filename, chunkSize)
-	if err != nil {
-		return nil, err
-	}
+	err := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		writer, err := ft.NewFileWriter(ctx, filename, chunkSize)
+		if err != nil {
+			return err
+		}
 
-	_, err = io.Copy(writer, bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
+		_, err = io.Copy(writer, bytes.NewReader(data))
+		if err != nil {
+			return err
+		}
 
-	err = writer.Close()
-	if err != nil {
-		return nil, err
-	}
+		err = writer.Close()
+		return err
+	})
 
-	return data, nil
+	return data, err
 }
 
 // Checks that filename has been divided into the expected number of chunks
@@ -65,13 +71,18 @@ func uploadFile(
 func checkNumberOfPayloadChunks(
 	ctx context.Context,
 	t *testing.T,
-	payloadTableName, filename string,
+	fileTableName, payloadTableName, filename string,
 	expectedNumChunks int,
 	sqlDB *gosql.DB,
 ) {
+	var fileID []uint8
+	err := sqlDB.QueryRowContext(ctx, fmt.Sprintf(`SELECT file_id FROM %s WHERE filename=$1`,
+		fileTableName), filename).Scan(&fileID)
+	require.NoError(t, err)
+
 	var count int
-	err := sqlDB.QueryRowContext(ctx, fmt.Sprintf(`SELECT count(*) FROM %s WHERE filename='%s'`,
-		payloadTableName, filename)).Scan(&count)
+	err = sqlDB.QueryRowContext(ctx, fmt.Sprintf(`SELECT count(*) FROM %s WHERE file_id=$1`,
+		payloadTableName), fileID).Scan(&count)
 	require.NoError(t, err)
 	require.Equal(t, expectedNumChunks, count)
 }
@@ -95,23 +106,24 @@ func TestListAndDeleteFiles(t *testing.T) {
 	s, _, kvDB := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
 
+	executor := filetable.MakeInternalFileToTableExecutor(s.InternalExecutor().(*sql.
+		InternalExecutor), kvDB)
 	fileTableReadWriter, err := filetable.NewFileToTableSystem(ctx, qualifiedTableName,
-		s.InternalExecutor().(*sql.InternalExecutor), kvDB,
-		security.RootUser)
+		executor, security.RootUserName())
 	require.NoError(t, err)
 
 	// Create first test file with multiple chunks.
 	const size = 1024
 	const chunkSize = 8
-	_, err = uploadFile(ctx, "file1", size, chunkSize, fileTableReadWriter)
+	_, err = uploadFile(ctx, "file1", size, chunkSize, fileTableReadWriter, kvDB)
 	require.NoError(t, err)
 
 	// Create second test file with multiple chunks.
-	_, err = uploadFile(ctx, "file2", size, chunkSize, fileTableReadWriter)
+	_, err = uploadFile(ctx, "file2", size, chunkSize, fileTableReadWriter, kvDB)
 	require.NoError(t, err)
 
 	// Create third test file with multiple chunks.
-	_, err = uploadFile(ctx, "file3", size, chunkSize, fileTableReadWriter)
+	_, err = uploadFile(ctx, "file3", size, chunkSize, fileTableReadWriter, kvDB)
 	require.NoError(t, err)
 
 	// List files before delete.
@@ -133,7 +145,7 @@ func TestListAndDeleteFiles(t *testing.T) {
 	require.NoError(t, filetable.DestroyUserFileSystem(ctx, fileTableReadWriter))
 
 	// Attempt to write after the user system has been destroyed.
-	_, err = uploadFile(ctx, "file4", size, chunkSize, fileTableReadWriter)
+	_, err = uploadFile(ctx, "file4", size, chunkSize, fileTableReadWriter, kvDB)
 	require.Error(t, err)
 }
 
@@ -145,9 +157,10 @@ func TestReadWriteFile(t *testing.T) {
 	s, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
 
+	executor := filetable.MakeInternalFileToTableExecutor(s.InternalExecutor().(*sql.
+		InternalExecutor), kvDB)
 	fileTableReadWriter, err := filetable.NewFileToTableSystem(ctx, qualifiedTableName,
-		s.InternalExecutor().(*sql.InternalExecutor), kvDB,
-		security.RootUser)
+		executor, security.RootUserName())
 	require.NoError(t, err)
 
 	testFileName := "testfile"
@@ -174,7 +187,7 @@ func TestReadWriteFile(t *testing.T) {
 
 	for _, testCase := range testCases {
 		expected, err := uploadFile(ctx, testFileName, testCase.fileSize, testCase.chunkSize,
-			fileTableReadWriter)
+			fileTableReadWriter, kvDB)
 		require.NoError(t, err)
 
 		// Check size.
@@ -190,35 +203,71 @@ func TestReadWriteFile(t *testing.T) {
 			sqlDB)
 		expectedNumChunks := (testCase.fileSize / testCase.chunkSize) +
 			(testCase.fileSize % testCase.chunkSize)
-		checkNumberOfPayloadChunks(ctx, t, fileTableReadWriter.GetFQPayloadTableName(), testFileName,
-			expectedNumChunks, sqlDB)
+		checkNumberOfPayloadChunks(ctx, t, fileTableReadWriter.GetFQFileTableName(),
+			fileTableReadWriter.GetFQPayloadTableName(), testFileName, expectedNumChunks, sqlDB)
 
 		// Delete file.
 		require.NoError(t, fileTableReadWriter.DeleteFile(ctx, testFileName))
 	}
 
-	t.Run("file-already-exists", func(t *testing.T) {
-		_, err = uploadFile(ctx, testFileName, 11, 2, fileTableReadWriter)
-		require.NoError(t, err)
-		_, err := fileTableReadWriter.NewFileWriter(ctx, testFileName, 2)
+	t.Run("can-overwrite-file", func(t *testing.T) {
+		_, err = uploadFile(ctx, testFileName, 11, 2, fileTableReadWriter, kvDB)
 		require.NoError(t, err)
 
-		// Upload the same file again, and expect a PK violation.
-		_, err = uploadFile(ctx, testFileName, 11, 2, fileTableReadWriter)
-		require.Error(t, err)
+		// Record the old files' UUID.
+		var oldFileID []uint8
+		err := sqlDB.QueryRowContext(ctx, fmt.Sprintf(`SELECT file_id FROM %s WHERE filename=$1`,
+			fileTableReadWriter.GetFQFileTableName()), testFileName).Scan(&oldFileID)
+		require.NoError(t, err)
+
+		// Upload the same file again, and expect the old one to be overwritten.
+		expected, err := uploadFile(ctx, testFileName, 12, 2, fileTableReadWriter, kvDB)
+		require.NoError(t, err)
+
+		// Record the overwritten files' UUID and verify it is different from the
+		// old one.
+		var newFileID []uint8
+		err = sqlDB.QueryRowContext(ctx, fmt.Sprintf(`SELECT file_id FROM %s WHERE filename=$1`,
+			fileTableReadWriter.GetFQFileTableName()), testFileName).Scan(&newFileID)
+		require.NoError(t, err)
+
+		require.NotEqual(t, oldFileID, newFileID)
+
+		// Check size.
+		size, err := fileTableReadWriter.FileSize(ctx, testFileName)
+		require.NoError(t, err)
+		require.Equal(t, size, int64(12))
+
+		// Check content.
+		require.True(t, isContentEqual(testFileName, expected, fileTableReadWriter))
+
+		// Check chunking and metadata entry.
+		checkMetadataEntryExists(ctx, t, fileTableReadWriter.GetFQFileTableName(), testFileName,
+			sqlDB)
+		expectedNumChunks := (12 / 2) + (12 % 2)
+		checkNumberOfPayloadChunks(ctx, t, fileTableReadWriter.GetFQFileTableName(),
+			fileTableReadWriter.GetFQPayloadTableName(), testFileName, expectedNumChunks, sqlDB)
+
+		// Check that the old file UUID has no payload entries lying around.
+		var rowCount int
+		err = sqlDB.QueryRowContext(ctx, fmt.Sprintf(`SELECT count(*) FROM %s WHERE file_id=$1`,
+			fileTableReadWriter.GetFQPayloadTableName()), oldFileID).Scan(&rowCount)
+		require.NoError(t, err)
+		require.Equal(t, 0, rowCount)
 
 		require.NoError(t, fileTableReadWriter.DeleteFile(ctx, testFileName))
 	})
 
 	t.Run("write-delete-write", func(t *testing.T) {
-		write1, err := uploadFile(ctx, testFileName, 11, 2, fileTableReadWriter)
+		write1, err := uploadFile(ctx, testFileName, 11, 2, fileTableReadWriter, kvDB)
 		require.NoError(t, err)
 		require.True(t, isContentEqual(testFileName, write1, fileTableReadWriter))
 
 		require.NoError(t, fileTableReadWriter.DeleteFile(ctx, testFileName))
 
 		// Write same file name but different size configuration.
-		write2, err := uploadFile(ctx, testFileName, 1024, 4, fileTableReadWriter)
+		write2, err := uploadFile(ctx, testFileName, 1024, 4, fileTableReadWriter,
+			kvDB)
 		require.NoError(t, err)
 		require.True(t, isContentEqual(testFileName, write2, fileTableReadWriter))
 		require.NoError(t, fileTableReadWriter.DeleteFile(ctx, testFileName))
@@ -241,7 +290,7 @@ func TestReadWriteFile(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		require.NoError(t, writer.Close())
+		require.NoError(t, err)
 
 		// Check content.
 		expectedContent := append(data, data...)
@@ -252,10 +301,18 @@ func TestReadWriteFile(t *testing.T) {
 		checkMetadataEntryExists(ctx, t, fileTableReadWriter.GetFQFileTableName(), testFileName, sqlDB)
 		expectedNumChunks := (expectedFileSize / chunkSize) +
 			(expectedFileSize % chunkSize)
-		checkNumberOfPayloadChunks(ctx, t, fileTableReadWriter.GetFQPayloadTableName(), testFileName,
-			expectedNumChunks, sqlDB)
+		checkNumberOfPayloadChunks(ctx, t, fileTableReadWriter.GetFQFileTableName(),
+			fileTableReadWriter.GetFQPayloadTableName(), testFileName, expectedNumChunks, sqlDB)
 
 		require.NoError(t, fileTableReadWriter.DeleteFile(ctx, testFileName))
+	})
+
+	// Tests that a FQN without a db and/or schema prefix is rejected during
+	// FileTable creation.
+	t.Run("no-db-or-schema-qualified-table-name", func(t *testing.T) {
+		_, err := filetable.NewFileToTableSystem(ctx, "foo",
+			executor, security.RootUserName())
+		testutils.IsError(err, "could not resolve db or schema name")
 	})
 }
 
@@ -281,13 +338,16 @@ func TestUserGrants(t *testing.T) {
 	require.NoError(t, err)
 
 	// Operate under non-admin user.
+	executor := filetable.MakeInternalFileToTableExecutor(s.InternalExecutor().(*sql.
+		InternalExecutor), kvDB)
+	johnUser := security.MakeSQLUsernameFromPreNormalizedString("john")
 	fileTableReadWriter, err := filetable.NewFileToTableSystem(ctx, qualifiedTableName,
-		s.InternalExecutor().(*sql.InternalExecutor), kvDB,
-		"john")
+		executor, johnUser)
 	require.NoError(t, err)
 
 	// Upload a file to test INSERT privilege.
-	expected, err := uploadFile(ctx, "file1", 1024, 1, fileTableReadWriter)
+	expected, err := uploadFile(ctx, "file1", 1024, 1, fileTableReadWriter,
+		kvDB)
 	require.NoError(t, err)
 
 	// Read file to test SELECT privilege.
@@ -360,12 +420,14 @@ func TestDifferentUserDisallowed(t *testing.T) {
 	require.NoError(t, err)
 
 	// Operate under non-admin user john.
+	executor := filetable.MakeInternalFileToTableExecutor(s.InternalExecutor().(*sql.
+		InternalExecutor), kvDB)
+	johnUser := security.MakeSQLUsernameFromPreNormalizedString("john")
 	fileTableReadWriter, err := filetable.NewFileToTableSystem(ctx, qualifiedTableName,
-		s.InternalExecutor().(*sql.InternalExecutor), kvDB,
-		"john")
+		executor, johnUser)
 	require.NoError(t, err)
 
-	_, err = uploadFile(ctx, "file1", 1024, 10, fileTableReadWriter)
+	_, err = uploadFile(ctx, "file1", 1024, 10, fileTableReadWriter, kvDB)
 	require.NoError(t, err)
 
 	// Under normal circumstances Doe should have ALL privileges on the file and
@@ -415,12 +477,14 @@ func TestDifferentRoleDisallowed(t *testing.T) {
 	require.NoError(t, err)
 
 	// Operate under non-admin user john.
+	executor := filetable.MakeInternalFileToTableExecutor(s.InternalExecutor().(*sql.
+		InternalExecutor), kvDB)
+	johnUser := security.MakeSQLUsernameFromPreNormalizedString("john")
 	fileTableReadWriter, err := filetable.NewFileToTableSystem(ctx, qualifiedTableName,
-		s.InternalExecutor().(*sql.InternalExecutor), kvDB,
-		"john")
+		executor, johnUser)
 	require.NoError(t, err)
 
-	_, err = uploadFile(ctx, "file1", 1024, 10, fileTableReadWriter)
+	_, err = uploadFile(ctx, "file1", 1024, 10, fileTableReadWriter, kvDB)
 	require.NoError(t, err)
 
 	// Under normal circumstances Doe should have ALL privileges on the file and
@@ -447,13 +511,15 @@ func TestDatabaseScope(t *testing.T) {
 	s, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(ctx)
 
+	executor := filetable.MakeInternalFileToTableExecutor(s.InternalExecutor().(*sql.
+		InternalExecutor), kvDB)
 	fileTableReadWriter, err := filetable.NewFileToTableSystem(ctx, qualifiedTableName,
-		s.InternalExecutor().(*sql.InternalExecutor), kvDB,
-		security.RootUser)
+		executor, security.RootUserName())
 	require.NoError(t, err)
 
 	// Verify defaultdb has the file we wrote.
-	uploadedContent, err := uploadFile(ctx, "file1", 1024, 10, fileTableReadWriter)
+	uploadedContent, err := uploadFile(ctx, "file1", 1024, 10,
+		fileTableReadWriter, kvDB)
 	require.NoError(t, err)
 	oldDBReader, err := fileTableReadWriter.ReadFile(ctx, "file1")
 	require.NoError(t, err)
@@ -465,8 +531,7 @@ func TestDatabaseScope(t *testing.T) {
 	_, err = sqlDB.Exec(`CREATE DATABASE newdb`)
 	require.NoError(t, err)
 	newFileTableReadWriter, err := filetable.NewFileToTableSystem(ctx,
-		"newdb.file_table_read_writer",
-		s.InternalExecutor().(*sql.InternalExecutor), kvDB, security.RootUser)
+		"newdb.file_table_read_writer", executor, security.RootUserName())
 	require.NoError(t, err)
 	_, err = newFileTableReadWriter.ReadFile(ctx, "file1")
 	require.True(t, os.IsNotExist(err))

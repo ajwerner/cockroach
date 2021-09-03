@@ -15,7 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 )
@@ -24,7 +24,7 @@ import (
 // statement.
 func (b *Builder) buildCreateTable(ct *tree.CreateTable, inScope *scope) (outScope *scope) {
 	b.DisableMemoReuse = true
-	isTemp := resolveTemporaryStatus(&ct.Table, ct.Temporary)
+	isTemp := resolveTemporaryStatus(&ct.Table, ct.Persistence)
 	if isTemp {
 		// Postgres allows using `pg_temp` as an alias for the session specific temp
 		// schema. In PG, the following are equivalent:
@@ -39,7 +39,7 @@ func (b *Builder) buildCreateTable(ct *tree.CreateTable, inScope *scope) (outSco
 		// TODO(solon): Once it is possible to drop schemas, it will no longer be
 		// safe to set the schema name to `public`, as it may have been dropped.
 		ct.Table.ObjectNamePrefix.SchemaName = tree.PublicSchemaName
-		ct.Temporary = true
+		ct.Persistence = tree.PersistenceTemporary
 	}
 	sch, resName := b.resolveSchemaForCreate(&ct.Table)
 	ct.Table.ObjectNamePrefix = resName
@@ -74,7 +74,7 @@ func (b *Builder) buildCreateTable(ct *tree.CreateTable, inScope *scope) (outSco
 		}
 		numColumns := len(outScope.cols)
 		if numColNames != 0 && numColNames != numColumns {
-			panic(sqlbase.NewSyntaxErrorf(
+			panic(sqlerrors.NewSyntaxErrorf(
 				"CREATE TABLE specifies %d column name%s, but data source has %d column%s",
 				numColNames, util.Pluralize(int64(numColNames)),
 				numColumns, util.Pluralize(int64(numColumns))))

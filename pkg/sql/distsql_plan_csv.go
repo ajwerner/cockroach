@@ -20,6 +20,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
@@ -43,6 +45,8 @@ var _ rowResultWriter = &RowResultWriter{}
 
 // NewRowResultWriter creates a new RowResultWriter.
 func NewRowResultWriter(rowContainer *rowcontainer.RowContainer) *RowResultWriter {
+	// TODO(yuzefovich): consider using disk-backed row container in some cases
+	// (for example, in case of subqueries and apply-joins).
 	return &RowResultWriter{rowContainer: rowContainer}
 }
 
@@ -107,7 +111,7 @@ func makeImportReaderSpecs(
 	format roachpb.IOFileFormat,
 	nodes []roachpb.NodeID,
 	walltime int64,
-	user string,
+	user security.SQLUsername,
 ) []*execinfrapb.ReadImportDataSpec {
 
 	// For each input file, assign it to a node.
@@ -128,7 +132,7 @@ func makeImportReaderSpecs(
 				WalltimeNanos: walltime,
 				Uri:           make(map[int32]string),
 				ResumePos:     make(map[int32]int64),
-				User:          user,
+				UserProto:     user.EncodeProto(),
 			}
 			inputSpecs = append(inputSpecs, spec)
 		}
@@ -154,7 +158,9 @@ func presplitTableBoundaries(
 ) error {
 	expirationTime := cfg.DB.Clock().Now().Add(time.Hour.Nanoseconds(), 0)
 	for _, tbl := range tables {
-		for _, span := range tbl.Desc.AllIndexSpans(cfg.Codec) {
+		// TODO(ajwerner): Consider passing in the wrapped descriptors.
+		tblDesc := tabledesc.MakeImmutable(*tbl.Desc)
+		for _, span := range tblDesc.AllIndexSpans(cfg.Codec) {
 			if err := cfg.DB.AdminSplit(ctx, span.Key, expirationTime); err != nil {
 				return err
 			}

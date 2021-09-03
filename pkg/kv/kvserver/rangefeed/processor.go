@@ -13,6 +13,7 @@ package rangefeed
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -21,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
+	"github.com/cockroachdb/errors"
 )
 
 const (
@@ -116,9 +118,26 @@ type Processor struct {
 	lenResC    chan int
 	filterReqC chan struct{}
 	filterResC chan *Filter
-	eventC     chan event
+	eventC     chan *event
 	stopC      chan *roachpb.Error
 	stoppedC   chan struct{}
+}
+
+var eventSyncPool = sync.Pool{
+	New: func() interface{} {
+		return new(event)
+	},
+}
+
+func getPooledEvent(ev event) *event {
+	e := eventSyncPool.Get().(*event)
+	*e = ev
+	return e
+}
+
+func putPooledEvent(ev *event) {
+	*ev = event{}
+	eventSyncPool.Put(ev)
 }
 
 // event is a union of different event types that the Processor goroutine needs
@@ -152,11 +171,15 @@ func NewProcessor(cfg Config) *Processor {
 		lenResC:    make(chan int),
 		filterReqC: make(chan struct{}),
 		filterResC: make(chan *Filter),
-		eventC:     make(chan event, cfg.EventChanCap),
+		eventC:     make(chan *event, cfg.EventChanCap),
 		stopC:      make(chan *roachpb.Error, 1),
 		stoppedC:   make(chan struct{}),
 	}
 }
+
+// IteratorConstructor is used to construct an iterator. It should be called
+// from underneath a stopper task to ensure that the engine has not been closed.
+type IteratorConstructor func() storage.SimpleMVCCIterator
 
 // Start launches a goroutine to process rangefeed events and send them to
 // registrations.
@@ -167,145 +190,155 @@ func NewProcessor(cfg Config) *Processor {
 // calling its Close method when it is finished. If the iterator is nil then
 // no initialization scan will be performed and the resolved timestamp will
 // immediately be considered initialized.
-func (p *Processor) Start(stopper *stop.Stopper, rtsIter storage.SimpleIterator) {
+func (p *Processor) Start(stopper *stop.Stopper, rtsIterFunc IteratorConstructor) {
 	ctx := p.AnnotateCtx(context.Background())
-	stopper.RunWorker(ctx, func(ctx context.Context) {
-		defer close(p.stoppedC)
-		ctx, cancelOutputLoops := context.WithCancel(ctx)
-		defer cancelOutputLoops()
+	if err := stopper.RunAsyncTask(ctx, "rangefeed.Processor", func(ctx context.Context) {
+		p.run(ctx, rtsIterFunc, stopper)
+	}); err != nil {
+		pErr := roachpb.NewError(err)
+		p.reg.DisconnectWithErr(all, pErr)
+		close(p.stoppedC)
+	}
+}
 
-		// Launch an async task to scan over the resolved timestamp iterator and
-		// initialize the unresolvedIntentQueue. Ignore error if quiescing.
-		if rtsIter != nil {
-			initScan := newInitResolvedTSScan(p, rtsIter)
-			err := stopper.RunAsyncTask(ctx, "rangefeed: init resolved ts", initScan.Run)
-			if err != nil {
-				initScan.Cancel()
-			}
-		} else {
-			p.initResolvedTS(ctx)
+// run is called from Start and runs the rangefeed.
+func (p *Processor) run(
+	ctx context.Context, rtsIterFunc IteratorConstructor, stopper *stop.Stopper,
+) {
+	defer close(p.stoppedC)
+	ctx, cancelOutputLoops := context.WithCancel(ctx)
+	defer cancelOutputLoops()
+
+	// Launch an async task to scan over the resolved timestamp iterator and
+	// initialize the unresolvedIntentQueue. Ignore error if quiescing.
+	if rtsIterFunc != nil {
+		rtsIter := rtsIterFunc()
+		initScan := newInitResolvedTSScan(p, rtsIter)
+		err := stopper.RunAsyncTask(ctx, "rangefeed: init resolved ts", initScan.Run)
+		if err != nil {
+			initScan.Cancel()
 		}
+	} else {
+		p.initResolvedTS(ctx)
+	}
 
-		// txnPushTicker periodically pushes the transaction record of all
-		// unresolved intents that are above a certain age, helping to ensure
-		// that the resolved timestamp continues to make progress.
-		var txnPushTicker *time.Ticker
-		var txnPushTickerC <-chan time.Time
-		var txnPushAttemptC chan struct{}
-		if p.PushTxnsInterval > 0 {
-			txnPushTicker = time.NewTicker(p.PushTxnsInterval)
+	// txnPushTicker periodically pushes the transaction record of all
+	// unresolved intents that are above a certain age, helping to ensure
+	// that the resolved timestamp continues to make progress.
+	var txnPushTicker *time.Ticker
+	var txnPushTickerC <-chan time.Time
+	var txnPushAttemptC chan struct{}
+	if p.PushTxnsInterval > 0 {
+		txnPushTicker = time.NewTicker(p.PushTxnsInterval)
+		txnPushTickerC = txnPushTicker.C
+		defer txnPushTicker.Stop()
+	}
+
+	for {
+		select {
+
+		// Handle new registrations.
+		case r := <-p.regC:
+			if !p.Span.AsRawSpanWithNoLocals().Contains(r.span) {
+				log.Fatalf(ctx, "registration %s not in Processor's key range %v", r, p.Span)
+			}
+
+			// Add the new registration to the registry.
+			p.reg.Register(&r)
+
+			// Publish an updated filter that includes the new registration.
+			p.filterResC <- p.reg.NewFilter()
+
+			// Immediately publish a checkpoint event to the registry. This will be
+			// the first event published to this registration after its initial
+			// catch-up scan completes.
+			r.publish(p.newCheckpointEvent())
+
+			// Run an output loop for the registry.
+			runOutputLoop := func(ctx context.Context) {
+				r.runOutputLoop(ctx)
+				select {
+				case p.unregC <- &r:
+				case <-p.stoppedC:
+				}
+			}
+			if err := stopper.RunAsyncTask(ctx, "rangefeed: output loop", runOutputLoop); err != nil {
+				r.disconnect(roachpb.NewError(err))
+				p.reg.Unregister(&r)
+			}
+
+		// Respond to unregistration requests; these come from registrations that
+		// encounter an error during their output loop.
+		case r := <-p.unregC:
+			p.reg.Unregister(r)
+
+		// Respond to answers about the processor goroutine state.
+		case <-p.lenReqC:
+			p.lenResC <- p.reg.Len()
+
+		// Respond to answers about which operations can be filtered before
+		// reaching the Processor.
+		case <-p.filterReqC:
+			p.filterResC <- p.reg.NewFilter()
+
+		// Transform and route events.
+		case e := <-p.eventC:
+			p.consumeEvent(ctx, e)
+			putPooledEvent(e)
+
+		// Check whether any unresolved intents need a push.
+		case <-txnPushTickerC:
+			// Don't perform transaction push attempts until the resolved
+			// timestamp has been initialized.
+			if !p.rts.IsInit() {
+				continue
+			}
+
+			now := p.Clock.Now()
+			before := now.Add(-p.PushTxnsAge.Nanoseconds(), 0)
+			oldTxns := p.rts.intentQ.Before(before)
+
+			if len(oldTxns) > 0 {
+				toPush := make([]enginepb.TxnMeta, len(oldTxns))
+				for i, txn := range oldTxns {
+					toPush[i] = txn.asTxnMeta()
+				}
+
+				// Set the ticker channel to nil so that it can't trigger a
+				// second concurrent push. Create a push attempt response
+				// channel that is closed when the push attempt completes.
+				txnPushTickerC = nil
+				txnPushAttemptC = make(chan struct{})
+
+				// Launch an async transaction push attempt that pushes the
+				// timestamp of all transactions beneath the push offset.
+				// Ignore error if quiescing.
+				pushTxns := newTxnPushAttempt(p, toPush, now, txnPushAttemptC)
+				err := stopper.RunAsyncTask(ctx, "rangefeed: pushing old txns", pushTxns.Run)
+				if err != nil {
+					pushTxns.Cancel()
+				}
+			}
+
+		// Update the resolved timestamp based on the push attempt.
+		case <-txnPushAttemptC:
+			// Reset the ticker channel so that it can trigger push attempts
+			// again. Set the push attempt channel back to nil.
 			txnPushTickerC = txnPushTicker.C
-			defer txnPushTicker.Stop()
+			txnPushAttemptC = nil
+
+		// Close registrations and exit when signaled.
+		case pErr := <-p.stopC:
+			p.reg.DisconnectWithErr(all, pErr)
+			return
+
+		// Exit on stopper.
+		case <-stopper.ShouldQuiesce():
+			pErr := roachpb.NewError(&roachpb.NodeUnavailableError{})
+			p.reg.DisconnectWithErr(all, pErr)
+			return
 		}
-
-		for {
-			select {
-
-			// Handle new registrations.
-			case r := <-p.regC:
-				if !p.Span.AsRawSpanWithNoLocals().Contains(r.span) {
-					log.Fatalf(ctx, "registration %s not in Processor's key range %v", r, p.Span)
-				}
-
-				// Add the new registration to the registry.
-				p.reg.Register(&r)
-
-				// Publish an updated filter that includes the new registration.
-				p.filterResC <- p.reg.NewFilter()
-
-				// Immediately publish a checkpoint event to the registry. This will be
-				// the first event published to this registration after its initial
-				// catch-up scan completes.
-				r.publish(p.newCheckpointEvent())
-
-				// Run an output loop for the registry.
-				runOutputLoop := func(ctx context.Context) {
-					r.runOutputLoop(ctx)
-					select {
-					case p.unregC <- &r:
-					case <-p.stoppedC:
-					}
-				}
-				if err := stopper.RunAsyncTask(ctx, "rangefeed: output loop", runOutputLoop); err != nil {
-					if r.catchupIter != nil {
-						r.catchupIter.Close() // clean up
-					}
-					r.disconnect(roachpb.NewError(err))
-					p.reg.Unregister(&r)
-				}
-
-			// Respond to unregistration requests; these come from registrations that
-			// encounter an error during their output loop.
-			case r := <-p.unregC:
-				p.reg.Unregister(r)
-
-			// Respond to answers about the processor goroutine state.
-			case <-p.lenReqC:
-				p.lenResC <- p.reg.Len()
-
-			// Respond to answers about which operations can be filtered before
-			// reaching the Processor.
-			case <-p.filterReqC:
-				p.filterResC <- p.reg.NewFilter()
-
-			// Transform and route events.
-			case e := <-p.eventC:
-				p.consumeEvent(ctx, e)
-
-			// Check whether any unresolved intents need a push.
-			case <-txnPushTickerC:
-				// Don't perform transaction push attempts until the resolved
-				// timestamp has been initialized.
-				if !p.rts.IsInit() {
-					continue
-				}
-
-				now := p.Clock.Now()
-				before := now.Add(-p.PushTxnsAge.Nanoseconds(), 0)
-				oldTxns := p.rts.intentQ.Before(before)
-
-				if len(oldTxns) > 0 {
-					toPush := make([]enginepb.TxnMeta, len(oldTxns))
-					for i, txn := range oldTxns {
-						toPush[i] = txn.asTxnMeta()
-					}
-
-					// Set the ticker channel to nil so that it can't trigger a
-					// second concurrent push. Create a push attempt response
-					// channel that is closed when the push attempt completes.
-					txnPushTickerC = nil
-					txnPushAttemptC = make(chan struct{})
-
-					// Launch an async transaction push attempt that pushes the
-					// timestamp of all transactions beneath the push offset.
-					// Ignore error if quiescing.
-					pushTxns := newTxnPushAttempt(p, toPush, now, txnPushAttemptC)
-					err := stopper.RunAsyncTask(ctx, "rangefeed: pushing old txns", pushTxns.Run)
-					if err != nil {
-						pushTxns.Cancel()
-					}
-				}
-
-			// Update the resolved timestamp based on the push attempt.
-			case <-txnPushAttemptC:
-				// Reset the ticker channel so that it can trigger push attempts
-				// again. Set the push attempt channel back to nil.
-				txnPushTickerC = txnPushTicker.C
-				txnPushAttemptC = nil
-
-			// Close registrations and exit when signaled.
-			case pErr := <-p.stopC:
-				p.reg.DisconnectWithErr(all, pErr)
-				return
-
-			// Exit on stopper.
-			case <-stopper.ShouldQuiesce():
-				pErr := roachpb.NewError(&roachpb.NodeUnavailableError{})
-				p.reg.DisconnectWithErr(all, pErr)
-				return
-			}
-		}
-	})
+	}
 }
 
 // Stop shuts down the processor and closes all registrations. Safe to call on
@@ -357,7 +390,7 @@ func (p *Processor) sendStop(pErr *roachpb.Error) {
 func (p *Processor) Register(
 	span roachpb.RSpan,
 	startTS hlc.Timestamp,
-	catchupIter storage.SimpleIterator,
+	catchupIterConstructor IteratorConstructor,
 	withDiff bool,
 	stream Stream,
 	errC chan<- *roachpb.Error,
@@ -368,7 +401,7 @@ func (p *Processor) Register(
 	p.syncEventC()
 
 	r := newRegistration(
-		span.AsRawSpanWithNoLocals(), startTS, catchupIter, withDiff,
+		span.AsRawSpanWithNoLocals(), startTS, catchupIterConstructor, withDiff,
 		p.Config.EventChanCap, p.Metrics, stream, errC,
 	)
 	select {
@@ -448,20 +481,21 @@ func (p *Processor) ForwardClosedTS(closedTS hlc.Timestamp) bool {
 // the method will wait for no longer than that duration before giving up,
 // shutting down the Processor, and returning false. 0 for no timeout.
 func (p *Processor) sendEvent(e event, timeout time.Duration) bool {
+	ev := getPooledEvent(e)
 	if timeout == 0 {
 		select {
-		case p.eventC <- e:
+		case p.eventC <- ev:
 		case <-p.stoppedC:
 			// Already stopped. Do nothing.
 		}
 	} else {
 		select {
-		case p.eventC <- e:
+		case p.eventC <- ev:
 		case <-p.stoppedC:
 			// Already stopped. Do nothing.
 		default:
 			select {
-			case p.eventC <- e:
+			case p.eventC <- ev:
 			case <-p.stoppedC:
 				// Already stopped. Do nothing.
 			case <-time.After(timeout):
@@ -486,8 +520,9 @@ func (p *Processor) setResolvedTSInitialized() {
 // It does so by flushing the event pipeline.
 func (p *Processor) syncEventC() {
 	syncC := make(chan struct{})
+	ev := getPooledEvent(event{syncC: syncC})
 	select {
-	case p.eventC <- event{syncC: syncC}:
+	case p.eventC <- ev:
 		select {
 		case <-syncC:
 		// Synchronized.
@@ -499,7 +534,7 @@ func (p *Processor) syncEventC() {
 	}
 }
 
-func (p *Processor) consumeEvent(ctx context.Context, e event) {
+func (p *Processor) consumeEvent(ctx context.Context, e *event) {
 	switch {
 	case len(e.ops) > 0:
 		p.consumeLogicalOps(ctx, e.ops)
@@ -519,7 +554,7 @@ func (p *Processor) consumeEvent(ctx context.Context, e event) {
 		}
 		close(e.syncC)
 	default:
-		panic("missing event variant")
+		panic(fmt.Sprintf("missing event variant: %+v", e))
 	}
 }
 
@@ -548,7 +583,7 @@ func (p *Processor) consumeLogicalOps(ctx context.Context, ops []enginepb.MVCCLo
 			// No updates to publish.
 
 		default:
-			panic(fmt.Sprintf("unknown logical op %T", t))
+			panic(errors.AssertionFailedf("unknown logical op %T", t))
 		}
 
 		// Determine whether the operation caused the resolved timestamp to

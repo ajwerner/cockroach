@@ -12,6 +12,7 @@ package cli
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -23,11 +24,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/server/heapprofiler"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
@@ -75,6 +78,7 @@ var debugZipTablesPerCluster = []string{
 	"crdb_internal.schema_changes",
 	"crdb_internal.partitions",
 	"crdb_internal.zones",
+	"crdb_internal.invalid_objects",
 }
 
 // Tables collected from each node in a debug zip.
@@ -94,6 +98,7 @@ var debugZipTablesPerNode = []string{
 	"crdb_internal.node_runtime_info",
 	"crdb_internal.node_sessions",
 	"crdb_internal.node_statement_statistics",
+	"crdb_internal.node_transaction_statistics",
 	"crdb_internal.node_transactions",
 	"crdb_internal.node_txn_stats",
 }
@@ -293,6 +298,8 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 		return z.createJSONOrError(r.pathName+".json", data, err)
 	}
 
+	// NB: we intentionally omit liveness since it's already pulled manually (we
+	// act on the output to special case decommissioned nodes).
 	for _, r := range []zipRequest{
 		{
 			fn: func(ctx context.Context) (interface{}, error) {
@@ -305,12 +312,6 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 				return admin.RangeLog(ctx, &serverpb.RangeLogRequest{})
 			},
 			pathName: rangelogName,
-		},
-		{
-			fn: func(ctx context.Context) (interface{}, error) {
-				return admin.Liveness(ctx, &serverpb.LivenessRequest{})
-			},
-			pathName: livenessName,
 		},
 		{
 			fn: func(ctx context.Context) (interface{}, error) {
@@ -337,6 +338,17 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		if err := dumpTableDataForZip(z, sqlConn, timeout, base, table, selectClause); err != nil {
 			return errors.Wrapf(err, "fetching %s", table)
+		}
+	}
+
+	{
+		var doctorData bytes.Buffer
+		fmt.Printf("doctor examining cluster...")
+		if err := runClusterDoctor(nil, nil, sqlConn, &doctorData, timeout); err != nil {
+			return err
+		}
+		if err := z.createRawOrError(reportsPrefix+"/doctor.txt", doctorData.Bytes(), err); err != nil {
+			return err
 		}
 	}
 
@@ -370,12 +382,74 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 			lresponse, err = admin.Liveness(ctx, &serverpb.LivenessRequest{})
 			return err
 		})
-		if cErr := z.createJSONOrError(base+"/liveness.json", nodes, err); cErr != nil {
+		if cErr := z.createJSONOrError(livenessName+".json", nodes, err); cErr != nil {
 			return cErr
 		}
 		livenessByNodeID := map[roachpb.NodeID]kvserverpb.NodeLivenessStatus{}
 		if lresponse != nil {
 			livenessByNodeID = lresponse.Statuses
+		}
+
+		// Collect CPU profiles in parallel over all nodes (this is useful since
+		// these profiles contain profiler labels, which can then be correlated
+		// across nodes). Do this first and in isolation, before other zip
+		// operations possibly influence the node.
+		if zipCtx.cpuProfDuration > 0 {
+			var wg sync.WaitGroup
+			type profData struct {
+				data []byte
+				err  error
+			}
+
+			// NB: this takes care not to produce non-deterministic log output.
+			resps := make([]profData, len(nodeList))
+			for i := range nodeList {
+				if livenessByNodeID[nodeList[i].Desc.NodeID] == kvserverpb.NodeLivenessStatus_DECOMMISSIONED {
+					continue
+				}
+				wg.Add(1)
+				go func(ctx context.Context, i int) {
+					defer wg.Done()
+
+					secs := int32(zipCtx.cpuProfDuration / time.Second)
+					if secs < 1 {
+						secs = 1
+					}
+
+					var pd profData
+					err := contextutil.RunWithTimeout(ctx, "fetch cpu profile", timeout+zipCtx.cpuProfDuration, func(ctx context.Context) error {
+						resp, err := status.Profile(ctx, &serverpb.ProfileRequest{
+							NodeId:  fmt.Sprintf("%d", nodeList[i].Desc.NodeID),
+							Type:    serverpb.ProfileRequest_CPU,
+							Seconds: secs,
+						})
+						if err != nil {
+							return err
+						}
+						pd = profData{data: resp.Data}
+						return nil
+					})
+					if err != nil {
+						resps[i] = profData{err: err}
+					} else {
+						resps[i] = pd
+					}
+				}(baseCtx, i)
+			}
+
+			fmt.Print("requesting CPU profiles... ")
+			wg.Wait()
+			fmt.Println("ok")
+
+			for i, pd := range resps {
+				if len(pd.data) == 0 && pd.err == nil {
+					continue // skipped node
+				}
+				prefix := fmt.Sprintf("%s/%s", nodesPrefix, fmt.Sprintf("%d", nodeList[i].Desc.NodeID))
+				if err := z.createRawOrError(prefix+"/cpu.pprof", pd.data, pd.err); err != nil {
+					return err
+				}
+			}
 		}
 
 		for _, node := range nodeList {
@@ -414,12 +488,7 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 			// not work and if it doesn't, we let the invalid curSQLConn get
 			// used anyway so that anything that does *not* need it will
 			// still happen.
-			sqlAddr := node.Desc.SQLAddress
-			if sqlAddr.IsEmpty() {
-				// No SQL address: either a pre-19.2 node, or same address for both
-				// SQL and RPC.
-				sqlAddr = node.Desc.Address
-			}
+			sqlAddr := node.Desc.CheckedSQLAddress()
 			curSQLConn := guessNodeURL(sqlConn.url, sqlAddr.AddressField)
 			if err := z.createJSON(prefix+"/status.json", node); err != nil {
 				return err
@@ -525,7 +594,8 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 			} else {
 				fmt.Printf("%d found\n", len(profiles.Files))
 				for _, file := range profiles.Files {
-					name := prefix + "/heapprof/" + file.Name + ".pprof"
+					fName := maybeAddProfileSuffix(file.Name)
+					name := prefix + "/heapprof/" + fName
 					if err := z.createRaw(name, file.Contents); err != nil {
 						return err
 					}
@@ -688,7 +758,43 @@ func runDebugZip(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
+	// Add a little helper script to draw attention to the existence of tags in
+	// the profiles.
+	{
+		if err := z.createRaw(base+"/pprof-summary.sh", []byte(`#!/bin/sh
+find . -name cpu.pprof -print0 | xargs -0 go tool pprof -tags
+`)); err != nil {
+			return err
+		}
+	}
+
+	// A script to summarize the hottest ranges.
+	{
+		if err := z.createRaw(base+"/hot-ranges.sh", []byte(`#!/bin/sh
+find . -path './nodes/*/ranges/*.json' -print0 | xargs -0 grep per_second | sort -rhk3 | head -n 20
+`)); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+// maybeAddProfileSuffix adds a file extension if this was not done
+// already on the server. This is necessary as pre-20.2 servers did
+// not use any extension for memory profiles.
+//
+// TODO(knz): Remove this in v21.1.
+func maybeAddProfileSuffix(name string) string {
+	switch {
+	case strings.HasPrefix(name, heapprofiler.HeapFileNamePrefix+".") && !strings.HasSuffix(name, heapprofiler.HeapFileNameSuffix):
+		name += heapprofiler.HeapFileNameSuffix
+	case strings.HasPrefix(name, heapprofiler.StatsFileNamePrefix+".") && !strings.HasSuffix(name, heapprofiler.StatsFileNameSuffix):
+		name += heapprofiler.StatsFileNameSuffix
+	case strings.HasPrefix(name, heapprofiler.JemallocFileNamePrefix+".") && !strings.HasSuffix(name, heapprofiler.JemallocFileNameSuffix):
+		name += heapprofiler.JemallocFileNameSuffix
+	}
+	return name
 }
 
 type fileNameEscaper struct {

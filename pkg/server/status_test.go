@@ -13,9 +13,11 @@ package server
 import (
 	"bytes"
 	"context"
+	gosql "database/sql"
 	"fmt"
 	"io/ioutil"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -40,10 +42,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/diagnosticspb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/ts"
 	"github.com/cockroachdb/cockroach/pkg/ts/catalog"
@@ -55,7 +60,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-	"github.com/gogo/protobuf/proto"
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -283,7 +287,8 @@ func TestStatusEngineStatsJson(t *testing.T) {
 		t.Fatal(errors.Errorf("expected one engine stats, got: %v", engineStats))
 	}
 
-	if engineStats.Stats[0].EngineType == enginepb.EngineTypePebble {
+	if engineStats.Stats[0].EngineType == enginepb.EngineTypePebble ||
+		engineStats.Stats[0].EngineType == enginepb.EngineTypeDefault {
 		// Pebble does not have RocksDB style TickersAnd Histogram.
 		return
 	}
@@ -327,6 +332,13 @@ func startServer(t *testing.T) *TestServer {
 			base.DefaultTestStoreSpec,
 			base.DefaultTestStoreSpec,
 		},
+		Knobs: base.TestingKnobs{
+			Store: &kvserver.StoreTestingKnobs{
+				// Now that we allow same node rebalances, disable it in these tests,
+				// as they dont expect replicas to move.
+				DisableReplicaRebalancing: true,
+			},
+		},
 	})
 
 	ts := tsI.(*TestServer)
@@ -353,6 +365,7 @@ func startServer(t *testing.T) *TestServer {
 
 func newRPCTestContext(ts *TestServer, cfg *base.Config) *rpc.Context {
 	rpcContext := rpc.NewContext(rpc.ContextOptions{
+		TenantID:   roachpb.SystemTenantID,
 		AmbientCtx: log.AmbientContext{Tracer: ts.ClusterSettings().Tracer},
 		Config:     cfg,
 		Clock:      ts.Clock(),
@@ -384,7 +397,7 @@ func TestStatusGetFiles(t *testing.T) {
 	ts := tsI.(*TestServer)
 	defer ts.Stopper().Stop(context.Background())
 
-	rootConfig := testutils.NewTestBaseContext(security.RootUser)
+	rootConfig := testutils.NewTestBaseContext(security.RootUserName())
 	rpcContext := newRPCTestContext(ts, rootConfig)
 
 	url := ts.ServingRPCAddr()
@@ -496,7 +509,7 @@ func TestStatusGetFiles(t *testing.T) {
 func TestStatusLocalLogs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	if log.V(3) {
-		t.Skip("Test only works with low verbosity levels")
+		skip.IgnoreLint(t, "Test only works with low verbosity levels")
 	}
 
 	s := log.ScopeWithoutShowLogs(t)
@@ -533,7 +546,7 @@ func TestStatusLocalLogs(t *testing.T) {
 	if err := getStatusJSONProto(ts, "logfiles/local", &wrapper); err != nil {
 		t.Fatal(err)
 	}
-	if a, e := len(wrapper.Files), 2; a != e {
+	if a, e := len(wrapper.Files), 1; a != e {
 		t.Fatalf("expected %d log files; got %d", e, a)
 	}
 
@@ -703,17 +716,14 @@ func TestStatusLogRedaction(t *testing.T) {
 			if err := getStatusJSONProto(ts, "logfiles/local", &wrapper); err != nil {
 				t.Fatal(err)
 			}
-			// We expect a main log and a stderr log.
-			if a, e := len(wrapper.Files), 2; a != e {
+			// We expect only the main log.
+			if a, e := len(wrapper.Files), 1; a != e {
 				t.Fatalf("expected %d log files; got %d: %+v", e, a, wrapper.Files)
 			}
-			var file log.FileInfo
-			// Find the main log.
-			for _, f := range wrapper.Files {
-				if !strings.Contains("stderr", f.Name) {
-					file = f
-					break
-				}
+			file := wrapper.Files[0]
+			// Assert that the log that's present is not a stderr log.
+			if strings.Contains("stderr", file.Name) {
+				t.Fatalf("expected main log, found %v", file.Name)
 			}
 
 			for _, tc := range testData {
@@ -798,7 +808,7 @@ func TestNodeStatusResponse(t *testing.T) {
 	if len(nodeStatuses) != 1 {
 		t.Errorf("too many node statuses returned - expected:1 actual:%d", len(nodeStatuses))
 	}
-	if !proto.Equal(&s.node.Descriptor, &nodeStatuses[0].Desc) {
+	if !s.node.Descriptor.Equal(&nodeStatuses[0].Desc) {
 		t.Errorf("node status descriptors are not equal\nexpected:%+v\nactual:%+v\n", s.node.Descriptor, nodeStatuses[0].Desc)
 	}
 
@@ -809,7 +819,7 @@ func TestNodeStatusResponse(t *testing.T) {
 		if err := getStatusJSONProto(s, "nodes/"+oldNodeStatus.Desc.NodeID.String(), &nodeStatus); err != nil {
 			t.Fatal(err)
 		}
-		if !proto.Equal(&s.node.Descriptor, &nodeStatus.Desc) {
+		if !s.node.Descriptor.Equal(&nodeStatus.Desc) {
 			t.Errorf("node status descriptors are not equal\nexpected:%+v\nactual:%+v\n", s.node.Descriptor, nodeStatus.Desc)
 		}
 	}
@@ -905,8 +915,8 @@ func TestChartCatalogGen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Ensure each of the 7 constant sections of the chart catalog exist.
-	if len(chartCatalog) != 7 {
+	// Ensure each of the 8 constant sections of the chart catalog exist.
+	if len(chartCatalog) != 8 {
 		t.Fatal("Chart catalog failed to generate.")
 	}
 
@@ -1237,7 +1247,7 @@ func TestNodesGRPCResponse(t *testing.T) {
 	ts := startServer(t)
 	defer ts.Stopper().Stop(context.Background())
 
-	rootConfig := testutils.NewTestBaseContext(security.RootUser)
+	rootConfig := testutils.NewTestBaseContext(security.RootUserName())
 	rpcContext := newRPCTestContext(ts, rootConfig)
 	var request serverpb.NodesRequest
 
@@ -1270,8 +1280,8 @@ func TestCertificatesResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// We expect 4 certificates: CA, node, and client certs for root, testuser.
-	if a, e := len(response.Certificates), 4; a != e {
+	// We expect 5 certificates: CA, node, and client certs for root, testuser, testuser2.
+	if a, e := len(response.Certificates), 5; a != e {
 		t.Errorf("expected %d certificates, found %d", e, a)
 	}
 
@@ -1427,8 +1437,6 @@ func TestRemoteDebugModeSetting(t *testing.T) {
 			{"allocator/range/1", &serverpb.AllocatorResponse{}},
 			{"logs/local", &serverpb.LogEntriesResponse{}},
 			{"logfiles/local/cockroach.log", &serverpb.LogEntriesResponse{}},
-			{"local_sessions", &serverpb.ListSessionsResponse{}},
-			{"sessions", &serverpb.ListSessionsResponse{}},
 		} {
 			err := getStatusJSONProto(ts, tc.path, tc.response)
 			if !testutils.IsError(err, "403 Forbidden") {
@@ -1443,7 +1451,7 @@ func TestRemoteDebugModeSetting(t *testing.T) {
 	// don't indicate that the grpc gateway is correctly adding the necessary
 	// metadata for differentiating between the two (and that we're correctly
 	// interpreting said metadata).
-	rootConfig := testutils.NewTestBaseContext(security.RootUser)
+	rootConfig := testutils.NewTestBaseContext(security.RootUserName())
 	rpcContext := newRPCTestContext(ts, rootConfig)
 	url := ts.ServingRPCAddr()
 	nodeID := ts.NodeID()
@@ -1540,11 +1548,203 @@ func TestRemoteDebugModeSetting(t *testing.T) {
 	}
 }
 
+func TestStatusAPITransactions(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	testCluster := serverutils.StartNewTestCluster(t, 3, base.TestClusterArgs{})
+	ctx := context.Background()
+	defer testCluster.Stopper().Stop(ctx)
+
+	thirdServer := testCluster.Server(2)
+	pgURL, cleanupGoDB := sqlutils.PGUrl(
+		t, thirdServer.ServingSQLAddr(), "CreateConnections" /* prefix */, url.User(security.RootUser))
+	defer cleanupGoDB()
+	firstServerProto := testCluster.Server(0)
+
+	type testCase struct {
+		query         string
+		fingerprinted string
+		count         int
+		shouldRetry   bool
+		numRows       int
+	}
+
+	testCases := []testCase{
+		{query: `CREATE DATABASE roachblog`, count: 1, numRows: 0},
+		{query: `SET database = roachblog`, count: 1, numRows: 0},
+		{query: `CREATE TABLE posts (id INT8 PRIMARY KEY, body STRING)`, count: 1, numRows: 0},
+		{
+			query:         `INSERT INTO posts VALUES (1, 'foo')`,
+			fingerprinted: `INSERT INTO posts VALUES (_, _)`,
+			count:         1,
+			numRows:       1,
+		},
+		{query: `SELECT * FROM posts`, count: 2, numRows: 1},
+		{query: `BEGIN; SELECT * FROM posts; SELECT * FROM posts; COMMIT`, count: 3, numRows: 2},
+		{
+			query:         `BEGIN; SELECT crdb_internal.force_retry('2s'); SELECT * FROM posts; COMMIT;`,
+			fingerprinted: `BEGIN; SELECT crdb_internal.force_retry(_); SELECT * FROM posts; COMMIT;`,
+			shouldRetry:   true,
+			count:         1,
+			numRows:       2,
+		},
+		{
+			query:         `BEGIN; SELECT crdb_internal.force_retry('5s'); SELECT * FROM posts; COMMIT;`,
+			fingerprinted: `BEGIN; SELECT crdb_internal.force_retry(_); SELECT * FROM posts; COMMIT;`,
+			shouldRetry:   true,
+			count:         1,
+			numRows:       2,
+		},
+	}
+
+	appNameToTestCase := make(map[string]testCase)
+
+	for i, tc := range testCases {
+		appName := fmt.Sprintf("app%d", i)
+		appNameToTestCase[appName] = tc
+
+		// Create a brand new connection for each app, so that we don't pollute
+		// transaction stats collection with `SET application_name` queries.
+		sqlDB, err := gosql.Open("postgres", pgURL.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sqlDB.Exec(fmt.Sprintf(`SET application_name = "%s"`, appName)); err != nil {
+			t.Fatal(err)
+		}
+		for c := 0; c < tc.count; c++ {
+			if _, err := sqlDB.Exec(tc.query); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := sqlDB.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Hit query endpoint.
+	var resp serverpb.StatementsResponse
+	if err := getStatusJSONProto(firstServerProto, "statements", &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	// Construct a map of all the statement IDs.
+	statementIDs := make(map[roachpb.StmtID]bool, len(resp.Statements))
+	for _, respStatement := range resp.Statements {
+		statementIDs[respStatement.ID] = true
+	}
+
+	respAppNames := make(map[string]bool)
+	for _, respTransaction := range resp.Transactions {
+		appName := respTransaction.StatsData.App
+		tc, found := appNameToTestCase[appName]
+		if !found {
+			// Ignore internal queries, they aren't relevant to this test.
+			continue
+		}
+		respAppNames[appName] = true
+		// Ensure all statementIDs comprised by the Transaction Response can be
+		// linked to StatementIDs for statements in the response.
+		for _, stmtID := range respTransaction.StatsData.StatementIDs {
+			if _, found := statementIDs[stmtID]; !found {
+				t.Fatalf("app: %s, expected stmtID: %d not found in StatementResponse.", appName, stmtID)
+			}
+		}
+		stats := respTransaction.StatsData.Stats
+		if tc.count != int(stats.Count) {
+			t.Fatalf("app: %s, expected count %d, got %d", appName, tc.count, stats.Count)
+		}
+		if tc.shouldRetry && respTransaction.StatsData.Stats.MaxRetries == 0 {
+			t.Fatalf("app: %s, expected retries, got none\n", appName)
+		}
+
+		// Sanity check numeric stat values
+		if respTransaction.StatsData.Stats.CommitLat.Mean <= 0 {
+			t.Fatalf("app: %s, unexpected mean for commit latency\n", appName)
+		}
+		if respTransaction.StatsData.Stats.RetryLat.Mean <= 0 && tc.shouldRetry {
+			t.Fatalf("app: %s, expected retry latency mean to be non-zero as retries were involved\n", appName)
+		}
+		if respTransaction.StatsData.Stats.ServiceLat.Mean <= 0 {
+			t.Fatalf("app: %s, unexpected mean for service latency\n", appName)
+		}
+		if respTransaction.StatsData.Stats.NumRows.Mean != float64(tc.numRows) {
+			t.Fatalf("app: %s, unexpected number of rows observed. expected: %d, got %d\n",
+				appName, tc.numRows, int(respTransaction.StatsData.Stats.NumRows.Mean))
+		}
+	}
+
+	// Ensure we got transaction statistics for all the queries we sent.
+	for appName := range appNameToTestCase {
+		if _, found := respAppNames[appName]; !found {
+			t.Fatalf("app: %s did not appear in the response\n", appName)
+		}
+	}
+}
+
+func TestStatusAPITransactionStatementIDsTruncation(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	testCluster := serverutils.StartNewTestCluster(t, 3, base.TestClusterArgs{})
+	defer testCluster.Stopper().Stop(context.Background())
+
+	firstServerProto := testCluster.Server(0)
+	thirdServerSQL := sqlutils.MakeSQLRunner(testCluster.ServerConn(2))
+	testingApp := "testing"
+
+	thirdServerSQL.Exec(t, `CREATE DATABASE db; CREATE TABLE db.t();`)
+	thirdServerSQL.Exec(t, fmt.Sprintf(`SET application_name = "%s"`, testingApp))
+
+	maxStmtIDsLen := int(sql.TxnStatsNumStmtIDsToRecord.Get(
+		&firstServerProto.ExecutorConfig().(sql.ExecutorConfig).Settings.SV))
+
+	// Construct 2 transaction queries that include an absurd number of statements.
+	// These two queries have the same first 1000 statements, but should still have
+	// different fingerprints, as fingerprints take into account all statementIDs
+	// (unlike the statementIDs stored on the proto response, which are capped).
+	testQuery1 := "BEGIN;"
+	for i := 0; i < maxStmtIDsLen+1; i++ {
+		testQuery1 += "SELECT * FROM db.t;"
+	}
+	testQuery2 := testQuery1 + "SELECT * FROM db.t; COMMIT;"
+	testQuery1 += "COMMIT;"
+
+	thirdServerSQL.Exec(t, testQuery1)
+	thirdServerSQL.Exec(t, testQuery2)
+
+	// Hit query endpoint.
+	var resp serverpb.StatementsResponse
+	if err := getStatusJSONProto(firstServerProto, "statements", &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	txnsFound := 0
+	for _, respTransaction := range resp.Transactions {
+		appName := respTransaction.StatsData.App
+		if appName != testingApp {
+			// Only testQuery1 and testQuery2 are relevant to this test.
+			continue
+		}
+
+		txnsFound++
+		if len(respTransaction.StatsData.StatementIDs) != maxStmtIDsLen {
+			t.Fatalf("unexpected length of StatementIDs. expected:%d, got:%d",
+				maxStmtIDsLen, len(respTransaction.StatsData.StatementIDs))
+		}
+	}
+	if txnsFound != 2 {
+		t.Fatalf("transactions were not disambiguated as expected. expected %d txns, got: %d",
+			2, txnsFound)
+	}
+}
+
 func TestStatusAPIStatements(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	testCluster := serverutils.StartTestCluster(t, 3, base.TestClusterArgs{})
+	testCluster := serverutils.StartNewTestCluster(t, 3, base.TestClusterArgs{})
 	defer testCluster.Stopper().Stop(context.Background())
 
 	firstServerProto := testCluster.Server(0)
@@ -1568,9 +1768,18 @@ func TestStatusAPIStatements(t *testing.T) {
 		thirdServerSQL.Exec(t, stmt.stmt)
 	}
 
-	// Hit query endpoint.
+	// Test that non-admin without VIEWACTIVITY privileges cannot access.
 	var resp serverpb.StatementsResponse
-	if err := getStatusJSONProto(firstServerProto, "statements", &resp); err != nil {
+	err := getStatusJSONProtoWithAdminOption(firstServerProto, "statements", &resp, false)
+	if !testutils.IsError(err, "status: 403") {
+		t.Fatalf("expected privilege error, got %v", err)
+	}
+
+	// Grant VIEWACTIVITY.
+	thirdServerSQL.Exec(t, "ALTER USER $1 VIEWACTIVITY", authenticatedUserNameNoAdmin().Normalized())
+
+	// Hit query endpoint.
+	if err := getStatusJSONProtoWithAdminOption(firstServerProto, "statements", &resp, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1591,9 +1800,13 @@ func TestStatusAPIStatements(t *testing.T) {
 			// be automatically retried, confusing the test success check.
 			continue
 		}
-		if strings.HasPrefix(respStatement.Key.KeyData.App, sqlbase.InternalAppNamePrefix) {
+		if strings.HasPrefix(respStatement.Key.KeyData.App, catconstants.InternalAppNamePrefix) {
 			// We ignore internal queries, these are not relevant for the
 			// validity of this test.
+			continue
+		}
+		if strings.HasPrefix(respStatement.Key.KeyData.Query, "ALTER USER") {
+			// Ignore the ALTER USER ... VIEWACTIVITY statement.
 			continue
 		}
 		statementsInResponse = append(statementsInResponse, respStatement.Key.KeyData.Query)
@@ -1619,10 +1832,10 @@ func TestListSessionsSecurity(t *testing.T) {
 
 	for _, requestWithAdmin := range []bool{true, false} {
 		t.Run(fmt.Sprintf("admin=%v", requestWithAdmin), func(t *testing.T) {
-			myUser := authenticatedUserNameNoAdmin
+			myUser := authenticatedUserNameNoAdmin()
 			expectedErrOnListingRootSessions := "does not have permission to view sessions from user"
 			if requestWithAdmin {
-				myUser = authenticatedUserName
+				myUser = authenticatedUserName()
 				expectedErrOnListingRootSessions = ""
 			}
 
@@ -1633,10 +1846,10 @@ func TestListSessionsSecurity(t *testing.T) {
 			}{
 				{"local_sessions", ""},
 				{"sessions", ""},
-				{fmt.Sprintf("local_sessions?username=%s", myUser), ""},
-				{fmt.Sprintf("sessions?username=%s", myUser), ""},
-				{"local_sessions?username=root", expectedErrOnListingRootSessions},
-				{"sessions?username=root", expectedErrOnListingRootSessions},
+				{fmt.Sprintf("local_sessions?username=%s", myUser.Normalized()), ""},
+				{fmt.Sprintf("sessions?username=%s", myUser.Normalized()), ""},
+				{"local_sessions?username=" + security.RootUser, expectedErrOnListingRootSessions},
+				{"sessions?username=" + security.RootUser, expectedErrOnListingRootSessions},
 			}
 			for _, tc := range testCases {
 				var response serverpb.ListSessionsResponse
@@ -1662,7 +1875,7 @@ func TestListSessionsSecurity(t *testing.T) {
 	}
 
 	// gRPC requests behave as root and thus are always allowed.
-	rootConfig := testutils.NewTestBaseContext(security.RootUser)
+	rootConfig := testutils.NewTestBaseContext(security.RootUserName())
 	rpcContext := newRPCTestContext(ts, rootConfig)
 	url := ts.ServingRPCAddr()
 	nodeID := ts.NodeID()
@@ -1672,7 +1885,7 @@ func TestListSessionsSecurity(t *testing.T) {
 	}
 	client := serverpb.NewStatusClient(conn)
 
-	for _, user := range []string{"", authenticatedUserName, "root"} {
+	for _, user := range []string{"", authenticatedUser, security.RootUser} {
 		request := &serverpb.ListSessionsRequest{Username: user}
 		if resp, err := client.ListLocalSessions(ctx, request); err != nil || len(resp.Errors) > 0 {
 			t.Errorf("unexpected failure listing local sessions for %q; error: %v; response errors: %v",
@@ -1764,7 +1977,7 @@ func TestJobStatusResponse(t *testing.T) {
 	ts := startServer(t)
 	defer ts.Stopper().Stop(context.Background())
 
-	rootConfig := testutils.NewTestBaseContext(security.RootUser)
+	rootConfig := testutils.NewTestBaseContext(security.RootUserName())
 	rpcContext := newRPCTestContext(ts, rootConfig)
 
 	url := ts.ServingRPCAddr()
@@ -1786,16 +1999,16 @@ func TestJobStatusResponse(t *testing.T) {
 		jobs.Record{
 			Description: "testing",
 			Statement:   "SELECT 1",
-			Username:    "root",
+			Username:    security.RootUserName(),
 			Details: jobspb.ImportDetails{
 				Tables: []jobspb.ImportDetails_Table{
 					{
-						Desc: &sqlbase.TableDescriptor{
+						Desc: &descpb.TableDescriptor{
 							ID: 1,
 						},
 					},
 					{
-						Desc: &sqlbase.TableDescriptor{
+						Desc: &descpb.TableDescriptor{
 							ID: 2,
 						},
 					},
@@ -1803,7 +2016,7 @@ func TestJobStatusResponse(t *testing.T) {
 				URIs: []string{"a", "b"},
 			},
 			Progress:      jobspb.ImportProgress{},
-			DescriptorIDs: []sqlbase.ID{1, 2, 3},
+			DescriptorIDs: []descpb.ID{1, 2, 3},
 		},
 		nil)
 	if err != nil {

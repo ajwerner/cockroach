@@ -22,8 +22,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
@@ -32,8 +33,8 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
-func (p *planner) showStateMachineSetting(
-	ctx context.Context, st *cluster.Settings, s *settings.StateMachineSetting, name string,
+func (p *planner) showVersionSetting(
+	ctx context.Context, st *cluster.Settings, s *settings.VersionSetting, name string,
 ) (string, error) {
 	var res string
 	// For statemachine settings (at the time of writing, this is only the cluster version setting)
@@ -52,7 +53,7 @@ func (p *planner) showStateMachineSetting(
 					datums, err := p.ExtendedEvalContext().ExecCfg.InternalExecutor.QueryRowEx(
 						ctx, "read-setting",
 						txn,
-						sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+						sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 						"SELECT value FROM system.settings WHERE name = $1", name,
 					)
 					if err != nil {
@@ -82,8 +83,8 @@ func (p *planner) showStateMachineSetting(
 					if err != nil {
 						return err
 					}
-					res = val.(fmt.Stringer).String()
 
+					res = val.String()
 					return nil
 				})
 			})
@@ -97,11 +98,6 @@ func (p *planner) showStateMachineSetting(
 func (p *planner) ShowClusterSetting(
 	ctx context.Context, n *tree.ShowClusterSetting,
 ) (planNode, error) {
-
-	if err := p.RequireAdminRole(ctx, "SHOW CLUSTER SETTING"); err != nil {
-		return nil, err
-	}
-
 	name := strings.ToLower(n.Name)
 	st := p.ExecCfg().Settings
 	val, ok := settings.Lookup(name, settings.LookupForLocalAccess)
@@ -109,11 +105,15 @@ func (p *planner) ShowClusterSetting(
 		return nil, errors.Errorf("unknown setting: %q", name)
 	}
 
+	if err := checkPrivilegesForSetting(ctx, p, name, "show"); err != nil {
+		return nil, err
+	}
+
 	var dType *types.T
 	switch val.(type) {
 	case *settings.IntSetting:
 		dType = types.Int
-	case *settings.StringSetting, *settings.ByteSizeSetting, *settings.StateMachineSetting, *settings.EnumSetting:
+	case *settings.StringSetting, *settings.ByteSizeSetting, *settings.VersionSetting, *settings.EnumSetting:
 		dType = types.String
 	case *settings.BoolSetting:
 		dType = types.Bool
@@ -121,11 +121,13 @@ func (p *planner) ShowClusterSetting(
 		dType = types.Float
 	case *settings.DurationSetting:
 		dType = types.Interval
+	case *settings.DurationSettingWithExplicitUnit:
+		dType = types.Interval
 	default:
 		return nil, errors.Errorf("unknown setting type for %s: %s", name, val.Typ())
 	}
 
-	columns := sqlbase.ResultColumns{{Name: name, Typ: dType}}
+	columns := colinfo.ResultColumns{{Name: name, Typ: dType}}
 	return &delayedNode{
 		name:    "SHOW CLUSTER SETTING " + name,
 		columns: columns,
@@ -136,23 +138,24 @@ func (p *planner) ShowClusterSetting(
 				d = tree.NewDInt(tree.DInt(s.Get(&st.SV)))
 			case *settings.StringSetting:
 				d = tree.NewDString(s.String(&st.SV))
-			case *settings.StateMachineSetting:
-				var err error
-				valStr, err := p.showStateMachineSetting(ctx, st, s, name)
-				if err != nil {
-					return nil, err
-				}
-				d = tree.NewDString(valStr)
 			case *settings.BoolSetting:
 				d = tree.MakeDBool(tree.DBool(s.Get(&st.SV)))
 			case *settings.FloatSetting:
 				d = tree.NewDFloat(tree.DFloat(s.Get(&st.SV)))
 			case *settings.DurationSetting:
 				d = &tree.DInterval{Duration: duration.MakeDuration(s.Get(&st.SV).Nanoseconds(), 0, 0)}
+			case *settings.DurationSettingWithExplicitUnit:
+				d = &tree.DInterval{Duration: duration.MakeDuration(s.Get(&st.SV).Nanoseconds(), 0, 0)}
 			case *settings.EnumSetting:
 				d = tree.NewDString(s.String(&st.SV))
 			case *settings.ByteSizeSetting:
 				d = tree.NewDString(s.String(&st.SV))
+			case *settings.VersionSetting:
+				valStr, err := p.showVersionSetting(ctx, st, s, name)
+				if err != nil {
+					return nil, err
+				}
+				d = tree.NewDString(valStr)
 			default:
 				return nil, errors.Errorf("unknown setting type for %s: %s", name, val.Typ())
 			}

@@ -1,4 +1,7 @@
-# LogicTest: !3node-tenant(47895)
+# 3node-tenant is blocked from running this file due to heavy reliance on
+# unavailable node IDs in this test.
+# LogicTest: !3node-tenant
+
 query error database "crdb_internal" does not exist
 ALTER DATABASE crdb_internal RENAME TO not_crdb_internal
 
@@ -8,48 +11,51 @@ CREATE TABLE crdb_internal.t (x INT)
 query error database "crdb_internal" does not exist
 DROP DATABASE crdb_internal
 
-query TTT
+query TTTTI
 SHOW TABLES FROM crdb_internal
 ----
-crdb_internal  backward_dependencies      table
-crdb_internal  builtin_functions          table
-crdb_internal  cluster_queries            table
-crdb_internal  cluster_sessions           table
-crdb_internal  cluster_settings           table
-crdb_internal  cluster_transactions       table
-crdb_internal  create_statements          table
-crdb_internal  create_type_statements     table
-crdb_internal  databases                  table
-crdb_internal  feature_usage              table
-crdb_internal  forward_dependencies       table
-crdb_internal  gossip_alerts              table
-crdb_internal  gossip_liveness            table
-crdb_internal  gossip_network             table
-crdb_internal  gossip_nodes               table
-crdb_internal  index_columns              table
-crdb_internal  jobs                       table
-crdb_internal  kv_node_status             table
-crdb_internal  kv_store_status            table
-crdb_internal  leases                     table
-crdb_internal  node_build_info            table
-crdb_internal  node_metrics               table
-crdb_internal  node_queries               table
-crdb_internal  node_runtime_info          table
-crdb_internal  node_sessions              table
-crdb_internal  node_statement_statistics  table
-crdb_internal  node_transactions          table
-crdb_internal  node_txn_stats             table
-crdb_internal  partitions                 table
-crdb_internal  predefined_comments        table
-crdb_internal  ranges                     view
-crdb_internal  ranges_no_leases           table
-crdb_internal  schema_changes             table
-crdb_internal  session_trace              table
-crdb_internal  session_variables          table
-crdb_internal  table_columns              table
-crdb_internal  table_indexes              table
-crdb_internal  tables                     table
-crdb_internal  zones                      table
+crdb_internal  backward_dependencies        table  NULL  NULL
+crdb_internal  builtin_functions            table  NULL  NULL
+crdb_internal  cluster_queries              table  NULL  NULL
+crdb_internal  cluster_sessions             table  NULL  NULL
+crdb_internal  cluster_settings             table  NULL  NULL
+crdb_internal  cluster_transactions         table  NULL  NULL
+crdb_internal  create_statements            table  NULL  NULL
+crdb_internal  create_type_statements       table  NULL  NULL
+crdb_internal  databases                    table  NULL  NULL
+crdb_internal  feature_usage                table  NULL  NULL
+crdb_internal  forward_dependencies         table  NULL  NULL
+crdb_internal  gossip_alerts                table  NULL  NULL
+crdb_internal  gossip_liveness              table  NULL  NULL
+crdb_internal  gossip_network               table  NULL  NULL
+crdb_internal  gossip_nodes                 table  NULL  NULL
+crdb_internal  index_columns                table  NULL  NULL
+crdb_internal  invalid_objects              table  NULL  NULL
+crdb_internal  jobs                         table  NULL  NULL
+crdb_internal  kv_node_status               table  NULL  NULL
+crdb_internal  kv_store_status              table  NULL  NULL
+crdb_internal  leases                       table  NULL  NULL
+crdb_internal  node_build_info              table  NULL  NULL
+crdb_internal  node_metrics                 table  NULL  NULL
+crdb_internal  node_queries                 table  NULL  NULL
+crdb_internal  node_runtime_info            table  NULL  NULL
+crdb_internal  node_sessions                table  NULL  NULL
+crdb_internal  node_statement_statistics    table  NULL  NULL
+crdb_internal  node_transaction_statistics  table  NULL  NULL
+crdb_internal  node_transactions            table  NULL  NULL
+crdb_internal  node_txn_stats               table  NULL  NULL
+crdb_internal  partitions                   table  NULL  NULL
+crdb_internal  predefined_comments          table  NULL  NULL
+crdb_internal  ranges                       view   NULL  NULL
+crdb_internal  ranges_no_leases             table  NULL  NULL
+crdb_internal  schema_changes               table  NULL  NULL
+crdb_internal  session_trace                table  NULL  NULL
+crdb_internal  session_variables            table  NULL  NULL
+crdb_internal  table_columns                table  NULL  NULL
+crdb_internal  table_indexes                table  NULL  NULL
+crdb_internal  table_row_statistics         table  NULL  NULL
+crdb_internal  tables                       table  NULL  NULL
+crdb_internal  zones                        table  NULL  NULL
 
 statement ok
 CREATE DATABASE testdb; CREATE TABLE testdb.foo(x INT)
@@ -77,11 +83,25 @@ SELECT * FROM crdb_internal.schema_changes
 table_id parent_id name type target_id target_name state direction
 
 # We don't select the modification time as it does not remain contant.
-query IITTITTTTTTT colnames
-SELECT table_id, parent_id, name, database_name, version, format_version, state, sc_lease_node_id, sc_lease_expiration_time, drop_time, audit_mode, schema_name FROM crdb_internal.tables WHERE NAME = 'descriptor'
+query IITTITTTTTTTI colnames
+SELECT
+  table_id,
+  parent_id,
+  name,
+  database_name,
+  version,
+  format_version,
+  state,
+  sc_lease_node_id,
+  sc_lease_expiration_time,
+  drop_time,
+  audit_mode,
+  schema_name,
+  parent_schema_id
+FROM crdb_internal.tables WHERE NAME = 'descriptor'
 ----
-table_id  parent_id  name       database_name  version  format_version            state   sc_lease_node_id  sc_lease_expiration_time  drop_time  audit_mode  schema_name
-3        1          descriptor  system         1        InterleavedFormatVersion  PUBLIC  NULL              NULL                      NULL       DISABLED    public
+table_id  parent_id  name        database_name  version  format_version            state   sc_lease_node_id  sc_lease_expiration_time  drop_time  audit_mode  schema_name  parent_schema_id
+3         1          descriptor  system         1        InterleavedFormatVersion  PUBLIC  NULL              NULL                      NULL       DISABLED    public       29
 
 # Verify that table names are not double escaped.
 
@@ -127,10 +147,15 @@ SELECT * FROM crdb_internal.leases WHERE node_id < 0
 ----
 node_id  table_id  name  parent_id  expiration  deleted
 
-query ITTTTIIITFFFFFFFFFFFFIIF colnames
+query ITTTTIIITRRRRRRRRRRRRRRRRR colnames
 SELECT * FROM crdb_internal.node_statement_statistics WHERE node_id < 0
 ----
-node_id  application_name  flags  key  anonymized  count  first_attempt_count  max_retries  last_error  rows_avg  rows_var  parse_lat_avg  parse_lat_var  plan_lat_avg  plan_lat_var  run_lat_avg  run_lat_var  service_lat_avg  service_lat_var  overhead_lat_avg  overhead_lat_var  bytes_read rows_read  implicit_txn
+node_id  application_name  flags  key  anonymized  count  first_attempt_count  max_retries  last_error  rows_avg  rows_var  parse_lat_avg  parse_lat_var  plan_lat_avg  plan_lat_var  run_lat_avg  run_lat_var  service_lat_avg  service_lat_var  overhead_lat_avg  overhead_lat_var  bytes_read_avg  bytes_read_var  rows_read_avg  rows_read_var  implicit_txn
+
+query ITTTIIRRRRRRRR colnames
+SELECT * FROM crdb_internal.node_transaction_statistics WHERE node_id < 0
+----
+node_id  application_name  key  statement_ids  count  max_retries  service_lat_avg  service_lat_var  retry_lat_avg  retry_lat_var  commit_lat_avg  commit_lat_var  rows_read_avg  rows_read_var
 
 query IITTTTTTT colnames
 SELECT * FROM crdb_internal.session_trace WHERE span_idx < 0
@@ -162,15 +187,15 @@ SELECT * FROM crdb_internal.cluster_queries WHERE node_id < 0
 ----
 query_id  txn_id  node_id  session_id user_name  start  query  client_address  application_name  distributed  phase
 
-query TITTTT colnames
+query TITTTTIII colnames
 SELECT  * FROM crdb_internal.node_transactions WHERE node_id < 0
 ----
-id  node_id  session_id  start  txn_string  application_name
+id  node_id  session_id  start  txn_string  application_name  num_stmts  num_retries  num_auto_retries
 
-query TITTTT colnames
+query TITTTTIII colnames
 SELECT  * FROM crdb_internal.cluster_transactions WHERE node_id < 0
 ----
-id  node_id  session_id  start  txn_string  application_name
+id  node_id  session_id  start  txn_string  application_name  num_stmts  num_retries  num_auto_retries
 
 query ITTTTTTTTTTT colnames
 SELECT * FROM crdb_internal.node_sessions WHERE node_id < 0
@@ -296,7 +321,7 @@ select crdb_internal.set_vmodule('')
 query T
 select regexp_replace(crdb_internal.node_executable_version()::string, '(-\d+)?$', '');
 ----
-20.1
+20.2
 
 query ITTT colnames
 select node_id, component, field, regexp_replace(regexp_replace(value, '^\d+$', '<port>'), e':\\d+', ':<port>') as value from crdb_internal.node_runtime_info
@@ -449,7 +474,7 @@ select * from crdb_internal.gossip_alerts
 query T
 select regexp_replace(crdb_internal.node_executable_version()::string, '(-\d+)?$', '');
 ----
-20.1
+20.2
 
 user root
 
@@ -536,12 +561,12 @@ query TT colnames
 SELECT start_pretty, end_pretty FROM crdb_internal.ranges WHERE split_enforced_until IS NOT NULL
 ----
 start_pretty   end_pretty
-/Table/58/1/1  /Table/58/1/2
-/Table/58/1/2  /Table/58/1/3
-/Table/58/1/3  /Table/58/2/1
-/Table/58/2/1  /Table/58/2/2
-/Table/58/2/2  /Table/58/2/3
-/Table/58/2/3  /Max
+/Table/56/3/1  /Table/56/3/2
+/Table/56/3/2  /Table/56/3/3
+/Table/56/3/3  /Table/56/4/1
+/Table/56/4/1  /Table/56/4/2
+/Table/56/4/2  /Table/56/4/3
+/Table/56/4/3  /Max
 
 statement ok
 DROP TABLE foo
@@ -564,12 +589,12 @@ query TT colnames
 SELECT start_pretty, end_pretty FROM crdb_internal.ranges WHERE split_enforced_until IS NOT NULL
 ----
 start_pretty   end_pretty
-/Table/59/1/1  /Table/59/1/2
-/Table/59/1/2  /Table/59/1/3
-/Table/59/1/3  /Table/59/2/1
-/Table/59/2/1  /Table/59/2/2
-/Table/59/2/2  /Table/59/2/3
-/Table/59/2/3  /Max
+/Table/58/1/1  /Table/58/1/2
+/Table/58/1/2  /Table/58/1/3
+/Table/58/1/3  /Table/58/2/1
+/Table/58/2/1  /Table/58/2/2
+/Table/58/2/2  /Table/58/2/3
+/Table/58/2/3  /Max
 
 statement ok
 DROP INDEX foo@idx
@@ -580,9 +605,9 @@ query T colnames
 SELECT start_pretty FROM crdb_internal.ranges WHERE split_enforced_until IS NOT NULL
 ----
 start_pretty
-/Table/59/1/1
-/Table/59/1/2
-/Table/59/1/3
+/Table/58/1/1
+/Table/58/1/2
+/Table/58/1/3
 
 query T
 SELECT crdb_internal.cluster_name()
@@ -625,14 +650,44 @@ user root
 
 # Test the crdb_internal.create_type_statements table.
 statement ok
-SET experimental_enable_enums=true;
 CREATE TYPE enum1 AS ENUM ('hello', 'hi');
 CREATE TYPE enum2 AS ENUM ()
 
 query ITTITTT
 SELECT * FROM crdb_internal.create_type_statements
 ----
-52  test  public  61  enum1  CREATE TYPE public.enum1 AS ENUM ('hello', 'hi') {hello,hi}
-52  test  public  63  enum2  CREATE TYPE public.enum2 AS ENUM ()              {}
+52  test  public  60  enum1  CREATE TYPE public.enum1 AS ENUM ('hello', 'hi') {hello,hi}
+52  test  public  62  enum2  CREATE TYPE public.enum2 AS ENUM ()              {}
 
 # Test the virtual index as well.
+
+statement ok
+SET application_name = "test_txn_statistics"
+
+statement ok
+CREATE TABLE t_53504()
+
+statement ok
+BEGIN; SELECT * FROM t_53504; SELECT * FROM t_53504; SELECT * FROM t_53504; COMMIT;
+
+statement ok
+BEGIN; SELECT * FROM t_53504; SELECT * FROM t_53504; COMMIT;
+
+statement ok
+BEGIN; SELECT * FROM t_53504; SELECT * FROM t_53504; COMMIT;
+
+statement ok
+BEGIN; SELECT * FROM t_53504; COMMIT;
+
+statement ok
+SELECT * FROM t_53504
+
+query ITTTI colnames
+SELECT node_id, application_name, key, statement_ids, count FROM crdb_internal.node_transaction_statistics where application_name = 'test_txn_statistics'
+----
+node_id  application_name     key                   statement_ids                                                     count
+1        test_txn_statistics  4572719807723346491   {14727561584397653505,14727561584397653505}                       2
+1        test_txn_statistics  6826443595058283584   {14727561584397653505,14727561584397653505,14727561584397653505}  1
+1        test_txn_statistics  7134109142904971730   {14727561584397653517}                                            1
+1        test_txn_statistics  7134109142904971742   {14727561584397653505}                                            1
+1        test_txn_statistics  10166963080898232577  {2484845987516053214}                                             1

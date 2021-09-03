@@ -16,18 +16,22 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+)
+
+// Workaround for bazel auto-generated code. goimports does not automatically
+// pick up the right packages when run within the bazel sandbox.
+var (
+	_ = typeconv.DatumVecCanonicalTypeFamily
+	_ coldataext.Datum
+	_ tree.AggType
 )
 
 // checkColAgainstItself is similar to checkCol, but it probes the vector
 // against itself.
 func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel []int) {
 	probeVec, buildVec, probeSel := vec, vec, sel
-	// In order to inline the templated code of overloads, we need to have a
-	// `_overloadHelper` local variable of type `overloadHelper`.
-	_overloadHelper := ht.overloadHelper
 	switch probeVec.CanonicalTypeFamily() {
 	case types.BoolFamily:
 		switch probeVec.Type().Width() {
@@ -48,11 +52,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -110,11 +111,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -160,11 +158,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -210,11 +205,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -258,11 +250,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -310,11 +299,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -370,11 +356,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -418,11 +401,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -466,11 +446,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -512,11 +489,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -577,11 +551,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -631,11 +602,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -673,11 +641,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -715,11 +680,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -755,11 +717,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -799,11 +758,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -851,11 +807,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -891,11 +844,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -931,11 +881,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -969,11 +916,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -1012,2026 +956,6 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 		case -1:
 		default:
 			switch buildVec.CanonicalTypeFamily() {
-			case types.IntFamily:
-				switch buildVec.Type().Width() {
-				case 16:
-					probeKeys := probeVec.Decimal()
-					buildKeys := buildVec.Int16()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(buildVal))
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(buildVal))
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(buildVal))
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(buildVal))
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				case 32:
-					probeKeys := probeVec.Decimal()
-					buildKeys := buildVec.Int32()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(buildVal))
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(buildVal))
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(buildVal))
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(buildVal))
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				case -1:
-				default:
-					probeKeys := probeVec.Decimal()
-					buildKeys := buildVec.Int64()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(buildVal))
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(buildVal))
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(buildVal))
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(buildVal))
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(buildVal))
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			case types.FloatFamily:
-				switch buildVec.Type().Width() {
-				case -1:
-				default:
-					probeKeys := probeVec.Decimal()
-					buildKeys := buildVec.Float64()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														if _, err := tmpDec.SetFloat64(float64(buildVal)); err != nil {
-															colexecerror.ExpectedError(err)
-														}
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														if _, err := tmpDec.SetFloat64(float64(buildVal)); err != nil {
-															colexecerror.ExpectedError(err)
-														}
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													if _, err := tmpDec.SetFloat64(float64(buildVal)); err != nil {
-														colexecerror.ExpectedError(err)
-													}
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													if _, err := tmpDec.SetFloat64(float64(buildVal)); err != nil {
-														colexecerror.ExpectedError(err)
-													}
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													if _, err := tmpDec.SetFloat64(float64(buildVal)); err != nil {
-														colexecerror.ExpectedError(err)
-													}
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														if _, err := tmpDec.SetFloat64(float64(buildVal)); err != nil {
-															colexecerror.ExpectedError(err)
-														}
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														if _, err := tmpDec.SetFloat64(float64(buildVal)); err != nil {
-															colexecerror.ExpectedError(err)
-														}
-														cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													if _, err := tmpDec.SetFloat64(float64(buildVal)); err != nil {
-														colexecerror.ExpectedError(err)
-													}
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													if _, err := tmpDec.SetFloat64(float64(buildVal)); err != nil {
-														colexecerror.ExpectedError(err)
-													}
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													if _, err := tmpDec.SetFloat64(float64(buildVal)); err != nil {
-														colexecerror.ExpectedError(err)
-													}
-													cmpResult = tree.CompareDecimals(&probeVal, tmpDec)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				}
 			case types.DecimalFamily:
 				switch buildVec.Type().Width() {
 				case -1:
@@ -3046,11 +970,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3100,11 +1021,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3142,11 +1060,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3184,11 +1099,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3224,11 +1136,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3268,11 +1177,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3320,11 +1226,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3360,11 +1263,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3400,11 +1300,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3438,11 +1335,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3493,11 +1387,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3558,11 +1449,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3611,11 +1499,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3664,11 +1549,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3715,11 +1597,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3770,11 +1649,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3833,11 +1709,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3884,11 +1757,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3935,11 +1805,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -3984,11 +1851,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4041,11 +1905,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4106,11 +1967,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4159,11 +2017,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4212,11 +2067,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4263,11 +2115,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4318,11 +2167,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4381,11 +2227,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4432,11 +2275,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4483,11 +2323,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4532,11 +2369,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4590,11 +2424,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4655,11 +2486,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4708,11 +2536,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4761,11 +2586,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4812,11 +2634,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4867,11 +2686,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4930,11 +2746,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -4981,11 +2794,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -5032,11 +2842,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -5081,11 +2888,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -5115,1140 +2919,6 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 													} else {
 														cmpResult = 0
 													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			case types.FloatFamily:
-				switch buildVec.Type().Width() {
-				case -1:
-				default:
-					probeKeys := probeVec.Int16()
-					buildKeys := buildVec.Float64()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if false {
-															if math.IsNaN(b) {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if false {
-															if math.IsNaN(b) {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if false {
-															if math.IsNaN(b) {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if false {
-															if math.IsNaN(b) {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			case types.DecimalFamily:
-				switch buildVec.Type().Width() {
-				case -1:
-				default:
-					probeKeys := probeVec.Int16()
-					buildKeys := buildVec.Decimal()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(probeVal))
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(probeVal))
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(probeVal))
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(probeVal))
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
 												}
 
 												unique = cmpResult != 0
@@ -6278,11 +2948,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -6343,11 +3010,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -6396,11 +3060,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -6449,11 +3110,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -6500,11 +3158,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -6555,11 +3210,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -6618,11 +3270,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -6669,11 +3318,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -6720,11 +3366,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -6769,11 +3412,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -6826,11 +3466,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -6891,11 +3528,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -6944,11 +3578,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -6997,11 +3628,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7048,11 +3676,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7103,11 +3728,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7166,11 +3788,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7217,11 +3836,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7268,11 +3884,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7317,11 +3930,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7375,11 +3985,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7440,11 +4047,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7493,11 +4097,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7546,11 +4147,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7597,11 +4195,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7652,11 +4247,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7715,11 +4307,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7766,11 +4355,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7817,11 +4403,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7866,11 +4449,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -7900,1140 +4480,6 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 													} else {
 														cmpResult = 0
 													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			case types.FloatFamily:
-				switch buildVec.Type().Width() {
-				case -1:
-				default:
-					probeKeys := probeVec.Int32()
-					buildKeys := buildVec.Float64()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if false {
-															if math.IsNaN(b) {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if false {
-															if math.IsNaN(b) {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if false {
-															if math.IsNaN(b) {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if false {
-															if math.IsNaN(b) {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			case types.DecimalFamily:
-				switch buildVec.Type().Width() {
-				case -1:
-				default:
-					probeKeys := probeVec.Int32()
-					buildKeys := buildVec.Decimal()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(probeVal))
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(probeVal))
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(probeVal))
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(probeVal))
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
 												}
 
 												unique = cmpResult != 0
@@ -9064,11 +4510,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9129,11 +4572,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9182,11 +4622,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9235,11 +4672,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9286,11 +4720,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9341,11 +4772,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9404,11 +4832,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9455,11 +4880,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9506,11 +4928,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9555,11 +4974,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9612,11 +5028,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9677,11 +5090,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9730,11 +5140,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9783,11 +5190,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9834,11 +5238,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9889,11 +5290,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -9952,11 +5350,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10003,11 +5398,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10054,11 +5446,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10103,11 +5492,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10161,11 +5547,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10226,11 +5609,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10279,11 +5659,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10332,11 +5709,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10383,11 +5757,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10438,11 +5809,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10501,11 +5869,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10552,11 +5917,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10603,11 +5965,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10652,11 +6011,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -10686,1140 +6042,6 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 													} else {
 														cmpResult = 0
 													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			case types.FloatFamily:
-				switch buildVec.Type().Width() {
-				case -1:
-				default:
-					probeKeys := probeVec.Int64()
-					buildKeys := buildVec.Float64()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if false {
-															if math.IsNaN(b) {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if false {
-															if math.IsNaN(b) {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if false {
-															if math.IsNaN(b) {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if false {
-															if math.IsNaN(b) {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if false {
-														if math.IsNaN(b) {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			case types.DecimalFamily:
-				switch buildVec.Type().Width() {
-				case -1:
-				default:
-					probeKeys := probeVec.Int64()
-					buildKeys := buildVec.Decimal()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(probeVal))
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(probeVal))
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(probeVal))
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														tmpDec.SetInt64(int64(probeVal))
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													tmpDec.SetInt64(int64(probeVal))
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
 												}
 
 												unique = cmpResult != 0
@@ -11840,1894 +6062,6 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 		case -1:
 		default:
 			switch buildVec.CanonicalTypeFamily() {
-			case types.IntFamily:
-				switch buildVec.Type().Width() {
-				case 16:
-					probeKeys := probeVec.Float64()
-					buildKeys := buildVec.Int16()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if math.IsNaN(a) {
-															if false {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if math.IsNaN(a) {
-															if false {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if math.IsNaN(a) {
-															if false {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if math.IsNaN(a) {
-															if false {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				case 32:
-					probeKeys := probeVec.Float64()
-					buildKeys := buildVec.Int32()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if math.IsNaN(a) {
-															if false {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if math.IsNaN(a) {
-															if false {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if math.IsNaN(a) {
-															if false {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if math.IsNaN(a) {
-															if false {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				case -1:
-				default:
-					probeKeys := probeVec.Float64()
-					buildKeys := buildVec.Int64()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if math.IsNaN(a) {
-															if false {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if math.IsNaN(a) {
-															if false {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if math.IsNaN(a) {
-															if false {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														a, b := float64(probeVal), float64(buildVal)
-														if a < b {
-															cmpResult = -1
-														} else if a > b {
-															cmpResult = 1
-														} else if a == b {
-															cmpResult = 0
-														} else if math.IsNaN(a) {
-															if false {
-																cmpResult = 0
-															} else {
-																cmpResult = -1
-															}
-														} else {
-															cmpResult = 1
-														}
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													a, b := float64(probeVal), float64(buildVal)
-													if a < b {
-														cmpResult = -1
-													} else if a > b {
-														cmpResult = 1
-													} else if a == b {
-														cmpResult = 0
-													} else if math.IsNaN(a) {
-														if false {
-															cmpResult = 0
-														} else {
-															cmpResult = -1
-														}
-													} else {
-														cmpResult = 1
-													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				}
 			case types.FloatFamily:
 				switch buildVec.Type().Width() {
 				case -1:
@@ -13742,11 +6076,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -13815,11 +6146,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -13876,11 +6204,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -13937,11 +6262,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -13996,11 +6318,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -14059,11 +6378,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -14130,11 +6446,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -14189,11 +6502,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -14248,11 +6558,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -14305,11 +6612,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -14347,528 +6651,6 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 													} else {
 														cmpResult = 1
 													}
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			case types.DecimalFamily:
-				switch buildVec.Type().Width() {
-				case -1:
-				default:
-					probeKeys := probeVec.Float64()
-					buildKeys := buildVec.Decimal()
-					if probeSel != nil {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														if _, err := tmpDec.SetFloat64(float64(probeVal)); err != nil {
-															colexecerror.ExpectedError(err)
-														}
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = probeSel[toCheck]
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											// The vector is probed against itself, so buildVec has the same
-											// selection vector as probeVec.
-											buildIdx = probeSel[keyID-1]
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														if _, err := tmpDec.SetFloat64(float64(probeVal)); err != nil {
-															colexecerror.ExpectedError(err)
-														}
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													if _, err := tmpDec.SetFloat64(float64(probeVal)); err != nil {
-														colexecerror.ExpectedError(err)
-													}
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													if _, err := tmpDec.SetFloat64(float64(probeVal)); err != nil {
-														colexecerror.ExpectedError(err)
-													}
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = probeSel[toCheck]
-										// The vector is probed against itself, so buildVec has the same
-										// selection vector as probeVec.
-										buildIdx = probeSel[keyID-1]
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													if _, err := tmpDec.SetFloat64(float64(probeVal)); err != nil {
-														colexecerror.ExpectedError(err)
-													}
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						}
-					} else {
-						if probeVec.MaybeHasNulls() {
-							if buildVec.MaybeHasNulls() {
-								if ht.allowNullEquality {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull && buildIsNull {
-												// Both values are NULLs, and since we're allowing null equality, we
-												// proceed to the next value to check.
-												continue
-											} else if probeIsNull {
-												// Only probing value is NULL, so it is different from the build value
-												// (which is non-NULL). We mark it as "different" and proceed to the
-												// next value to check. This behavior is special in case of allowing
-												// null equality because we don't want to reset the groupID of the
-												// current probing tuple.
-												ht.probeScratch.differs[toCheck] = true
-												continue
-											}
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														if _, err := tmpDec.SetFloat64(float64(probeVal)); err != nil {
-															colexecerror.ExpectedError(err)
-														}
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								} else {
-									var (
-										probeIdx, buildIdx       int
-										probeIsNull, buildIsNull bool
-									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
-										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
-										keyID := ht.probeScratch.groupID[toCheck]
-										if keyID != 0 {
-											// the build table key (calculated using keys[keyID - 1] = key) is
-											// compared to the corresponding probe table to determine if a match is
-											// found.
-
-											probeIdx = int(toCheck)
-											probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-											buildIdx = int(keyID - 1)
-											buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-											if probeIsNull {
-												ht.probeScratch.groupID[toCheck] = 0
-											} else if buildIsNull {
-												ht.probeScratch.differs[toCheck] = true
-											} else {
-												probeVal := probeKeys.Get(probeIdx)
-												buildVal := buildKeys.Get(buildIdx)
-												var unique bool
-
-												{
-													var cmpResult int
-
-													{
-														tmpDec := &_overloadHelper.tmpDec1
-														if _, err := tmpDec.SetFloat64(float64(probeVal)); err != nil {
-															colexecerror.ExpectedError(err)
-														}
-														cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-													}
-
-													unique = cmpResult != 0
-												}
-
-												ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-											}
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										probeIsNull = probeVec.Nulls().NullAt(probeIdx)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													if _, err := tmpDec.SetFloat64(float64(probeVal)); err != nil {
-														colexecerror.ExpectedError(err)
-													}
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							}
-						} else {
-							if buildVec.MaybeHasNulls() {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										buildIsNull = buildVec.Nulls().NullAt(buildIdx)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													if _, err := tmpDec.SetFloat64(float64(probeVal)); err != nil {
-														colexecerror.ExpectedError(err)
-													}
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
-												}
-
-												unique = cmpResult != 0
-											}
-
-											ht.probeScratch.differs[toCheck] = ht.probeScratch.differs[toCheck] || unique
-										}
-									}
-								}
-							} else {
-								var (
-									probeIdx, buildIdx       int
-									probeIsNull, buildIsNull bool
-								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
-									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
-									keyID := ht.probeScratch.groupID[toCheck]
-									if keyID != 0 {
-										// the build table key (calculated using keys[keyID - 1] = key) is
-										// compared to the corresponding probe table to determine if a match is
-										// found.
-
-										probeIdx = int(toCheck)
-										buildIdx = int(keyID - 1)
-										if probeIsNull {
-											ht.probeScratch.groupID[toCheck] = 0
-										} else if buildIsNull {
-											ht.probeScratch.differs[toCheck] = true
-										} else {
-											probeVal := probeKeys.Get(probeIdx)
-											buildVal := buildKeys.Get(buildIdx)
-											var unique bool
-
-											{
-												var cmpResult int
-
-												{
-													tmpDec := &_overloadHelper.tmpDec1
-													if _, err := tmpDec.SetFloat64(float64(probeVal)); err != nil {
-														colexecerror.ExpectedError(err)
-													}
-													cmpResult = tree.CompareDecimals(tmpDec, &buildVal)
 												}
 
 												unique = cmpResult != 0
@@ -14903,11 +6685,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -14964,11 +6743,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15013,11 +6789,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15062,11 +6835,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15109,11 +6879,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15160,11 +6927,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15219,11 +6983,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15266,11 +7027,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15313,11 +7071,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15358,11 +7113,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15422,11 +7174,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15476,11 +7225,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15518,11 +7264,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15560,11 +7303,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15600,11 +7340,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15644,11 +7381,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15696,11 +7430,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15736,11 +7467,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15776,11 +7504,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15814,11 +7539,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15871,11 +7593,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15927,11 +7646,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -15971,11 +7687,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16015,11 +7728,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16057,11 +7767,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16103,11 +7810,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16157,11 +7861,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 										probeIdx, buildIdx       int
 										probeIsNull, buildIsNull bool
 									)
-									// Early bounds check.
-									_ = ht.probeScratch.toCheck[nToCheck-1]
-									for i := uint64(0); i < nToCheck; i++ {
+									for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 										// keyID of 0 is reserved to represent the end of the next chain.
-										toCheck := ht.probeScratch.toCheck[i]
 										keyID := ht.probeScratch.groupID[toCheck]
 										if keyID != 0 {
 											// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16199,11 +7900,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16241,11 +7939,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16281,11 +7976,8 @@ func (ht *hashTable) checkColAgainstItself(vec coldata.Vec, nToCheck uint64, sel
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16346,11 +8038,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16409,11 +8098,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16473,11 +8159,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16535,11 +8218,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16601,11 +8281,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16664,11 +8341,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16728,11 +8402,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16790,11 +8461,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16871,11 +8539,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16926,11 +8591,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -16982,11 +8644,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17036,11 +8695,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17094,11 +8750,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17149,11 +8802,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17205,11 +8855,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17259,11 +8906,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17338,11 +8982,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17393,11 +9034,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17449,11 +9087,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17503,11 +9138,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17561,11 +9193,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17616,11 +9245,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17672,11 +9298,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17726,11 +9349,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17797,11 +9417,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17863,11 +9480,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17930,11 +9544,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -17995,11 +9606,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18064,11 +9672,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18130,11 +9735,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18197,11 +9799,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18262,11 +9861,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18347,11 +9943,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18413,11 +10006,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18480,11 +10070,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18545,11 +10132,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18614,11 +10198,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18680,11 +10261,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18747,11 +10325,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18812,11 +10387,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18899,11 +10471,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -18965,11 +10534,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19032,11 +10598,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19097,11 +10660,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19166,11 +10726,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19232,11 +10789,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19299,11 +10853,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19364,11 +10915,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19457,11 +11005,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19531,11 +11076,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19606,11 +11148,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19679,11 +11218,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19756,11 +11292,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19830,11 +11363,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19905,11 +11435,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -19978,11 +11505,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20073,11 +11597,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20135,11 +11656,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20198,11 +11716,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20259,11 +11774,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20324,11 +11836,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20386,11 +11895,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20449,11 +11955,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20510,11 +12013,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20590,11 +12090,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20645,11 +12142,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20701,11 +12195,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20755,11 +12246,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20813,11 +12301,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20868,11 +12353,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20924,11 +12406,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -20978,11 +12457,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -21051,11 +12527,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -21108,11 +12581,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -21166,11 +12636,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -21222,11 +12689,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -21282,11 +12746,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -21339,11 +12800,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -21397,11 +12855,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -21453,11 +12908,8 @@ func (ht *hashTable) checkColForDistinctTuples(
 									probeIdx, buildIdx       int
 									probeIsNull, buildIsNull bool
 								)
-								// Early bounds check.
-								_ = ht.probeScratch.toCheck[nToCheck-1]
-								for i := uint64(0); i < nToCheck; i++ {
+								for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 									// keyID of 0 is reserved to represent the end of the next chain.
-									toCheck := ht.probeScratch.toCheck[i]
 									keyID := ht.probeScratch.groupID[toCheck]
 									if keyID != 0 {
 										// the build table key (calculated using keys[keyID - 1] = key) is
@@ -21513,36 +12965,6 @@ func (ht *hashTable) checkColForDistinctTuples(
 	}
 }
 
-// checkBuildForDistinct finds all tuples in probeVecs that are not present in
-// buffered tuples stored in ht.vals. It stores the probeVecs's distinct tuples'
-// keyIDs in headID buffer.
-// NOTE: It assumes that probeVecs does not contain any duplicates itself.
-// NOTE: It assumes that probeSel has already been populated and it is not nil.
-func (ht *hashTable) checkBuildForDistinct(
-	probeVecs []coldata.Vec, nToCheck uint64, probeSel []int,
-) uint64 {
-	if probeSel == nil {
-		colexecerror.InternalError("invalid selection vector")
-	}
-	copy(ht.probeScratch.distinct, zeroBoolColumn)
-
-	ht.checkColsForDistinctTuples(probeVecs, nToCheck, probeSel)
-	nDiffers := uint64(0)
-	for i := uint64(0); i < nToCheck; i++ {
-		if ht.probeScratch.distinct[ht.probeScratch.toCheck[i]] {
-			ht.probeScratch.distinct[ht.probeScratch.toCheck[i]] = false
-			// Calculated using the convention: keyID = keys.indexOf(key) + 1.
-			ht.probeScratch.headID[ht.probeScratch.toCheck[i]] = ht.probeScratch.toCheck[i] + 1
-		} else if ht.probeScratch.differs[ht.probeScratch.toCheck[i]] {
-			// Continue probing in this next chain for the probe key.
-			ht.probeScratch.differs[ht.probeScratch.toCheck[i]] = false
-			ht.probeScratch.toCheck[nDiffers] = ht.probeScratch.toCheck[i]
-			nDiffers++
-		}
-	}
-	return nDiffers
-}
-
 // checkProbeForDistinct performs a column by column check for duplicated tuples
 // in the probe table.
 func (ht *hashTable) checkProbeForDistinct(vecs []coldata.Vec, nToCheck uint64, sel []int) uint64 {
@@ -21579,40 +13001,38 @@ func (ht *hashTable) checkProbeForDistinct(vecs []coldata.Vec, nToCheck uint64, 
 func (ht *hashTable) updateSel(b coldata.Batch) {
 	distinctCount := 0
 	if sel := b.Selection(); sel != nil {
+		batchLength := b.Length()
 		// Reuse the buffer allocated for distinct.
 		visited := ht.probeScratch.distinct
 		copy(visited, zeroBoolColumn)
-		for i := 0; i < b.Length(); i++ {
-			if ht.probeScratch.headID[i] != 0 {
-				if hasVisited := visited[ht.probeScratch.headID[i]-1]; !hasVisited {
-					sel[distinctCount] = sel[ht.probeScratch.headID[i]-1]
-					visited[ht.probeScratch.headID[i]-1] = true
+		for i, headID := range ht.probeScratch.headID[:batchLength] {
+			if headID != 0 {
+				if hasVisited := visited[headID-1]; !hasVisited {
+					sel[distinctCount] = sel[headID-1]
+					visited[headID-1] = true
 					// Compacting and deduplicating hash buffer.
 					ht.probeScratch.hashBuffer[distinctCount] = ht.probeScratch.hashBuffer[i]
 					distinctCount++
 				}
 			}
-			ht.probeScratch.headID[i] = 0
-			ht.probeScratch.differs[i] = false
 		}
 	} else {
 		b.SetSelection(true)
 		sel = b.Selection()
+		batchLength := b.Length()
 		// Reuse the buffer allocated for distinct.
 		visited := ht.probeScratch.distinct
 		copy(visited, zeroBoolColumn)
-		for i := 0; i < b.Length(); i++ {
-			if ht.probeScratch.headID[i] != 0 {
-				if hasVisited := visited[ht.probeScratch.headID[i]-1]; !hasVisited {
-					sel[distinctCount] = int(ht.probeScratch.headID[i] - 1)
-					visited[ht.probeScratch.headID[i]-1] = true
+		for i, headID := range ht.probeScratch.headID[:batchLength] {
+			if headID != 0 {
+				if hasVisited := visited[headID-1]; !hasVisited {
+					sel[distinctCount] = int(headID - 1)
+					visited[headID-1] = true
 					// Compacting and deduplicating hash buffer.
 					ht.probeScratch.hashBuffer[distinctCount] = ht.probeScratch.hashBuffer[i]
 					distinctCount++
 				}
 			}
-			ht.probeScratch.headID[i] = 0
-			ht.probeScratch.differs[i] = false
 		}
 	}
 	b.SetLength(distinctCount)
@@ -21624,16 +13044,13 @@ func (ht *hashTable) updateSel(b coldata.Batch) {
 // list is reconstructed to only hold the indices of the eqCol keys that have
 // not been found. The new length of toCheck is returned by this function.
 func (ht *hashTable) distinctCheck(nToCheck uint64, probeSel []int) uint64 {
-	probeVecs := ht.probeScratch.keys
-	buildVecs := ht.vals.ColVecs()
-	buildKeyCols := ht.keyCols
-	ht.checkCols(probeVecs, buildVecs, buildKeyCols, nToCheck, probeSel)
+	ht.checkCols(ht.keys, nToCheck, probeSel)
 	// Select the indices that differ and put them into toCheck.
 	nDiffers := uint64(0)
-	for i := uint64(0); i < nToCheck; i++ {
-		if ht.probeScratch.differs[ht.probeScratch.toCheck[i]] {
-			ht.probeScratch.differs[ht.probeScratch.toCheck[i]] = false
-			ht.probeScratch.toCheck[nDiffers] = ht.probeScratch.toCheck[i]
+	for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
+		if ht.probeScratch.differs[toCheck] {
+			ht.probeScratch.differs[toCheck] = false
+			ht.probeScratch.toCheck[nDiffers] = toCheck
 			nDiffers++
 		}
 	}

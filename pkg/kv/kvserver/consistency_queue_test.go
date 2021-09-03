@@ -29,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -36,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
+	"github.com/cockroachdb/pebble"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -225,6 +227,17 @@ func TestCheckConsistencyReplay(t *testing.T) {
 func TestCheckConsistencyInconsistent(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
+	// This test prints a consistency checker diff, so it's
+	// good to make sure we're overly redacting said diff.
+	defer log.TestingSetRedactable(true)()
+
+	if testing.Short() {
+		// Takes 30s as of 2020/07. The test uses on-disk stores because nodes get
+		// killed, and for some reason using the on-disk stores seems to cause
+		// WaitForFullReplication() to take forever.
+		skip.UnderShort(t)
+	}
 
 	const numStores = 3
 	testKnobs := kvserver.StoreTestingKnobs{
@@ -426,7 +439,7 @@ func TestCheckConsistencyInconsistent(t *testing.T) {
 		assert.NoError(t, err)
 		defer cpEng.Close()
 
-		iter := cpEng.NewIterator(storage.IterOptions{UpperBound: []byte("\xff")})
+		iter := cpEng.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: []byte("\xff")})
 		defer iter.Close()
 
 		ms, err := storage.ComputeStatsGo(iter, roachpb.KeyMin, roachpb.KeyMax, 0 /* nowNanos */)
@@ -554,14 +567,17 @@ func testConsistencyQueueRecomputeStatsImpl(t *testing.T, hadEstimates bool) {
 	const sysCountGarbage = 123000
 
 	func() {
-		cache := storage.NewRocksDBCache(1 << 20)
-		defer cache.Release()
-		eng, err := storage.NewRocksDB(storage.RocksDBConfig{
+		cache := pebble.NewCache(1 << 20)
+		defer cache.Unref()
+		opts := storage.DefaultPebbleOptions()
+		opts.Cache = cache
+		eng, err := storage.NewPebble(ctx, storage.PebbleConfig{
 			StorageConfig: base.StorageConfig{
 				Dir:       path,
 				MustExist: true,
 			},
-		}, cache)
+			Opts: opts,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}

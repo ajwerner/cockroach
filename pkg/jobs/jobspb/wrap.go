@@ -14,8 +14,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
+	"github.com/cockroachdb/errors"
 )
 
 // Details is a marker interface for job details proto structs.
@@ -64,8 +65,10 @@ func DetailsType(d isPayload_Details) Type {
 		return TypeCreateStats
 	case *Payload_SchemaChangeGC:
 		return TypeSchemaChangeGC
+	case *Payload_TypeSchemaChange:
+		return TypeTypeSchemaChange
 	default:
-		panic(fmt.Sprintf("Payload.Type called on a payload with an unknown details type: %T", d))
+		panic(errors.AssertionFailedf("Payload.Type called on a payload with an unknown details type: %T", d))
 	}
 }
 
@@ -92,8 +95,10 @@ func WrapProgressDetails(details ProgressDetails) interface {
 		return &Progress_CreateStats{CreateStats: &d}
 	case SchemaChangeGCProgress:
 		return &Progress_SchemaChangeGC{SchemaChangeGC: &d}
+	case TypeSchemaChangeProgress:
+		return &Progress_TypeSchemaChange{TypeSchemaChange: &d}
 	default:
-		panic(fmt.Sprintf("WrapProgressDetails: unknown details type %T", d))
+		panic(errors.AssertionFailedf("WrapProgressDetails: unknown details type %T", d))
 	}
 }
 
@@ -115,6 +120,8 @@ func (p *Payload) UnwrapDetails() Details {
 		return *d.CreateStats
 	case *Payload_SchemaChangeGC:
 		return *d.SchemaChangeGC
+	case *Payload_TypeSchemaChange:
+		return *d.TypeSchemaChange
 	default:
 		return nil
 	}
@@ -138,6 +145,8 @@ func (p *Progress) UnwrapDetails() ProgressDetails {
 		return *d.CreateStats
 	case *Progress_SchemaChangeGC:
 		return *d.SchemaChangeGC
+	case *Progress_TypeSchemaChange:
+		return *d.TypeSchemaChange
 	default:
 		return nil
 	}
@@ -174,13 +183,15 @@ func WrapPayloadDetails(details Details) interface {
 		return &Payload_CreateStats{CreateStats: &d}
 	case SchemaChangeGCDetails:
 		return &Payload_SchemaChangeGC{SchemaChangeGC: &d}
+	case TypeSchemaChangeDetails:
+		return &Payload_TypeSchemaChange{TypeSchemaChange: &d}
 	default:
-		panic(fmt.Sprintf("jobs.WrapPayloadDetails: unknown details type %T", d))
+		panic(errors.AssertionFailedf("jobs.WrapPayloadDetails: unknown details type %T", d))
 	}
 }
 
 // ChangefeedTargets is a set of id targets with metadata.
-type ChangefeedTargets map[sqlbase.ID]ChangefeedTarget
+type ChangefeedTargets map[descpb.ID]ChangefeedTarget
 
 // SchemaChangeDetailsFormatVersion is the format version for
 // SchemaChangeDetails.
@@ -197,7 +208,23 @@ const (
 	// fields, and, more generally, flags the job as being suitable for the job
 	// registry to adopt.
 	JobResumerFormatVersion
+	// DatabaseJobFormatVersion indicates that database schema changes are
+	// run in the schema change job.
+	DatabaseJobFormatVersion
 
 	// Silence unused warning.
 	_ = BaseFormatVersion
 )
+
+// SafeValue implements the redact.SafeValue interface.
+func (Type) SafeValue() {}
+
+// NumJobTypes is the number of jobs types.
+const NumJobTypes = 10
+
+func init() {
+	if len(Type_name) != NumJobTypes {
+		panic(fmt.Errorf("NumJobTypes (%d) does not match generated job type name map length (%d)",
+			NumJobTypes, len(Type_name)))
+	}
+}

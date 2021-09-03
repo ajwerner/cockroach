@@ -43,7 +43,7 @@ type vecToDatumWidthTmplInfo struct {
 
 // AssignConverted returns a string that performs a conversion of the element
 // in typedCol at position tupleIdx and assigns the result to targetElem.
-// datumAlloc is the name of *sqlbase.DatumAlloc struct that can be used to
+// datumAlloc is the name of *rowenc.DatumAlloc struct that can be used to
 // allocate new datums.
 func (i vecToDatumWidthTmplInfo) AssignConverted(
 	targetElem, typedCol, tupleIdx, datumAlloc string,
@@ -88,22 +88,25 @@ var vecToDatumConversionTmpls = map[types.Family]string{
 	typeconv.DatumVecCanonicalTypeFamily: `%[1]s = %[2]s.Get(%[3]s).(*coldataext.Datum).Datum`,
 }
 
-const vecToDatumTmpl = "pkg/sql/colexec/vec_to_datum_tmpl.go"
+const vecToDatumTmpl = "pkg/sql/colconv/vec_to_datum_tmpl.go"
 
 func genVecToDatum(inputFileContents string, wr io.Writer) error {
 	r := strings.NewReplacer(
 		"_HAS_NULLS", "$.HasNulls",
 		"_HAS_SEL", "$.HasSel",
+		"_DESELECT", "$.Deselect",
 		"_TYPE_FAMILY", "{{.TypeFamily}}",
 		"_TYPE_WIDTH", typeWidthReplacement,
 		"_VEC_METHOD", "{{.VecMethod}}",
 	)
 	s := r.Replace(inputFileContents)
 
-	setTupleIdx := makeFunctionRegex("_SET_TUPLE_IDX", 4)
-	s = setTupleIdx.ReplaceAllString(s, `{{template "setTupleIdx" buildDict "HasSel" $4}}`)
-	vecToDatum := makeFunctionRegex("_VEC_TO_DATUM", 7)
-	s = vecToDatum.ReplaceAllString(s, `{{template "vecToDatum" buildDict "Global" . "HasNulls" $6 "HasSel" $7}}`)
+	setDestIdx := makeFunctionRegex("_SET_DEST_IDX", 5)
+	s = setDestIdx.ReplaceAllString(s, `{{template "setDestIdx" buildDict "HasSel" $4 "Deselect" $5}}`)
+	setSrcIdx := makeFunctionRegex("_SET_SRC_IDX", 4)
+	s = setSrcIdx.ReplaceAllString(s, `{{template "setSrcIdx" buildDict "HasSel" $4}}`)
+	vecToDatum := makeFunctionRegex("_VEC_TO_DATUM", 8)
+	s = vecToDatum.ReplaceAllString(s, `{{template "vecToDatum" buildDict "Global" . "HasNulls" $6 "HasSel" $7 "Deselect" $8}}`)
 
 	assignConvertedRe := makeFunctionRegex("_ASSIGN_CONVERTED", 4)
 	s = assignConvertedRe.ReplaceAllString(s, makeTemplateFunctionCall("AssignConverted", 4))

@@ -12,14 +12,14 @@ package sql
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
+	"github.com/cockroachdb/cockroach/pkg/sql/querycache"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/fsm"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -47,6 +47,20 @@ func (ex *connExecutor) execPrepare(
 	} else {
 		// Deallocate the unnamed statement, if it exists.
 		ex.deletePreparedStmt(ctx, "")
+	}
+
+	// If we were provided any type hints, attempt to resolve any user defined
+	// type OIDs into types.T's.
+	if parseCmd.TypeHints != nil {
+		for i := range parseCmd.TypeHints {
+			if parseCmd.TypeHints[i] == nil && types.IsOIDUserDefinedType(parseCmd.RawTypeHints[i]) {
+				var err error
+				parseCmd.TypeHints[i], err = ex.planner.ResolveTypeByOID(ctx, parseCmd.RawTypeHints[i])
+				if err != nil {
+					return retErr(err)
+				}
+			}
+		}
 	}
 
 	ps, err := ex.addPreparedStmt(
@@ -99,7 +113,7 @@ func (ex *connExecutor) addPreparedStmt(
 	origin PreparedStatementOrigin,
 ) (*PreparedStatement, error) {
 	if _, ok := ex.extraTxnState.prepStmtsNamespace.prepStmts[name]; ok {
-		panic(fmt.Sprintf("prepared statement already exists: %q", name))
+		panic(errors.AssertionFailedf("prepared statement already exists: %q", name))
 	}
 
 	// Prepare the query. This completes the typing of placeholders.
@@ -133,7 +147,7 @@ func (ex *connExecutor) prepare(
 	}
 
 	prepared := &PreparedStatement{
-		PrepareMetadata: sqlbase.PrepareMetadata{
+		PrepareMetadata: querycache.PrepareMetadata{
 			PlaceholderTypesInfo: tree.PlaceholderTypesInfo{
 				TypeHints: placeholderHints,
 			},
@@ -323,7 +337,7 @@ func (ex *connExecutor) execBind(
 					"expected %d arguments, got %d", numQArgs, len(bindCmd.Args)))
 		}
 
-		ptCtx := tree.NewParseTimeContext(ex.state.sqlTimestamp.In(ex.sessionData.DataConversion.Location))
+		ptCtx := tree.NewParseTimeContext(ex.state.sqlTimestamp.In(ex.sessionData.GetLocation()))
 
 		for i, arg := range bindCmd.Args {
 			k := tree.PlaceholderIdx(i)
@@ -332,7 +346,7 @@ func (ex *connExecutor) execBind(
 				// nil indicates a NULL argument value.
 				qargs[k] = tree.DNull
 			} else {
-				d, err := pgwirebase.DecodeOidDatum(ptCtx, t, qArgFormatCodes[i], arg)
+				d, err := pgwirebase.DecodeOidDatum(ctx, ptCtx, t, qArgFormatCodes[i], arg, &ex.planner)
 				if err != nil {
 					return retErr(pgerror.Wrapf(err, pgcode.ProtocolViolation,
 						"error in argument for %s", k))
@@ -359,9 +373,7 @@ func (ex *connExecutor) execBind(
 	}
 
 	// Create the new PreparedPortal.
-	if err := ex.addPortal(
-		ctx, portalName, bindCmd.PreparedStatementName, ps, qargs, columnFormatCodes,
-	); err != nil {
+	if err := ex.addPortal(ctx, portalName, ps, qargs, columnFormatCodes); err != nil {
 		return retErr(err)
 	}
 
@@ -380,22 +392,32 @@ func (ex *connExecutor) execBind(
 func (ex *connExecutor) addPortal(
 	ctx context.Context,
 	portalName string,
-	psName string,
 	stmt *PreparedStatement,
 	qargs tree.QueryArguments,
 	outFormats []pgwirebase.FormatCode,
 ) error {
 	if _, ok := ex.extraTxnState.prepStmtsNamespace.portals[portalName]; ok {
-		panic(fmt.Sprintf("portal already exists: %q", portalName))
+		panic(errors.AssertionFailedf("portal already exists: %q", portalName))
 	}
 
-	portal, err := ex.newPreparedPortal(ctx, portalName, stmt, qargs, outFormats)
+	portal, err := ex.makePreparedPortal(ctx, portalName, stmt, qargs, outFormats)
 	if err != nil {
 		return err
 	}
 
 	ex.extraTxnState.prepStmtsNamespace.portals[portalName] = portal
 	return nil
+}
+
+// exhaustPortal marks a portal with the provided name as "exhausted" and
+// panics if there is no portal with such name.
+func (ex *connExecutor) exhaustPortal(portalName string) {
+	portal, ok := ex.extraTxnState.prepStmtsNamespace.portals[portalName]
+	if !ok {
+		panic(errors.AssertionFailedf("portal %s doesn't exist", portalName))
+	}
+	portal.exhausted = true
+	ex.extraTxnState.prepStmtsNamespace.portals[portalName] = portal
 }
 
 func (ex *connExecutor) deletePreparedStmt(ctx context.Context, name string) {
@@ -412,7 +434,7 @@ func (ex *connExecutor) deletePortal(ctx context.Context, name string) {
 	if !ok {
 		return
 	}
-	portal.decRef(ctx)
+	portal.decRef(ctx, &ex.extraTxnState.prepStmtsNamespaceMemAcc, name)
 	delete(ex.extraTxnState.prepStmtsNamespace.portals, name)
 }
 
@@ -437,7 +459,7 @@ func (ex *connExecutor) execDelPrepStmt(
 		}
 		ex.deletePortal(ctx, delCmd.Name)
 	default:
-		panic(fmt.Sprintf("unknown del type: %s", delCmd.Type))
+		panic(errors.AssertionFailedf("unknown del type: %s", delCmd.Type))
 	}
 	return nil, nil
 }

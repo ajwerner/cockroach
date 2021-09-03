@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/colcontainerutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -34,8 +34,9 @@ func TestNumBatches(t *testing.T) {
 	nBatches := 10
 	noop := NewNoop(makeFiniteChunksSourceWithBatchSize(nBatches, coldata.BatchSize()))
 	vsc := NewVectorizedStatsCollector(
-		noop, 0 /* id */, execinfrapb.ProcessorIDTagKey, true, /* isStall */
+		noop, nil /* ioReader */, 0 /* id */, execinfrapb.ProcessorIDTagKey,
 		timeutil.NewStopWatch(), nil /* memMonitors */, nil, /* diskMonitors */
+		nil, /* inputStatsCollectors */
 	)
 	vsc.Init()
 	for {
@@ -55,8 +56,9 @@ func TestNumTuples(t *testing.T) {
 	for _, batchSize := range []int{1, 16, 1024} {
 		noop := NewNoop(makeFiniteChunksSourceWithBatchSize(nBatches, batchSize))
 		vsc := NewVectorizedStatsCollector(
-			noop, 0 /* id */, execinfrapb.ProcessorIDTagKey, true, /* isStall */
+			noop, nil /* ioReader */, 0 /* id */, execinfrapb.ProcessorIDTagKey,
 			timeutil.NewStopWatch(), nil /* memMonitors */, nil, /* diskMonitors */
+			nil, /* inputStatsCollectors */
 		)
 		vsc.Init()
 		for {
@@ -81,30 +83,27 @@ func TestVectorizedStatsCollector(t *testing.T) {
 	for nBatches := 1; nBatches < 5; nBatches++ {
 		timeSource := timeutil.NewTestTimeSource()
 		mjInputWatch := timeutil.NewTestStopWatch(timeSource.Now)
-
 		leftSource := &timeAdvancingOperator{
 			OneInputNode: NewOneInputNode(makeFiniteChunksSourceWithBatchSize(nBatches, coldata.BatchSize())),
 			timeSource:   timeSource,
 		}
 		leftInput := NewVectorizedStatsCollector(
-			leftSource, 0 /* id */, execinfrapb.ProcessorIDTagKey, true, /* isStall */
+			leftSource, nil /* ioReader */, 0 /* id */, execinfrapb.ProcessorIDTagKey,
 			timeutil.NewTestStopWatch(timeSource.Now), nil /* memMonitors */, nil, /* diskMonitors */
+			nil, /* inputStatsCollectors */
 		)
-		leftInput.SetOutputWatch(mjInputWatch)
-
 		rightSource := &timeAdvancingOperator{
 			OneInputNode: NewOneInputNode(makeFiniteChunksSourceWithBatchSize(nBatches, coldata.BatchSize())),
 			timeSource:   timeSource,
 		}
 		rightInput := NewVectorizedStatsCollector(
-			rightSource, 1 /* id */, execinfrapb.ProcessorIDTagKey, true, /* isStall */
+			rightSource, nil /* ioReader */, 1 /* id */, execinfrapb.ProcessorIDTagKey,
 			timeutil.NewTestStopWatch(timeSource.Now), nil /* memMonitors */, nil, /* diskMonitors */
+			nil, /* inputStatsCollectors */
 		)
-		rightInput.SetOutputWatch(mjInputWatch)
-
 		mergeJoiner, err := NewMergeJoinOp(
 			testAllocator, defaultMemoryLimit, queueCfg,
-			colexecbase.NewTestingSemaphore(4), sqlbase.InnerJoin, leftInput, rightInput,
+			colexecbase.NewTestingSemaphore(4), descpb.InnerJoin, leftInput, rightInput,
 			[]*types.T{types.Int}, []*types.T{types.Int},
 			[]execinfrapb.Ordering_Column{{ColIdx: 0}},
 			[]execinfrapb.Ordering_Column{{ColIdx: 0}},
@@ -117,39 +116,39 @@ func TestVectorizedStatsCollector(t *testing.T) {
 			OneInputNode: NewOneInputNode(mergeJoiner),
 			timeSource:   timeSource,
 		}
+
 		mjStatsCollector := NewVectorizedStatsCollector(
-			timeAdvancingMergeJoiner, 2 /* id */, execinfrapb.ProcessorIDTagKey, false, /* isStall */
+			timeAdvancingMergeJoiner, nil /* ioReader */, 2 /* id */, execinfrapb.ProcessorIDTagKey,
 			mjInputWatch, nil /* memMonitors */, nil, /* diskMonitors */
+			[]*VectorizedStatsCollector{leftInput, rightInput},
 		)
 
-		// The inputs are identical, so the merge joiner should output nBatches
-		// batches with each having coldata.BatchSize() tuples.
+		// The inputs are identical, so the merge joiner should output
+		// nBatches x coldata.BatchSize() tuples.
 		mjStatsCollector.Init()
-		batchCount := 0
+		batchCount, tupleCount := 0, 0
 		for {
 			b := mjStatsCollector.Next(context.Background())
 			if b.Length() == 0 {
 				break
 			}
-			require.Equal(t, coldata.BatchSize(), b.Length())
 			batchCount++
+			tupleCount += b.Length()
 		}
 		mjStatsCollector.finalizeStats()
 
-		require.Equal(t, nBatches, batchCount)
-		require.Equal(t, nBatches, int(mjStatsCollector.NumBatches))
 		require.Equal(t, nBatches*coldata.BatchSize(), int(mjStatsCollector.NumTuples))
 		// Two inputs are advancing the time source for a total of 2 * nBatches
 		// advances, but these do not count towards merge joiner execution time.
 		// Merge joiner advances the time on its every non-empty batch totaling
-		// nBatches advances that should be accounted for in stats.
-		require.Equal(t, time.Duration(nBatches), mjStatsCollector.Time)
+		// batchCount advances that should be accounted for in stats.
+		require.Equal(t, time.Duration(batchCount), mjStatsCollector.Time)
 	}
 }
 
 func makeFiniteChunksSourceWithBatchSize(nBatches int, batchSize int) colexecbase.Operator {
 	typs := []*types.T{types.Int}
-	batch := testAllocator.NewMemBatchWithSize(typs, batchSize)
+	batch := testAllocator.NewMemBatchWithFixedCapacity(typs, batchSize)
 	vec := batch.ColVec(0).Int64()
 	for i := 0; i < batchSize; i++ {
 		vec[i] = int64(i)

@@ -16,8 +16,9 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 )
@@ -31,7 +32,7 @@ const StaticNodeID = roachpb.NodeID(3)
 type RepeatableRowSource struct {
 	// The index of the next row to emit.
 	nextRowIdx int
-	rows       sqlbase.EncDatumRows
+	rows       rowenc.EncDatumRows
 	// Schema of rows.
 	types []*types.T
 }
@@ -40,7 +41,7 @@ var _ RowSource = &RepeatableRowSource{}
 
 // NewRepeatableRowSource creates a RepeatableRowSource with the given schema
 // and rows. types is optional if at least one row is provided.
-func NewRepeatableRowSource(types []*types.T, rows sqlbase.EncDatumRows) *RepeatableRowSource {
+func NewRepeatableRowSource(types []*types.T, rows rowenc.EncDatumRows) *RepeatableRowSource {
 	if types == nil {
 		panic("types required")
 	}
@@ -56,7 +57,7 @@ func (r *RepeatableRowSource) OutputTypes() []*types.T {
 func (r *RepeatableRowSource) Start(ctx context.Context) context.Context { return ctx }
 
 // Next is part of the RowSource interface.
-func (r *RepeatableRowSource) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (r *RepeatableRowSource) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	// If we've emitted all rows, signal that we have reached the end.
 	if r.nextRowIdx >= len(r.rows) {
 		return nil, nil
@@ -116,16 +117,16 @@ func NewTestDiskMonitor(ctx context.Context, st *cluster.Settings) *mon.BytesMon
 // GenerateValuesSpec generates a ValuesCoreSpec that encodes the given rows.
 // We pass the types as well because zero rows are allowed.
 func GenerateValuesSpec(
-	colTypes []*types.T, rows sqlbase.EncDatumRows, rowsPerChunk int,
+	colTypes []*types.T, rows rowenc.EncDatumRows, rowsPerChunk int,
 ) (execinfrapb.ValuesCoreSpec, error) {
 	var spec execinfrapb.ValuesCoreSpec
 	spec.Columns = make([]execinfrapb.DatumInfo, len(colTypes))
 	for i := range spec.Columns {
 		spec.Columns[i].Type = colTypes[i]
-		spec.Columns[i].Encoding = sqlbase.DatumEncoding_VALUE
+		spec.Columns[i].Encoding = descpb.DatumEncoding_VALUE
 	}
 
-	var a sqlbase.DatumAlloc
+	var a rowenc.DatumAlloc
 	for i := 0; i < len(rows); {
 		var buf []byte
 		for end := i + rowsPerChunk; i < len(rows) && i < end; i++ {

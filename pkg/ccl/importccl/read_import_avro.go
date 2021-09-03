@@ -17,10 +17,12 @@ import (
 	"unicode/utf8"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/lex"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
@@ -80,12 +82,12 @@ func nativeToDatum(
 			// []byte arrays are hard.  Sometimes we want []bytes, sometimes
 			// we want StringFamily.  So, instead of creating DBytes datum,
 			// parse this data to "cast" it to our expected type.
-			return sqlbase.ParseDatumStringAs(targetT, string(v), evalCtx)
+			return rowenc.ParseDatumStringAs(targetT, string(v), evalCtx)
 		}
 	case string:
 		// We allow strings to be specified for any column, as
 		// long as we can convert the string value to the target type.
-		return sqlbase.ParseDatumStringAs(targetT, v, evalCtx)
+		return rowenc.ParseDatumStringAs(targetT, v, evalCtx)
 	case map[string]interface{}:
 		for _, aT := range avroT {
 			// The value passed in is an avro schema.  Extract
@@ -173,7 +175,7 @@ func (a *avroConsumer) convertNative(x interface{}, conv *row.DatumRowConverter)
 	}
 
 	for f, v := range record {
-		field := lex.NormalizeName(f)
+		field := lexbase.NormalizeName(f)
 		idx, ok := a.fieldNameToIdx[field]
 		if !ok {
 			if a.strict {
@@ -362,6 +364,11 @@ func (r *avroRecordStream) readNative() {
 		if len(r.buf) > 0 {
 			r.row, remaining, decodeErr = r.decode()
 		}
+		// If we've already read all we can (either to eof or to max size), then
+		// any error during decoding should just be returned as an error.
+		if decodeErr != nil && (r.eof || len(r.buf) > r.maxBufSize) {
+			break
+		}
 	}
 
 	if decodeErr != nil {
@@ -447,7 +454,7 @@ var _ inputConverter = &avroInputReader{}
 
 func newAvroInputReader(
 	kvCh chan row.KVBatch,
-	tableDesc *sqlbase.TableDescriptor,
+	tableDesc *tabledesc.Immutable,
 	avroOpts roachpb.AvroOptions,
 	walltime int64,
 	parallelism int,
@@ -474,7 +481,7 @@ func (a *avroInputReader) readFiles(
 	resumePos map[int32]int64,
 	format roachpb.IOFileFormat,
 	makeExternalStorage cloud.ExternalStorageFactory,
-	user string,
+	user security.SQLUsername,
 ) error {
 	return readInputFiles(ctx, dataFiles, resumePos, format, a.readFile, makeExternalStorage, user)
 }

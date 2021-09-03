@@ -1,4 +1,7 @@
-# LogicTest: local fakedist
+# LogicTest: !3node-tenant(49854)
+
+statement ok
+SET CLUSTER SETTING sql.cross_db_fks.enabled = TRUE
 
 # Randomize the use of insert fast path.
 # The let statement will also log the value.
@@ -299,8 +302,6 @@ SHOW INDEXES FROM unindexed
 ----
 table_name  index_name                                      non_unique  seq_in_index  column_name  direction  storing  implicit
 unindexed   primary                                         false       1             rowid        ASC        false    false
-unindexed   unindexed_auto_index_fk_customer_ref_customers  true        1             customer     ASC        false    false
-unindexed   unindexed_auto_index_fk_customer_ref_customers  true        2             rowid        ASC        false    true
 
 statement error there is no unique constraint matching given keys for referenced table products
 CREATE TABLE non_unique (product STRING REFERENCES products (vendor))
@@ -497,15 +498,14 @@ CREATE TABLE delivery (
 query TT
 SHOW CREATE TABLE delivery
 ----
-delivery  CREATE TABLE delivery (
+delivery  CREATE TABLE public.delivery (
           ts TIMESTAMP NULL DEFAULT now():::TIMESTAMP,
           "order" INT8 NULL,
           shipment INT8 NULL,
           item STRING NULL,
-          CONSTRAINT fk_order_ref_orders FOREIGN KEY ("order", shipment) REFERENCES orders(id, shipment),
-          CONSTRAINT fk_item_ref_products FOREIGN KEY (item) REFERENCES products(upc),
+          CONSTRAINT fk_order_ref_orders FOREIGN KEY ("order", shipment) REFERENCES public.orders(id, shipment),
+          CONSTRAINT fk_item_ref_products FOREIGN KEY (item) REFERENCES public.products(upc),
           INDEX delivery_item_idx (item ASC),
-          INDEX delivery_auto_index_fk_order_ref_orders ("order" ASC, shipment ASC),
           FAMILY "primary" (ts, "order", shipment, item, rowid)
 )
 
@@ -664,10 +664,6 @@ DROP TABLE products RESTRICT
 statement error referenced by foreign key from table "customer reviews"
 DROP TABLE orders
 
-# reviews has a multi-col FK in which dropping one col is not allowed.
-statement error column "order" is referenced by existing index "customer reviews_auto_index_orderfk"
-ALTER TABLE "user content"."customer reviews" DROP COLUMN "order"
-
 statement ok
 ALTER TABLE "user content"."customer reviews" DROP COLUMN "order" CASCADE
 
@@ -779,9 +775,6 @@ refpairs_wrong_order  primary                                         false     
 refpairs_wrong_order  refpairs_wrong_order_b_a_idx                    true        1             b            ASC        false    false
 refpairs_wrong_order  refpairs_wrong_order_b_a_idx                    true        2             a            ASC        false    false
 refpairs_wrong_order  refpairs_wrong_order_b_a_idx                    true        3             rowid        ASC        false    true
-refpairs_wrong_order  refpairs_wrong_order_auto_index_fk_a_ref_pairs  true        1             a            ASC        false    false
-refpairs_wrong_order  refpairs_wrong_order_auto_index_fk_a_ref_pairs  true        2             b            ASC        false    false
-refpairs_wrong_order  refpairs_wrong_order_auto_index_fk_a_ref_pairs  true        3             rowid        ASC        false    true
 
 statement ok
 CREATE TABLE refpairs_c_between (a INT, b STRING, c INT, FOREIGN KEY (a, b) REFERENCES pairs (src, dest), INDEX (a, c, b))
@@ -795,9 +788,6 @@ refpairs_c_between  refpairs_c_between_a_c_b_idx                  true        1 
 refpairs_c_between  refpairs_c_between_a_c_b_idx                  true        2             c            ASC        false    false
 refpairs_c_between  refpairs_c_between_a_c_b_idx                  true        3             b            ASC        false    false
 refpairs_c_between  refpairs_c_between_a_c_b_idx                  true        4             rowid        ASC        false    true
-refpairs_c_between  refpairs_c_between_auto_index_fk_a_ref_pairs  true        1             a            ASC        false    false
-refpairs_c_between  refpairs_c_between_auto_index_fk_a_ref_pairs  true        2             b            ASC        false    false
-refpairs_c_between  refpairs_c_between_auto_index_fk_a_ref_pairs  true        3             rowid        ASC        false    true
 
 statement ok
 CREATE TABLE refpairs (
@@ -822,11 +812,11 @@ refpairs    refpairs_a_b_c_idx  true        4             rowid        ASC      
 query TT
 SHOW CREATE TABLE refpairs
 ----
-refpairs  CREATE TABLE refpairs (
+refpairs  CREATE TABLE public.refpairs (
           a INT8 NULL,
           b STRING NULL,
           c INT8 NULL,
-          CONSTRAINT fk_a_ref_pairs FOREIGN KEY (a, b) REFERENCES pairs(src, dest) ON UPDATE RESTRICT,
+          CONSTRAINT fk_a_ref_pairs FOREIGN KEY (a, b) REFERENCES public.pairs(src, dest) ON UPDATE RESTRICT,
           INDEX refpairs_a_b_c_idx (a ASC, b ASC, c ASC),
           FAMILY "primary" (a, b, c, rowid)
 )
@@ -1030,12 +1020,11 @@ ALTER INDEX refers@b_idx RENAME TO another_idx
 query TT
 SHOW CREATE TABLE refers
 ----
-refers  CREATE TABLE refers (
+refers  CREATE TABLE public.refers (
         a INT8 NULL,
         b INT8 NULL,
-        CONSTRAINT fk_a_ref_referee FOREIGN KEY (a) REFERENCES referee(id),
+        CONSTRAINT fk_a_ref_referee FOREIGN KEY (a) REFERENCES public.referee(id),
         INDEX another_idx (b ASC),
-        INDEX refers_auto_index_fk_a_ref_referee (a ASC),
         INDEX foo (a ASC),
         FAMILY "primary" (a, b, rowid)
 )
@@ -1044,26 +1033,26 @@ statement ok
 DROP INDEX refers@another_idx
 
 # refers is not visible because it is in the ADD state.
-query TTT
+query TTTTI
 SHOW TABLES FROM test
 ----
-public  bar                   table
-public  child                 table
-public  customers             table
-public  delivery              table
-public  domain_modules        table
-public  domains               table
-public  foo                   table
-public  grandchild            table
-public  modules               table
-public  pairs                 table
-public  referee               table
-public  refpairs              table
-public  refpairs_c_between    table
-public  refpairs_wrong_order  table
-public  tx                    table
-public  tx_leg                table
-public  unindexed             table
+public  bar                   table  root  0
+public  child                 table  root  0
+public  customers             table  root  0
+public  delivery              table  root  0
+public  domain_modules        table  root  0
+public  domains               table  root  0
+public  foo                   table  root  0
+public  grandchild            table  root  0
+public  modules               table  root  0
+public  pairs                 table  root  0
+public  referee               table  root  0
+public  refpairs              table  root  0
+public  refpairs_c_between    table  root  0
+public  refpairs_wrong_order  table  root  0
+public  tx                    table  root  0
+public  tx_leg                table  root  0
+public  unindexed             table  root  0
 
 statement ok
 COMMIT
@@ -1113,10 +1102,10 @@ CREATE TABLE pkref_b (b INT PRIMARY KEY REFERENCES pkref_a ON UPDATE NO ACTION O
 query TT
 SHOW CREATE TABLE pkref_b
 ----
-pkref_b  CREATE TABLE pkref_b (
+pkref_b  CREATE TABLE public.pkref_b (
          b INT8 NOT NULL,
          CONSTRAINT "primary" PRIMARY KEY (b ASC),
-         CONSTRAINT fk_b_ref_pkref_a FOREIGN KEY (b) REFERENCES pkref_a(a) ON DELETE RESTRICT,
+         CONSTRAINT fk_b_ref_pkref_a FOREIGN KEY (b) REFERENCES public.pkref_a(a) ON DELETE RESTRICT,
          FAMILY "primary" (b)
 )
 
@@ -2655,25 +2644,9 @@ INSERT INTO nonempty_b VALUES (1), (2), (3);
 statement ok
 INSERT INTO nonempty_a VALUES (1, NULL, 1)
 
-# Fails because self_id is not indexed, and an index will not be automatically created because the table is nonempty
-statement error foreign key requires an existing index on columns \("self_id"\)
-ALTER TABLE nonempty_a ADD CONSTRAINT fk_self_id FOREIGN KEY (self_id) REFERENCES nonempty_a;
-
-statement ok
-CREATE INDEX ON nonempty_a (self_id)
-
-# This now succeeds with the manually added index
 statement ok
 ALTER TABLE nonempty_a ADD CONSTRAINT fk_self_id FOREIGN KEY (self_id) REFERENCES nonempty_a;
 
-# Fails because b_id is not indexed, and an index will not be automatically created because the table is nonempty
-statement error foreign key requires an existing index on columns \("b_id"\)
-ALTER TABLE nonempty_a ADD CONSTRAINT fk_b FOREIGN KEY (b_id) REFERENCES nonempty_b;
-
-statement ok
-CREATE INDEX ON nonempty_a (b_id)
-
-# This now succeeds with the manually added index
 statement ok
 ALTER TABLE nonempty_a ADD CONSTRAINT fk_b FOREIGN KEY (b_id) REFERENCES nonempty_b;
 
@@ -2707,7 +2680,7 @@ statement ok
 CREATE TABLE child_duplicate_cols (id INT, parent_id INT, PRIMARY KEY (id))
 
 # The fk constraint is invalid because it has duplicate columns, so automatically adding the index fails
-statement error index \"child_duplicate_cols_auto_index_fk\" contains duplicate column \"parent_id\"
+statement error foreign key contains duplicate column \"parent_id\"
 ALTER TABLE child_duplicate_cols ADD CONSTRAINT fk FOREIGN KEY (parent_id, parent_id) references parent
 
 statement ok
@@ -3554,3 +3527,112 @@ SELECT
     *
 FROM
     a
+
+
+# Test that reversing a constraint addition after adding a self foreign key
+# works correctly.
+
+subtest reverse_failed_self_fk
+
+statement ok
+CREATE TABLE add_self_fk_fail (k int primary key, a int unique, b int);
+
+statement ok
+INSERT INTO add_self_fk_fail VALUES (1, 2, 3);
+
+statement error foreign key violation: "add_self_fk_fail" row b=3, k=1 has no match in "add_self_fk_fail"
+ALTER TABLE add_self_fk_fail ADD CONSTRAINT self_fk FOREIGN KEY (b) REFERENCES add_self_fk_fail (a);
+
+# The error from running will be reported to the user but if there is an
+# error reverting it will be in the jobs table. Ensure that there was no
+# problem reverting the change.
+
+query T
+select error from [SHOW JOBS] WHERE description LIKE '%add_self_fk_fail%'
+----
+foreign key violation: "add_self_fk_fail" row b=3, k=1 has no match in "add_self_fk_fail"
+
+statement ok
+DROP TABLE add_self_fk_fail
+
+# Test that we disallow cross-database foreign key references, depending on the
+# cluster setting.
+
+subtest cross_db_fks
+
+statement ok
+SET CLUSTER SETTING sql.cross_db_fks.enabled = FALSE
+
+statement ok
+CREATE DATABASE db1
+
+statement ok
+CREATE DATABASE db2
+
+statement ok
+USE db1
+
+statement ok
+CREATE TABLE parent (p INT PRIMARY KEY);
+
+statement ok
+CREATE TABLE child1 (c INT PRIMARY KEY, p INT REFERENCES parent(p))
+
+statement ok
+CREATE TABLE child2 (c INT PRIMARY KEY, p INT REFERENCES db1.public.parent(p))
+
+statement ok
+CREATE TABLE db1.public.child3 (c INT PRIMARY KEY, p INT REFERENCES db1.public.parent(p))
+
+statement error foreign references between databases are not allowed
+CREATE TABLE db2.public.child (c INT PRIMARY KEY, p INT REFERENCES parent(p))
+
+statement ok
+CREATE SCHEMA sc1
+
+# Cross-schema references should always be allowed.
+statement ok
+CREATE TABLE db1.sc1.child (c INT PRIMARY KEY, p INT REFERENCES db1.public.parent(p))
+
+statement ok
+USE db2
+
+statement error foreign references between databases are not allowed
+CREATE TABLE child (c INT PRIMARY KEY, p INT REFERENCES db1.public.parent(p))
+
+statement error foreign references between databases are not allowed
+CREATE TABLE db2.public.child (c INT PRIMARY KEY, p INT REFERENCES db1.public.parent(p))
+
+statement ok
+CREATE TABLE child (c INT PRIMARY KEY, p INT)
+
+statement error foreign references between databases are not allowed
+ALTER TABLE child ADD CONSTRAINT fk FOREIGN KEY (p) REFERENCES db1.public.parent(p)
+
+statement ok
+USE db1
+
+statement error foreign references between databases are not allowed
+ALTER TABLE db2.public.child ADD CONSTRAINT fk FOREIGN KEY (p) REFERENCES parent(p)
+
+statement ok
+SET CLUSTER SETTING sql.cross_db_fks.enabled = TRUE
+
+statement ok
+ALTER TABLE db2.public.child ADD CONSTRAINT fk FOREIGN KEY (p) REFERENCES parent(p)
+
+statement ok
+USE db2
+
+statement ok
+CREATE TABLE child2 (c INT PRIMARY KEY, p INT REFERENCES db1.public.parent(p))
+
+# Test that foreign keys cannot reference columns that are indexed by a partial
+# unique index. Partial unique indexes do not guarantee uniqueness in the entire
+# table.
+
+statement ok
+CREATE TABLE partial_parent (p INT, UNIQUE INDEX (p) WHERE p > 100)
+
+statement error there is no unique constraint matching given keys for referenced table partial_parent
+CREATE TABLE partial_child (p INT REFERENCES partial_parent (p))

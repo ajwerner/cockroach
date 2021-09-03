@@ -10,10 +10,13 @@ package backupccl
 
 import (
 	"context"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
@@ -22,12 +25,31 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	gogotypes "github.com/gogo/protobuf/types"
 )
 
 var backupOutputTypes = []*types.T{}
+
+var (
+	useTBI = settings.RegisterBoolSetting(
+		"kv.bulk_io_write.experimental_incremental_export_enabled",
+		"use experimental time-bound file filter when exporting in BACKUP",
+		true,
+	)
+	priorityAfter = settings.RegisterNonNegativeDurationSetting(
+		"bulkio.backup.read_with_priority_after",
+		"age of read-as-of time above which a BACKUP should read with priority",
+		time.Minute,
+	)
+	delayPerAttmpt = settings.RegisterNonNegativeDurationSetting(
+		"bulkio.backup.read_retry_delay",
+		"amount of time since the read-as-of time, per-prior attempt, to wait before making another attempt",
+		time.Second*5,
+	)
+)
 
 // TODO(pbardea): It would be nice if we could add some DistSQL processor tests
 // we would probably want to have a mock cloudStorage object that we could
@@ -87,8 +109,14 @@ func (cp *backupDataProcessor) Run(ctx context.Context) {
 
 	if err != nil {
 		cp.output.Push(nil, &execinfrapb.ProducerMetadata{Err: err})
-		return
 	}
+}
+
+type spanAndTime struct {
+	span       roachpb.Span
+	start, end hlc.Timestamp
+	attempts   int
+	lastTried  time.Time
 }
 
 func runBackupProcessor(
@@ -99,76 +127,111 @@ func runBackupProcessor(
 ) error {
 	settings := flowCtx.Cfg.Settings
 
-	allSpans := make([]spanAndTime, 0, len(spec.Spans)+len(spec.IntroducedSpans))
+	todo := make(chan spanAndTime, len(spec.Spans)+len(spec.IntroducedSpans))
 	for _, s := range spec.IntroducedSpans {
-		allSpans = append(allSpans, spanAndTime{span: s, start: hlc.Timestamp{}, end: spec.BackupStartTime})
+		todo <- spanAndTime{span: s, start: hlc.Timestamp{}, end: spec.BackupStartTime}
 	}
 	for _, s := range spec.Spans {
-		allSpans = append(allSpans, spanAndTime{span: s, start: spec.BackupStartTime, end: spec.BackupEndTime})
+		todo <- spanAndTime{span: s, start: spec.BackupStartTime, end: spec.BackupEndTime}
 	}
 
 	// TODO(pbardea): Check to see if this benefits from any tuning (e.g. +1, or
 	//  *2). See #49798.
-	maxConcurrentExports := kvserver.ExportRequestsLimit.Get(&settings.SV)
-	exportsSem := make(chan struct{}, maxConcurrentExports)
+	numSenders := int(kvserver.ExportRequestsLimit.Get(&settings.SV)) * 2
 
 	// For all backups, partitioned or not, the main BACKUP manifest is stored at
 	// details.URI.
-	defaultConf, err := cloudimpl.ExternalStorageConfFromURI(spec.DefaultURI, spec.User)
+	defaultConf, err := cloudimpl.ExternalStorageConfFromURI(spec.DefaultURI, spec.User())
 	if err != nil {
-		return errors.Wrapf(err, "export configuration")
-	}
-	defaultStore, err := flowCtx.Cfg.ExternalStorage(ctx, defaultConf)
-	if err != nil {
-		return errors.Wrapf(err, "make storage")
+		return err
 	}
 	storageByLocalityKV := make(map[string]*roachpb.ExternalStorage)
 	for kv, uri := range spec.URIsByLocalityKV {
-		conf, err := cloudimpl.ExternalStorageConfFromURI(uri, spec.User)
+		conf, err := cloudimpl.ExternalStorageConfFromURI(uri, spec.User())
 		if err != nil {
 			return err
 		}
 		storageByLocalityKV[kv] = &conf
 	}
 
-	g := ctxgroup.WithContext(ctx)
+	return ctxgroup.GroupWorkers(ctx, numSenders, func(ctx context.Context, _ int) error {
+		readTime := spec.BackupEndTime.GoTime()
 
-	g.GoCtx(func(ctx context.Context) error {
-		for i := range allSpans {
-			{
-				select {
-				case exportsSem <- struct{}{}:
-				case <-ctx.Done():
-					// Break the for loop to avoid creating more work - the backup
-					// has failed because either the context has been canceled or an
-					// error has been returned. Either way, Wait() is guaranteed to
-					// return an error now.
-					return ctx.Err()
-				}
-			}
+		// priority becomes true when we're sending re-attempts of reads far enough
+		// in the past that we want to run them with priority.
+		var priority bool
+		timer := timeutil.NewTimer()
+		defer timer.Stop()
 
-			span := allSpans[i]
-			// TODO(pbardea): It would be nice if we could avoid producing many small
-			//  SSTs. See #44480.
-			g.GoCtx(func(ctx context.Context) error {
-				defer func() { <-exportsSem }()
+		done := ctx.Done()
+		for {
+			select {
+			case <-done:
+				return ctx.Err()
+			case span := <-todo:
+				// TODO(pbardea): It would be nice if we could avoid producing many small
+				//  SSTs. See #44480.
 				header := roachpb.Header{Timestamp: span.end}
 				req := &roachpb.ExportRequest{
 					RequestHeader:                       roachpb.RequestHeaderFromSpan(span.span),
-					Storage:                             defaultStore.Conf(),
+					Storage:                             defaultConf,
 					StorageByLocalityKV:                 storageByLocalityKV,
 					StartTime:                           span.start,
 					EnableTimeBoundIteratorOptimization: useTBI.Get(&settings.SV),
 					MVCCFilter:                          spec.MVCCFilter,
 					Encryption:                          spec.Encryption,
 				}
-				log.Infof(ctx, "sending ExportRequest for span %s", span.span)
+
+				// If we're doing re-attempts but are not yet in the priority regime,
+				// check to see if it is time to switch to priority.
+				if !priority && span.attempts > 0 {
+					// Check if this is starting a new pass and we should delay first.
+					// We're okay with delaying this worker until then since we assume any
+					// other work it could pull off the queue will likely want to delay to
+					// a similar or later time anyway.
+					if delay := delayPerAttmpt.Get(&settings.SV) - timeutil.Since(span.lastTried); delay > 0 {
+						timer.Reset(delay)
+						log.Infof(ctx, "waiting %s to start attempt %d of remaining spans", delay, span.attempts+1)
+						select {
+						case <-done:
+							return ctx.Err()
+						case <-timer.C:
+							timer.Read = true
+						}
+					}
+
+					priority = timeutil.Since(readTime) > priorityAfter.Get(&settings.SV)
+				}
+
+				if priority {
+					// This re-attempt is reading far enough in the past that we just want
+					// to abort any transactions it hits.
+					header.UserPriority = roachpb.MaxUserPriority
+				} else {
+					// On the initial attempt to export this span and re-attempts that are
+					// done while it is still less than the configured time above the read
+					// time, we set WaitPolicy to Error, so that the export will return an
+					// error to us instead of instead doing blocking wait if it hits any
+					// other txns. This lets us move on to other ranges we have to export,
+					// provide an indication of why we're blocked, etc instead and come
+					// back to this range later.
+					header.WaitPolicy = lock.WaitPolicy_Error
+				}
+				log.Infof(ctx, "sending ExportRequest for span %s (attempt %d, priority %s)",
+					span.span, span.attempts+1, header.UserPriority.String())
 				rawRes, pErr := kv.SendWrappedWith(ctx, flowCtx.Cfg.DB.NonTransactionalSender(), header, req)
 				if pErr != nil {
+					if err := pErr.Detail.GetWriteIntent(); err != nil {
+						span.lastTried = timeutil.Now()
+						span.attempts++
+						todo <- span
+						// TODO(dt): send a progress update to update job progress to note
+						// the intents being hit.
+						continue
+					}
 					return errors.Wrapf(pErr.GoError(), "exporting %s", span.span)
 				}
 				res := rawRes.(*roachpb.ExportResponse)
-
 				files := make([]BackupManifest_File, 0)
 				var prog execinfrapb.RemoteProducerMetadata_BulkProcessorProgress
 				progDetails := BackupManifest_Progress{}
@@ -194,16 +257,15 @@ func runBackupProcessor(
 				}
 				prog.ProgressDetails = *details
 				progCh <- prog
+			default:
+				// No work left to do, so we can exit. Note that another worker could
+				// still be running and may still push new work (a retry) on to todo but
+				// that is OK, since that also means it is still running and thus can
+				// pick up that work on its next iteration.
 				return nil
-			})
+			}
 		}
-		return nil
 	})
-
-	if err := g.Wait(); err != nil {
-		return errors.Wrapf(err, "exporting %d ranges", errors.Safe(len(allSpans)))
-	}
-	return nil
 }
 
 func init() {

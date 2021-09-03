@@ -67,7 +67,7 @@ func typeCheckConstant(
 	ctx context.Context, semaCtx *SemaContext, c Constant, desired *types.T,
 ) (ret TypedExpr, err error) {
 	avail := c.AvailableTypes()
-	if desired.Family() != types.AnyFamily {
+	if !desired.IsAmbiguous() {
 		for _, typ := range avail {
 			if desired.Equivalent(typ) {
 				return c.ResolveAsType(ctx, semaCtx, desired)
@@ -368,13 +368,18 @@ func (expr *NumVal) ResolveAsType(
 	}
 }
 
+// intersectTypeSlices returns a slice of all the types that are in both of the
+// input slices that have the same OID.
 func intersectTypeSlices(xs, ys []*types.T) (out []*types.T) {
+	seen := make(map[oid.Oid]struct{})
 	for _, x := range xs {
 		for _, y := range ys {
-			if x == y {
+			_, ok := seen[x.Oid()]
+			if x.Oid() == y.Oid() && !ok {
 				out = append(out, x)
 			}
 		}
+		seen[x.Oid()] = struct{}{}
 	}
 	return out
 }
@@ -464,19 +469,31 @@ var (
 		types.Date,
 		types.StringArray,
 		types.IntArray,
+		types.FloatArray,
+		types.DecimalArray,
+		types.BoolArray,
+		types.Box2D,
 		types.Geography,
 		types.Geometry,
-		types.DecimalArray,
 		types.Time,
 		types.TimeTZ,
 		types.Timestamp,
 		types.TimestampTZ,
 		types.Interval,
 		types.Uuid,
+		types.DateArray,
+		types.TimeArray,
+		types.TimeTZArray,
+		types.TimestampArray,
+		types.TimestampTZArray,
+		types.IntervalArray,
+		types.UUIDArray,
 		types.INet,
 		types.Jsonb,
 		types.VarBit,
 		types.AnyEnum,
+		types.INetArray,
+		types.VarBitArray,
 	}
 	// StrValAvailBytes is the set of types convertible to byte array.
 	StrValAvailBytes = []*types.T{types.Bytes, types.Uuid, types.String, types.AnyEnum}

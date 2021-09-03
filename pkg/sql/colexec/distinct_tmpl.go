@@ -22,13 +22,26 @@ package colexec
 import (
 	"context"
 
+	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/errors"
+)
+
+// Workaround for bazel auto-generated code. goimports does not automatically
+// pick up the right packages when run within the bazel sandbox.
+var (
+	_ apd.Context
+	_ coldataext.Datum
+	_ duration.Duration
+	_ tree.AggType
 )
 
 // OrderedDistinctColsToOperators is a utility function that given an input and
@@ -55,7 +68,7 @@ func OrderedDistinctColsToOperators(
 		}
 	}
 	if r, ok = input.(ResettableOperator); !ok {
-		colexecerror.InternalError("unexpectedly an ordered distinct is not a resetter")
+		colexecerror.InternalError(errors.AssertionFailedf("unexpectedly an ordered distinct is not a resetter"))
 	}
 	distinctChain := &distinctChainOps{
 		ResettableOperator: r,
@@ -97,7 +110,7 @@ type _GOTYPESLICE interface{}
 // _ASSIGN_NE is the template equality function for assigning the first input
 // to the result of the second input != the third input.
 func _ASSIGN_NE(_ bool, _, _, _, _, _ _GOTYPE) bool {
-	colexecerror.InternalError("")
+	colexecerror.InternalError(errors.AssertionFailedf(""))
 }
 
 // _CANONICAL_TYPE_FAMILY is the template variable.

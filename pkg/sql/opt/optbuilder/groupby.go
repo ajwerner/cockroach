@@ -681,10 +681,12 @@ func translateAggName(name string) string {
 // buildAggregateFunction returns a pointer to the aggregateInfo containing
 // the function definition, fully built arguments, and the aggregate output
 // column.
+//
+// tempScope is a temporary scope which is used for building the aggregate
+// function arguments before the correct scope is determined.
 func (b *Builder) buildAggregateFunction(
-	f *tree.FuncExpr, def *memo.FunctionPrivate, fromScope *scope,
+	f *tree.FuncExpr, def *memo.FunctionPrivate, tempScope, fromScope *scope,
 ) *aggregateInfo {
-	tempScope := fromScope.startAggFunc()
 	tempScopeColsBefore := len(tempScope.cols)
 
 	info := aggregateInfo{
@@ -817,6 +819,18 @@ func (b *Builder) constructAggregate(name string, args []opt.ScalarExpr) opt.Sca
 		return b.factory.ConstructVariance(args[0])
 	case "stddev", "stddev_samp":
 		return b.factory.ConstructStdDev(args[0])
+	case "stddev_pop":
+		return b.factory.ConstructStdDevPop(args[0])
+	case "var_pop":
+		return b.factory.ConstructVarPop(args[0])
+	case "st_makeline":
+		return b.factory.ConstructSTMakeLine(args[0])
+	case "st_collect", "st_memcollect":
+		return b.factory.ConstructSTCollect(args[0])
+	case "st_extent":
+		return b.factory.ConstructSTExtent(args[0])
+	case "st_union", "st_memunion":
+		return b.factory.ConstructSTUnion(args[0])
 	case "xor_agg":
 		return b.factory.ConstructXorAgg(args[0])
 	case "json_agg":
@@ -880,7 +894,7 @@ func (b *Builder) allowImplicitGroupingColumn(colID opt.ColumnID, g *groupby) bo
 	}
 	primaryIndex := tab.Index(cat.PrimaryIndex)
 	for i := 0; i < primaryIndex.KeyColumnCount(); i++ {
-		pkCols.Add(colMeta.Table.ColumnID(primaryIndex.Column(i).Ordinal))
+		pkCols.Add(colMeta.Table.IndexColumnID(primaryIndex, i))
 	}
 	// Remove PK columns that are grouping cols and see if there's anything left.
 	groupingCols := g.groupingCols()

@@ -20,7 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/errors"
 )
@@ -50,7 +50,7 @@ func (p *planner) AlterRoleNode(
 	// Note that for Postgres, only superuser can ALTER another superuser.
 	// CockroachDB does not support superuser privilege right now.
 	// However we make it so the admin role cannot be edited (done in startExec).
-	if err := p.HasRoleOption(ctx, roleoption.CREATEROLE); err != nil {
+	if err := p.CheckRoleOption(ctx, roleoption.CREATEROLE); err != nil {
 		return nil, err
 	}
 
@@ -65,6 +65,12 @@ func (p *planner) AlterRoleNode(
 		return nil, err
 	}
 
+	// Check that the requested combination of password options is
+	// compatible with the user's own CREATELOGIN privilege.
+	if err := p.checkPasswordOptionConstraints(ctx, roleOptions, false /* newUser */); err != nil {
+		return nil, err
+	}
+
 	ua, err := p.getUserAuthInfo(ctx, nameE, opName)
 	if err != nil {
 		return nil, err
@@ -76,6 +82,38 @@ func (p *planner) AlterRoleNode(
 		isRole:       isRole,
 		roleOptions:  roleOptions,
 	}, nil
+}
+
+func (p *planner) checkPasswordOptionConstraints(
+	ctx context.Context, roleOptions roleoption.List, newUser bool,
+) error {
+	if !p.EvalContext().Settings.Version.IsActive(ctx, clusterversion.VersionCreateLoginPrivilege) {
+		// TODO(knz): Remove this condition in 21.1.
+		if roleOptions.Contains(roleoption.CREATELOGIN) || roleOptions.Contains(roleoption.NOCREATELOGIN) {
+			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
+				`granting CREATELOGIN or NOCREATELOGIN requires all nodes to be upgraded to %s`,
+				clusterversion.VersionByKey(clusterversion.VersionCreateLoginPrivilege))
+		}
+	}
+
+	if roleOptions.Contains(roleoption.CREATELOGIN) ||
+		roleOptions.Contains(roleoption.NOCREATELOGIN) ||
+		roleOptions.Contains(roleoption.PASSWORD) ||
+		roleOptions.Contains(roleoption.VALIDUNTIL) ||
+		roleOptions.Contains(roleoption.LOGIN) ||
+		// CREATE ROLE NOLOGIN is valid without CREATELOGIN.
+		(roleOptions.Contains(roleoption.NOLOGIN) && !newUser) ||
+		// Disallow implicit LOGIN upon new user.
+		(newUser && !roleOptions.Contains(roleoption.NOLOGIN) && !roleOptions.Contains(roleoption.LOGIN)) {
+		// Only a role who has CREATELOGIN itself can grant CREATELOGIN or
+		// NOCREATELOGIN to another role, or set up a password for
+		// authentication, or set up password validity, or enable/disable
+		// LOGIN privilege; even if they have CREATEROLE privilege.
+		if err := p.CheckRoleOption(ctx, roleoption.CREATELOGIN); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (n *alterRoleNode) startExec(params runParams) error {
@@ -108,7 +146,7 @@ func (n *alterRoleNode) startExec(params runParams) error {
 		params.ctx,
 		opName,
 		params.p.txn,
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		fmt.Sprintf("SELECT 1 FROM %s WHERE username = $1", userTableName),
 		normalizedUsername,
 	)
@@ -123,21 +161,11 @@ func (n *alterRoleNode) startExec(params runParams) error {
 	}
 
 	if n.roleOptions.Contains(roleoption.PASSWORD) {
-		hashedPassword, err := n.roleOptions.GetHashedPassword()
+		isNull, password, err := n.roleOptions.GetPassword()
 		if err != nil {
 			return err
 		}
-
-		// TODO(knz): Remove in 20.2.
-		if normalizedUsername == security.RootUser && len(hashedPassword) > 0 &&
-			!params.EvalContext().Settings.Version.IsActive(params.ctx, clusterversion.VersionRootPassword) {
-			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
-				`setting a root password requires all nodes to be upgraded to %s`,
-				clusterversion.VersionByKey(clusterversion.VersionRootPassword),
-			)
-		}
-
-		if len(hashedPassword) > 0 && params.extendedEvalCtx.ExecCfg.RPCContext.Config.Insecure {
+		if !isNull && params.extendedEvalCtx.ExecCfg.RPCContext.Config.Insecure {
 			// We disallow setting a non-empty password in insecure mode
 			// because insecure means an observer may have MITM'ed the change
 			// and learned the password.
@@ -147,6 +175,13 @@ func (n *alterRoleNode) startExec(params runParams) error {
 			// and certs can't be MITM'ed over the insecure SQL connection.
 			return pgerror.New(pgcode.InvalidPassword,
 				"setting or updating a password is not supported in insecure mode")
+		}
+
+		var hashedPassword []byte
+		if !isNull {
+			if hashedPassword, err = params.p.checkPasswordAndGetHash(params.ctx, password); err != nil {
+				return err
+			}
 		}
 
 		if hashedPassword == nil {
@@ -201,7 +236,7 @@ func (n *alterRoleNode) startExec(params runParams) error {
 			params.ctx,
 			opName,
 			params.p.txn,
-			sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 			stmt,
 			qargs...,
 		)

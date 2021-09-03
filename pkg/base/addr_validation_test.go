@@ -26,7 +26,10 @@ import (
 type addrs struct{ listen, adv, http, advhttp, sql, advsql string }
 
 func (a *addrs) String() string {
-	return fmt.Sprintf("--listen-addr=%s --advertise-addr=%s --http-addr=%s (http adv: %s) --sql-addr=%s (sql adv: %s)",
+	return fmt.Sprintf(""+
+		"--listen-addr=%s --advertise-addr=%s "+
+		"--http-addr=%s (http adv: %s) "+
+		"--sql-addr=%s (sql adv: %s)",
 		a.listen, a.adv, a.http, a.advhttp, a.sql, a.advsql)
 }
 
@@ -107,7 +110,7 @@ func TestValidateAddrs(t *testing.T) {
 		{addrs{"localhost:26257", "", hostname + ":8080", "", ":5432", ""}, "",
 			addrs{localAddr + ":26257", "localhost:26257", hostAddr + ":8080", hostname + ":8080", localAddr + ":5432", "localhost:5432"}},
 
-		// Make SQL local only.
+		// Make SQL and tenant local only.
 		{addrs{":26257", "", ":8080", "", "localhost:5432", ""}, "",
 			addrs{":26257", hostname + ":26257", ":8080", hostname + ":8080", localAddr + ":5432", "localhost:5432"}},
 
@@ -124,6 +127,10 @@ func TestValidateAddrs(t *testing.T) {
 		{addrs{"", "", "", "", ":", ""}, "",
 			addrs{":0", hostname + ":0", ":0", hostname + ":0", ":0", hostname + ":0"}},
 		{addrs{"", "", "", "", "", ":"}, "",
+			addrs{":0", hostname + ":0", ":0", hostname + ":0", ":0", hostname + ":0"}},
+		{addrs{"", "", "", "", "", ""}, "",
+			addrs{":0", hostname + ":0", ":0", hostname + ":0", ":0", hostname + ":0"}},
+		{addrs{"", "", "", "", "", ""}, "",
 			addrs{":0", hostname + ":0", ":0", hostname + ":0", ":0", hostname + ":0"}},
 
 		// Advertise port 0 means reuse listen port. We don't
@@ -149,11 +156,12 @@ func TestValidateAddrs(t *testing.T) {
 	for i, test := range testData {
 		t.Run(fmt.Sprintf("%d/%s", i, test.in), func(t *testing.T) {
 			cfg := base.Config{
-				Addr:             test.in.listen,
-				AdvertiseAddr:    test.in.adv,
-				HTTPAddr:         test.in.http,
-				SQLAddr:          test.in.sql,
-				SQLAdvertiseAddr: test.in.advsql,
+				Addr:              test.in.listen,
+				AdvertiseAddr:     test.in.adv,
+				HTTPAddr:          test.in.http,
+				HTTPAdvertiseAddr: test.in.advhttp,
+				SQLAddr:           test.in.sql,
+				SQLAdvertiseAddr:  test.in.advsql,
 			}
 
 			if err := cfg.ValidateAddrs(context.Background()); err != nil {
@@ -166,7 +174,14 @@ func TestValidateAddrs(t *testing.T) {
 				t.Fatalf("expected error %q, got success", test.expectedErr)
 			}
 
-			got := addrs{cfg.Addr, cfg.AdvertiseAddr, cfg.HTTPAddr, cfg.HTTPAdvertiseAddr, cfg.SQLAddr, cfg.SQLAdvertiseAddr}
+			got := addrs{
+				listen:  cfg.Addr,
+				adv:     cfg.AdvertiseAddr,
+				http:    cfg.HTTPAddr,
+				advhttp: cfg.HTTPAdvertiseAddr,
+				sql:     cfg.SQLAddr,
+				advsql:  cfg.SQLAdvertiseAddr,
+			}
 			gotStr := got.String()
 			expStr := test.expected.String()
 

@@ -71,6 +71,8 @@ var retiredSettings = map[string]struct{}{
 	"sql.defaults.optimizer_foreign_keys.enabled":                      {},
 	"sql.defaults.experimental_optimizer_foreign_key_cascades.enabled": {},
 	"sql.parallel_scans.enabled":                                       {},
+	// removed as of 21.1.
+	"sql.distsql.interleaved_joins.enabled": {},
 }
 
 // register adds a setting to the registry.
@@ -142,7 +144,7 @@ var ReadableTypes = map[string]string{
 	"z": "byte size",
 	"d": "duration",
 	"e": "enumeration",
-	"m": "custom validation",
+	"v": "version",
 }
 
 // RedactedValue returns a string representation of the value for settings

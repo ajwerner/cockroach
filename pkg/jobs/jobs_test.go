@@ -22,14 +22,18 @@ import (
 
 	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -43,6 +47,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 	"github.com/google/go-cmp/cmp"
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/assert"
@@ -90,7 +95,7 @@ func (expected *expectation) verify(id *int64, expectedStatus jobs.Status) error
 		Description:   payload.Description,
 		Details:       details,
 		DescriptorIDs: payload.DescriptorIDs,
-		Username:      payload.Username,
+		Username:      payload.UsernameProto.Decode(),
 		Progress:      progressDetail,
 	}); !reflect.DeepEqual(e, a) {
 		diff := strings.Join(pretty.Diff(e, a), "\n")
@@ -145,16 +150,16 @@ type counters struct {
 }
 
 type registryTestSuite struct {
-	ctx         context.Context
-	oldInterval time.Duration
-	s           serverutils.TestServerInterface
-	outerDB     *gosql.DB
-	sqlDB       *sqlutils.SQLRunner
-	registry    *jobs.Registry
-	done        chan struct{}
-	mockJob     jobs.Record
-	job         *jobs.Job
-	mu          struct {
+	ctx             context.Context
+	cleanupSettings func()
+	s               serverutils.TestServerInterface
+	outerDB         *gosql.DB
+	sqlDB           *sqlutils.SQLRunner
+	registry        *jobs.Registry
+	done            chan struct{}
+	mockJob         jobs.Record
+	job             *jobs.Job
+	mu              struct {
 		syncutil.Mutex
 		a counters
 		e counters
@@ -177,8 +182,7 @@ func noopPauseRequestFunc(
 }
 
 func (rts *registryTestSuite) setUp(t *testing.T) {
-	rts.oldInterval = jobs.DefaultAdoptInterval
-	jobs.DefaultAdoptInterval = time.Millisecond
+	rts.cleanupSettings = jobs.TestingSetAdoptAndCancelIntervals(time.Millisecond, 2*time.Millisecond)
 	rts.ctx = context.Background()
 	rts.s, rts.outerDB, _ = serverutils.StartServer(t, base.TestServerArgs{})
 	rts.sqlDB = sqlutils.MakeSQLRunner(rts.outerDB)
@@ -268,7 +272,7 @@ func (rts *registryTestSuite) tearDown() {
 	close(rts.resumeCheckCh)
 	close(rts.done)
 	rts.s.Stopper().Stop(rts.ctx)
-	jobs.DefaultAdoptInterval = rts.oldInterval
+	rts.cleanupSettings()
 	jobs.ResetConstructors()()
 }
 
@@ -304,6 +308,7 @@ func (rts *registryTestSuite) check(t *testing.T, expectedStatus jobs.Status) {
 func TestRegistryLifecycle(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
 	t.Run("normal success", func(t *testing.T) {
 		rts := registryTestSuite{}
 		rts.setUp(t)
@@ -323,6 +328,7 @@ func TestRegistryLifecycle(t *testing.T) {
 		rts.mu.e.ResumeExit++
 		rts.mu.e.Success = true
 		rts.check(t, jobs.StatusSucceeded)
+		t.Log("Done")
 	})
 
 	t.Run("create separately success", func(t *testing.T) {
@@ -879,10 +885,11 @@ func TestJobLifecycle(t *testing.T) {
 
 	t.Run("valid job lifecycles succeed", func(t *testing.T) {
 		// Woody is a successful job.
+		woodyPride, _ := security.MakeSQLUsernameFromUserInput("Woody Pride", security.UsernameValidation)
 		woodyJob, woodyExp := createJob(jobs.Record{
 			Description:   "There's a snake in my boot!",
-			Username:      "Woody Pride",
-			DescriptorIDs: []sqlbase.ID{1, 2, 3},
+			Username:      woodyPride,
+			DescriptorIDs: []descpb.ID{1, 2, 3},
 			Details:       jobspb.RestoreDetails{},
 			Progress:      jobspb.RestoreProgress{},
 		})
@@ -937,10 +944,11 @@ func TestJobLifecycle(t *testing.T) {
 		}
 
 		// Buzz fails after it starts running.
+		buzzL, _ := security.MakeSQLUsernameFromUserInput("Buzz Lightyear", security.UsernameValidation)
 		buzzRecord := jobs.Record{
 			Description:   "To infinity and beyond!",
-			Username:      "Buzz Lightyear",
-			DescriptorIDs: []sqlbase.ID{3, 2, 1},
+			Username:      buzzL,
+			DescriptorIDs: []descpb.ID{3, 2, 1},
 			Details:       jobspb.BackupDetails{},
 			Progress:      jobspb.BackupProgress{},
 		}
@@ -988,10 +996,11 @@ func TestJobLifecycle(t *testing.T) {
 		}
 
 		// Sid fails before it starts running.
+		sidP, _ := security.MakeSQLUsernameFromUserInput("Sid Phillips", security.UsernameValidation)
 		sidJob, sidExp := createJob(jobs.Record{
 			Description:   "The toys! The toys are alive!",
-			Username:      "Sid Phillips",
-			DescriptorIDs: []sqlbase.ID{6, 6, 6},
+			Username:      sidP,
+			DescriptorIDs: []descpb.ID{6, 6, 6},
 			Details:       jobspb.RestoreDetails{},
 			Progress:      jobspb.RestoreProgress{},
 		})
@@ -1178,7 +1187,7 @@ func TestJobLifecycle(t *testing.T) {
 
 	t.Run("bad job details fail", func(t *testing.T) {
 		defer func() {
-			if r, ok := recover().(string); !ok || !strings.Contains(r, "unknown details type int") {
+			if r, ok := recover().(error); !ok || !strings.Contains(r.Error(), "unknown details type int") {
 				t.Fatalf("expected 'unknown details type int', but got: %v", r)
 			}
 		}()
@@ -1327,42 +1336,73 @@ func TestJobLifecycle(t *testing.T) {
 		}
 	})
 
+	updateClaimStmt := `UPDATE system.jobs SET claim_session_id = $1 WHERE id = $2`
+	updateStatusStmt := `UPDATE system.jobs SET status = $1 WHERE id = $2`
+
 	t.Run("set details works", func(t *testing.T) {
-		job, exp := createJob(jobs.Record{
-			Details:  jobspb.RestoreDetails{},
-			Progress: jobspb.RestoreProgress{},
-		})
-		if err := exp.verify(job.ID(), jobs.StatusRunning); err != nil {
-			t.Fatal(err)
-		}
-		newDetails := jobspb.RestoreDetails{URIs: []string{"new"}}
+		job, exp := startLeasedJob(t, defaultRecord)
+		require.NoError(t, exp.verify(job.ID(), jobs.StatusRunning))
+		newDetails := jobspb.ImportDetails{URIs: []string{"new"}}
 		exp.Record.Details = newDetails
-		if err := job.SetDetails(ctx, newDetails); err != nil {
-			t.Fatal(err)
-		}
-		if err := exp.verify(job.ID(), jobs.StatusRunning); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, job.SetDetails(ctx, newDetails))
+		require.NoError(t, exp.verify(job.ID(), jobs.StatusRunning))
+		require.NoError(t, job.SetDetails(ctx, newDetails))
+
+		// Now change job's session id and check that updates are rejected.
+		_, err := exp.DB.Exec(updateClaimStmt, "!@#!@$!$@#", *job.ID())
+		require.NoError(t, err)
+		require.Error(t, job.SetDetails(ctx, newDetails))
+		require.NoError(t, exp.verify(job.ID(), jobs.StatusRunning))
+	})
+
+	t.Run("set details fails", func(t *testing.T) {
+		job, exp := startLeasedJob(t, defaultRecord)
+		require.NoError(t, exp.verify(job.ID(), jobs.StatusRunning))
+		_, err := exp.DB.Exec(updateStatusStmt, jobs.StatusCancelRequested, *job.ID())
+		require.NoError(t, err)
+		require.Error(t, job.SetDetails(ctx, jobspb.ImportDetails{URIs: []string{"new"}}))
+		require.NoError(t, exp.verify(job.ID(), jobs.StatusCancelRequested))
 	})
 
 	t.Run("set progress works", func(t *testing.T) {
-		job, exp := createJob(jobs.Record{
-			Details:  jobspb.RestoreDetails{},
-			Progress: jobspb.RestoreProgress{},
-		})
-		if err := exp.verify(job.ID(), jobs.StatusRunning); err != nil {
-			t.Fatal(err)
-		}
-		newDetails := jobspb.RestoreProgress{HighWater: []byte{42}}
-		exp.Record.Progress = newDetails
-		if err := job.SetProgress(ctx, newDetails); err != nil {
-			t.Fatal(err)
-		}
-		if err := exp.verify(job.ID(), jobs.StatusRunning); err != nil {
-			t.Fatal(err)
-		}
+		job, exp := startLeasedJob(t, defaultRecord)
+		require.NoError(t, exp.verify(job.ID(), jobs.StatusRunning))
+		newProgress := jobspb.ImportProgress{ResumePos: []int64{42}}
+		exp.Record.Progress = newProgress
+		require.NoError(t, job.SetProgress(ctx, newProgress))
+		require.NoError(t, exp.verify(job.ID(), jobs.StatusRunning))
+
+		// Now change job's session id and check that updates are rejected.
+		_, err := exp.DB.Exec(updateClaimStmt, "!@#!@$!$@#", *job.ID())
+		require.NoError(t, err)
+		require.Error(t, job.SetDetails(ctx, newProgress))
+		require.NoError(t, exp.verify(job.ID(), jobs.StatusRunning))
 	})
 
+	t.Run("set progress fails", func(t *testing.T) {
+		job, exp := startLeasedJob(t, defaultRecord)
+		require.NoError(t, exp.verify(job.ID(), jobs.StatusRunning))
+		_, err := exp.DB.Exec(updateStatusStmt, jobs.StatusPauseRequested, *job.ID())
+		require.NoError(t, err)
+		require.Error(t, job.SetProgress(ctx, jobspb.ImportProgress{ResumePos: []int64{42}}))
+		require.NoError(t, exp.verify(job.ID(), jobs.StatusPauseRequested))
+	})
+
+	t.Run("job with created by fields", func(t *testing.T) {
+		createdByType := "internal_test"
+
+		job := registry.NewJob(jobs.Record{
+			Details:   jobspb.RestoreDetails{},
+			Progress:  jobspb.RestoreProgress{},
+			CreatedBy: &jobs.CreatedByInfo{Name: createdByType, ID: 123},
+		})
+		require.NoError(t, job.Created(ctx))
+
+		loadedJob, err := registry.LoadJob(ctx, *job.ID())
+		require.NoError(t, err)
+		require.NotNil(t, loadedJob.CreatedBy())
+		require.Equal(t, job.CreatedBy(), loadedJob.CreatedBy())
+	})
 }
 
 // TestShowJobs manually inserts a row into system.jobs and checks that the
@@ -1372,6 +1412,7 @@ func TestShowJobs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	defer jobs.TestingSetAdoptAndCancelIntervals(10*time.Millisecond, 10*time.Millisecond)()
 	params, _ := tests.CreateTestServerParams()
 	s, rawSQLDB, _ := serverutils.StartServer(t, params)
 	sqlDB := sqlutils.MakeSQLRunner(rawSQLDB)
@@ -1384,7 +1425,7 @@ func TestShowJobs(t *testing.T) {
 		typ               string
 		status            string
 		description       string
-		username          string
+		username          security.SQLUsername
 		err               string
 		created           time.Time
 		started           time.Time
@@ -1402,7 +1443,7 @@ func TestShowJobs(t *testing.T) {
 			typ:         "SCHEMA CHANGE",
 			status:      "superfailed",
 			description: "failjob",
-			username:    "failure",
+			username:    security.MakeSQLUsernameFromPreNormalizedString("failure"),
 			err:         "boom",
 			// lib/pq returns time.Time objects with goofy locations, which breaks
 			// reflect.DeepEqual without this time.FixedZone song and dance.
@@ -1420,7 +1461,7 @@ func TestShowJobs(t *testing.T) {
 			typ:         "CHANGEFEED",
 			status:      "running",
 			description: "persistent feed",
-			username:    "persistent",
+			username:    security.MakeSQLUsernameFromPreNormalizedString("persistent"),
 			err:         "",
 			// lib/pq returns time.Time objects with goofy locations, which breaks
 			// reflect.DeepEqual without this time.FixedZone song and dance.
@@ -1444,7 +1485,7 @@ func TestShowJobs(t *testing.T) {
 				Description:    in.description,
 				StartedMicros:  in.started.UnixNano() / time.Microsecond.Nanoseconds(),
 				FinishedMicros: in.finished.UnixNano() / time.Microsecond.Nanoseconds(),
-				Username:       in.username,
+				UsernameProto:  in.username.EncodeProto(),
 				Lease: &jobspb.Lease{
 					NodeID: 7,
 				},
@@ -1479,14 +1520,16 @@ func TestShowJobs(t *testing.T) {
 			var out row
 			var maybeFractionCompleted *float32
 			var decimalHighWater *apd.Decimal
+			var resultUsername string
 			sqlDB.QueryRow(t, `
       SELECT job_id, job_type, status, created, description, started, finished, modified,
              fraction_completed, high_water_timestamp, user_name, ifnull(error, ''), coordinator_id
         FROM crdb_internal.jobs WHERE job_id = $1`, in.id).Scan(
 				&out.id, &out.typ, &out.status, &out.created, &out.description, &out.started,
-				&out.finished, &out.modified, &maybeFractionCompleted, &decimalHighWater, &out.username,
+				&out.finished, &out.modified, &maybeFractionCompleted, &decimalHighWater, &resultUsername,
 				&out.err, &out.coordinatorID,
 			)
+			out.username = security.MakeSQLUsernameFromPreNormalizedString(resultUsername)
 
 			if decimalHighWater != nil {
 				var err error
@@ -1550,7 +1593,8 @@ func TestShowAutomaticJobs(t *testing.T) {
 		// system.jobs is part proper SQL columns, part protobuf, so we can't use the
 		// row struct directly.
 		inPayload, err := protoutil.Marshal(&jobspb.Payload{
-			Details: jobspb.WrapPayloadDetails(in.details),
+			UsernameProto: security.RootUserName().EncodeProto(),
+			Details:       jobspb.WrapPayloadDetails(in.details),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1761,15 +1805,17 @@ func TestShowJobWhenComplete(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	// Canceling a job relies on adopt daemon to move the job to state
 	// reverting.
-	defer func(oldInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldInterval
-	}(jobs.DefaultAdoptInterval)
-	jobs.DefaultAdoptInterval = 10 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(10*time.Millisecond, 10*time.Millisecond)()
+
 	ctx := context.Background()
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	defer s.Stopper().Stop(ctx)
 	registry := s.JobRegistry().(*jobs.Registry)
-	mockJob := jobs.Record{Details: jobspb.ImportDetails{}, Progress: jobspb.ImportProgress{}}
+	mockJob := jobs.Record{
+		Username: security.RootUserName(),
+		Details:  jobspb.ImportDetails{},
+		Progress: jobspb.ImportProgress{},
+	}
 	done := make(chan struct{})
 	defer close(done)
 	jobs.RegisterConstructor(
@@ -1896,10 +1942,8 @@ func TestJobInTxn(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	defer jobs.ResetConstructors()()
 
-	defer func(oldInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldInterval
-	}(jobs.DefaultAdoptInterval)
-	jobs.DefaultAdoptInterval = 5 * time.Second
+	// Set the adoption interval to be very long to test the adoption channel.
+	defer jobs.TestingSetAdoptAndCancelIntervals(time.Hour, time.Hour)()
 
 	ctx := context.Background()
 	s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{})
@@ -1913,7 +1957,7 @@ func TestJobInTxn(t *testing.T) {
 	// Piggy back on BACKUP to be able to create a succeeding test job.
 	sql.AddPlanHook(
 		func(_ context.Context, stmt tree.Statement, phs sql.PlanHookState,
-		) (sql.PlanHookRowFn, sqlbase.ResultColumns, []sql.PlanNode, bool, error) {
+		) (sql.PlanHookRowFn, colinfo.ResultColumns, []sql.PlanNode, bool, error) {
 			st, ok := stmt.(*tree.Backup)
 			if !ok {
 				return nil, nil, nil, false, nil
@@ -1948,7 +1992,7 @@ func TestJobInTxn(t *testing.T) {
 	// Piggy back on RESTORE to be able to create a failing test job.
 	sql.AddPlanHook(
 		func(_ context.Context, stmt tree.Statement, phs sql.PlanHookState,
-		) (sql.PlanHookRowFn, sqlbase.ResultColumns, []sql.PlanNode, bool, error) {
+		) (sql.PlanHookRowFn, colinfo.ResultColumns, []sql.PlanNode, bool, error) {
 			_, ok := stmt.(*tree.Restore)
 			if !ok {
 				return nil, nil, nil, false, nil
@@ -2041,6 +2085,49 @@ func TestJobInTxn(t *testing.T) {
 	})
 }
 
+func TestStartableJobMixedVersion(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	defer jobs.ResetConstructors()()
+
+	ctx := context.Background()
+	st := cluster.MakeTestingClusterSettingsWithVersions(
+		clusterversion.TestingBinaryVersion,
+		clusterversion.TestingBinaryMinSupportedVersion,
+		false, /* initializeVersion */
+	)
+	s, sqlDB, db := serverutils.StartServer(t, base.TestServerArgs{
+		Settings: st,
+		Knobs: base.TestingKnobs{
+			Server: &server.TestingKnobs{
+				BinaryVersionOverride:          clusterversion.TestingBinaryMinSupportedVersion,
+				DisableAutomaticVersionUpgrade: 1,
+			},
+		},
+	})
+	defer s.Stopper().Stop(ctx)
+	jr := s.JobRegistry().(*jobs.Registry)
+	_, err := sqlDB.Exec("SELECT now()")
+	require.NoError(t, err)
+
+	jobs.RegisterConstructor(jobspb.TypeImport, func(job *jobs.Job, settings *cluster.Settings) jobs.Resumer {
+		return jobs.FakeResumer{}
+	})
+	var j *jobs.StartableJob
+	require.NoError(t, db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
+		j, err = jr.CreateStartableJobWithTxn(ctx, jobs.Record{
+			Details:  jobspb.ImportDetails{},
+			Progress: jobspb.ImportProgress{},
+		}, txn, nil)
+		return err
+	}))
+	_, err = sqlDB.Exec("SET CLUSTER SETTING version = crdb_internal.node_executable_version()")
+	require.NoError(t, err)
+	errCh, err := j.Start(ctx)
+	require.NoError(t, err)
+	require.NoError(t, <-errCh)
+}
+
 // TestStartableJobErrors tests that the StartableJob returns the expected
 // errors when used incorrectly and performs the appropriate cleanup in
 // CleanupOnRollback.
@@ -2069,10 +2156,11 @@ func TestStartableJob(t *testing.T) {
 			},
 		}
 	})
+	woodyP, _ := security.MakeSQLUsernameFromUserInput("Woody Pride", security.UsernameValidation)
 	rec := jobs.Record{
 		Description:   "There's a snake in my boot!",
-		Username:      "Woody Pride",
-		DescriptorIDs: []sqlbase.ID{1, 2, 3},
+		Username:      woodyP,
+		DescriptorIDs: []descpb.ID{1, 2, 3},
 		Details:       jobspb.RestoreDetails{},
 		Progress:      jobspb.RestoreProgress{},
 	}
@@ -2251,10 +2339,7 @@ func TestUnmigratedSchemaChangeJobs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 	defer jobs.ResetConstructors()()
-	defer func(oldInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldInterval
-	}(jobs.DefaultAdoptInterval)
-	jobs.DefaultAdoptInterval = 10 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(10*time.Millisecond, 10*time.Millisecond)()
 
 	ctx := context.Background()
 
@@ -2266,12 +2351,13 @@ func TestUnmigratedSchemaChangeJobs(t *testing.T) {
 	// The default FormatVersion value in SchemaChangeDetails corresponds to a
 	// pre-20.1 job.
 	rec := jobs.Record{
-		DescriptorIDs: []sqlbase.ID{1},
+		DescriptorIDs: []descpb.ID{1},
 		Details:       jobspb.SchemaChangeDetails{},
 		Progress:      jobspb.SchemaChangeProgress{},
 	}
 
 	t.Run("job is not adopted", func(t *testing.T) {
+		defer jobs.ResetConstructors()()
 		resuming := make(chan struct{})
 		jobs.RegisterConstructor(jobspb.TypeSchemaChange, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 			return jobs.FakeResumer{
@@ -2284,9 +2370,10 @@ func TestUnmigratedSchemaChangeJobs(t *testing.T) {
 		select {
 		case <-resuming:
 			t.Fatal("job was resumed")
-		case <-time.After(time.Second):
-			// With an adopt interval of 10 ms, within 1 s we can be reasonably sure
-			// that the job was not adopted.
+		case <-time.After(100 * time.Millisecond):
+			// With an adopt interval of 10 ms, within 100ms we can be reasonably sure
+			// that the job was not adopted. At the very least, the test would be
+			// flakey.
 		}
 	})
 
@@ -2307,6 +2394,251 @@ func TestUnmigratedSchemaChangeJobs(t *testing.T) {
 		}
 		if _, err := sqlDB.Exec("CANCEL JOB $1", *job.ID()); !testutils.IsError(err, "cannot be canceled in this version") {
 			t.Fatal(err)
+		}
+	})
+}
+
+func TestRegistryTestingNudgeAdoptionQueue(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	defer jobs.ResetConstructors()()
+
+	ctx := context.Background()
+
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop(ctx)
+	registry := s.JobRegistry().(*jobs.Registry)
+
+	// The default FormatVersion value in SchemaChangeDetails corresponds to a
+	// pre-20.1 job.
+	rec := jobs.Record{
+		DescriptorIDs: []descpb.ID{1},
+		Details:       jobspb.BackupDetails{},
+		Progress:      jobspb.BackupProgress{},
+	}
+
+	defer jobs.ResetConstructors()()
+	resuming := make(chan struct{})
+	jobs.RegisterConstructor(jobspb.TypeBackup, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
+		return jobs.FakeResumer{
+			OnResume: func(ctx context.Context, _ chan<- tree.Datums) error {
+				resuming <- struct{}{}
+				return nil
+			},
+		}
+	})
+	before := timeutil.Now()
+	j, err := registry.CreateAdoptableJobWithTxn(ctx, rec, nil /* txn */)
+	require.NoError(t, err)
+	registry.TestingNudgeAdoptionQueue()
+	// We want the job to be resumed very rapidly. We set this long timeout of 2s
+	// to deal with extremely slow stressrace. The adoption interval is still
+	// much larger than this so this should be a sufficient test.
+	const aLongTime = 5 * time.Second
+	select {
+	case <-resuming:
+	case <-time.After(aLongTime):
+		t.Fatal("job was not adopted")
+	}
+	loaded, err := registry.LoadJob(ctx, *j.ID())
+	require.NoError(t, err)
+	started := timeutil.Unix(0, loaded.Payload().StartedMicros*1000)
+	require.True(t, started.After(before),
+		"started: %v, before:	%v", started, before)
+}
+
+func TestStatusSafeFormatter(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	redacted := string(redact.Sprint(jobs.StatusCanceled).Redact())
+	expected := string(jobs.StatusCanceled)
+	require.Equal(t, expected, redacted)
+}
+
+func TestMetrics(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer jobs.TestingSetAdoptAndCancelIntervals(time.Millisecond, time.Millisecond)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	resuming := make(chan chan error, 1)
+	waitForErr := func(ctx context.Context) error {
+		errCh := make(chan error)
+		select {
+		case resuming <- errCh:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		select {
+		case err := <-errCh:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	int64EqSoon := func(t *testing.T, f func() int64, exp int64) {
+		t.Helper()
+		testutils.SucceedsSoon(t, func() error {
+			if vv := f(); vv != exp {
+				return errors.Errorf("expected %d, got %d", exp, vv)
+			}
+			return nil
+		})
+	}
+	res := jobs.FakeResumer{
+		OnResume: func(ctx context.Context, _ chan<- tree.Datums) error {
+			return waitForErr(ctx)
+		},
+		FailOrCancel: func(ctx context.Context) error {
+			return waitForErr(ctx)
+		},
+	}
+	jobs.RegisterConstructor(jobspb.TypeBackup, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
+		return res
+	})
+	jobs.RegisterConstructor(jobspb.TypeImport, func(_ *jobs.Job, _ *cluster.Settings) jobs.Resumer {
+		return res
+	})
+	setup := func(t *testing.T) (s serverutils.TestServerInterface, r *jobs.Registry, cleanup func()) {
+		jobConstructorCleanup := jobs.ResetConstructors()
+		s, _, _ = serverutils.StartServer(t, base.TestServerArgs{})
+		r = s.JobRegistry().(*jobs.Registry)
+		return s, r, func() {
+			jobConstructorCleanup()
+			s.Stopper().Stop(ctx)
+		}
+	}
+
+	t.Run("success", func(t *testing.T) {
+		_, registry, cleanup := setup(t)
+		defer cleanup()
+		rec := jobs.Record{
+			DescriptorIDs: []descpb.ID{1},
+			Details:       jobspb.BackupDetails{},
+			Progress:      jobspb.BackupProgress{},
+		}
+		_, err := registry.CreateAdoptableJobWithTxn(ctx, rec, nil /* txn */)
+		require.NoError(t, err)
+		errCh := <-resuming
+		backupMetrics := registry.MetricsStruct().JobMetrics[jobspb.TypeBackup]
+		require.Equal(t, int64(1), backupMetrics.CurrentlyRunning.Value())
+		errCh <- nil
+		int64EqSoon(t, backupMetrics.ResumeCompleted.Count, 1)
+	})
+	t.Run("restart, pause, resume, then success", func(t *testing.T) {
+		_, registry, cleanup := setup(t)
+		defer cleanup()
+		rec := jobs.Record{
+			DescriptorIDs: []descpb.ID{1},
+			Details:       jobspb.ImportDetails{},
+			Progress:      jobspb.ImportProgress{},
+		}
+		importMetrics := registry.MetricsStruct().JobMetrics[jobspb.TypeImport]
+
+		j, err := registry.CreateAdoptableJobWithTxn(ctx, rec, nil /* txn */)
+		require.NoError(t, err)
+		{
+			// Fail the Resume with a retriable error.
+			errCh := <-resuming
+			require.Equal(t, int64(1), importMetrics.CurrentlyRunning.Value())
+			errCh <- jobs.NewRetryJobError("")
+			int64EqSoon(t, importMetrics.ResumeRetryError.Count, 1)
+			// It will be retried.
+			int64EqSoon(t, importMetrics.CurrentlyRunning.Value, 1)
+		}
+		{
+			// We'll pause the job this time around and make sure it stops running.
+			<-resuming
+			require.Equal(t, int64(1), importMetrics.CurrentlyRunning.Value())
+			require.NoError(t, registry.PauseRequested(ctx, nil, *j.ID()))
+			int64EqSoon(t, importMetrics.ResumeRetryError.Count, 2)
+			require.Equal(t, int64(0), importMetrics.ResumeFailed.Count())
+			require.Equal(t, int64(0), importMetrics.ResumeCompleted.Count())
+			require.Equal(t, int64(0), importMetrics.CurrentlyRunning.Value())
+		}
+		{
+			// Now resume the job and let it succeed.
+			require.NoError(t, registry.Unpause(ctx, nil, *j.ID()))
+			errCh := <-resuming
+			require.Equal(t, int64(1), importMetrics.CurrentlyRunning.Value())
+			errCh <- nil
+			int64EqSoon(t, importMetrics.ResumeCompleted.Count, 1)
+		}
+	})
+	t.Run("failure then restarts in revert", func(t *testing.T) {
+		_, registry, cleanup := setup(t)
+		defer cleanup()
+		rec := jobs.Record{
+			DescriptorIDs: []descpb.ID{1},
+			Details:       jobspb.ImportDetails{},
+			Progress:      jobspb.ImportProgress{},
+		}
+		importMetrics := registry.MetricsStruct().JobMetrics[jobspb.TypeImport]
+
+		_, err := registry.CreateAdoptableJobWithTxn(ctx, rec, nil /* txn */)
+		require.NoError(t, err)
+		{
+			// Fail the Resume with a permanent error.
+			errCh := <-resuming
+			require.Equal(t, int64(1), importMetrics.CurrentlyRunning.Value())
+			errCh <- errors.Errorf("boom")
+			int64EqSoon(t, importMetrics.ResumeFailed.Count, 1)
+			require.Equal(t, int64(0), importMetrics.ResumeCompleted.Count())
+			require.Equal(t, int64(0), importMetrics.ResumeRetryError.Count())
+		}
+		{
+			// We'll inject retriable errors in OnFailOrCancel.
+			errCh := <-resuming
+			require.Equal(t, int64(1), importMetrics.CurrentlyRunning.Value())
+			errCh <- jobs.NewRetryJobError("boom")
+			int64EqSoon(t, importMetrics.FailOrCancelRetryError.Count, 1)
+		}
+		{
+			errCh := <-resuming
+			require.Equal(t, int64(1), importMetrics.CurrentlyRunning.Value())
+			errCh <- nil
+			int64EqSoon(t, importMetrics.FailOrCancelCompleted.Count, 1)
+		}
+	})
+	t.Run("fail, pause, resume, then success on failure", func(t *testing.T) {
+		_, registry, cleanup := setup(t)
+		defer cleanup()
+		rec := jobs.Record{
+			DescriptorIDs: []descpb.ID{1},
+			Details:       jobspb.ImportDetails{},
+			Progress:      jobspb.ImportProgress{},
+		}
+		importMetrics := registry.MetricsStruct().JobMetrics[jobspb.TypeImport]
+
+		j, err := registry.CreateAdoptableJobWithTxn(ctx, rec, nil /* txn */)
+		require.NoError(t, err)
+		{
+			// Fail the Resume with a retriable error.
+			errCh := <-resuming
+			require.Equal(t, int64(1), importMetrics.CurrentlyRunning.Value())
+			errCh <- errors.New("boom")
+			int64EqSoon(t, importMetrics.ResumeFailed.Count, 1)
+			// It will be retried.
+			int64EqSoon(t, importMetrics.CurrentlyRunning.Value, 1)
+		}
+		{
+			// We'll pause the job this time around and make sure it stops running.
+			<-resuming
+			require.Equal(t, int64(1), importMetrics.CurrentlyRunning.Value())
+			require.NoError(t, registry.PauseRequested(ctx, nil, *j.ID()))
+			int64EqSoon(t, importMetrics.FailOrCancelRetryError.Count, 1)
+			require.Equal(t, int64(1), importMetrics.ResumeFailed.Count())
+			require.Equal(t, int64(0), importMetrics.ResumeCompleted.Count())
+			require.Equal(t, int64(0), importMetrics.CurrentlyRunning.Value())
+		}
+		{
+			// Now resume the job and let it succeed.
+			require.NoError(t, registry.Unpause(ctx, nil, *j.ID()))
+			errCh := <-resuming
+			require.Equal(t, int64(1), importMetrics.CurrentlyRunning.Value())
+			errCh <- nil
+			int64EqSoon(t, importMetrics.FailOrCancelCompleted.Count, 1)
+			int64EqSoon(t, importMetrics.FailOrCancelFailed.Count, 0)
 		}
 	})
 }

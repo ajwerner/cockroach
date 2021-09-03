@@ -18,12 +18,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/gc"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
@@ -45,14 +47,21 @@ const (
 	gcIntentScoreThreshold = 10
 
 	probablyLargeAbortSpanSysCountThreshold = 10000
-	probablyLargeAbortSpanSysBytesThreshold = 16 * (1 << 20) // 16mb
+	largeAbortSpanBytesThreshold            = 16 * (1 << 20) // 16mb
 )
 
-func probablyLargeAbortSpan(ms enginepb.MVCCStats) bool {
-	// If there is "a lot" of data in Sys{Bytes,Count}, then we are likely
-	// experiencing a large abort span. The abort span is not supposed to
-	// become that large, but it does happen and causes stability fallout,
-	// usually due to a combination of shortcomings:
+// useClearRangeForGC is an experimental setting to utilize clear range
+// operations in the face of a large number of versions of a key.
+var useClearRangeForGC = settings.RegisterBoolSetting(
+	"kv.gc.use_clear_range.enabled",
+	"enables the use of clear range operations to delete large numbers of versions of a key",
+	false)
+
+func largeAbortSpan(ms enginepb.MVCCStats) bool {
+	// Checks if the size of the abort span exceeds the given threshold.
+	// The abort span is not supposed to become that large, but it does
+	// happen and causes stability fallout, usually due to a combination of
+	// shortcomings:
 	//
 	// 1. there's no trigger for GC based on abort span size alone (before
 	//    this code block here was written)
@@ -64,11 +73,15 @@ func probablyLargeAbortSpan(ms enginepb.MVCCStats) bool {
 	//    (and we suspect this also happens in user apps occasionally)
 	// 4. large snapshots would never complete due to the queue time limits
 	//    (addressed in https://github.com/cockroachdb/cockroach/pull/44952).
-	//
-	// In an ideal world, we would factor in the abort span into this method
-	// directly, but until then the condition guarding this block will do.
-	return ms.SysCount >= probablyLargeAbortSpanSysCountThreshold &&
-		ms.SysBytes >= probablyLargeAbortSpanSysBytesThreshold
+
+	// New versions (20.2+) of Cockroach accurately track the size of the abort
+	// span (after a migration period of a few days, assuming default consistency
+	// checker intervals). For mixed-version 20.1/20.2 clusters, we also include
+	// a heuristic based on SysBytes (which always reflects the abort span). This
+	// heuristic can be removed in 21.1.
+	definitelyLargeAbortSpan := ms.AbortSpanBytes >= largeAbortSpanBytesThreshold
+	probablyLargeAbortSpan := ms.SysBytes >= largeAbortSpanBytesThreshold && ms.SysCount >= probablyLargeAbortSpanSysCountThreshold
+	return definitelyLargeAbortSpan || probablyLargeAbortSpan
 }
 
 // gcQueue manages a queue of replicas slated to be scanned in their
@@ -343,7 +356,7 @@ func makeGCQueueScoreImpl(
 	r.ShouldQueue = r.FuzzFactor*valScore > gcKeyScoreThreshold || r.FuzzFactor*r.IntentScore > gcIntentScoreThreshold
 	r.FinalScore = r.FuzzFactor * (valScore + r.IntentScore)
 
-	if probablyLargeAbortSpan(ms) && !r.ShouldQueue &&
+	if largeAbortSpan(ms) && !r.ShouldQueue &&
 		(r.LikelyLastGC == 0 || r.LikelyLastGC > kvserverbase.TxnCleanupThreshold) {
 		r.ShouldQueue = true
 		r.FinalScore++
@@ -453,33 +466,37 @@ func (gcq *gcQueue) process(
 	snap := repl.store.Engine().NewSnapshot()
 	defer snap.Close()
 
+	cleanupIntentsFunc := func(ctx context.Context, intents []roachpb.Intent) error {
+		intentCount, err := repl.store.intentResolver.
+			CleanupIntents(ctx, intents, gcTimestamp, roachpb.PUSH_ABORT)
+		if err == nil {
+			gcq.store.metrics.GCResolveSuccess.Inc(int64(intentCount))
+		}
+		return err
+	}
+	cleanupTxnIntentsAsyncFunc := func(ctx context.Context, txn *roachpb.Transaction) error {
+		err := repl.store.intentResolver.
+			CleanupTxnIntentsOnGCAsync(ctx, repl.RangeID, txn, gcTimestamp,
+				func(pushed, succeeded bool) {
+					if pushed {
+						gcq.store.metrics.GCPushTxn.Inc(1)
+					}
+					if succeeded {
+						gcq.store.metrics.GCResolveSuccess.Inc(int64(len(txn.LockSpans)))
+					}
+				})
+		if errors.Is(err, stop.ErrThrottled) {
+			log.Eventf(ctx, "processing txn %s: %s; skipping for future GC", txn.ID.Short(), err)
+			return nil
+		}
+		return err
+	}
+	canUseClearRange := useClearRangeForGC.Get(&repl.store.ClusterSettings().SV) &&
+		gcq.store.ClusterSettings().Version.IsActive(ctx, clusterversion.VersionClearRangeForGC)
+
 	info, err := gc.Run(ctx, desc, snap, gcTimestamp, newThreshold, *zone.GC,
-		&replicaGCer{repl: repl},
-		func(ctx context.Context, intents []roachpb.Intent) error {
-			intentCount, err := repl.store.intentResolver.
-				CleanupIntents(ctx, intents, gcTimestamp, roachpb.PUSH_ABORT)
-			if err == nil {
-				gcq.store.metrics.GCResolveSuccess.Inc(int64(intentCount))
-			}
-			return err
-		},
-		func(ctx context.Context, txn *roachpb.Transaction, intents []roachpb.LockUpdate) error {
-			err := repl.store.intentResolver.
-				CleanupTxnIntentsOnGCAsync(ctx, repl.RangeID, txn, intents, gcTimestamp,
-					func(pushed, succeeded bool) {
-						if pushed {
-							gcq.store.metrics.GCPushTxn.Inc(1)
-						}
-						if succeeded {
-							gcq.store.metrics.GCResolveSuccess.Inc(int64(len(intents)))
-						}
-					})
-			if errors.Is(err, stop.ErrThrottled) {
-				log.Eventf(ctx, "processing txn %s: %s; skipping for future GC", txn.ID.Short(), err)
-				return nil
-			}
-			return err
-		})
+		&replicaGCer{repl: repl}, cleanupIntentsFunc, cleanupTxnIntentsAsyncFunc,
+		canUseClearRange)
 	if err != nil {
 		return false, err
 	}

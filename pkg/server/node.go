@@ -26,28 +26,31 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvtenant"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util"
-	"github.com/cockroachdb/cockroach/pkg/util/growstack"
 	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
-	opentracing "github.com/opentracing/opentracing-go"
+	"github.com/cockroachdb/redact"
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 )
 
 const (
@@ -146,21 +149,24 @@ func (nm nodeMetrics) callComplete(d time.Duration, pErr *roachpb.Error) {
 // IDs for bootstrapping the node itself or new stores as they're added
 // on subsequent instantiations.
 type Node struct {
-	stopper     *stop.Stopper
-	clusterID   *base.ClusterIDContainer // UUID for Cockroach cluster
-	Descriptor  roachpb.NodeDescriptor   // Node ID, network/physical topology
-	storeCfg    kvserver.StoreConfig     // Config to use and pass to stores
-	eventLogger sql.EventLogger
-	stores      *kvserver.Stores // Access to node-local stores
-	metrics     nodeMetrics
-	recorder    *status.MetricsRecorder
-	startedAt   int64
-	lastUp      int64
-	initialBoot bool // True if this is the first time this node has started.
-	txnMetrics  kvcoord.TxnMetrics
+	stopper              *stop.Stopper
+	clusterID            *base.ClusterIDContainer // UUID for Cockroach cluster
+	Descriptor           roachpb.NodeDescriptor   // Node ID, network/physical topology
+	storeCfg             kvserver.StoreConfig     // Config to use and pass to stores
+	eventLogger          sql.EventLogger
+	stores               *kvserver.Stores // Access to node-local stores
+	metrics              nodeMetrics
+	recorder             *status.MetricsRecorder
+	startedAt            int64
+	lastUp               int64
+	initialStart         bool // True if this is the first time this node has started.
+	txnMetrics           kvcoord.TxnMetrics
+	bootstrapNewStoresCh chan struct{}
 
 	perReplicaServer kvserver.Server
 }
+
+var _ roachpb.InternalServer = &Node{}
 
 // allocateNodeID increments the node id generator key to allocate
 // a new, unique node id.
@@ -189,8 +195,8 @@ func allocateStoreIDs(
 // server.
 func GetBootstrapSchema(
 	defaultZoneConfig *zonepb.ZoneConfig, defaultSystemZoneConfig *zonepb.ZoneConfig,
-) sqlbase.MetadataSchema {
-	return sqlbase.MakeMetadataSchema(keys.SystemSQLCodec, defaultZoneConfig, defaultSystemZoneConfig)
+) bootstrap.MetadataSchema {
+	return bootstrap.MakeMetadataSchema(keys.SystemSQLCodec, defaultZoneConfig, defaultSystemZoneConfig)
 }
 
 // bootstrapCluster initializes the passed-in engines for a new cluster.
@@ -211,6 +217,7 @@ func bootstrapCluster(
 	// TODO(andrei): It'd be cool if this method wouldn't do anything to engines
 	// other than the first one, and let regular node startup code deal with them.
 	var bootstrapVersion clusterversion.ClusterVersion
+	const firstStoreID = 1
 	for i, eng := range engines {
 		cv, err := kvserver.ReadClusterVersion(ctx, eng)
 		if err != nil {
@@ -229,7 +236,7 @@ func bootstrapCluster(
 		sIdent := roachpb.StoreIdent{
 			ClusterID: clusterID,
 			NodeID:    FirstNodeID,
-			StoreID:   roachpb.StoreID(i + 1),
+			StoreID:   roachpb.StoreID(i + firstStoreID),
 		}
 
 		// Initialize the engine backing the store with the store ident and cluster
@@ -267,7 +274,7 @@ func bootstrapCluster(
 			initializedEngines: engines,
 			newEngines:         nil,
 		},
-		joined: true,
+		firstStoreID: firstStoreID,
 	}
 	return state, nil
 }
@@ -322,19 +329,20 @@ func (n *Node) AnnotateCtx(ctx context.Context) context.Context {
 // AnnotateCtxWithSpan is a convenience wrapper; see AmbientContext.
 func (n *Node) AnnotateCtxWithSpan(
 	ctx context.Context, opName string,
-) (context.Context, opentracing.Span) {
+) (context.Context, *tracing.Span) {
 	return n.storeCfg.AmbientCtx.AnnotateCtxWithSpan(ctx, opName)
 }
 
-// start starts the node by registering the storage instance for the
-// RPC service "Node" and initializing stores for each specified
-// engine. Launches periodic store gossiping in a goroutine.
-// A callback can be optionally provided that will be invoked once this node's
+// start starts the node by registering the storage instance for the RPC
+// service "Node" and initializing stores for each specified engine.
+// Launches periodic store gossiping in a goroutine. A callback can
+// be optionally provided that will be invoked once this node's
 // NodeDescriptor is available, to help bootstrapping.
 func (n *Node) start(
 	ctx context.Context,
 	addr, sqlAddr net.Addr,
 	state initState,
+	initialStart bool,
 	clusterName string,
 	attrs roachpb.Attributes,
 	locality roachpb.Locality,
@@ -344,10 +352,14 @@ func (n *Node) start(
 	// Obtaining the NodeID requires a dance of sorts. If the node has initialized
 	// stores, the NodeID is persisted in each of them. If not, then we'll need to
 	// use the KV store to get a NodeID assigned.
-	n.initialBoot = state.joined
+	n.initialStart = initialStart
 	nodeID := state.nodeID
 	if nodeID == 0 {
-		if !state.joined {
+		// TODO(irfansharif): This codepath exists to maintain the legacy
+		// behavior of node ID allocation that was triggered on gossip
+		// connectivity. This was replaced by the Join RPC in 20.2, and can be
+		// removed in 21.1.
+		if !initialStart {
 			log.Fatalf(ctx, "node has no NodeID, but claims to not be joining cluster")
 		}
 		// Allocate NodeID. Note that Gossip is already connected because if there's
@@ -355,7 +367,7 @@ func (n *Node) start(
 		select {
 		case <-n.storeCfg.Gossip.Connected:
 		default:
-			log.Fatalf(ctx, "Gossip is not connected yet")
+			log.Fatalf(ctx, "gossip is not connected yet")
 		}
 		ctxWithSpan, span := n.AnnotateCtxWithSpan(ctx, "alloc-node-id")
 		newID, err := allocateNodeID(ctxWithSpan, n.storeCfg.DB)
@@ -365,6 +377,12 @@ func (n *Node) start(
 		log.Infof(ctxWithSpan, "new node allocated ID %d", newID)
 		span.Finish()
 		nodeID = newID
+
+		// We're joining via gossip, so we don't have a liveness record for
+		// ourselves yet. Let's create one while here.
+		if err := n.storeCfg.NodeLiveness.CreateLivenessRecord(ctx, nodeID); err != nil {
+			return err
+		}
 	}
 
 	// Inform the RPC context of the node ID.
@@ -405,13 +423,13 @@ func (n *Node) start(
 		if err := s.Start(ctx, n.stopper); err != nil {
 			return errors.Errorf("failed to start store: %s", err)
 		}
-		capacity, err := s.Capacity(false /* useCached */)
+		capacity, err := s.Capacity(ctx, false /* useCached */)
 		if err != nil {
 			return errors.Errorf("could not query store capacity: %s", err)
 		}
 		log.Infof(ctx, "initialized store %s: %+v", s, capacity)
 
-		n.addStore(s)
+		n.addStore(ctx, s)
 	}
 
 	// Verify all initialized stores agree on cluster and node IDs.
@@ -444,29 +462,57 @@ func (n *Node) start(
 		return fmt.Errorf("failed to initialize the gossip interface: %s", err)
 	}
 
-	// Bootstrap any uninitialized stores.
-	//
-	// TODO(tbg): address https://github.com/cockroachdb/cockroach/issues/39415.
-	// Should be easy enough. Writing the test is probably most of the work.
+	// Bootstrap uninitialized stores, if any.
 	if len(state.newEngines) > 0 {
-		if err := n.bootstrapStores(ctx, state.newEngines, n.stopper); err != nil {
+		// We need to bootstrap additional stores asynchronously. Consider the range that
+		// houses the store ID allocator. When restarting the set of nodes that holds a
+		// quorum of these replicas, when restarting them with additional stores, those
+		// additional stores will require store IDs to get fully bootstrapped. But if we're
+		// gating node start (specifically opening up the RPC floodgates) on having all
+		// stores fully bootstrapped, we'll simply hang when trying to allocate store IDs.
+		// See TestAddNewStoresToExistingNodes and #39415 for more details.
+		//
+		// Instead we opt to bootstrap additional stores asynchronously, and rely on the
+		// blocking function n.waitForBootstrapNewStores() to signal to the caller that
+		// all stores have been fully bootstrapped.
+		n.bootstrapNewStoresCh = make(chan struct{})
+		if err := n.stopper.RunAsyncTask(ctx, "bootstrap-stores", func(ctx context.Context) {
+			if err := n.bootstrapStores(ctx, state.firstStoreID, state.newEngines, n.stopper); err != nil {
+				log.Fatalf(ctx, "while bootstrapping additional stores: %v", err)
+			}
+			close(n.bootstrapNewStoresCh)
+		}); err != nil {
+			close(n.bootstrapNewStoresCh)
 			return err
 		}
 	}
 
 	n.startComputePeriodicMetrics(n.stopper, base.DefaultMetricsSampleInterval)
 
-	// Be careful about moving this line above `startStores`; store migrations rely
-	// on the fact that the cluster version has not been updated via Gossip (we
-	// have migrations that want to run only if the server starts with a given
-	// cluster version, but not if the server starts with a lower one and gets
-	// bumped immediately, which would be possible if gossip got started earlier).
-	n.startGossip(ctx, n.stopper)
+	// Be careful about moving this line above where we start stores; store
+	// migrations rely on the fact that the cluster version has not been updated
+	// via Gossip (we have migrations that want to run only if the server starts
+	// with a given cluster version, but not if the server starts with a lower
+	// one and gets bumped immediately, which would be possible if gossip got
+	// started earlier).
+	n.startGossiping(ctx, n.stopper)
 
 	allEngines := append([]storage.Engine(nil), state.initializedEngines...)
 	allEngines = append(allEngines, state.newEngines...)
-	log.Infof(ctx, "%s: started with %v engine(s) and attributes %v", n, allEngines, attrs.Attrs)
+	for _, e := range allEngines {
+		t := e.Type()
+		log.Infof(ctx, "started with engine type %v", t)
+	}
+	log.Infof(ctx, "started with attributes %v", attrs.Attrs)
 	return nil
+}
+
+// waitForBootstrapNewStores blocks until all additional empty stores,
+// if any, have been bootstrapped.
+func (n *Node) waitForBootstrapNewStores() {
+	if n.bootstrapNewStoresCh != nil {
+		<-n.bootstrapNewStoresCh
+	}
 }
 
 // IsDraining returns true if at least one Store housed on this Node is not
@@ -487,7 +533,7 @@ func (n *Node) IsDraining() bool {
 // to report work that needed to be done and which may or may not have
 // been done by the time this call returns. See the explanation in
 // pkg/server/drain.go for details.
-func (n *Node) SetDraining(drain bool, reporter func(int, string)) error {
+func (n *Node) SetDraining(drain bool, reporter func(int, redact.SafeString)) error {
 	return n.stores.VisitStores(func(s *kvserver.Store) error {
 		s.SetDraining(drain, reporter)
 		return nil
@@ -502,15 +548,15 @@ func (n *Node) SetHLCUpperBound(ctx context.Context, hlcUpperBound int64) error 
 	})
 }
 
-func (n *Node) addStore(store *kvserver.Store) {
-	cv, err := store.GetClusterVersion(context.TODO())
+func (n *Node) addStore(ctx context.Context, store *kvserver.Store) {
+	cv, err := kvserver.ReadClusterVersion(context.TODO(), store.Engine())
 	if err != nil {
-		log.Fatalf(context.TODO(), "%v", err)
+		log.Fatalf(ctx, "%v", err)
 	}
 	if cv == (clusterversion.ClusterVersion{}) {
 		// The store should have had a version written to it during the store
 		// bootstrap process.
-		log.Fatal(context.TODO(), "attempting to add a store without a version")
+		log.Fatal(ctx, "attempting to add a store without a version")
 	}
 	n.stores.AddStore(store)
 	n.recorder.AddStore(store)
@@ -535,7 +581,10 @@ func (n *Node) validateStores(ctx context.Context) error {
 // allocated via a sequence id generator stored at a system key per
 // node. The new stores are added to n.stores.
 func (n *Node) bootstrapStores(
-	ctx context.Context, emptyEngines []storage.Engine, stopper *stop.Stopper,
+	ctx context.Context,
+	firstStoreID roachpb.StoreID,
+	emptyEngines []storage.Engine,
+	stopper *stop.Stopper,
 ) error {
 	if n.clusterID.Get() == uuid.Nil {
 		return errors.New("ClusterID missing during store bootstrap of auxiliary store")
@@ -544,16 +593,28 @@ func (n *Node) bootstrapStores(
 	{
 		// Bootstrap all waiting stores by allocating a new store id for
 		// each and invoking storage.Bootstrap() to persist it and the cluster
-		// version and to create stores.
-		inc := int64(len(emptyEngines))
-		firstID, err := allocateStoreIDs(ctx, n.Descriptor.NodeID, inc, n.storeCfg.DB)
+		// version and to create stores. The -1 comes from the fact that our
+		// first store ID has already been pre-allocated for us.
+		storeIDAlloc := int64(len(emptyEngines)) - 1
+		if firstStoreID == 0 {
+			// We lied, we don't have a firstStoreID; we'll need to allocate for
+			// that too.
+			//
+			// TODO(irfansharif): We get here if we're falling back to
+			// gossip-based connectivity. This can be removed in 21.1.
+			storeIDAlloc++
+		}
+		startID, err := allocateStoreIDs(ctx, n.Descriptor.NodeID, storeIDAlloc, n.storeCfg.DB)
+		if firstStoreID == 0 {
+			firstStoreID = startID
+		}
 		if err != nil {
 			return errors.Errorf("error allocating store ids: %s", err)
 		}
 		sIdent := roachpb.StoreIdent{
 			ClusterID: n.clusterID.Get(),
 			NodeID:    n.Descriptor.NodeID,
-			StoreID:   firstID,
+			StoreID:   firstStoreID,
 		}
 		for _, eng := range emptyEngines {
 			if err := kvserver.InitEngine(ctx, eng, sIdent); err != nil {
@@ -564,9 +625,9 @@ func (n *Node) bootstrapStores(
 			if err := s.Start(ctx, stopper); err != nil {
 				return err
 			}
-			n.addStore(s)
+			n.addStore(ctx, s)
 			log.Infof(ctx, "bootstrapped store %s", s)
-			// Done regularly in Node.startGossip, but this cuts down the time
+			// Done regularly in Node.startGossiping, but this cuts down the time
 			// until this store is used for range allocations.
 			if err := s.GossipStore(ctx, false /* useCached */); err != nil {
 				log.Warningf(ctx, "error doing initial gossiping: %s", err)
@@ -585,9 +646,9 @@ func (n *Node) bootstrapStores(
 	return nil
 }
 
-// startGossip loops on a periodic ticker to gossip node-related
+// startGossiping loops on a periodic ticker to gossip node-related
 // information. Starts a goroutine to loop until the node is closed.
-func (n *Node) startGossip(ctx context.Context, stopper *stop.Stopper) {
+func (n *Node) startGossiping(ctx context.Context, stopper *stop.Stopper) {
 	ctx = n.AnnotateCtx(ctx)
 	stopper.RunWorker(ctx, func(ctx context.Context) {
 		// Verify we've already gossiped our node descriptor.
@@ -774,7 +835,7 @@ func (n *Node) recordJoinEvent() {
 
 	logEventType := sql.EventLogNodeRestart
 	lastUp := n.lastUp
-	if n.initialBoot {
+	if n.initialStart {
 		logEventType = sql.EventLogNodeJoin
 		lastUp = n.startedAt
 	}
@@ -908,20 +969,20 @@ func (n *Node) setupSpanForIncomingRPC(
 	// The operation name matches the one created by the interceptor in the
 	// remoteTrace case below.
 	const opName = "/cockroach.roachpb.Internal/Batch"
-	var newSpan, grpcSpan opentracing.Span
+	var newSpan, grpcSpan *tracing.Span
 	if isLocalRequest {
 		// This is a local request which circumvented gRPC. Start a span now.
 		ctx, newSpan = tracing.ChildSpan(ctx, opName)
 	} else {
-		grpcSpan = opentracing.SpanFromContext(ctx)
+		grpcSpan = tracing.SpanFromContext(ctx)
 		if grpcSpan == nil {
 			// If tracing information was passed via gRPC metadata, the gRPC interceptor
 			// should have opened a span for us. If not, open a span now (if tracing is
 			// disabled, this will be a noop span).
-			newSpan = n.storeCfg.AmbientCtx.Tracer.(*tracing.Tracer).StartRootSpan(
+			newSpan = n.storeCfg.AmbientCtx.Tracer.StartRootSpan(
 				opName, n.storeCfg.AmbientCtx.LogTags(), tracing.NonRecordableSpan,
 			)
-			ctx = opentracing.ContextWithSpan(ctx, newSpan)
+			ctx = tracing.ContextWithSpan(ctx, newSpan)
 		} else {
 			grpcSpan.SetTag("node", n.Descriptor.NodeID)
 		}
@@ -947,12 +1008,41 @@ func (n *Node) setupSpanForIncomingRPC(
 	return ctx, finishSpan
 }
 
+// RangeLookup implements the roachpb.InternalServer interface.
+func (n *Node) RangeLookup(
+	ctx context.Context, req *roachpb.RangeLookupRequest,
+) (*roachpb.RangeLookupResponse, error) {
+	ctx = n.storeCfg.AmbientCtx.AnnotateCtx(ctx)
+
+	// Proxy the RangeLookup through the local DB. Note that this does not use
+	// the local RangeDescriptorCache itself (for the direct range descriptor).
+	// To be able to do so, we'd have to let tenant's evict descriptors from our
+	// cache in order to avoid serving the same stale descriptor over and over
+	// again. Because of that, using our own cache doesn't seem worth it, at
+	// least for now.
+	sender := n.storeCfg.DB.NonTransactionalSender()
+	rs, preRs, err := kv.RangeLookup(
+		ctx,
+		sender,
+		req.Key.AsRawKey(),
+		req.ReadConsistency,
+		req.PrefetchNum,
+		req.PrefetchReverse,
+	)
+	resp := new(roachpb.RangeLookupResponse)
+	if err != nil {
+		resp.Error = roachpb.NewError(err)
+	} else {
+		resp.Descriptors = rs
+		resp.PrefetchedDescriptors = preRs
+	}
+	return resp, nil
+}
+
 // RangeFeed implements the roachpb.InternalServer interface.
 func (n *Node) RangeFeed(
 	args *roachpb.RangeFeedRequest, stream roachpb.Internal_RangeFeedServer,
 ) error {
-	growstack.Grow()
-
 	pErr := n.stores.RangeFeed(args, stream)
 	if pErr != nil {
 		var event roachpb.RangeFeedEvent
@@ -962,4 +1052,150 @@ func (n *Node) RangeFeed(
 		return stream.Send(&event)
 	}
 	return nil
+}
+
+// GossipSubscription implements the roachpb.InternalServer interface.
+func (n *Node) GossipSubscription(
+	args *roachpb.GossipSubscriptionRequest, stream roachpb.Internal_GossipSubscriptionServer,
+) error {
+	ctx := n.storeCfg.AmbientCtx.AnnotateCtx(stream.Context())
+	ctxDone := ctx.Done()
+
+	stripContent := func(_ string, content roachpb.Value) (roachpb.Value, error) {
+		// Don't strip anything.
+		return content, nil
+	}
+	if _, ok := roachpb.TenantFromContext(ctx); ok {
+		// If this is a tenant connection, strip portions of the gossip infos.
+		stripContent = func(key string, content roachpb.Value) (roachpb.Value, error) {
+			switch key {
+			case gossip.KeySystemConfig:
+				// Strip the system config down to just those keys in the
+				// GossipSubscriptionSystemConfigMask, preventing cluster-wide
+				// or system tenant-specific information to leak.
+				var ents config.SystemConfigEntries
+				if err := content.GetProto(&ents); err != nil {
+					return roachpb.Value{}, errors.Errorf("could not unmarshal system config: %v", err)
+				}
+
+				var newContent roachpb.Value
+				newEnts := kvtenant.GossipSubscriptionSystemConfigMask.Apply(ents)
+				if err := newContent.SetProto(&newEnts); err != nil {
+					return roachpb.Value{}, errors.Errorf("could not marshal system config: %v", err)
+				}
+				return newContent, nil
+			default:
+				return content, nil
+			}
+		}
+	}
+
+	// Register a callback for each of the requested patterns. We don't want to
+	// block the gossip callback goroutine on a slow consumer, so we instead
+	// handle all communication asynchronously. We could pick a channel size and
+	// say that if the channel ever blocks, terminate the subscription. Doing so
+	// feels fragile, though, especially during the initial information dump.
+	// Instead, we say that if the channel ever blocks for more than some
+	// duration, terminate the subscription.
+	entC := make(chan *roachpb.GossipSubscriptionEvent, 256)
+	entCClosed := false
+	var callbackMu syncutil.Mutex
+	const maxBlockDur = 1 * time.Millisecond
+	for _, pattern := range args.Patterns {
+		pattern := pattern
+		callback := func(key string, content roachpb.Value) {
+			callbackMu.Lock()
+			defer callbackMu.Unlock()
+			if entCClosed {
+				return
+			}
+			content, err := stripContent(key, content)
+			var event roachpb.GossipSubscriptionEvent
+			if err != nil {
+				event.Error = roachpb.NewError(err)
+			} else {
+				event.Key = key
+				event.Content = content
+				event.PatternMatched = pattern
+			}
+			select {
+			case entC <- &event:
+			default:
+				select {
+				case entC <- &event:
+				case <-time.After(maxBlockDur):
+					// entC blocking for too long. The consumer must not be
+					// keeping up. Terminate the subscription.
+					close(entC)
+					entCClosed = true
+				}
+			}
+		}
+		unregister := n.storeCfg.Gossip.RegisterCallback(pattern, callback)
+		defer unregister()
+	}
+
+	for {
+		select {
+		case e, ok := <-entC:
+			if !ok {
+				// The consumer was not keeping up with gossip updates, so its
+				// subscription was terminated to avoid blocking gossip.
+				err := roachpb.NewErrorf("subscription terminated due to slow consumption")
+				log.Warningf(ctx, "%v", err)
+				e = &roachpb.GossipSubscriptionEvent{Error: err}
+			}
+			if err := stream.Send(e); err != nil {
+				return err
+			}
+		case <-ctxDone:
+			return ctx.Err()
+		}
+	}
+}
+
+// Join implements the roachpb.InternalServer service. This is the
+// "connectivity" API; individual CRDB servers are passed in a --join list and
+// the join targets are addressed through this API.
+func (n *Node) Join(
+	ctx context.Context, req *roachpb.JoinNodeRequest,
+) (*roachpb.JoinNodeResponse, error) {
+	ctx, span := n.AnnotateCtxWithSpan(ctx, "alloc-{node,store}-id")
+	defer span.Finish()
+
+	activeVersion := n.storeCfg.Settings.Version.ActiveVersion(ctx)
+	if req.BinaryVersion.Less(activeVersion.Version) {
+		return nil, grpcstatus.Error(codes.PermissionDenied, ErrIncompatibleBinaryVersion.Error())
+	}
+
+	nodeID, err := allocateNodeID(ctx, n.storeCfg.DB)
+	if err != nil {
+		return nil, err
+	}
+
+	storeID, err := allocateStoreIDs(ctx, nodeID, 1, n.storeCfg.DB)
+	if err != nil {
+		return nil, err
+	}
+
+	// We create a liveness record here for the joining node while here. We do
+	// so to maintain the invariant that there's always a liveness record for a
+	// given node. See `WriteInitialClusterData` for the other codepath where we
+	// manually create a liveness record to maintain this same invariant.
+	//
+	// NB: This invariant will be required for when we introduce long running
+	// migrations. See https://github.com/cockroachdb/cockroach/pull/48843 for
+	// details.
+	if err := n.storeCfg.NodeLiveness.CreateLivenessRecord(ctx, nodeID); err != nil {
+		return nil, err
+	}
+
+	log.Infof(ctx, "allocated IDs: n%d, s%d", nodeID, storeID)
+
+	return &roachpb.JoinNodeResponse{
+		ClusterID:     n.clusterID.Get().GetBytes(),
+		NodeID:        int32(nodeID),
+		StoreID:       int32(storeID),
+		ActiveVersion: &activeVersion.Version,
+	}, nil
 }

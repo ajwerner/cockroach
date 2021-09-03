@@ -13,151 +13,123 @@ package jobs
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
+	"github.com/cockroachdb/cockroach/pkg/jobs/jobstest"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/scheduledjobs"
 	"github.com/cockroachdb/cockroach/pkg/security"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/gogo/protobuf/types"
 	"github.com/stretchr/testify/require"
 )
 
-// testJobSchedulerEnv is a test implementation of cron environment.
-// allows injection fake time, as well as use of non-system tables.
-type testJobSchedulerEnv struct {
-	scheduledJobsTableName string
-	jobsTableName          string
-	mu                     struct {
-		syncutil.Mutex
-		now time.Time
-	}
-}
-
-func (e *testJobSchedulerEnv) ScheduledJobsTableName() string {
-	return e.scheduledJobsTableName
-}
-
-func (e *testJobSchedulerEnv) SystemJobsTableName() string {
-	return e.jobsTableName
-}
-
-func (e *testJobSchedulerEnv) Now() time.Time {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.mu.now
-}
-
-func (e *testJobSchedulerEnv) AdvanceTime(d time.Duration) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.mu.now = e.mu.now.Add(d)
-}
-
-func (e *testJobSchedulerEnv) SetTime(t time.Time) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.mu.now = t
-}
-
-const timestampTZLayout = "2006-01-02 15:04:05.000000"
-
-func (e *testJobSchedulerEnv) NowExpr() string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return fmt.Sprintf("TIMESTAMPTZ '%s'", e.mu.now.Format(timestampTZLayout))
-}
-
-// Returns schema for the scheduled jobs table.
-func (e *testJobSchedulerEnv) getScheduledJobsTableSchema() string {
-	return strings.Replace(sqlbase.ScheduledJobsTableSchema,
-		"system.scheduled_jobs", e.scheduledJobsTableName, 1)
-}
-
-// Returns schema for the jobs table.
-func (e *testJobSchedulerEnv) getJobsTableSchema() string {
-	if e.jobsTableName == "system.jobs" {
-		return sqlbase.JobsTableSchema
-	}
-	return strings.Replace(sqlbase.JobsTableSchema, "system.jobs", e.jobsTableName, 1)
-}
-
+type execSchedulesFn func(ctx context.Context, maxSchedules int64, txn *kv.Txn) error
 type testHelper struct {
-	env   *testJobSchedulerEnv
-	kvDB  *kv.DB
-	sqlDB *sqlutils.SQLRunner
-	ex    sqlutil.InternalExecutor
-}
-
-func newTestCronEnv() *testJobSchedulerEnv {
-	env := &testJobSchedulerEnv{
-		scheduledJobsTableName: "defaultdb.scheduled_jobs",
-		jobsTableName:          "defaultdb.system_jobs",
-	}
-	env.mu.now = timeutil.Now()
-	return env
+	env           *jobstest.JobSchedulerTestEnv
+	server        serverutils.TestServerInterface
+	execSchedules execSchedulesFn
+	cfg           *scheduledjobs.JobExecutionConfig
+	sqlDB         *sqlutils.SQLRunner
 }
 
 // newTestHelper creates and initializes appropriate state for a test,
 // returning testHelper as well as a cleanup function.
+// This test helper does not use system tables for jobs and scheduled jobs.
+// It creates separate tables for the test, that are then dropped when cleanup
+// function executes.  Because of this, the execution of job scheduler daemon
+// is disabled by this test helper.
+// If you want to run daemon, invoke it directly.
+//
+// The testHelper will accelerate the adoption and cancellation loops inside of
+// the registry.
 func newTestHelper(t *testing.T) (*testHelper, func()) {
-	s, db, kvdb := serverutils.StartServer(t, base.TestServerArgs{})
-	sqlDB := sqlutils.MakeSQLRunner(db)
+	return newTestHelperForTables(t, jobstest.UseTestTables)
+}
+
+func newTestHelperForTables(
+	t *testing.T, envTableType jobstest.EnvTablesType,
+) (*testHelper, func()) {
+	var execSchedules execSchedulesFn
 
 	// Setup test scheduled jobs table.
-	env := newTestCronEnv()
+	env := jobstest.NewJobSchedulerTestEnv(envTableType, timeutil.Now())
+	knobs := &TestingKnobs{
+		JobSchedulerEnv: env,
+		TakeOverJobsScheduling: func(daemon func(ctx context.Context, maxSchedules int64, txn *kv.Txn) error) {
+			execSchedules = daemon
+		},
+	}
+	s, db, kvDB := serverutils.StartServer(t, base.TestServerArgs{
+		Knobs: base.TestingKnobs{JobsTestingKnobs: knobs},
+	})
 
-	sqlDB.Exec(t, env.getScheduledJobsTableSchema())
-	sqlDB.Exec(t, env.getJobsTableSchema())
+	sqlDB := sqlutils.MakeSQLRunner(db)
 
+	if envTableType == jobstest.UseTestTables {
+		sqlDB.Exec(t, jobstest.GetScheduledJobsTableSchema(env))
+		sqlDB.Exec(t, jobstest.GetJobsTableSchema(env))
+	}
+
+	restoreRegistry := settings.TestingSaveRegistry()
 	return &testHelper{
-			env:   env,
-			kvDB:  kvdb,
-			sqlDB: sqlDB,
-			ex:    s.InternalExecutor().(sqlutil.InternalExecutor),
+			env:    env,
+			server: s,
+			cfg: &scheduledjobs.JobExecutionConfig{
+				Settings:         s.ClusterSettings(),
+				InternalExecutor: s.InternalExecutor().(sqlutil.InternalExecutor),
+				DB:               kvDB,
+				TestingKnobs:     knobs,
+			},
+			sqlDB:         sqlDB,
+			execSchedules: execSchedules,
 		}, func() {
-			if env.scheduledJobsTableName == "defaultdb.scheduled_jobs" {
-				sqlDB.Exec(t, "DROP TABLE "+env.scheduledJobsTableName)
-			}
-			if env.jobsTableName != "defaultdb.system_jobs" {
-				sqlDB.Exec(t, "DROP TABLE "+env.jobsTableName)
+			if envTableType == jobstest.UseTestTables {
+				sqlDB.Exec(t, "DROP TABLE "+env.SystemJobsTableName())
+				sqlDB.Exec(t, "DROP TABLE "+env.ScheduledJobsTableName())
 			}
 			s.Stopper().Stop(context.Background())
+			restoreRegistry()
 		}
 }
 
-// NewScheduledJob is a helper to create job with helper environment.
-func (h *testHelper) newScheduledJob(t *testing.T, scheduleName, sql string) *ScheduledJob {
+// newScheduledJob is a helper to create scheduled job with helper environment.
+func (h *testHelper) newScheduledJob(t *testing.T, scheduleLabel, sql string) *ScheduledJob {
 	j := NewScheduledJob(h.env)
-	j.SetScheduleName(scheduleName)
+	j.SetScheduleLabel(scheduleLabel)
+	j.SetOwner(security.TestUserName())
 	any, err := types.MarshalAny(&jobspb.SqlStatementExecutionArg{Statement: sql})
 	require.NoError(t, err)
 	j.SetExecutionDetails(InlineExecutorName, jobspb.ExecutionArguments{Args: any})
 	return j
 }
 
+// newScheduledJobForExecutor is a helper to create scheduled job for the specified
+// executor and its args.
 func (h *testHelper) newScheduledJobForExecutor(
-	scheduleName, executorName string, executorArgs *types.Any,
+	scheduleLabel, executorName string, executorArgs *types.Any,
 ) *ScheduledJob {
 	j := NewScheduledJob(h.env)
-	j.SetScheduleName(scheduleName)
+	j.SetScheduleLabel(scheduleLabel)
+	j.SetOwner(security.TestUserName())
 	j.SetExecutionDetails(executorName, jobspb.ExecutionArguments{Args: executorArgs})
 	return j
 }
 
-// loads (almost) all columns for the specified scheduled job.
-func (h *testHelper) loadJob(t *testing.T, id int64) *ScheduledJob {
+// loadSchedule loads  all columns for the specified scheduled job.
+func (h *testHelper) loadSchedule(t *testing.T, id int64) *ScheduledJob {
 	j := NewScheduledJob(h.env)
-	rows, cols, err := h.ex.QueryWithCols(context.Background(), "sched-load", nil,
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+	rows, cols, err := h.cfg.InternalExecutor.QueryWithCols(
+		context.Background(), "sched-load", nil,
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		fmt.Sprintf(
 			"SELECT * FROM %s WHERE schedule_id = %d",
 			h.env.ScheduledJobsTableName(), id),
@@ -169,13 +141,33 @@ func (h *testHelper) loadJob(t *testing.T, id int64) *ScheduledJob {
 	return j
 }
 
+// registerScopedScheduledJobExecutor registers executor under the name,
+// and returns a function which, when invoked, de-registers this executor.
 func registerScopedScheduledJobExecutor(name string, ex ScheduledJobExecutor) func() {
 	RegisterScheduledJobExecutorFactory(
 		name,
-		func(_ sqlutil.InternalExecutor) (ScheduledJobExecutor, error) {
+		func() (ScheduledJobExecutor, error) {
 			return ex, nil
 		})
 	return func() {
 		delete(registeredExecutorFactories, name)
 	}
+}
+
+// addFakeJob adds a fake job associated with the specified scheduleID.
+// Returns the id of the newly created job.
+func addFakeJob(t *testing.T, h *testHelper, scheduleID int64, status Status, txn *kv.Txn) int64 {
+	payload := []byte("fake payload")
+	datums, err := h.cfg.InternalExecutor.QueryRowEx(context.Background(), "fake-job", txn,
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		fmt.Sprintf(`
+INSERT INTO %s (created_by_type, created_by_id, status, payload)
+VALUES ($1, $2, $3, $4)
+RETURNING id`,
+			h.env.SystemJobsTableName(),
+		),
+		CreatedByScheduledJobs, scheduleID, status, payload,
+	)
+	require.NoError(t, err)
+	return int64(tree.MustBeDInt(datums[0]))
 }

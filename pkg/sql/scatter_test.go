@@ -19,11 +19,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
-	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
@@ -32,13 +32,11 @@ func TestScatterRandomizeLeases(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	if testutils.NightlyStress() && util.RaceEnabled {
-		t.Skip("uses too many resources for stressrace")
-	}
+	skip.UnderStressRace(t, "uses too many resources for stressrace")
 
 	const numHosts = 3
 
-	tc := serverutils.StartTestCluster(t, numHosts, base.TestClusterArgs{})
+	tc := serverutils.StartNewTestCluster(t, numHosts, base.TestClusterArgs{})
 	defer tc.Stopper().Stop(context.Background())
 
 	sqlutils.CreateTable(
@@ -123,7 +121,7 @@ func TestScatterResponse(t *testing.T) {
 		1000,
 		sqlutils.ToRowFn(sqlutils.RowIdxFn, sqlutils.RowModuloFn(10)),
 	)
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
 
 	r := sqlutils.MakeSQLRunner(sqlDB)
 	r.Exec(t, "ALTER TABLE test.t SPLIT AT (SELECT i*10 FROM generate_series(1, 99) AS g(i))")
@@ -141,7 +139,7 @@ func TestScatterResponse(t *testing.T) {
 			expectedKey = keys.SystemSQLCodec.TablePrefix(uint32(tableDesc.ID))
 		} else {
 			var err error
-			expectedKey, err = sqlbase.TestingMakePrimaryIndexKey(tableDesc, i*10)
+			expectedKey, err = rowenc.TestingMakePrimaryIndexKey(tableDesc, i*10)
 			if err != nil {
 				t.Fatal(err)
 			}

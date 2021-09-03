@@ -13,7 +13,6 @@ package roleoption
 import (
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
@@ -42,16 +41,44 @@ const (
 	LOGIN
 	NOLOGIN
 	VALIDUNTIL
+	CONTROLJOB
+	NOCONTROLJOB
+	CONTROLCHANGEFEED
+	NOCONTROLCHANGEFEED
+	CREATEDB
+	NOCREATEDB
+	CREATELOGIN
+	NOCREATELOGIN
+	VIEWACTIVITY
+	NOVIEWACTIVITY
+	CANCELQUERY
+	NOCANCELQUERY
+	MODIFYCLUSTERSETTING
+	NOMODIFYCLUSTERSETTING
 )
 
 // toSQLStmts is a map of Kind -> SQL statement string for applying the
 // option to the role.
 var toSQLStmts = map[Option]string{
-	CREATEROLE:   `UPSERT INTO system.role_options (username, option) VALUES ($1, 'CREATEROLE')`,
-	NOCREATEROLE: `DELETE FROM system.role_options WHERE username = $1 AND option = 'CREATEROLE'`,
-	LOGIN:        `DELETE FROM system.role_options WHERE username = $1 AND option = 'NOLOGIN'`,
-	NOLOGIN:      `UPSERT INTO system.role_options (username, option) VALUES ($1, 'NOLOGIN')`,
-	VALIDUNTIL:   `UPSERT INTO system.role_options (username, option, value) VALUES ($1, 'VALID UNTIL', $2::timestamptz::string)`,
+	CREATEROLE:             `UPSERT INTO system.role_options (username, option) VALUES ($1, 'CREATEROLE')`,
+	NOCREATEROLE:           `DELETE FROM system.role_options WHERE username = $1 AND option = 'CREATEROLE'`,
+	LOGIN:                  `DELETE FROM system.role_options WHERE username = $1 AND option = 'NOLOGIN'`,
+	NOLOGIN:                `UPSERT INTO system.role_options (username, option) VALUES ($1, 'NOLOGIN')`,
+	VALIDUNTIL:             `UPSERT INTO system.role_options (username, option, value) VALUES ($1, 'VALID UNTIL', $2::timestamptz::string)`,
+	CONTROLJOB:             `UPSERT INTO system.role_options (username, option) VALUES ($1, 'CONTROLJOB')`,
+	NOCONTROLJOB:           `DELETE FROM system.role_options WHERE username = $1 AND option = 'CONTROLJOB'`,
+	CONTROLCHANGEFEED:      `UPSERT INTO system.role_options (username, option) VALUES ($1, 'CONTROLCHANGEFEED')`,
+	NOCONTROLCHANGEFEED:    `DELETE FROM system.role_options WHERE username = $1 AND option = 'CONTROLCHANGEFEED'`,
+	CREATEDB:               `UPSERT INTO system.role_options (username, option) VALUES ($1, 'CREATEDB')`,
+	NOCREATEDB:             `DELETE FROM system.role_options WHERE username = $1 AND option = 'CREATEDB'`,
+	CREATELOGIN:            `UPSERT INTO system.role_options (username, option) VALUES ($1, 'CREATELOGIN')`,
+	NOCREATELOGIN:          `DELETE FROM system.role_options WHERE username = $1 AND option = 'CREATELOGIN'`,
+	VIEWACTIVITY:           `UPSERT INTO system.role_options (username, option) VALUES ($1, 'VIEWACTIVITY')`,
+	NOVIEWACTIVITY:         `DELETE FROM system.role_options WHERE username = $1 AND option = 'VIEWACTIVITY'`,
+	CANCELQUERY:            `UPSERT INTO system.role_options (username, option) VALUES ($1, 'CANCELQUERY')`,
+	NOCANCELQUERY:          `DELETE FROM system.role_options WHERE username = $1 AND option = 'CANCELQUERY'`,
+	MODIFYCLUSTERSETTING:   `UPSERT INTO system.role_options (username, option) VALUES ($1, 'MODIFYCLUSTERSETTING')`,
+	NOMODIFYCLUSTERSETTING: `DELETE FROM system.role_options WHERE username = $1 AND option = 'MODIFYCLUSTERSETTING'`,
 }
 
 // Mask returns the bitmask for a given role option.
@@ -61,19 +88,33 @@ func (o Option) Mask() uint32 {
 
 // ByName is a map of string -> kind value.
 var ByName = map[string]Option{
-	"CREATEROLE":   CREATEROLE,
-	"NOCREATEROLE": NOCREATEROLE,
-	"PASSWORD":     PASSWORD,
-	"LOGIN":        LOGIN,
-	"NOLOGIN":      NOLOGIN,
-	"VALID_UNTIL":  VALIDUNTIL,
+	"CREATEROLE":             CREATEROLE,
+	"NOCREATEROLE":           NOCREATEROLE,
+	"PASSWORD":               PASSWORD,
+	"LOGIN":                  LOGIN,
+	"NOLOGIN":                NOLOGIN,
+	"VALID_UNTIL":            VALIDUNTIL,
+	"CONTROLJOB":             CONTROLJOB,
+	"NOCONTROLJOB":           NOCONTROLJOB,
+	"CONTROLCHANGEFEED":      CONTROLCHANGEFEED,
+	"NOCONTROLCHANGEFEED":    NOCONTROLCHANGEFEED,
+	"CREATEDB":               CREATEDB,
+	"NOCREATEDB":             NOCREATEDB,
+	"CREATELOGIN":            CREATELOGIN,
+	"NOCREATELOGIN":          NOCREATELOGIN,
+	"VIEWACTIVITY":           VIEWACTIVITY,
+	"NOVIEWACTIVITY":         NOVIEWACTIVITY,
+	"CANCELQUERY":            CANCELQUERY,
+	"NOCANCELQUERY":          NOCANCELQUERY,
+	"MODIFYCLUSTERSETTING":   MODIFYCLUSTERSETTING,
+	"NOMODIFYCLUSTERSETTING": NOMODIFYCLUSTERSETTING,
 }
 
 // ToOption takes a string and returns the corresponding Option.
 func ToOption(str string) (Option, error) {
 	ret := ByName[strings.ToUpper(str)]
 	if ret == 0 {
-		return 0, pgerror.New(pgcode.Syntax, "option does not exist")
+		return 0, pgerror.Newf(pgcode.Syntax, "unrecognized role option %s", str)
 	}
 
 	return ret, nil
@@ -155,37 +196,35 @@ func (rol List) CheckRoleOptionConflicts() error {
 	if (roleOptionBits&CREATEROLE.Mask() != 0 &&
 		roleOptionBits&NOCREATEROLE.Mask() != 0) ||
 		(roleOptionBits&LOGIN.Mask() != 0 &&
-			roleOptionBits&NOLOGIN.Mask() != 0) {
+			roleOptionBits&NOLOGIN.Mask() != 0) ||
+		(roleOptionBits&CONTROLJOB.Mask() != 0 &&
+			roleOptionBits&NOCONTROLJOB.Mask() != 0) ||
+		(roleOptionBits&CONTROLCHANGEFEED.Mask() != 0 &&
+			roleOptionBits&NOCONTROLCHANGEFEED.Mask() != 0) ||
+		(roleOptionBits&CREATEDB.Mask() != 0 &&
+			roleOptionBits&NOCREATEDB.Mask() != 0) ||
+		(roleOptionBits&CREATELOGIN.Mask() != 0 &&
+			roleOptionBits&NOCREATELOGIN.Mask() != 0) ||
+		(roleOptionBits&VIEWACTIVITY.Mask() != 0 &&
+			roleOptionBits&NOVIEWACTIVITY.Mask() != 0) ||
+		(roleOptionBits&CANCELQUERY.Mask() != 0 &&
+			roleOptionBits&NOCANCELQUERY.Mask() != 0) ||
+		(roleOptionBits&MODIFYCLUSTERSETTING.Mask() != 0 &&
+			roleOptionBits&NOMODIFYCLUSTERSETTING.Mask() != 0) {
 		return pgerror.Newf(pgcode.Syntax, "conflicting role options")
 	}
 	return nil
 }
 
-// GetHashedPassword returns the value of the password after hashing it.
-// Returns error if no password option is found or if password is invalid.
-func (rol List) GetHashedPassword() ([]byte, error) {
-	var hashedPassword []byte
+// GetPassword returns the value of the password or whether the
+// password was set to NULL. Returns error if the string was invalid
+// or if no password option is found.
+func (rol List) GetPassword() (isNull bool, password string, err error) {
 	for _, ro := range rol {
 		if ro.Option == PASSWORD {
-			isNull, password, err := ro.Value()
-			if isNull {
-				// Use empty byte array for hashedPassword.
-				return hashedPassword, nil
-			}
-			if err != nil {
-				return hashedPassword, err
-			}
-			if password == "" {
-				return hashedPassword, security.ErrEmptyPassword
-			}
-			hashedPassword, err = security.HashPassword(password)
-			if err != nil {
-				return hashedPassword, err
-			}
-
-			return hashedPassword, nil
+			return ro.Value()
 		}
 	}
 	// Password option not found.
-	return hashedPassword, errors.New("password not found in role options")
+	return false, "", errors.New("password not found in role options")
 }

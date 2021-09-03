@@ -23,12 +23,11 @@ import { Bytes } from "src/util/format";
 import { TableInfo } from "src/views/databases/data/tableInfo";
 import { SortSetting } from "src/views/shared/components/sortabletable";
 import { SortedTable } from "src/views/shared/components/sortedtable";
-import "./styles.styl";
 const { TabPane } = Tabs;
 import { getMatchParamByName } from "src/util/query";
 import { databaseDetails } from "../databaseSummary";
-import { Button } from "src/components/button";
-import { BackIcon } from "src/components/icon";
+import { Button } from "@cockroachlabs/admin-ui-components";
+import { ArrowLeft } from "@cockroachlabs/icons";
 import SqlBox from "src/views/shared/components/sql/box";
 
 class GrantsSortedTable extends SortedTable<protos.cockroach.server.serverpb.TableDetailsResponse.IGrant> {}
@@ -101,7 +100,7 @@ export class TableMain extends React.Component<TableMainProps, {}> {
               onClick={this.prevPage}
               type="unstyled-link"
               size="small"
-              icon={BackIcon}
+              icon={<ArrowLeft fontSize={"10px"} />}
               iconPosition="left"
             >
               Databases

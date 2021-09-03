@@ -12,8 +12,10 @@ package tree
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/json"
 	"github.com/cockroachdb/cockroach/pkg/util/pretty"
@@ -867,7 +869,7 @@ func (node *ComparisonExpr) doc(p *PrettyCfg) pretty.Doc {
 		opStr = "IS"
 	}
 	opDoc := pretty.Keyword(opStr)
-	if node.Operator.hasSubOperator() {
+	if node.Operator.HasSubOperator() {
 		opDoc = pretty.ConcatSpace(pretty.Text(node.SubOperator.String()), opDoc)
 	}
 	return pretty.Group(
@@ -952,6 +954,9 @@ func (node *Insert) doc(p *PrettyCfg) pretty.Doc {
 			cond = p.bracket("(", p.Doc(&node.OnConflict.Columns), ")")
 		}
 		items = append(items, p.row("ON CONFLICT", cond))
+		if node.OnConflict.ArbiterPredicate != nil {
+			items = append(items, p.row("WHERE", p.Doc(node.OnConflict.ArbiterPredicate)))
+		}
 
 		if node.OnConflict.DoNothing {
 			items = append(items, p.row("DO", pretty.Keyword("NOTHING")))
@@ -1195,14 +1200,17 @@ func (node *UpdateExpr) doc(p *PrettyCfg) pretty.Doc {
 func (node *CreateTable) doc(p *PrettyCfg) pretty.Doc {
 	// Final layout:
 	//
-	// CREATE [TEMP] TABLE [IF NOT EXISTS] name ( .... ) [AS]
+	// CREATE [TEMP | UNLOGGED] TABLE [IF NOT EXISTS] name ( .... ) [AS]
 	//     [SELECT ...] - for CREATE TABLE AS
 	//     [INTERLEAVE ...]
 	//     [PARTITION BY ...]
 	//
 	title := pretty.Keyword("CREATE")
-	if node.Temporary {
+	switch node.Persistence {
+	case PersistenceTemporary:
 		title = pretty.ConcatSpace(title, pretty.Keyword("TEMPORARY"))
+	case PersistenceUnlogged:
+		title = pretty.ConcatSpace(title, pretty.Keyword("UNLOGGED"))
 	}
 	title = pretty.ConcatSpace(title, pretty.Keyword("TABLE"))
 	if node.IfNotExists {
@@ -1248,8 +1256,11 @@ func (node *CreateView) doc(p *PrettyCfg) pretty.Doc {
 	if node.Replace {
 		title = pretty.ConcatSpace(title, pretty.Keyword("OR REPLACE"))
 	}
-	if node.Temporary {
+	if node.Persistence == PersistenceTemporary {
 		title = pretty.ConcatSpace(title, pretty.Keyword("TEMPORARY"))
+	}
+	if node.Materialized {
+		title = pretty.ConcatSpace(title, pretty.Keyword("MATERIALIZED"))
 	}
 	title = pretty.ConcatSpace(title, pretty.Keyword("VIEW"))
 	if node.IfNotExists {
@@ -1505,6 +1516,7 @@ func (node *CreateIndex) doc(p *PrettyCfg) pretty.Doc {
 	//    [STORING ( ... )]
 	//    [INTERLEAVE ...]
 	//    [PARTITION BY ...]
+	//    [WITH ...]
 	//    [WHERE ...]
 	//
 	title := make([]pretty.Doc, 0, 6)
@@ -1548,6 +1560,13 @@ func (node *CreateIndex) doc(p *PrettyCfg) pretty.Doc {
 	if node.PartitionBy != nil {
 		clauses = append(clauses, p.Doc(node.PartitionBy))
 	}
+	if node.StorageParams != nil {
+		clauses = append(clauses, p.bracketKeyword(
+			"WITH", " (",
+			p.Doc(&node.StorageParams),
+			")", "",
+		))
+	}
 	if node.Predicate != nil {
 		clauses = append(clauses, p.nestUnder(pretty.Keyword("WHERE"), p.Doc(node.Predicate)))
 	}
@@ -1579,28 +1598,6 @@ func (node *LikeTableDef) doc(p *PrettyCfg) pretty.Doc {
 		d = pretty.ConcatSpace(d, pretty.Keyword(opt.Opt.String()))
 	}
 	return d
-}
-
-func (node *IndexElem) doc(p *PrettyCfg) pretty.Doc {
-	d := p.Doc(&node.Column)
-	if node.Direction != DefaultDirection {
-		d = pretty.ConcatSpace(d, pretty.Keyword(node.Direction.String()))
-	}
-	if node.NullsOrder != DefaultNullsOrder {
-		d = pretty.ConcatSpace(d, pretty.Keyword(node.NullsOrder.String()))
-	}
-	return d
-}
-
-func (node *IndexElemList) doc(p *PrettyCfg) pretty.Doc {
-	if node == nil || len(*node) == 0 {
-		return pretty.Nil
-	}
-	d := make([]pretty.Doc, len(*node))
-	for i := range *node {
-		d[i] = p.Doc(&(*node)[i])
-	}
-	return p.commaSeparated(d...)
 }
 
 func (node *IndexTableDef) doc(p *PrettyCfg) pretty.Doc {
@@ -1636,6 +1633,12 @@ func (node *IndexTableDef) doc(p *PrettyCfg) pretty.Doc {
 	if node.PartitionBy != nil {
 		clauses = append(clauses, p.Doc(node.PartitionBy))
 	}
+	if node.StorageParams != nil {
+		clauses = append(
+			clauses,
+			p.bracketKeyword("WITH", "(", p.Doc(&node.StorageParams), ")", ""),
+		)
+	}
 	if node.Predicate != nil {
 		clauses = append(clauses, p.nestUnder(pretty.Keyword("WHERE"), p.Doc(node.Predicate)))
 	}
@@ -1649,7 +1652,7 @@ func (node *IndexTableDef) doc(p *PrettyCfg) pretty.Doc {
 func (node *UniqueConstraintTableDef) doc(p *PrettyCfg) pretty.Doc {
 	// Final layout:
 	// [CONSTRAINT name]
-	//    [PRIMARY KEY|UNIQUE] ( ... )
+	//    [PRIMARY KEY|UNIQUE [WITHOUT INDEX]] ( ... )
 	//    [STORING ( ... )]
 	//    [INTERLEAVE ...]
 	//    [PARTITION BY ...]
@@ -1657,7 +1660,7 @@ func (node *UniqueConstraintTableDef) doc(p *PrettyCfg) pretty.Doc {
 	//
 	// or (no constraint name):
 	//
-	// [PRIMARY KEY|UNIQUE] ( ... )
+	// [PRIMARY KEY|UNIQUE [WITHOUT INDEX]] ( ... )
 	//    [STORING ( ... )]
 	//    [INTERLEAVE ...]
 	//    [PARTITION BY ...]
@@ -1669,6 +1672,9 @@ func (node *UniqueConstraintTableDef) doc(p *PrettyCfg) pretty.Doc {
 		title = pretty.Keyword("PRIMARY KEY")
 	} else {
 		title = pretty.Keyword("UNIQUE")
+		if node.WithoutIndex {
+			title = pretty.ConcatSpace(title, pretty.Keyword("WITHOUT INDEX"))
+		}
 	}
 	title = pretty.ConcatSpace(title, p.bracket("(", p.Doc(&node.Columns), ")"))
 	if node.Name != "" {
@@ -1765,7 +1771,7 @@ func (node *ColumnTableDef) docRow(p *PrettyCfg) pretty.TableRow {
 	//   [[CREATE [IF NOT EXISTS]] FAMILY [name]]
 	//   [[CONSTRAINT name] DEFAULT expr]
 	//   [[CONSTRAINT name] {NULL|NOT NULL}]
-	//   [[CONSTRAINT name] {PRIMARY KEY|UNIQUE}]
+	//   [[CONSTRAINT name] {PRIMARY KEY|UNIQUE [WITHOUT INDEX]}]
 	//   [[CONSTRAINT name] CHECK ...]
 	//   [[CONSTRAINT name] REFERENCES tbl (...)
 	//         [MATCH ...]
@@ -1826,11 +1832,14 @@ func (node *ColumnTableDef) docRow(p *PrettyCfg) pretty.TableRow {
 	pkConstraint := pretty.Nil
 	if node.PrimaryKey.IsPrimaryKey {
 		pkConstraint = pretty.Keyword("PRIMARY KEY")
-	} else if node.Unique {
+	} else if node.Unique.IsUnique {
 		pkConstraint = pretty.Keyword("UNIQUE")
+		if node.Unique.WithoutIndex {
+			pkConstraint = pretty.ConcatSpace(pkConstraint, pretty.Keyword("WITHOUT INDEX"))
+		}
 	}
 	if pkConstraint != pretty.Nil {
-		clauses = append(clauses, p.maybePrependConstraintName(&node.UniqueConstraintName, pkConstraint))
+		clauses = append(clauses, p.maybePrependConstraintName(&node.Unique.ConstraintName, pkConstraint))
 	}
 
 	if node.PrimaryKey.Sharded {
@@ -1932,10 +1941,21 @@ func (node *Backup) doc(p *PrettyCfg) pretty.Doc {
 	items := make([]pretty.TableRow, 0, 6)
 
 	items = append(items, p.row("BACKUP", pretty.Nil))
-	if node.DescriptorCoverage == RequestedDescriptors {
+	if node.Targets != nil {
 		items = append(items, node.Targets.docRow(p))
 	}
-	items = append(items, p.row("TO", p.Doc(&node.To)))
+	if node.Nested {
+		if node.Subdir != nil {
+			items = append(items, p.row("INTO ", p.Doc(node.Subdir)))
+			items = append(items, p.row(" IN ", p.Doc(&node.To)))
+		} else if node.AppendToLatest {
+			items = append(items, p.row("INTO LATEST IN", p.Doc(&node.To)))
+		} else {
+			items = append(items, p.row("INTO", p.Doc(&node.To)))
+		}
+	} else {
+		items = append(items, p.row("TO", p.Doc(&node.To)))
+	}
 
 	if node.AsOf.Expr != nil {
 		items = append(items, node.AsOf.docRow(p))
@@ -1960,12 +1980,17 @@ func (node *Restore) doc(p *PrettyCfg) pretty.Doc {
 	for i := range node.From {
 		from[i] = p.Doc(&node.From[i])
 	}
-	items = append(items, p.row("FROM", p.commaSeparated(from...)))
+	if node.Subdir != nil {
+		items = append(items, p.row("FROM", p.Doc(node.Subdir)))
+		items = append(items, p.row("IN", p.commaSeparated(from...)))
+	} else {
+		items = append(items, p.row("FROM", p.commaSeparated(from...)))
+	}
 
 	if node.AsOf.Expr != nil {
 		items = append(items, node.AsOf.docRow(p))
 	}
-	if node.Options != nil {
+	if !node.Options.IsDefault() {
 		items = append(items, p.row("WITH", p.Doc(&node.Options)))
 	}
 	return p.rlTable(items...)
@@ -1978,6 +2003,9 @@ func (node *TargetList) doc(p *PrettyCfg) pretty.Doc {
 func (node *TargetList) docRow(p *PrettyCfg) pretty.TableRow {
 	if node.Databases != nil {
 		return p.row("DATABASE", p.Doc(&node.Databases))
+	}
+	if node.Tenant != (roachpb.TenantID{}) {
+		return p.row("TENANT", pretty.Text(strconv.FormatUint(node.Tenant.ToUint64(), 10)))
 	}
 	return p.row("TABLE", p.Doc(&node.Tables))
 }
@@ -2063,13 +2091,15 @@ func (node *Export) doc(p *PrettyCfg) pretty.Doc {
 
 func (node *Explain) doc(p *PrettyCfg) pretty.Doc {
 	d := pretty.Keyword("EXPLAIN")
+	showMode := node.Mode != ExplainPlan
 	// ANALYZE is a special case because it is a statement implemented as an
 	// option to EXPLAIN.
 	if node.Flags[ExplainFlagAnalyze] {
 		d = pretty.ConcatSpace(d, pretty.Keyword("ANALYZE"))
+		showMode = true
 	}
 	var opts []pretty.Doc
-	if node.Mode != ExplainPlan {
+	if showMode {
 		opts = append(opts, pretty.Keyword(node.Mode.String()))
 	}
 	for f := ExplainFlag(1); f <= numExplainFlags; f++ {

@@ -20,11 +20,21 @@
 package colexec
 
 import (
-	"fmt"
-
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
+	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
+)
+
+// Workaround for bazel auto-generated code. goimports does not automatically
+// pick up the right packages when run within the bazel sandbox.
+var (
+	_ = typeconv.DatumVecCanonicalTypeFamily
+	_ coldataext.Datum
+	_ tree.AggType
 )
 
 // {{/*
@@ -39,7 +49,7 @@ const _TYPE_WIDTH = 0
 // _ASSIGN_EQ is the template equality function for assigning the first input
 // to the result of the the second input == the third input.
 func _ASSIGN_EQ(_, _, _, _, _, _ interface{}) int {
-	colexecerror.InternalError("")
+	colexecerror.InternalError(errors.AssertionFailedf(""))
 }
 
 // */}}
@@ -101,7 +111,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 			}
 		// {{end}}
 		default:
-			colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx]))
+			colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx]))
 		}
 	}
 	return false

@@ -18,9 +18,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/unique"
 	"github.com/cockroachdb/errors"
@@ -30,10 +31,10 @@ import (
 type Updater struct {
 	Helper                rowHelper
 	DeleteHelper          *rowHelper
-	FetchCols             []sqlbase.ColumnDescriptor
-	FetchColIDtoRowIndex  map[sqlbase.ColumnID]int
-	UpdateCols            []sqlbase.ColumnDescriptor
-	UpdateColIDtoRowIndex map[sqlbase.ColumnID]int
+	FetchCols             []descpb.ColumnDescriptor
+	FetchColIDtoRowIndex  map[descpb.ColumnID]int
+	UpdateCols            []descpb.ColumnDescriptor
+	UpdateColIDtoRowIndex map[descpb.ColumnID]int
 	primaryKeyColChange   bool
 
 	// rd and ri are used when the update this Updater is created for modifies
@@ -48,8 +49,8 @@ type Updater struct {
 	key             roachpb.Key
 	valueBuf        []byte
 	value           roachpb.Value
-	oldIndexEntries [][]sqlbase.IndexEntry
-	newIndexEntries [][]sqlbase.IndexEntry
+	oldIndexEntries [][]rowenc.IndexEntry
+	newIndexEntries [][]rowenc.IndexEntry
 }
 
 type rowUpdaterType int
@@ -59,7 +60,7 @@ const (
 	// about a row, including secondary indexes.
 	UpdaterDefault rowUpdaterType = 0
 	// UpdaterOnlyColumns indicates that an Updater should only update the
-	// columns of a row.
+	// columns of a row and not the secondary indexes.
 	UpdaterOnlyColumns rowUpdaterType = 1
 )
 
@@ -81,15 +82,15 @@ func MakeUpdater(
 	ctx context.Context,
 	txn *kv.Txn,
 	codec keys.SQLCodec,
-	tableDesc *sqlbase.ImmutableTableDescriptor,
-	updateCols []sqlbase.ColumnDescriptor,
-	requestedCols []sqlbase.ColumnDescriptor,
+	tableDesc *tabledesc.Immutable,
+	updateCols []descpb.ColumnDescriptor,
+	requestedCols []descpb.ColumnDescriptor,
 	updateType rowUpdaterType,
-	alloc *sqlbase.DatumAlloc,
+	alloc *rowenc.DatumAlloc,
 ) (Updater, error) {
 	updateColIDtoRowIndex := ColIDtoRowIndexFromCols(updateCols)
 
-	primaryIndexCols := make(map[sqlbase.ColumnID]struct{}, len(tableDesc.PrimaryIndex.ColumnIDs))
+	primaryIndexCols := make(map[descpb.ColumnID]struct{}, len(tableDesc.PrimaryIndex.ColumnIDs))
 	for _, colID := range tableDesc.PrimaryIndex.ColumnIDs {
 		primaryIndexCols[colID] = struct{}{}
 	}
@@ -102,17 +103,30 @@ func MakeUpdater(
 		}
 	}
 
-	// Secondary indexes needing updating.
-	needsUpdate := func(index sqlbase.IndexDescriptor) bool {
+	// needsUpdate returns true if the given index may need to be updated for
+	// the current UPDATE mutation.
+	needsUpdate := func(index descpb.IndexDescriptor) bool {
+		// If the UPDATE is set to only update columns and not secondary
+		// indexes, return false.
 		if updateType == UpdaterOnlyColumns {
-			// Only update columns.
 			return false
 		}
-		// If the primary key changed, we need to update all of them.
+		// If the primary key changed, we need to update all secondary indexes.
 		if primaryKeyColChange {
 			return true
 		}
-		return index.RunOverAllColumns(func(id sqlbase.ColumnID) error {
+		// If the index is a partial index, an update may be required even if
+		// the indexed columns aren't changing. For example, an index entry must
+		// be added when an update to a non-indexed column causes a row to
+		// satisfy the partial index predicate when it did not before.
+		// TODO(mgartner): needsUpdate does not need to return true for every
+		// partial index. A partial index will never require updating if neither
+		// its indexed columns nor the columns referenced in its predicate
+		// expression are changing.
+		if index.IsPartial() {
+			return true
+		}
+		return index.RunOverAllColumns(func(id descpb.ColumnID) error {
 			if _, ok := updateColIDtoRowIndex[id]; ok {
 				return returnTruePseudoError
 			}
@@ -121,7 +135,7 @@ func MakeUpdater(
 	}
 
 	writableIndexes := tableDesc.WritableIndexes()
-	includeIndexes := make([]sqlbase.IndexDescriptor, 0, len(writableIndexes))
+	includeIndexes := make([]descpb.IndexDescriptor, 0, len(writableIndexes))
 	for _, index := range writableIndexes {
 		if needsUpdate(index) {
 			includeIndexes = append(includeIndexes, index)
@@ -131,12 +145,12 @@ func MakeUpdater(
 	// Columns of the table to update, including those in delete/write-only state
 	tableCols := tableDesc.DeletableColumns()
 
-	var deleteOnlyIndexes []sqlbase.IndexDescriptor
+	var deleteOnlyIndexes []descpb.IndexDescriptor
 	for _, idx := range tableDesc.DeleteOnlyIndexes() {
 		if needsUpdate(idx) {
 			if deleteOnlyIndexes == nil {
 				// Allocate at most once.
-				deleteOnlyIndexes = make([]sqlbase.IndexDescriptor, 0, len(tableDesc.DeleteOnlyIndexes()))
+				deleteOnlyIndexes = make([]descpb.IndexDescriptor, 0, len(tableDesc.DeleteOnlyIndexes()))
 			}
 			deleteOnlyIndexes = append(deleteOnlyIndexes, idx)
 		}
@@ -155,8 +169,8 @@ func MakeUpdater(
 		UpdateColIDtoRowIndex: updateColIDtoRowIndex,
 		primaryKeyColChange:   primaryKeyColChange,
 		marshaled:             make([]roachpb.Value, len(updateCols)),
-		oldIndexEntries:       make([][]sqlbase.IndexEntry, len(includeIndexes)),
-		newIndexEntries:       make([][]sqlbase.IndexEntry, len(includeIndexes)),
+		oldIndexEntries:       make([][]rowenc.IndexEntry, len(includeIndexes)),
+		newIndexEntries:       make([][]rowenc.IndexEntry, len(includeIndexes)),
 	}
 
 	if primaryKeyColChange {
@@ -164,11 +178,7 @@ func MakeUpdater(
 		// When changing the primary key, we delete the old values and reinsert
 		// them, so request them all.
 		var err error
-		if ru.rd, err = MakeDeleter(
-			ctx, txn, codec, tableDesc, tableCols, alloc,
-		); err != nil {
-			return Updater{}, err
-		}
+		ru.rd = MakeDeleter(codec, tableDesc, tableCols)
 		ru.FetchCols = ru.rd.FetchCols
 		ru.FetchColIDtoRowIndex = ColIDtoRowIndexFromCols(ru.FetchCols)
 		if ru.ri, err = MakeInserter(
@@ -182,7 +192,7 @@ func MakeUpdater(
 
 		// maybeAddCol adds the provided column to ru.FetchCols and
 		// ru.FetchColIDtoRowIndex if it isn't already present.
-		maybeAddCol := func(colID sqlbase.ColumnID) error {
+		maybeAddCol := func(colID descpb.ColumnID) error {
 			if _, ok := ru.FetchColIDtoRowIndex[colID]; !ok {
 				col, _, err := tableDesc.FindReadableColumnByID(colID)
 				if err != nil {
@@ -257,6 +267,7 @@ func (ru *Updater) UpdateRow(
 	batch *kv.Batch,
 	oldValues []tree.Datum,
 	updateValues []tree.Datum,
+	pm PartialIndexUpdateHelper,
 	traceKV bool,
 ) ([]tree.Datum, error) {
 	if len(oldValues) != len(ru.FetchCols) {
@@ -270,7 +281,7 @@ func (ru *Updater) UpdateRow(
 	if err != nil {
 		return nil, err
 	}
-	var deleteOldSecondaryIndexEntries []sqlbase.IndexEntry
+	var deleteOldSecondaryIndexEntries []rowenc.IndexEntry
 	if ru.DeleteHelper != nil {
 		// We want to include empty k/v pairs because we want
 		// to delete all k/v's for this row. By setting includeEmpty
@@ -280,11 +291,8 @@ func (ru *Updater) UpdateRow(
 		// deletes of keys that aren't present. We choose to make this
 		// compromise in order to avoid having to read all values of
 		// the row that is being updated.
-		// TODO(mgartner): Add partial index IDs to ignoreIndexes that we should
-		// not delete entries from.
-		var ignoreIndexes util.FastIntSet
 		_, deleteOldSecondaryIndexEntries, err = ru.DeleteHelper.encodeIndexes(
-			ru.FetchColIDtoRowIndex, oldValues, ignoreIndexes, true /* includeEmpty */)
+			ru.FetchColIDtoRowIndex, oldValues, pm.IgnoreForDel, true /* includeEmpty */)
 		if err != nil {
 			return nil, err
 		}
@@ -294,7 +302,7 @@ func (ru *Updater) UpdateRow(
 	// happen before index encoding because certain datum types (i.e. tuple)
 	// cannot be used as index values.
 	for i, val := range updateValues {
-		if ru.marshaled[i], err = sqlbase.MarshalColumnValue(&ru.UpdateCols[i], val); err != nil {
+		if ru.marshaled[i], err = rowenc.MarshalColumnValue(&ru.UpdateCols[i], val); err != nil {
 			return nil, err
 		}
 	}
@@ -317,6 +325,7 @@ func (ru *Updater) UpdateRow(
 	}
 
 	for i := range ru.Helper.Indexes {
+		index := &ru.Helper.Indexes[i]
 		// We don't want to insert any empty k/v's, so set includeEmpty to false.
 		// Consider the following case:
 		// TABLE t (
@@ -324,36 +333,48 @@ func (ru *Updater) UpdateRow(
 		//   INDEX (y) STORING (z, w),
 		//   FAMILY (x), FAMILY (y), FAMILY (z), FAMILY (w)
 		//)
-		// If we are to perform an update on row (1, 2, 3, NULL),
-		// the k/v pair for index i that encodes column w would have
-		// an empty value because w is null and the sole resident
-		// of that family. We want to ensure that we don't insert
-		// empty k/v pairs during the process of the update, so
-		// set includeEmpty to false while generating the old
-		// and new index entries.
-		ru.oldIndexEntries[i], err = sqlbase.EncodeSecondaryIndex(
-			ru.Helper.Codec,
-			ru.Helper.TableDesc.TableDesc(),
-			&ru.Helper.Indexes[i],
-			ru.FetchColIDtoRowIndex,
-			oldValues,
-			false, /* includeEmpty */
-		)
-		if err != nil {
-			return nil, err
+		// If we are to perform an update on row (1, 2, 3, NULL), the k/v pair
+		// for index i that encodes column w would have an empty value because w
+		// is null and the sole resident of that family. We want to ensure that
+		// we don't insert empty k/v pairs during the process of the update, so
+		// set includeEmpty to false while generating the old and new index
+		// entries.
+		//
+		// Also, we don't build entries for old and new values if the index
+		// exists in ignoreIndexesForDel and ignoreIndexesForPut, respectively.
+		// Index IDs in these sets indicate that old and new values for the row
+		// do not satisfy a partial index's predicate expression.
+		if pm.IgnoreForDel.Contains(int(index.ID)) {
+			ru.oldIndexEntries[i] = nil
+		} else {
+			ru.oldIndexEntries[i], err = rowenc.EncodeSecondaryIndex(
+				ru.Helper.Codec,
+				ru.Helper.TableDesc,
+				index,
+				ru.FetchColIDtoRowIndex,
+				oldValues,
+				false, /* includeEmpty */
+			)
+			if err != nil {
+				return nil, err
+			}
 		}
-		ru.newIndexEntries[i], err = sqlbase.EncodeSecondaryIndex(
-			ru.Helper.Codec,
-			ru.Helper.TableDesc.TableDesc(),
-			&ru.Helper.Indexes[i],
-			ru.FetchColIDtoRowIndex,
-			ru.newValues,
-			false, /* includeEmpty */
-		)
-		if err != nil {
-			return nil, err
+		if pm.IgnoreForPut.Contains(int(index.ID)) {
+			ru.newIndexEntries[i] = nil
+		} else {
+			ru.newIndexEntries[i], err = rowenc.EncodeSecondaryIndex(
+				ru.Helper.Codec,
+				ru.Helper.TableDesc,
+				index,
+				ru.FetchColIDtoRowIndex,
+				ru.newValues,
+				false, /* includeEmpty */
+			)
+			if err != nil {
+				return nil, err
+			}
 		}
-		if ru.Helper.Indexes[i].Type == sqlbase.IndexDescriptor_INVERTED {
+		if ru.Helper.Indexes[i].Type == descpb.IndexDescriptor_INVERTED {
 			// Deduplicate the keys we're adding and removing if we're updating an
 			// inverted index. For example, imagine a table with an inverted index on j:
 			//
@@ -390,14 +411,11 @@ func (ru *Updater) UpdateRow(
 	}
 
 	if rowPrimaryKeyChanged {
-		// TODO(mgartner): Add partial index IDs to ignoreIndexes that we should
-		// not write entries to.
-		var ignoreIndexes util.FastIntSet
-		if err := ru.rd.DeleteRow(ctx, batch, oldValues, ignoreIndexes, traceKV); err != nil {
+		if err := ru.rd.DeleteRow(ctx, batch, oldValues, pm, traceKV); err != nil {
 			return nil, err
 		}
 		if err := ru.ri.InsertRow(
-			ctx, batch, ru.newValues, ignoreIndexes, false /* ignoreConflicts */, traceKV,
+			ctx, batch, ru.newValues, pm, false /* ignoreConflicts */, traceKV,
 		); err != nil {
 			return nil, err
 		}
@@ -420,7 +438,7 @@ func (ru *Updater) UpdateRow(
 	// in the new and old values.
 	for i := range ru.Helper.Indexes {
 		index := &ru.Helper.Indexes[i]
-		if index.Type == sqlbase.IndexDescriptor_FORWARD {
+		if index.Type == descpb.IndexDescriptor_FORWARD {
 			oldIdx, newIdx := 0, 0
 			oldEntries, newEntries := ru.oldIndexEntries[i], ru.newIndexEntries[i]
 			// The index entries for a particular index are stored in
@@ -466,10 +484,10 @@ func (ru *Updater) UpdateRow(
 					}
 					batch.CPutAllowingIfNotExists(newEntry.Key, &newEntry.Value, expValue)
 				} else if oldEntry.Family < newEntry.Family {
-					if oldEntry.Family == sqlbase.FamilyID(0) {
+					if oldEntry.Family == descpb.FamilyID(0) {
 						return nil, errors.AssertionFailedf(
 							"index entry for family 0 for table %s, index %s was not generated",
-							ru.Helper.TableDesc.Name, index.Name,
+							ru.Helper.TableDesc.GetName(), index.Name,
 						)
 					}
 					// In this case, the index has a k/v for a family that does not exist in
@@ -480,10 +498,10 @@ func (ru *Updater) UpdateRow(
 					batch.Del(oldEntry.Key)
 					oldIdx++
 				} else {
-					if newEntry.Family == sqlbase.FamilyID(0) {
+					if newEntry.Family == descpb.FamilyID(0) {
 						return nil, errors.AssertionFailedf(
 							"index entry for family 0 for table %s, index %s was not generated",
-							ru.Helper.TableDesc.Name, index.Name,
+							ru.Helper.TableDesc.GetName(), index.Name,
 						)
 					}
 					// In this case, the index now has a k/v that did not exist in the
@@ -499,14 +517,11 @@ func (ru *Updater) UpdateRow(
 				}
 			}
 			for oldIdx < len(oldEntries) {
-				// Delete any remaining old entries that are not matched by new entries in this row.
+				// Delete any remaining old entries that are not matched by new
+				// entries in this row because 1) the family does not exist in
+				// the new set of k/v's or 2) the index is a partial index and
+				// the new row values do not match the partial index predicate.
 				oldEntry := &oldEntries[oldIdx]
-				if oldEntry.Family == sqlbase.FamilyID(0) {
-					return nil, errors.AssertionFailedf(
-						"index entry for family 0 for table %s, index %s was not generated",
-						ru.Helper.TableDesc.Name, index.Name,
-					)
-				}
 				if traceKV {
 					log.VEventf(ctx, 2, "Del %s", keys.PrettyPrint(ru.Helper.secIndexValDirs[i], oldEntry.Key))
 				}
@@ -514,14 +529,13 @@ func (ru *Updater) UpdateRow(
 				oldIdx++
 			}
 			for newIdx < len(newEntries) {
-				// Insert any remaining new entries that are not present in the old row.
+				// Insert any remaining new entries that are not present in the
+				// old row. Insert any remaining new entries that are not
+				// present in the old row because 1) the family does not exist
+				// in the old set of k/v's or 2) the index is a partial index
+				// and the old row values do not match the partial index
+				// predicate.
 				newEntry := &newEntries[newIdx]
-				if newEntry.Family == sqlbase.FamilyID(0) {
-					return nil, errors.AssertionFailedf(
-						"index entry for family 0 for table %s, index %s was not generated",
-						ru.Helper.TableDesc.Name, index.Name,
-					)
-				}
 				if traceKV {
 					k := keys.PrettyPrint(ru.Helper.secIndexValDirs[i], newEntry.Key)
 					v := newEntry.Value.PrettyPrint()
@@ -560,7 +574,7 @@ func (ru *Updater) UpdateRow(
 	return ru.newValues, nil
 }
 
-func compareIndexEntries(left, right sqlbase.IndexEntry) int {
+func compareIndexEntries(left, right rowenc.IndexEntry) int {
 	cmp := bytes.Compare(left.Key, right.Key)
 	if cmp != 0 {
 		return cmp

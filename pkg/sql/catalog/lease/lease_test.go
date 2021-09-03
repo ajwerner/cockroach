@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/cockroach-go/crdb"
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -34,13 +35,17 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -91,7 +96,7 @@ func (t *leaseTest) cleanup() {
 	t.server.Stopper().Stop(context.Background())
 }
 
-func (t *leaseTest) getLeases(descID sqlbase.ID) string {
+func (t *leaseTest) getLeases(descID descpb.ID) string {
 	sql := `
 SELECT version, "nodeID" FROM system.lease WHERE "descID" = $1 ORDER BY version, "nodeID"
 `
@@ -118,7 +123,7 @@ SELECT version, "nodeID" FROM system.lease WHERE "descID" = $1 ORDER BY version,
 	return buf.String()
 }
 
-func (t *leaseTest) expectLeases(descID sqlbase.ID, expected string) {
+func (t *leaseTest) expectLeases(descID descpb.ID, expected string) {
 	testutils.SucceedsSoon(t, func() error {
 		leases := t.getLeases(descID)
 		if expected != leases {
@@ -129,20 +134,20 @@ func (t *leaseTest) expectLeases(descID sqlbase.ID, expected string) {
 }
 
 func (t *leaseTest) acquire(
-	nodeID uint32, descID sqlbase.ID,
+	nodeID uint32, descID descpb.ID,
 ) (catalog.Descriptor, hlc.Timestamp, error) {
 	return t.node(nodeID).Acquire(context.Background(), t.server.Clock().Now(), descID)
 }
 
 func (t *leaseTest) acquireMinVersion(
-	nodeID uint32, descID sqlbase.ID, minVersion sqlbase.DescriptorVersion,
+	nodeID uint32, descID descpb.ID, minVersion descpb.DescriptorVersion,
 ) (catalog.Descriptor, hlc.Timestamp, error) {
 	return t.node(nodeID).TestingAcquireAndAssertMinVersion(
 		context.Background(), t.server.Clock().Now(), descID, minVersion)
 }
 
 func (t *leaseTest) mustAcquire(
-	nodeID uint32, descID sqlbase.ID,
+	nodeID uint32, descID descpb.ID,
 ) (catalog.Descriptor, hlc.Timestamp) {
 	table, expiration, err := t.acquire(nodeID, descID)
 	if err != nil {
@@ -152,7 +157,7 @@ func (t *leaseTest) mustAcquire(
 }
 
 func (t *leaseTest) mustAcquireMinVersion(
-	nodeID uint32, descID sqlbase.ID, minVersion sqlbase.DescriptorVersion,
+	nodeID uint32, descID descpb.ID, minVersion descpb.DescriptorVersion,
 ) (catalog.Descriptor, hlc.Timestamp) {
 	desc, expiration, err := t.acquireMinVersion(nodeID, descID, minVersion)
 	if err != nil {
@@ -186,14 +191,14 @@ func (t *leaseTest) mustRelease(
 	}
 }
 
-func (t *leaseTest) publish(ctx context.Context, nodeID uint32, descID sqlbase.ID) error {
+func (t *leaseTest) publish(ctx context.Context, nodeID uint32, descID descpb.ID) error {
 	_, err := t.node(nodeID).Publish(ctx, descID, func(catalog.MutableDescriptor) error {
 		return nil
 	}, nil)
 	return err
 }
 
-func (t *leaseTest) mustPublish(ctx context.Context, nodeID uint32, descID sqlbase.ID) {
+func (t *leaseTest) mustPublish(ctx context.Context, nodeID uint32, descID descpb.ID) {
 	if err := t.publish(ctx, nodeID, descID); err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +212,7 @@ func (t *leaseTest) node(nodeID uint32) *lease.Manager {
 	if mgr == nil {
 		var c base.NodeIDContainer
 		c.Set(context.Background(), roachpb.NodeID(nodeID))
-		nc := base.NewSQLIDContainer(0, &c, true /* exposed*/)
+		nc := base.NewSQLIDContainer(0, &c)
 		// Hack the ExecutorConfig that we pass to the Manager to have a
 		// different node id.
 		cfgCpy := t.server.ExecutorConfig().(sql.ExecutorConfig)
@@ -453,7 +458,7 @@ func TestLeaseManagerPublishIllegalVersionChange(testingT *testing.T) {
 
 	if _, err := t.node(1).Publish(
 		context.Background(), keys.LeaseTableID, func(desc catalog.MutableDescriptor) error {
-			table := desc.(*sqlbase.MutableTableDescriptor)
+			table := desc.(*tabledesc.Mutable)
 			table.Version++
 			return nil
 		}, nil); !testutils.IsError(err, "updated version") {
@@ -461,7 +466,7 @@ func TestLeaseManagerPublishIllegalVersionChange(testingT *testing.T) {
 	}
 	if _, err := t.node(1).Publish(
 		context.Background(), keys.LeaseTableID, func(desc catalog.MutableDescriptor) error {
-			table := desc.(*sqlbase.MutableTableDescriptor)
+			table := desc.(*tabledesc.Mutable)
 			table.Version--
 			return nil
 		}, nil); !testutils.IsError(err, "updated version") {
@@ -571,17 +576,17 @@ CREATE TABLE test.t(a INT PRIMARY KEY);
 	}
 
 	// Make sure we can't get a lease on the descriptor.
-	tableDesc := sqlbase.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "test", "t")
+	tableDesc := catalogkv.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "test", "t")
 	// try to acquire at a bogus version to make sure we don't get back a lease we
 	// already had.
 	_, _, err = t.acquireMinVersion(1, tableDesc.ID, tableDesc.Version+1)
-	if !testutils.IsError(err, "table is being dropped") {
+	if !testutils.IsError(err, "descriptor is being dropped") {
 		t.Fatalf("got a different error than expected: %v", err)
 	}
 }
 
 func acquire(
-	ctx context.Context, s *server.TestServer, descID sqlbase.ID,
+	ctx context.Context, s *server.TestServer, descID descpb.ID,
 ) (catalog.Descriptor, hlc.Timestamp, error) {
 	return s.LeaseManager().(*lease.Manager).Acquire(ctx, s.Clock().Now(), descID)
 }
@@ -595,19 +600,19 @@ func TestLeasesOnDeletedTableAreReleasedImmediately(t *testing.T) {
 	var mu syncutil.Mutex
 	clearSchemaChangers := false
 
-	var waitTableID sqlbase.ID
+	var waitTableID descpb.ID
 	deleted := make(chan bool)
 
 	params, _ := tests.CreateTestServerParams()
 	params.Knobs = base.TestingKnobs{
 		SQLLeaseManager: &lease.ManagerTestingKnobs{
-			TestingDescriptorRefreshedEvent: func(descriptor *sqlbase.Descriptor) {
+			TestingDescriptorRefreshedEvent: func(descriptor *descpb.Descriptor) {
 				mu.Lock()
 				defer mu.Unlock()
-				if waitTableID != descriptor.GetID() {
+				if waitTableID != descpb.GetDescriptorID(descriptor) {
 					return
 				}
-				if descriptor.Table(hlc.Timestamp{}).Dropped() {
+				if descpb.GetDescriptorState(descriptor) == descpb.DescriptorState_DROP {
 					close(deleted)
 					waitTableID = 0
 				}
@@ -635,7 +640,7 @@ CREATE TABLE test.t(a INT PRIMARY KEY);
 		t.Fatal(err)
 	}
 
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
 	ctx := context.Background()
 
 	lease1, _, err := acquire(ctx, s.(*server.TestServer), tableDesc.ID)
@@ -682,7 +687,7 @@ CREATE TABLE test.t(a INT PRIMARY KEY);
 	}
 	// Now we shouldn't be able to acquire any more.
 	_, _, err = acquire(ctx, s.(*server.TestServer), tableDesc.ID)
-	if !testutils.IsError(err, "table is being dropped") {
+	if !testutils.IsError(err, "descriptor is being dropped") {
 		t.Fatalf("got a different error than expected: %v", err)
 	}
 }
@@ -707,7 +712,7 @@ func TestSubqueryLeases(t *testing.T) {
 						atomic.AddInt32(&fooAcquiredCount, 1)
 					}
 				},
-				LeaseReleasedEvent: func(id sqlbase.ID, _ sqlbase.DescriptorVersion, _ error) {
+				LeaseReleasedEvent: func(id descpb.ID, _ descpb.DescriptorVersion, _ error) {
 					if int64(id) == atomic.LoadInt64(&tableID) {
 						// Note: we don't use close(fooRelease) here because the
 						// lease on "foo" may be re-acquired (and re-released)
@@ -734,7 +739,7 @@ CREATE TABLE t.foo (v INT);
 		t.Fatalf("CREATE TABLE has acquired a lease: got %d, expected 0", atomic.LoadInt32(&fooAcquiredCount))
 	}
 
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "foo")
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "foo")
 	atomic.StoreInt64(&tableID, int64(tableDesc.ID))
 
 	if _, err := sqlDB.Exec(`
@@ -823,7 +828,7 @@ CREATE TABLE t.foo (v INT);
 func TestDescriptorRefreshOnRetry(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	t.Skip("https://github.com/cockroachdb/cockroach/issues/50037")
+	skip.WithIssue(t, 50037)
 
 	params, _ := tests.CreateTestServerParams()
 
@@ -842,7 +847,7 @@ func TestDescriptorRefreshOnRetry(t *testing.T) {
 						atomic.AddInt32(&fooAcquiredCount, 1)
 					}
 				},
-				LeaseReleasedEvent: func(id sqlbase.ID, _ sqlbase.DescriptorVersion, _ error) {
+				LeaseReleasedEvent: func(id descpb.ID, _ descpb.DescriptorVersion, _ error) {
 					if int64(id) == atomic.LoadInt64(&tableID) {
 						atomic.AddInt32(&fooReleaseCount, 1)
 					}
@@ -864,7 +869,7 @@ CREATE TABLE t.foo (v INT);
 		t.Fatalf("CREATE TABLE has acquired a descriptor")
 	}
 
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "foo")
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "foo")
 	atomic.StoreInt64(&tableID, int64(tableDesc.ID))
 
 	tx, err := sqlDB.Begin()
@@ -942,7 +947,7 @@ INSERT INTO t.kv VALUES ('a', 'b');
 `); err != nil {
 		t.Fatal(err)
 	}
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
 
 	// A read-write transaction that uses the old version of the descriptor.
 	txReadWrite, err := sqlDB.Begin()
@@ -1019,7 +1024,7 @@ INSERT INTO t.kv VALUES ('a', 'b');
 	// The transaction read at one timestamp and wrote at another so it
 	// has to be restarted because the spans read were modified by the backfill.
 	if err := txReadWrite.Commit(); !testutils.IsError(err,
-		"TransactionRetryError: retry txn \\(RETRY_SERIALIZABLE\\)") {
+		"TransactionRetryError: retry txn \\(RETRY_SERIALIZABLE - failed preemptive refresh\\)") {
 		t.Fatalf("err = %v", err)
 	}
 
@@ -1112,7 +1117,7 @@ INSERT INTO t.kv VALUES ('a', 'b');
 	}
 
 	testutils.SucceedsSoon(t, func() error {
-		if tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv"); len(tableDesc.GCMutations) != 0 {
+		if tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv"); len(tableDesc.GCMutations) != 0 {
 			return errors.Errorf("%d gc mutations remaining", len(tableDesc.GCMutations))
 		}
 		return nil
@@ -1160,42 +1165,41 @@ COMMIT;
 		t.Fatal(err)
 	}
 
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
-
-	tx, err := sqlDB.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Insert an entry so that the transaction is guaranteed to be
-	// assigned a timestamp.
-	if _, err := tx.Exec(`
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	var updated bool
+	if err := crdb.ExecuteTx(context.Background(), sqlDB, nil, func(tx *gosql.Tx) error {
+		// Insert an entry so that the transaction is guaranteed to be
+		// assigned a timestamp.
+		if _, err := tx.Exec(`
 INSERT INTO t.timestamp VALUES ('a', 'b');
 `); err != nil {
-		t.Fatal(err)
-	}
+			return errors.WithStack(err)
+		}
 
-	// Increment the table version after the txn has started.
-	leaseMgr := s.LeaseManager().(*lease.Manager)
-	if _, err := leaseMgr.Publish(
-		context.Background(), tableDesc.ID, func(catalog.MutableDescriptor) error {
-			// Do nothing: increments the version.
-			return nil
-		}, nil); err != nil {
-		t.Error(err)
-	}
+		// Increment the table version after the txn has started. Only do this once
+		// even if there's a retry.
+		if !updated {
+			leaseMgr := s.LeaseManager().(*lease.Manager)
+			if _, err := leaseMgr.Publish(
+				context.Background(), tableDesc.ID, func(catalog.MutableDescriptor) error {
+					// Do nothing: increments the version.
+					return nil
+				}, nil); err != nil {
+				t.Fatal(err)
+			}
+			updated = true
+		}
 
-	// This select will see version 1 of the table. It will first
-	// acquire a lease on version 2 and note that the table descriptor is
-	// invalid for the transaction, so it will read the previous version
-	// and use it.
-	rows, err := tx.Query(`SELECT * FROM t.kv`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows.Close()
-
-	if err := tx.Commit(); err != nil {
+		// This select will see version 1 of the table. It will first
+		// acquire a lease on version 2 and note that the table descriptor is
+		// invalid for the transaction, so it will read the previous version
+		// and use it.
+		rows, err := tx.Query(`SELECT * FROM t.kv`)
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		return errors.WithStack(rows.Close())
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1222,7 +1226,7 @@ CREATE TABLE t.test (k CHAR PRIMARY KEY, v CHAR);
 		t.Fatal(err)
 	}
 
-	tableDesc := sqlbase.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "test")
+	tableDesc := catalogkv.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "test")
 	dbID := tableDesc.ParentID
 	tableName := tableDesc.Name
 	leaseManager := t.node(1)
@@ -1306,8 +1310,8 @@ CREATE TABLE t.test2 ();
 		t.Fatal(err)
 	}
 
-	test1Desc := sqlbase.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "test1")
-	test2Desc := sqlbase.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "test2")
+	test1Desc := catalogkv.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "test1")
+	test2Desc := catalogkv.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "test2")
 	dbID := test2Desc.ParentID
 
 	// Acquire a lease on test1 by name.
@@ -1440,7 +1444,7 @@ CREATE TABLE t.kv (k CHAR PRIMARY KEY, v CHAR);
 		t.Fatal(err)
 	}
 
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
 	if tableDesc.Version != 1 {
 		t.Fatalf("invalid version %d", tableDesc.Version)
 	}
@@ -1461,7 +1465,7 @@ CREATE TABLE t.kv (k CHAR PRIMARY KEY, v CHAR);
 	}
 
 	// The first schema change will succeed and increment the version.
-	tableDesc = sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDesc = catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv1")
 	if tableDesc.Version != 2 {
 		t.Fatalf("invalid version %d", tableDesc.Version)
 	}
@@ -1491,7 +1495,7 @@ CREATE TABLE t.kv (k CHAR PRIMARY KEY, v CHAR);
 	// the table descriptor. If the schema change transaction
 	// doesn't rollback the transaction this descriptor read will
 	// hang.
-	tableDesc = sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDesc = catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv1")
 	if tableDesc.Version != 2 {
 		t.Fatalf("invalid version %d", tableDesc.Version)
 	}
@@ -1502,7 +1506,7 @@ CREATE TABLE t.kv (k CHAR PRIMARY KEY, v CHAR);
 	}
 
 	wg.Wait()
-	tableDesc = sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDesc = catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv2")
 	if tableDesc.Version != 3 {
 		t.Fatalf("invalid version %d", tableDesc.Version)
 	}
@@ -1543,7 +1547,7 @@ INSERT INTO t.kv VALUES ('a', 'b');
 		t.Fatal(err)
 	}
 
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
 	if tableDesc.Version != 1 {
 		t.Fatalf("invalid version %d", tableDesc.Version)
 	}
@@ -1592,7 +1596,7 @@ INSERT INTO t.kv VALUES ('a', 'b');
 		// This can hang waiting for one version before tx.Commit() is
 		// called below, so it is executed in another goroutine
 		if err := txRetry.Commit(); !testutils.IsError(err,
-			`TransactionRetryWithProtoRefreshError: cannot publish new versions for tables: \[\{kv1 53 1\}\], old versions still in use`,
+			`TransactionRetryWithProtoRefreshError: cannot publish new versions for descriptors: \[\{kv1 53 1\}\], old versions still in use`,
 		) {
 			t.Errorf("err = %v", err)
 		}
@@ -1616,11 +1620,11 @@ INSERT INTO t.kv VALUES ('a', 'b');
 func TestModificationTimeTxnOrdering(testingT *testing.T) {
 	defer leaktest.AfterTest(testingT)()
 
-	testingT.Skip("#22479")
+	skip.WithIssue(testingT, 22479)
 
 	// Decide how long we should run this.
 	maxTime := time.Duration(5) * time.Second
-	if testutils.NightlyStress() {
+	if skip.NightlyStress() {
 		maxTime = time.Duration(2) * time.Minute
 	}
 
@@ -1665,7 +1669,7 @@ CREATE TABLE t.test0 (k CHAR PRIMARY KEY, v CHAR);
 			if err != nil {
 				t.Fatalf("error while publishing: %v", err)
 			}
-			table := desc.(*sqlbase.ImmutableTableDescriptor)
+			table := desc.(*tabledesc.Immutable)
 
 			// Wait a little time to give a chance to other goroutines to
 			// race past.
@@ -1683,14 +1687,14 @@ CREATE TABLE t.test0 (k CHAR PRIMARY KEY, v CHAR);
 			txn.SetFixedTimestamp(ctx, table.ModificationTime)
 
 			// Look up the descriptor.
-			descKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, descID)
-			dbDesc := &sqlbase.Descriptor{}
+			descKey := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, descID)
+			dbDesc := &descpb.Descriptor{}
 			ts, err := txn.GetProtoTs(ctx, descKey, dbDesc)
 			if err != nil {
 				t.Fatalf("error while reading proto: %v", err)
 			}
 			// Look at the descriptor that comes back from the database.
-			dbTable := dbDesc.Table(ts)
+			dbTable := descpb.TableFromDescriptor(dbDesc, ts)
 
 			if dbTable.Version != table.Version || dbTable.ModificationTime != table.ModificationTime {
 				t.Fatalf("db has version %d at ts %s, expected version %d at ts %s",
@@ -1709,7 +1713,7 @@ func TestLeaseRenewedPeriodically(testingT *testing.T) {
 	defer leaktest.AfterTest(testingT)()
 
 	var mu syncutil.Mutex
-	releasedIDs := make(map[sqlbase.ID]struct{})
+	releasedIDs := make(map[descpb.ID]struct{})
 
 	var testAcquiredCount int32
 	var testAcquisitionBlockCount int32
@@ -1725,7 +1729,7 @@ func TestLeaseRenewedPeriodically(testingT *testing.T) {
 						atomic.AddInt32(&testAcquiredCount, 1)
 					}
 				},
-				LeaseReleasedEvent: func(id sqlbase.ID, _ sqlbase.DescriptorVersion, _ error) {
+				LeaseReleasedEvent: func(id descpb.ID, _ descpb.DescriptorVersion, _ error) {
 					if id < keys.MaxReservedDescID {
 						return
 					}
@@ -1737,7 +1741,7 @@ func TestLeaseRenewedPeriodically(testingT *testing.T) {
 					atomic.AddInt32(&testAcquisitionBlockCount, 1)
 				},
 			},
-			TestingDescriptorUpdateEvent: func(_ *sqlbase.Descriptor) error {
+			TestingDescriptorUpdateEvent: func(_ *descpb.Descriptor) error {
 				return errors.Errorf("ignore gossip update")
 			},
 		},
@@ -1764,8 +1768,8 @@ CREATE TABLE t.test2 ();
 		t.Fatal(err)
 	}
 
-	test1Desc := sqlbase.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "test2")
-	test2Desc := sqlbase.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "test2")
+	test1Desc := catalogkv.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "test2")
+	test2Desc := catalogkv.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "test2")
 	dbID := test2Desc.ParentID
 
 	atomic.StoreInt32(&testAcquisitionBlockCount, 0)
@@ -1884,7 +1888,7 @@ INSERT INTO t.kv VALUES ('a', 'b');
 func TestTableCreationPushesTxnsInRecentPast(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	params, _ := tests.CreateTestServerParams()
-	tc := serverutils.StartTestCluster(t, 3, base.TestClusterArgs{
+	tc := serverutils.StartNewTestCluster(t, 3, base.TestClusterArgs{
 		ReplicationMode: base.ReplicationManual,
 		ServerArgs:      params,
 	})
@@ -1961,8 +1965,8 @@ CREATE TABLE t.after (k CHAR PRIMARY KEY, v CHAR);
 		t.Fatal(err)
 	}
 
-	beforeDesc := sqlbase.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "before")
-	afterDesc := sqlbase.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "after")
+	beforeDesc := catalogkv.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "before")
+	afterDesc := catalogkv.TestingGetTableDescriptor(t.kvDB, keys.SystemSQLCodec, "t", "after")
 	dbID := beforeDesc.ParentID
 
 	// Acquire a lease on "before" by name.
@@ -2021,7 +2025,7 @@ func TestLeaseAcquisitionDoesntBlock(t *testing.T) {
 
 	// Figure out the table ID.
 	row := db.QueryRow("SELECT id FROM system.namespace WHERE name='test'")
-	var descID sqlbase.ID
+	var descID descpb.ID
 	require.NoError(t, row.Scan(&descID))
 
 	// Spin up another goroutine performing a schema change. We'll suspend its
@@ -2220,7 +2224,7 @@ func TestFinalizeVersionEnablesRangefeedUpdates(t *testing.T) {
 					DisableAutomaticVersionUpgrade: 1,
 					// Bootstrap the cluster at something below VersionRangefeedLeases so
 					// that we can test the upgrade.
-					BootstrapVersionOverride: clusterversion.VersionByKey(clusterversion.Version20_1),
+					BinaryVersionOverride: clusterversion.VersionByKey(clusterversion.Version20_1),
 				},
 			},
 		},
@@ -2271,7 +2275,7 @@ func TestRangefeedUpdatesHandledProperlyInTheFaceOfRaces(t *testing.T) {
 
 	ctx := context.Background()
 	var interestingTable atomic.Value
-	interestingTable.Store(sqlbase.ID(0))
+	interestingTable.Store(descpb.ID(0))
 	blockLeaseAcquisitionOfInterestingTable := make(chan chan struct{})
 	unblockAll := make(chan struct{})
 	args := base.TestServerArgs{
@@ -2284,13 +2288,14 @@ func TestRangefeedUpdatesHandledProperlyInTheFaceOfRaces(t *testing.T) {
 	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{
 		ServerArgs: args,
 	})
-	descUpdateChan := make(chan *sqlbase.Descriptor)
+	descUpdateChan := make(chan *descpb.Descriptor)
 	args.Knobs.SQLLeaseManager = &lease.ManagerTestingKnobs{
-		TestingDescriptorUpdateEvent: func(descriptor *sqlbase.Descriptor) error {
+		TestingDescriptorUpdateEvent: func(descriptor *descpb.Descriptor) error {
 			// Use this testing knob to ensure that we see an update for the desc
 			// in question. We don't care about events to refresh the first version
 			// which can happen under rare stress scenarios.
-			if descriptor.GetID() == interestingTable.Load().(sqlbase.ID) && descriptor.GetVersion() >= 2 {
+			if descpb.GetDescriptorID(descriptor) == interestingTable.Load().(descpb.ID) &&
+				descpb.GetDescriptorVersion(descriptor) >= 2 {
 				select {
 				case descUpdateChan <- descriptor:
 				case <-unblockAll:
@@ -2303,7 +2308,7 @@ func TestRangefeedUpdatesHandledProperlyInTheFaceOfRaces(t *testing.T) {
 				// Block the lease acquisition for the desc after the leasing
 				// transaction has been issued. We'll wait to unblock it until after
 				// the new version has been published and that even has been received.
-				if desc.GetID() != interestingTable.Load().(sqlbase.ID) {
+				if desc.GetID() != interestingTable.Load().(descpb.ID) {
 					return
 				}
 				blocked := make(chan struct{})
@@ -2316,7 +2321,7 @@ func TestRangefeedUpdatesHandledProperlyInTheFaceOfRaces(t *testing.T) {
 		},
 	}
 	// Start a second server with our knobs.
-	tc.AddServer(t, args)
+	tc.AddAndStartServer(t, args)
 	defer tc.Stopper().Stop(ctx)
 
 	db1 := tc.ServerConn(0)
@@ -2327,13 +2332,13 @@ func TestRangefeedUpdatesHandledProperlyInTheFaceOfRaces(t *testing.T) {
 	tdb1.Exec(t, "CREATE TABLE foo (i INT PRIMARY KEY)")
 
 	// Find the desc ID for the desc we'll be mucking with.
-	var tableID sqlbase.ID
+	var tableID descpb.ID
 	tdb1.QueryRow(t, "SELECT table_id FROM crdb_internal.tables WHERE name = $1 AND database_name = current_database()",
 		"foo").Scan(&tableID)
 	interestingTable.Store(tableID)
 
 	// Launch a goroutine to query foo. It will be blocked in lease acquisition.
-	selectDone := make(chan error)
+	selectDone := make(chan error, 1)
 	go func() {
 		var count int
 		selectDone <- db2.QueryRow("SELECT count(*) FROM foo").Scan(&count)
@@ -2344,7 +2349,7 @@ func TestRangefeedUpdatesHandledProperlyInTheFaceOfRaces(t *testing.T) {
 
 	// Launch a goroutine to perform a schema change which will lead to new
 	// versions.
-	alterErrCh := make(chan error)
+	alterErrCh := make(chan error, 1)
 	go func() {
 		_, err := db1.Exec("ALTER TABLE foo ADD COLUMN j INT DEFAULT 1")
 		alterErrCh <- err
@@ -2352,8 +2357,14 @@ func TestRangefeedUpdatesHandledProperlyInTheFaceOfRaces(t *testing.T) {
 
 	// Make sure we get an update. Note that this is after we have already
 	// acquired a lease on the old version but have not yet recorded that fact.
-	desc := <-descUpdateChan
-	require.Equal(t, sqlbase.DescriptorVersion(2), desc.GetVersion())
+	select {
+	case err := <-alterErrCh:
+		t.Fatalf("alter succeeded before expected: %v", err)
+	case err := <-selectDone:
+		t.Fatalf("select succeeded before expected: %v", err)
+	case desc := <-descUpdateChan:
+		require.Equal(t, descpb.DescriptorVersion(2), descpb.GetDescriptorVersion(desc))
+	}
 
 	// Allow the original lease acquisition to proceed.
 	close(toUnblockForLeaseAcquisition)

@@ -25,6 +25,7 @@ import (
 func TestInlineExecutorFailedJobsHandling(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	defer TestingSetAdoptAndCancelIntervals(time.Millisecond, time.Microsecond)()
 	h, cleanup := newTestHelper(t)
 	defer cleanup()
 
@@ -55,18 +56,14 @@ func TestInlineExecutorFailedJobsHandling(t *testing.T) {
 			j.SetScheduleDetails(jobspb.ScheduleDetails{OnError: test.onError})
 
 			ctx := context.Background()
-			require.NoError(t, j.Create(ctx, h.ex, nil))
+			require.NoError(t, j.Create(ctx, h.cfg.InternalExecutor, nil))
 
 			// Pretend we failed running; we expect job to be rescheduled.
-			md := &JobMetadata{
-				ID:     123,
-				Status: "failed",
-			}
-
-			require.NoError(t, NotifyJobTermination(ctx, h.env, md, j.ScheduleID(), h.ex, nil))
+			require.NoError(t, NotifyJobTermination(
+				ctx, h.env, 123, StatusFailed, nil, j.ScheduleID(), h.cfg.InternalExecutor, nil))
 
 			// Verify nextRun updated
-			loaded := h.loadJob(t, j.ScheduleID())
+			loaded := h.loadSchedule(t, j.ScheduleID())
 			require.Equal(t, test.expectedNextRun, loaded.NextRun())
 		})
 	}

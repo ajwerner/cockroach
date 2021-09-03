@@ -15,12 +15,14 @@ import (
 	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
@@ -42,11 +44,11 @@ type scanNode struct {
 	// Enforce this using NoCopy.
 	_ util.NoCopy
 
-	desc  *sqlbase.ImmutableTableDescriptor
-	index *sqlbase.IndexDescriptor
+	desc  *tabledesc.Immutable
+	index *descpb.IndexDescriptor
 
 	// Set if an index was explicitly specified.
-	specifiedIndex *sqlbase.IndexDescriptor
+	specifiedIndex *descpb.IndexDescriptor
 	// Set if the NO_INDEX_JOIN hint was given.
 	noIndexJoin bool
 
@@ -57,30 +59,24 @@ type scanNode struct {
 	// be gained (e.g. for tables with wide rows) by reading only certain
 	// columns from KV using point lookups instead of a single range lookup for
 	// the entire row.
-	cols []*sqlbase.ColumnDescriptor
+	cols []*descpb.ColumnDescriptor
 	// There is a 1-1 correspondence between cols and resultColumns.
-	resultColumns sqlbase.ResultColumns
+	resultColumns colinfo.ResultColumns
 
 	// Map used to get the index for columns in cols.
-	colIdxMap map[sqlbase.ColumnID]int
+	colIdxMap map[descpb.ColumnID]int
 
 	spans   []roachpb.Span
 	reverse bool
 
 	reqOrdering ReqOrdering
 
-	// filter that can be evaluated using only this table/index; it contains
-	// tree.IndexedVar leaves generated using filterVars.
-	filter     tree.TypedExpr
-	filterVars tree.IndexedVarHelper
-
 	// if non-zero, hardLimit indicates that the scanNode only needs to provide
-	// this many rows (after applying any filter). It is a "hard" guarantee that
-	// Next will only be called this many times.
+	// this many rows.
 	hardLimit int64
-	// if non-zero, softLimit is an estimation that only this many rows (after
-	// applying any filter) might be needed. It is a (potentially optimistic)
-	// "hint". If hardLimit is set (non-zero), softLimit must be unset (zero).
+	// if non-zero, softLimit is an estimation that only this many rows might be
+	// needed. It is a (potentially optimistic) "hint". If hardLimit is set
+	// (non-zero), softLimit must be unset (zero).
 	softLimit int64
 
 	disableBatchLimits bool
@@ -102,8 +98,12 @@ type scanNode struct {
 
 	// lockingStrength and lockingWaitPolicy represent the row-level locking
 	// mode of the Scan.
-	lockingStrength   sqlbase.ScanLockingStrength
-	lockingWaitPolicy sqlbase.ScanLockingWaitPolicy
+	lockingStrength   descpb.ScanLockingStrength
+	lockingWaitPolicy descpb.ScanLockingWaitPolicy
+
+	// containsSystemColumns holds whether or not this scan is expected to
+	// produce any system columns.
+	containsSystemColumns bool
 }
 
 // scanColumnsConfig controls the "schema" of a scan node.
@@ -181,17 +181,8 @@ func (n *scanNode) limitHint() int64 {
 	var limitHint int64
 	if n.hardLimit != 0 {
 		limitHint = n.hardLimit
-		if !isFilterTrue(n.filter) {
-			// The limit is hard, but it applies after the filter; read a multiple of
-			// the limit to avoid needing a second batch. The multiple should be an
-			// estimate for the selectivity of the filter, but we have no way of
-			// calculating that right now.
-			limitHint *= 2
-		}
 	} else {
-		// Like above, read a multiple of the limit when the limit is "soft".
-		// TODO(yuzefovich): shouldn't soft limit already account for the
-		// selectivity of any filter and whatnot?
+		// Read a multiple of the limit when the limit is "soft" to avoid needing a second batch.
 		limitHint = n.softLimit * 2
 	}
 	return limitHint
@@ -201,7 +192,7 @@ func (n *scanNode) limitHint() int64 {
 func (n *scanNode) initTable(
 	ctx context.Context,
 	p *planner,
-	desc *sqlbase.ImmutableTableDescriptor,
+	desc *tabledesc.Immutable,
 	indexFlags *tree.IndexFlags,
 	colCfg scanColumnsConfig,
 ) error {
@@ -218,6 +209,9 @@ func (n *scanNode) initTable(
 			return err
 		}
 	}
+
+	// Check if any system columns are requested, as they need special handling.
+	n.containsSystemColumns = scanContainsSystemColumns(&colCfg)
 
 	n.noIndexJoin = (indexFlags != nil && indexFlags.NoIndexJoin)
 	return n.initDescDefaults(colCfg)
@@ -242,11 +236,11 @@ func (n *scanNode) lookupSpecifiedIndex(indexFlags *tree.IndexFlags) error {
 		}
 	} else if indexFlags.IndexID != 0 {
 		// Search index by ID.
-		if n.desc.PrimaryIndex.ID == sqlbase.IndexID(indexFlags.IndexID) {
+		if n.desc.PrimaryIndex.ID == descpb.IndexID(indexFlags.IndexID) {
 			n.specifiedIndex = &n.desc.PrimaryIndex
 		} else {
 			for i := range n.desc.Indexes {
-				if n.desc.Indexes[i].ID == sqlbase.IndexID(indexFlags.IndexID) {
+				if n.desc.Indexes[i].ID == descpb.IndexID(indexFlags.IndexID) {
 					n.specifiedIndex = &n.desc.Indexes[i]
 					break
 				}
@@ -261,23 +255,33 @@ func (n *scanNode) lookupSpecifiedIndex(indexFlags *tree.IndexFlags) error {
 
 // initColsForScan initializes cols according to desc and colCfg.
 func initColsForScan(
-	desc *sqlbase.ImmutableTableDescriptor, colCfg scanColumnsConfig,
-) (cols []*sqlbase.ColumnDescriptor, err error) {
+	desc *tabledesc.Immutable, colCfg scanColumnsConfig,
+) (cols []*descpb.ColumnDescriptor, err error) {
 	if colCfg.wantedColumns == nil {
 		return nil, errors.AssertionFailedf("unexpectedly wantedColumns is nil")
 	}
 
-	cols = make([]*sqlbase.ColumnDescriptor, 0, len(desc.ReadableColumns))
+	cols = make([]*descpb.ColumnDescriptor, 0, len(desc.ReadableColumns))
 	for _, wc := range colCfg.wantedColumns {
-		var c *sqlbase.ColumnDescriptor
+		var c *descpb.ColumnDescriptor
 		var err error
-		if id := sqlbase.ColumnID(wc); colCfg.visibility == execinfra.ScanVisibilityPublic {
-			c, err = desc.FindActiveColumnByID(id)
+		if colinfo.IsColIDSystemColumn(descpb.ColumnID(wc)) {
+			// If the requested column is a system column, then retrieve the
+			// corresponding descriptor.
+			c, err = colinfo.GetSystemColumnDescriptorFromID(descpb.ColumnID(wc))
+			if err != nil {
+				return nil, err
+			}
 		} else {
-			c, _, err = desc.FindReadableColumnByID(id)
-		}
-		if err != nil {
-			return cols, err
+			// Otherwise, collect the descriptors from the table's columns.
+			if id := descpb.ColumnID(wc); colCfg.visibility == execinfra.ScanVisibilityPublic {
+				c, err = desc.FindActiveColumnByID(id)
+			} else {
+				c, _, err = desc.FindReadableColumnByID(id)
+			}
+			if err != nil {
+				return cols, err
+			}
 		}
 
 		cols = append(cols, c)
@@ -288,7 +292,7 @@ func initColsForScan(
 			c := &desc.Columns[i]
 			found := false
 			for _, wc := range colCfg.wantedColumns {
-				if sqlbase.ColumnID(wc) == c.ID {
+				if descpb.ColumnID(wc) == c.ID {
 					found = true
 					break
 				}
@@ -319,11 +323,10 @@ func (n *scanNode) initDescDefaults(colCfg scanColumnsConfig) error {
 	}
 
 	// Set up the rest of the scanNode.
-	n.resultColumns = sqlbase.ResultColumnsFromColDescPtrs(n.desc.GetID(), n.cols)
-	n.colIdxMap = make(map[sqlbase.ColumnID]int, len(n.cols))
+	n.resultColumns = colinfo.ResultColumnsFromColDescPtrs(n.desc.GetID(), n.cols)
+	n.colIdxMap = make(map[descpb.ColumnID]int, len(n.cols))
 	for i, c := range n.cols {
 		n.colIdxMap[c.ID] = i
 	}
-	n.filterVars = tree.MakeIndexedVarHelper(n, len(n.cols))
 	return nil
 }

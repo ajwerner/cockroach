@@ -13,14 +13,15 @@ package optbuilder
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/util"
 )
 
 func (b *Builder) buildCreateView(cv *tree.CreateView, inScope *scope) (outScope *scope) {
 	b.DisableMemoReuse = true
-	sch, _ := b.resolveSchemaForCreate(&cv.Name)
+	sch, resName := b.resolveSchemaForCreate(&cv.Name)
 	schID := b.factory.Metadata().AddSchema(sch)
+	viewName := tree.MakeTableNameFromPrefix(resName, tree.Name(cv.Name.Object()))
 
 	// We build the select statement to:
 	//  - check the statement semantically,
@@ -44,7 +45,7 @@ func (b *Builder) buildCreateView(cv *tree.CreateView, inScope *scope) (outScope
 	p := defScope.makePhysicalProps().Presentation
 	if len(cv.ColumnNames) != 0 {
 		if len(p) != len(cv.ColumnNames) {
-			panic(sqlbase.NewSyntaxErrorf(
+			panic(sqlerrors.NewSyntaxErrorf(
 				"CREATE VIEW specifies %d column name%s, but data source has %d column%s",
 				len(cv.ColumnNames), util.Pluralize(int64(len(cv.ColumnNames))),
 				len(p), util.Pluralize(int64(len(p)))),
@@ -59,14 +60,15 @@ func (b *Builder) buildCreateView(cv *tree.CreateView, inScope *scope) (outScope
 	outScope = b.allocScope()
 	outScope.expr = b.factory.ConstructCreateView(
 		&memo.CreateViewPrivate{
-			Schema:      schID,
-			ViewName:    cv.Name.Table(),
-			IfNotExists: cv.IfNotExists,
-			Replace:     cv.Replace,
-			Temporary:   cv.Temporary,
-			ViewQuery:   tree.AsStringWithFlags(cv.AsSource, tree.FmtParsable),
-			Columns:     p,
-			Deps:        b.viewDeps,
+			Schema:       schID,
+			ViewName:     &viewName,
+			IfNotExists:  cv.IfNotExists,
+			Replace:      cv.Replace,
+			Persistence:  cv.Persistence,
+			Materialized: cv.Materialized,
+			ViewQuery:    tree.AsStringWithFlags(cv.AsSource, tree.FmtParsable),
+			Columns:      p,
+			Deps:         b.viewDeps,
 		},
 	)
 	return outScope

@@ -1,4 +1,4 @@
-# LogicTest: local fakedist fakedist-disk
+# LogicTest: local fakedist fakedist-disk 3node-tenant
 
 # Note that there is no much benefit from running this file with other logic
 # test configurations because we override vectorize setting.
@@ -286,6 +286,12 @@ SELECT a, b, a < 2 AND b > 0 AND a * b != 3, a < 2 AND b < 2 FROM a WHERE a < 2 
 0  1  true  true
 1  2  true  false
 
+query IIBBBBBB rowsort
+SELECT a, b, a < b AND NULL, a > b AND NULL, NULL OR a < b, NULL OR a > b, NULL AND NULL, NULL OR NULL FROM a WHERE a = 0
+----
+0 0 false false NULL NULL NULL NULL
+0 1 NULL  false true NULL NULL NULL
+
 statement ok
 RESET vectorize;
 CREATE TABLE b (a INT, b STRING, PRIMARY KEY (b,a));
@@ -423,6 +429,16 @@ SELECT * FROM e WHERE x NOT LIKE '%bc'
 xyz
 
 query T
+SELECT * FROM e WHERE x LIKE '%b%'
+----
+abc
+
+query T
+SELECT * FROM e WHERE x NOT LIKE '%b%'
+----
+xyz
+
+query T
 SELECT * FROM e WHERE x LIKE 'a%c'
 ----
 abc
@@ -432,12 +448,12 @@ SELECT * FROM e WHERE x NOT LIKE 'a%c'
 ----
 xyz
 
-query TBBBBBBBB
-SELECT x, x LIKE '%', x NOT LIKE '%', x LIKE 'ab%', x NOT LIKE 'ab%', x LIKE '%bc', x NOT LIKE '%bc', x LIKE 'a%c', x NOT LIKE 'a%c' FROM e ORDER BY x
+query TBBBBBBBBBB
+SELECT x, x LIKE '%', x NOT LIKE '%', x LIKE 'ab%', x NOT LIKE 'ab%', x LIKE '%bc', x NOT LIKE '%bc', x LIKE '%b%', x NOT LIKE '%b%', x LIKE 'a%c', x NOT LIKE 'a%c' FROM e ORDER BY x
 ----
-NULL  NULL  NULL   NULL   NULL   NULL   NULL   NULL   NULL
-abc   true  false  true   false  true   false  true   false
-xyz   true  false  false  true   false  true   false  true
+NULL  NULL  NULL   NULL   NULL   NULL   NULL   NULL   NULL   NULL   NULL
+abc   true  false  true   false  true   false  true   false  true   false
+xyz   true  false  false  true   false  true   false  true   false  true
 
 # Regression test for composite null handling
 # https://github.com/cockroachdb/cockroach/issues/37358
@@ -1235,3 +1251,43 @@ query T
 SELECT c0 FROM t47715 ORDER by c1
 ----
 1819487610
+
+# Ensure that the vectorized engine can plan and produce the MVCC system column.
+statement ok
+RESET vectorize;
+CREATE TABLE mvcc (x INT PRIMARY KEY, y INT, z INT, INDEX i (z));
+INSERT INTO mvcc VALUES (1, 2, 3)
+
+statement ok
+SET vectorize = experimental_always
+
+query B
+SELECT crdb_internal_mvcc_timestamp IS NOT NULL FROM mvcc
+----
+true
+
+query B
+SELECT crdb_internal_mvcc_timestamp IS NOT NULL FROM mvcc@i
+----
+true
+
+# Regression test for builtin funcs that take no arguments, combined with
+# data that can't be safely decoded as input.
+
+statement ok
+RESET vectorize;
+CREATE TABLE t51841 (a) AS SELECT gen_random_uuid();
+SET vectorize = experimental_always
+
+statement ok
+SELECT random() from t51841
+
+# Regression test to ensure that we can EXPLAIN (VEC) plans that contain user
+# defined types. We aren't interested in the output here, but are just ensuring
+# that we don't panic.
+statement ok
+RESET vectorize;
+CREATE TYPE greeting AS ENUM ('hello');
+CREATE TABLE greeting_table (x greeting);
+EXPLAIN (VEC) SELECT * FROM greeting_table;
+SET vectorize = experimental_always

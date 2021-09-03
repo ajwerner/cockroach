@@ -13,7 +13,6 @@ package colexecerror
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"runtime/debug"
 	"strings"
 
@@ -49,10 +48,10 @@ func CatchVectorizedRuntimeError(operation func()) (retErr error) {
 			}
 		}
 		if !panicLineFound {
-			panic(fmt.Sprintf("panic line %q not found in the stack trace\n%s", panicLineSubstring, stackTrace))
+			panic(errors.AssertionFailedf("panic line %q not found in the stack trace\n%s", panicLineSubstring, stackTrace))
 		}
 		if !scanner.Scan() {
-			panic(fmt.Sprintf("unexpectedly there is no line below the panic line in the stack trace\n%s", stackTrace))
+			panic(errors.AssertionFailedf("unexpectedly there is no line below the panic line in the stack trace\n%s", stackTrace))
 		}
 		panicEmittedFrom := strings.TrimSpace(scanner.Text())
 		if !isPanicFromVectorizedEngine(panicEmittedFrom) {
@@ -175,7 +174,7 @@ func init() {
 // caught and returned as internal error to the client with the corresponding
 // stack trace. This method should be called to propagate errors that resulted
 // in the vectorized engine being in an *unexpected* state.
-func InternalError(err interface{}) {
+func InternalError(err error) {
 	panic(err)
 }
 

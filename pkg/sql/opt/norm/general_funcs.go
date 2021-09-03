@@ -55,11 +55,6 @@ func (c *CustomFuncs) HasColType(scalar opt.ScalarExpr, dstTyp *types.T) bool {
 	return scalar.DataType().Identical(dstTyp)
 }
 
-// IsString returns true if the given scalar expression is of type String.
-func (c *CustomFuncs) IsString(scalar opt.ScalarExpr) bool {
-	return scalar.DataType().Family() == types.StringFamily
-}
-
 // IsTimestamp returns true if the given scalar expression is of type Timestamp.
 func (c *CustomFuncs) IsTimestamp(scalar opt.ScalarExpr) bool {
 	return scalar.DataType().Family() == types.TimestampFamily
@@ -135,6 +130,12 @@ func (c *CustomFuncs) IsConstJSON(expr opt.ScalarExpr) bool {
 		}
 	}
 	return false
+}
+
+// IsFloatDatum returns true if the given tree.Datum is a DFloat.
+func (c *CustomFuncs) IsFloatDatum(datum tree.Datum) bool {
+	_, ok := datum.(*tree.DFloat)
+	return ok
 }
 
 // ----------------------------------------------------------------------
@@ -267,6 +268,30 @@ func (c *CustomFuncs) RedundantCols(input memo.RelExpr, cols opt.ColSet) opt.Col
 		return opt.ColSet{}
 	}
 	return cols.Difference(reducedCols)
+}
+
+// RemapCols remaps columns IDs in the input ScalarExpr by replacing occurrences
+// of the keys of colMap with the corresponding values. If column IDs are
+// encountered in the input ScalarExpr that are not keys in colMap, they are not
+// remapped.
+func (c *CustomFuncs) RemapCols(scalar opt.ScalarExpr, colMap opt.ColMap) opt.ScalarExpr {
+	// Recursively walk the scalar sub-tree looking for references to columns
+	// that need to be replaced and then replace them appropriately.
+	var replace ReplaceFunc
+	replace = func(e opt.Expr) opt.Expr {
+		switch t := e.(type) {
+		case *memo.VariableExpr:
+			dstCol, ok := colMap.Get(int(t.Col))
+			if !ok {
+				// The column ID is not in colMap so no replacement is required.
+				return e
+			}
+			return c.f.ConstructVariable(opt.ColumnID(dstCol))
+		}
+		return c.f.Replace(e, replace)
+	}
+
+	return replace(scalar).(opt.ScalarExpr)
 }
 
 // ----------------------------------------------------------------------
@@ -881,7 +906,7 @@ func (c *CustomFuncs) MakeAggCols(aggOp opt.Operator, cols opt.ColSet) memo.Aggr
 // than once.
 func (c *CustomFuncs) JoinDoesNotDuplicateLeftRows(join memo.RelExpr) bool {
 	mult := memo.GetJoinMultiplicity(join)
-	return mult.JoinDoesNotDuplicateLeftRows()
+	return mult.JoinDoesNotDuplicateLeftRows(join.Op())
 }
 
 // JoinDoesNotDuplicateRightRows returns true if the given InnerJoin, LeftJoin
@@ -889,14 +914,14 @@ func (c *CustomFuncs) JoinDoesNotDuplicateLeftRows(join memo.RelExpr) bool {
 // more than once.
 func (c *CustomFuncs) JoinDoesNotDuplicateRightRows(join memo.RelExpr) bool {
 	mult := memo.GetJoinMultiplicity(join)
-	return mult.JoinDoesNotDuplicateRightRows()
+	return mult.JoinDoesNotDuplicateRightRows(join.Op())
 }
 
 // JoinPreservesLeftRows returns true if the given InnerJoin, LeftJoin or
 // FullJoin is guaranteed to output every row from its left input at least once.
 func (c *CustomFuncs) JoinPreservesLeftRows(join memo.RelExpr) bool {
 	mult := memo.GetJoinMultiplicity(join)
-	return mult.JoinPreservesLeftRows()
+	return mult.JoinPreservesLeftRows(join.Op())
 }
 
 // JoinPreservesRightRows returns true if the given InnerJoin, LeftJoin or
@@ -904,7 +929,7 @@ func (c *CustomFuncs) JoinPreservesLeftRows(join memo.RelExpr) bool {
 // once.
 func (c *CustomFuncs) JoinPreservesRightRows(join memo.RelExpr) bool {
 	mult := memo.GetJoinMultiplicity(join)
-	return mult.JoinPreservesRightRows()
+	return mult.JoinPreservesRightRows(join.Op())
 }
 
 // NoJoinHints returns true if no hints were specified for this join.
@@ -990,4 +1015,43 @@ func (c *CustomFuncs) IntConst(d *tree.DInt) opt.ScalarExpr {
 // second.
 func (c *CustomFuncs) IsGreaterThan(first, second tree.Datum) bool {
 	return first.Compare(c.f.evalCtx, second) == 1
+}
+
+// DatumsEqual returns true if the first datum compares as equal to the second.
+func (c *CustomFuncs) DatumsEqual(first, second tree.Datum) bool {
+	return first.Compare(c.f.evalCtx, second) == 0
+}
+
+// ----------------------------------------------------------------------
+//
+// Scan functions
+//   General functions related to scan operators.
+//
+// ----------------------------------------------------------------------
+
+// DuplicateScanPrivate constructs a new ScanPrivate with new table and column
+// IDs. Only the Index, Flags and Locking fields are copied from the old
+// ScanPrivate, so the new ScanPrivate will not have constraints even if the old
+// one did.
+func (c *CustomFuncs) DuplicateScanPrivate(sp *memo.ScanPrivate) *memo.ScanPrivate {
+	md := c.mem.Metadata()
+	tabMeta := md.TableMeta(sp.Table)
+	newTableID := md.DuplicateTable(sp.Table, c.RemapCols)
+
+	// Build a new set of column IDs from the new TableMeta.
+	var newColIDs opt.ColSet
+	cols := sp.Cols
+	for col, ok := cols.Next(0); ok; col, ok = cols.Next(col + 1) {
+		ord := tabMeta.MetaID.ColumnOrdinal(col)
+		newColID := newTableID.ColumnID(ord)
+		newColIDs.Add(newColID)
+	}
+
+	return &memo.ScanPrivate{
+		Table:   newTableID,
+		Index:   sp.Index,
+		Cols:    newColIDs,
+		Flags:   sp.Flags,
+		Locking: sp.Locking,
+	}
 }

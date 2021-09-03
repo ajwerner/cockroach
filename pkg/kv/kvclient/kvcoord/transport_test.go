@@ -21,7 +21,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	opentracing "github.com/opentracing/opentracing-go"
 	"google.golang.org/grpc"
 )
 
@@ -54,20 +53,20 @@ func TestTransportMoveToFront(t *testing.T) {
 	verifyOrder([]roachpb.ReplicaDescriptor{rd3, rd1, rd2})
 
 	// Advance the client index and move replica 3 back to front.
-	gt.clientIndex++
+	gt.nextReplicaIdx++
 	gt.MoveToFront(rd3)
 	verifyOrder([]roachpb.ReplicaDescriptor{rd3, rd1, rd2})
-	if gt.clientIndex != 0 {
-		t.Fatalf("expected client index 0; got %d", gt.clientIndex)
+	if gt.nextReplicaIdx != 0 {
+		t.Fatalf("expected client index 0; got %d", gt.nextReplicaIdx)
 	}
 
 	// Advance the client index again and verify replica 3 can
 	// be moved to front for a second retry.
-	gt.clientIndex++
+	gt.nextReplicaIdx++
 	gt.MoveToFront(rd3)
 	verifyOrder([]roachpb.ReplicaDescriptor{rd3, rd1, rd2})
-	if gt.clientIndex != 0 {
-		t.Fatalf("expected client index 0; got %d", gt.clientIndex)
+	if gt.nextReplicaIdx != 0 {
+		t.Fatalf("expected client index 0; got %d", gt.nextReplicaIdx)
 	}
 
 	// Move replica 2 to the front.
@@ -75,25 +74,25 @@ func TestTransportMoveToFront(t *testing.T) {
 	verifyOrder([]roachpb.ReplicaDescriptor{rd2, rd1, rd3})
 
 	// Advance client index and move rd1 front; should be no change.
-	gt.clientIndex++
+	gt.nextReplicaIdx++
 	gt.MoveToFront(rd1)
 	verifyOrder([]roachpb.ReplicaDescriptor{rd2, rd1, rd3})
 
 	// Advance client index and and move rd1 to front. Should move
 	// client index back for a retry.
-	gt.clientIndex++
+	gt.nextReplicaIdx++
 	gt.MoveToFront(rd1)
 	verifyOrder([]roachpb.ReplicaDescriptor{rd2, rd1, rd3})
-	if gt.clientIndex != 1 {
-		t.Fatalf("expected client index 1; got %d", gt.clientIndex)
+	if gt.nextReplicaIdx != 1 {
+		t.Fatalf("expected client index 1; got %d", gt.nextReplicaIdx)
 	}
 
 	// Advance client index once more; verify second retry.
-	gt.clientIndex++
+	gt.nextReplicaIdx++
 	gt.MoveToFront(rd2)
 	verifyOrder([]roachpb.ReplicaDescriptor{rd1, rd2, rd3})
-	if gt.clientIndex != 1 {
-		t.Fatalf("expected client index 1; got %d", gt.clientIndex)
+	if gt.nextReplicaIdx != 1 {
+		t.Fatalf("expected client index 1; got %d", gt.nextReplicaIdx)
 	}
 }
 
@@ -117,7 +116,7 @@ func TestSpanImport(t *testing.T) {
 	recCtx, getRec, cancel := tracing.ContextWithRecordingSpan(ctx, "test")
 	defer cancel()
 
-	server.tr = opentracing.SpanFromContext(recCtx).Tracer().(*tracing.Tracer)
+	server.tr = tracing.SpanFromContext(recCtx).Tracer()
 
 	br, err := gt.sendBatch(recCtx, roachpb.NodeID(1), &server, roachpb.BatchRequest{})
 	if err != nil {
@@ -148,7 +147,7 @@ func (m *mockInternalClient) Batch(
 	sp := m.tr.StartRootSpan("mock", nil /* logTags */, tracing.RecordableSpan)
 	defer sp.Finish()
 	tracing.StartRecording(sp, tracing.SnowballRecording)
-	ctx = opentracing.ContextWithSpan(ctx, sp)
+	ctx = tracing.ContextWithSpan(ctx, sp)
 
 	log.Eventf(ctx, "mockInternalClient processing batch")
 	br := &roachpb.BatchResponse{}
@@ -159,9 +158,29 @@ func (m *mockInternalClient) Batch(
 	return br, nil
 }
 
+// RangeLookup implements the roachpb.InternalClient interface.
+func (m *mockInternalClient) RangeLookup(
+	ctx context.Context, rl *roachpb.RangeLookupRequest, _ ...grpc.CallOption,
+) (*roachpb.RangeLookupResponse, error) {
+	return nil, fmt.Errorf("unsupported RangeLookup call")
+}
+
 // RangeFeed is part of the roachpb.InternalClient interface.
 func (m *mockInternalClient) RangeFeed(
 	ctx context.Context, in *roachpb.RangeFeedRequest, opts ...grpc.CallOption,
 ) (roachpb.Internal_RangeFeedClient, error) {
 	return nil, fmt.Errorf("unsupported RangeFeed call")
+}
+
+// GossipSubscription is part of the roachpb.InternalClient interface.
+func (m *mockInternalClient) GossipSubscription(
+	ctx context.Context, args *roachpb.GossipSubscriptionRequest, _ ...grpc.CallOption,
+) (roachpb.Internal_GossipSubscriptionClient, error) {
+	return nil, fmt.Errorf("unsupported GossipSubscripion call")
+}
+
+func (m *mockInternalClient) Join(
+	context.Context, *roachpb.JoinNodeRequest, ...grpc.CallOption,
+) (*roachpb.JoinNodeResponse, error) {
+	return nil, fmt.Errorf("unsupported Join call")
 }

@@ -19,9 +19,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -41,7 +44,7 @@ func slurpUserDataKVs(t testing.TB, e storage.Engine) []roachpb.KeyValue {
 	var kvs []roachpb.KeyValue
 	testutils.SucceedsSoon(t, func() error {
 		kvs = nil
-		it := e.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
+		it := e.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
 		defer it.Close()
 		for it.SeekGE(storage.MVCCKey{Key: keys.UserTableDataMin}); ; it.NextKey() {
 			ok, err := it.Valid()
@@ -83,11 +86,11 @@ func TestRowFetcherMVCCMetadata(t *testing.T) {
 		e STRING, f STRING, PRIMARY KEY (e, f)
 	) INTERLEAVE IN PARENT parent (e)`)
 
-	parentDesc := sqlbase.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, `d`, `parent`)
-	childDesc := sqlbase.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, `d`, `child`)
+	parentDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, `d`, `parent`)
+	childDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, `d`, `child`)
 	var args []row.FetcherTableArgs
-	for _, desc := range []*sqlbase.ImmutableTableDescriptor{parentDesc, childDesc} {
-		colIdxMap := make(map[sqlbase.ColumnID]int)
+	for _, desc := range []*tabledesc.Immutable{parentDesc, childDesc} {
+		colIdxMap := make(map[descpb.ColumnID]int)
 		var valNeededForCol util.FastIntSet
 		for colIdx := range desc.Columns {
 			id := desc.Columns[colIdx].ID
@@ -106,12 +109,14 @@ func TestRowFetcherMVCCMetadata(t *testing.T) {
 	}
 	var rf row.Fetcher
 	if err := rf.Init(
+		ctx,
 		keys.SystemSQLCodec,
 		false, /* reverse */
-		sqlbase.ScanLockingStrength_FOR_NONE,
-		false, /* returnRangeInfo */
-		true,  /* isCheck */
-		&sqlbase.DatumAlloc{},
+		descpb.ScanLockingStrength_FOR_NONE,
+		descpb.ScanLockingWaitPolicy_BLOCK,
+		true, /* isCheck */
+		&rowenc.DatumAlloc{},
+		nil, /* memMonitor */
 		args...,
 	); err != nil {
 		t.Fatal(err)
@@ -141,7 +146,7 @@ func TestRowFetcherMVCCMetadata(t *testing.T) {
 			}
 			row := rowWithMVCCMetadata{
 				RowIsDeleted:    rf.RowIsDeleted(),
-				RowLastModified: tree.TimestampToDecimal(rf.RowLastModified()).String(),
+				RowLastModified: tree.TimestampToDecimalDatum(rf.RowLastModified()).String(),
 			}
 			for _, datum := range datums {
 				if datum == tree.DNull {

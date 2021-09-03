@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -29,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/kvclientutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/localtestcluster"
+	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -43,14 +45,13 @@ import (
 // createTestDB creates a local test server and starts it. The caller
 // is responsible for stopping the test server.
 func createTestDB(t testing.TB) *localtestcluster.LocalTestCluster {
-	return createTestDBWithContextAndKnobs(t, kv.DefaultDBContext(), nil)
+	return createTestDBWithKnobs(t, nil)
 }
 
-func createTestDBWithContextAndKnobs(
-	t testing.TB, dbCtx kv.DBContext, knobs *kvserver.StoreTestingKnobs,
+func createTestDBWithKnobs(
+	t testing.TB, knobs *kvserver.StoreTestingKnobs,
 ) *localtestcluster.LocalTestCluster {
 	s := &localtestcluster.LocalTestCluster{
-		DBContext:         &dbCtx,
 		StoreTestingKnobs: knobs,
 	}
 	s.Start(t, testutils.NewNodeTestBaseContext(), InitFactoryForLocalTestCluster)
@@ -202,12 +203,10 @@ func TestTxnCoordSenderCondenseLockSpans(t *testing.T) {
 	// Check end transaction locks, which should be condensed and split
 	// at range boundaries.
 	expLocks := []roachpb.Span{aToBClosed, cToEClosed, fTog1Closed}
-	var sendFn simpleSendFn = func(
-		_ context.Context, _ SendOptions, _ ReplicaSlice, args roachpb.BatchRequest,
-	) (*roachpb.BatchResponse, error) {
-		resp := args.CreateReply()
-		resp.Txn = args.Txn
-		if req, ok := args.GetArg(roachpb.EndTxn); ok {
+	sendFn := func(_ context.Context, ba roachpb.BatchRequest) (*roachpb.BatchResponse, error) {
+		resp := ba.CreateReply()
+		resp.Txn = ba.Txn
+		if req, ok := ba.GetArg(roachpb.EndTxn); ok {
 			if !req.(*roachpb.EndTxnRequest).Commit {
 				t.Errorf("expected commit to be true")
 			}
@@ -236,11 +235,11 @@ func TestTxnCoordSenderCondenseLockSpans(t *testing.T) {
 			AmbientCtx: ambient,
 			Settings:   st,
 			Clock:      s.Clock,
-			Stopper:    s.Stopper,
+			Stopper:    s.Stopper(),
 		},
 		ds,
 	)
-	db := kv.NewDB(ambient, tsf, s.Clock)
+	db := kv.NewDB(ambient, tsf, s.Clock, s.Stopper())
 	ctx := context.Background()
 
 	txn := kv.NewTxn(ctx, db, 0 /* gatewayNodeID */)
@@ -281,7 +280,7 @@ func TestTxnCoordSenderCondenseLockSpans(t *testing.T) {
 func TestTxnCoordSenderHeartbeat(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	s := createTestDBWithContextAndKnobs(t, kv.DefaultDBContext(), &kvserver.StoreTestingKnobs{
+	s := createTestDBWithKnobs(t, &kvserver.StoreTestingKnobs{
 		DisableScanner:    true,
 		DisableSplitQueue: true,
 		DisableMergeQueue: true,
@@ -305,14 +304,14 @@ func TestTxnCoordSenderHeartbeat(t *testing.T) {
 			HeartbeatInterval: time.Millisecond,
 			Settings:          s.Cfg.Settings,
 			Clock:             s.Clock,
-			Stopper:           s.Stopper,
+			Stopper:           s.Stopper(),
 		},
 		NewDistSenderForLocalTestCluster(
 			s.Cfg.Settings, &roachpb.NodeDescriptor{NodeID: 1},
-			ambient.Tracer, s.Clock, s.Latency, s.Stores, s.Stopper, s.Gossip,
+			ambient.Tracer, s.Clock, s.Latency, s.Stores, s.Stopper(), s.Gossip,
 		),
 	)
-	quickHeartbeatDB := kv.NewDB(ambient, tsf, s.Clock)
+	quickHeartbeatDB := kv.NewDB(ambient, tsf, s.Clock, s.Stopper())
 
 	// We're going to test twice. In both cases the heartbeat is supposed to
 	// notice that its transaction is aborted, but:
@@ -415,8 +414,8 @@ func verifyCleanup(key roachpb.Key, eng storage.Engine, t *testing.T, coords ...
 			}
 		}
 		meta := &enginepb.MVCCMetadata{}
-		//lint:ignore SA1019 historical usage of deprecated eng.GetProto is OK
-		ok, _, _, err := eng.GetProto(storage.MakeMVCCMetadataKey(key), meta)
+		//lint:ignore SA1019 historical usage of deprecated eng.MVCCGetProto is OK
+		ok, _, _, err := eng.MVCCGetProto(storage.MakeMVCCMetadataKey(key), meta)
 		if err != nil {
 			return fmt.Errorf("error getting MVCC metadata: %s", err)
 		}
@@ -659,7 +658,7 @@ func TestTxnCoordSenderGCWithAmbiguousResultErr(t *testing.T) {
 			},
 		}
 
-		s := createTestDBWithContextAndKnobs(t, kv.DefaultDBContext(), knobs)
+		s := createTestDBWithKnobs(t, knobs)
 		defer s.Stop()
 
 		ctx := context.Background()
@@ -817,7 +816,7 @@ func TestTxnCoordSenderTxnUpdatedOnError(t *testing.T) {
 				},
 				senderFn,
 			)
-			db := kv.NewDB(ambient, tsf, clock)
+			db := kv.NewDB(ambient, tsf, clock, stopper)
 			key := roachpb.Key("test-key")
 			now := clock.Now()
 			origTxnProto := roachpb.MakeTransaction(
@@ -961,7 +960,7 @@ func TestTxnCoordSenderNoDuplicateLockSpans(t *testing.T) {
 	)
 	defer stopper.Stop(ctx)
 
-	db := kv.NewDB(ambient, factory, clock)
+	db := kv.NewDB(ambient, factory, clock, stopper)
 	txn := kv.NewTxn(ctx, db, 0 /* gatewayNodeID */)
 
 	// Acquire locks on a-b, c, u-w before the final batch.
@@ -1052,9 +1051,7 @@ func checkTxnMetricsOnce(
 // have a faster sample interval and returns a cleanup function to be
 // executed by callers.
 func setupMetricsTest(t *testing.T) (*localtestcluster.LocalTestCluster, TxnMetrics, func()) {
-	dbCtx := kv.DefaultDBContext()
 	s := &localtestcluster.LocalTestCluster{
-		DBContext: &dbCtx,
 		// Liveness heartbeat txns mess up the metrics.
 		DisableLivenessHeartbeat: true,
 		DontCreateSystemRanges:   true,
@@ -1191,8 +1188,8 @@ func TestTxnRestartCount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// This put will lay down an intent, txn timestamp will increase
-	// beyond DeprecatedOrigTimestamp.
+	// This put will lay down an intent, txn write timestamp will increase beyond
+	// the read timestamp.
 	if err := txn.Put(ctx, writeKey, value); err != nil {
 		t.Fatal(err)
 	}
@@ -1301,16 +1298,7 @@ func TestAbortTransactionOnCommitErrors(t *testing.T) {
 				br := ba.CreateReply()
 				br.Txn = ba.Txn.Clone()
 
-				if _, hasPut := ba.GetArg(roachpb.Put); hasPut {
-					if _, ok := ba.Requests[0].GetInner().(*roachpb.PutRequest); !ok {
-						t.Fatalf("expected Put")
-					}
-					union := &br.Responses[0] // avoid operating on copy
-					union.MustSetInner(&roachpb.PutResponse{})
-					if ba.Txn != nil && br.Txn == nil {
-						br.Txn.Status = roachpb.PENDING
-					}
-				} else if et, hasET := ba.GetArg(roachpb.EndTxn); hasET {
+				if et, hasET := ba.GetArg(roachpb.EndTxn); hasET {
 					if et.(*roachpb.EndTxnRequest).Commit {
 						commit.Store(true)
 						if test.errFn != nil {
@@ -1319,8 +1307,6 @@ func TestAbortTransactionOnCommitErrors(t *testing.T) {
 						return nil, roachpb.NewErrorWithTxn(test.err, ba.Txn)
 					}
 					abort.Store(true)
-				} else {
-					t.Fatalf("unexpected batch: %s", ba)
 				}
 				return br, nil
 			}
@@ -1335,7 +1321,7 @@ func TestAbortTransactionOnCommitErrors(t *testing.T) {
 				senderFn,
 			)
 
-			db := kv.NewDB(ambient, factory, clock)
+			db := kv.NewDB(ambient, factory, clock, stopper)
 			txn := kv.NewTxn(ctx, db, 0 /* gatewayNodeID */)
 			if pErr := txn.Put(ctx, "a", "b"); pErr != nil {
 				t.Fatalf("put failed: %s", pErr)
@@ -1415,7 +1401,7 @@ func TestRollbackErrorStopsHeartbeat(t *testing.T) {
 		},
 		sender,
 	)
-	db := kv.NewDB(ambient, factory, clock)
+	db := kv.NewDB(ambient, factory, clock, stopper)
 
 	sender.match(func(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
 		if _, ok := ba.GetArg(roachpb.EndTxn); !ok {
@@ -1483,7 +1469,7 @@ func TestOnePCErrorTracking(t *testing.T) {
 		},
 		sender,
 	)
-	db := kv.NewDB(ambient, factory, clock)
+	db := kv.NewDB(ambient, factory, clock, stopper)
 	keyA, keyB, keyC := roachpb.Key("a"), roachpb.Key("b"), roachpb.Key("c")
 
 	// Register a matcher catching the commit attempt.
@@ -1577,7 +1563,7 @@ func TestCommitReadOnlyTransaction(t *testing.T) {
 	testutils.RunTrueAndFalse(t, "explicit txn", func(t *testing.T, explicitTxn bool) {
 		testutils.RunTrueAndFalse(t, "with get", func(t *testing.T, withGet bool) {
 			calls = nil
-			db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock)
+			db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock, stopper)
 			if err := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 				b := txn.NewBatch()
 				if withGet {
@@ -1683,7 +1669,7 @@ func TestCommitMutatingTransaction(t *testing.T) {
 	for i, test := range testArgs {
 		t.Run(test.expMethod.String(), func(t *testing.T) {
 			calls = nil
-			db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock)
+			db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock, stopper)
 			if err := db.Txn(ctx, test.f); err != nil {
 				t.Fatalf("%d: unexpected error on commit: %s", i, err)
 			}
@@ -1726,7 +1712,7 @@ func TestAbortReadOnlyTransaction(t *testing.T) {
 		},
 		sender,
 	)
-	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock)
+	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock, stopper)
 	if err := db.Txn(context.Background(), func(ctx context.Context, txn *kv.Txn) error {
 		return errors.New("foo")
 	}); err == nil {
@@ -1783,7 +1769,7 @@ func TestEndWriteRestartReadOnlyTransaction(t *testing.T) {
 		},
 		sender,
 	)
-	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock)
+	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock, stopper)
 
 	testutils.RunTrueAndFalse(t, "write", func(t *testing.T, write bool) {
 		testutils.RunTrueAndFalse(t, "success", func(t *testing.T, success bool) {
@@ -1875,7 +1861,7 @@ func TestTransactionKeyNotChangedInRestart(t *testing.T) {
 		},
 		sender,
 	)
-	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock)
+	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock, stopper)
 
 	if err := db.Txn(context.Background(), func(ctx context.Context, txn *kv.Txn) error {
 		defer func() { attempt++ }()
@@ -1931,7 +1917,7 @@ func TestSequenceNumbers(t *testing.T) {
 		},
 		sender,
 	)
-	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock)
+	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock, stopper)
 	txn := kv.NewTxn(ctx, db, 0 /* gatewayNodeID */)
 
 	for i := 0; i < 5; i++ {
@@ -1981,7 +1967,7 @@ func TestConcurrentTxnRequestsProhibited(t *testing.T) {
 		},
 		sender,
 	)
-	db := kv.NewDB(ambient, factory, clock)
+	db := kv.NewDB(ambient, factory, clock, stopper)
 
 	err := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		g, gCtx := errgroup.WithContext(ctx)
@@ -2023,7 +2009,7 @@ func TestTxnRequestTxnTimestamp(t *testing.T) {
 		},
 		sender,
 	)
-	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock)
+	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock, stopper)
 
 	curReq := 0
 	requests := []struct {
@@ -2099,7 +2085,7 @@ func TestReadOnlyTxnObeysDeadline(t *testing.T) {
 		},
 		sender,
 	)
-	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock)
+	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock, stopper)
 
 	// We're going to run two tests: one where the EndTxn is by itself in a
 	// batch, one where it is not. As of June 2018, the EndTxn is elided in
@@ -2163,9 +2149,9 @@ func TestTxnCoordSenderPipelining(t *testing.T) {
 		AmbientCtx: ambientCtx,
 		Settings:   s.Cfg.Settings,
 		Clock:      s.Clock,
-		Stopper:    s.Stopper,
+		Stopper:    s.Stopper(),
 	}, senderFn)
-	db := kv.NewDB(ambientCtx, tsf, s.Clock)
+	db := kv.NewDB(ambientCtx, tsf, s.Clock, s.Stopper())
 
 	err := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		return txn.Put(ctx, "key", "val")
@@ -2244,7 +2230,7 @@ func TestAnchorKey(t *testing.T) {
 		},
 		senderFn,
 	)
-	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock)
+	db := kv.NewDB(testutils.MakeAmbientCtx(), factory, clock, stopper)
 
 	if err := db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
 		ba := txn.NewBatch()
@@ -2282,7 +2268,7 @@ func TestLeafTxnClientRejectError(t *testing.T) {
 		},
 	}
 
-	s := createTestDBWithContextAndKnobs(t, kv.DefaultDBContext(), knobs)
+	s := createTestDBWithKnobs(t, knobs)
 	defer s.Stop()
 
 	ctx := context.Background()
@@ -2313,7 +2299,7 @@ func TestLeafTxnClientRejectError(t *testing.T) {
 func TestUpdateRoootWithLeafFinalStateInAbortedTxn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	s := createTestDBWithContextAndKnobs(t, kv.DefaultDBContext(), nil /* knobs */)
+	s := createTestDBWithKnobs(t, nil /* knobs */)
 	defer s.Stop()
 	ctx := context.Background()
 
@@ -2335,4 +2321,74 @@ func TestUpdateRoootWithLeafFinalStateInAbortedTxn(t *testing.T) {
 	if leafInputState2.Txn.Status != roachpb.PENDING {
 		t.Fatalf("expected PENDING txn, got: %s", leafInputState2.Txn.Status)
 	}
+}
+
+// Test that evaluating a request within a txn with the STAGING status works
+// fine. It's unusual for the server to receive a request in the STAGING status
+// (other than a single EndTxn which transitions from STAGING->COMMITTED),
+// because the committer interceptor reverts the status from STAGING->PENDING if
+// the batch moving to STAGING has been split and some part of it failed.
+// However, it can still happen that the server receives a request with the
+// STAGING record when the DistSender splits a batch and doesn't send all the
+// sub-batches in parallel; in that case it's possible that a sub-batch with the
+// EndTxn succeeds, and then the DistSender will send the remaining sub-batches
+// with a STAGING status.
+func TestPutsInStagingTxn(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+
+	keyA := roachpb.Key("a")
+	keyB := roachpb.Key("b")
+
+	var putInStagingSeen bool
+	var storeKnobs kvserver.StoreTestingKnobs
+	storeKnobs.TestingRequestFilter = func(ctx context.Context, ba roachpb.BatchRequest) *roachpb.Error {
+		put, ok := ba.GetArg(roachpb.Put)
+		if !ok || !put.(*roachpb.PutRequest).Key.Equal(keyB) {
+			return nil
+		}
+		txn := ba.Txn
+		if txn == nil {
+			return nil
+		}
+		if txn.Status == roachpb.STAGING {
+			putInStagingSeen = true
+		}
+		return nil
+	}
+
+	// Disable the DistSender concurrency so that sub-batches split by the
+	// DistSender are send serially and the transaction is updated from one to
+	// another. See below.
+	settings := cluster.MakeTestingClusterSettings()
+	senderConcurrencyLimit.Override(&settings.SV, 0)
+
+	s, _, db := serverutils.StartServer(t,
+		base.TestServerArgs{
+			Settings: settings,
+			Knobs:    base.TestingKnobs{Store: &storeKnobs},
+		})
+	defer s.Stopper().Stop(ctx)
+
+	require.NoError(t, db.AdminSplit(ctx, keyB /* splitKey */, hlc.MaxTimestamp /* expirationTimestamp */))
+
+	txn := db.NewTxn(ctx, "test")
+
+	// Cause a write too old condition for the upcoming txn writes, to spicy up
+	// the test.
+	require.NoError(t, db.Put(ctx, keyB, "b"))
+
+	// Send a batch that will be split into two sub-batches: [Put(a)+EndTxn,
+	// Put(b)] (the EndTxn is grouped with the first write). These sub-batches are
+	// sent serially since we've inhibited the DistSender's concurrency. The first
+	// one will transition the txn to STAGING, and the DistSender will use that
+	// updated txn when sending the 2nd sub-batch.
+	b := txn.NewBatch()
+	b.Put(keyA, "a")
+	b.Put(keyB, "b")
+	require.NoError(t, txn.CommitInBatch(ctx, b))
+	// Verify that the test isn't fooling itself by checking that we've indeed
+	// seen a batch with the STAGING status.
+	require.True(t, putInStagingSeen)
 }

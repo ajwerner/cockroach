@@ -22,9 +22,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/jobutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -44,10 +46,7 @@ func TestCreateStatsControlJob(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	defer func(oldInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldInterval
-	}(jobs.DefaultAdoptInterval)
-	jobs.DefaultAdoptInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	// Test with 3 nodes and rowexec.SamplerProgressInterval=100 to ensure
 	// that progress metadata is sent correctly after every 100 input rows.
@@ -136,16 +135,15 @@ func TestCreateStatsLivenessWithRestart(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	defer func(oldAdoptInterval, oldCancelInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldAdoptInterval
-		jobs.DefaultCancelInterval = oldCancelInterval
-	}(jobs.DefaultAdoptInterval, jobs.DefaultCancelInterval)
-	jobs.DefaultAdoptInterval = 100 * time.Millisecond
-	jobs.DefaultCancelInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	const nodes = 1
 	nl := jobs.NewFakeNodeLiveness(nodes)
 	serverArgs := base.TestServerArgs{
+		Settings: cluster.MakeTestingClusterSettingsWithVersions(
+			roachpb.Version{Major: 20, Minor: 1},
+			roachpb.Version{Major: 20, Minor: 1},
+			true),
 		Knobs: base.TestingKnobs{
 			RegistryLiveness: nl,
 		},
@@ -246,16 +244,15 @@ func TestCreateStatsLivenessWithLeniency(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	defer func(oldAdoptInterval, oldCancelInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldAdoptInterval
-		jobs.DefaultCancelInterval = oldCancelInterval
-	}(jobs.DefaultAdoptInterval, jobs.DefaultCancelInterval)
-	jobs.DefaultAdoptInterval = 100 * time.Millisecond
-	jobs.DefaultCancelInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	const nodes = 1
 	nl := jobs.NewFakeNodeLiveness(nodes)
 	serverArgs := base.TestServerArgs{
+		Settings: cluster.MakeTestingClusterSettingsWithVersions(
+			roachpb.Version{Major: 20, Minor: 1},
+			roachpb.Version{Major: 20, Minor: 1},
+			true),
 		Knobs: base.TestingKnobs{
 			RegistryLiveness: nl,
 		},
@@ -335,10 +332,7 @@ func TestAtMostOneRunningCreateStats(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	defer func(oldAdoptInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldAdoptInterval
-	}(jobs.DefaultAdoptInterval)
-	jobs.DefaultAdoptInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	var allowRequest chan struct{}
 
@@ -449,10 +443,7 @@ func TestDeleteFailedJob(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	defer func(oldAdoptInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldAdoptInterval
-	}(jobs.DefaultAdoptInterval)
-	jobs.DefaultAdoptInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(100*time.Millisecond, 100*time.Millisecond)()
 
 	ctx := context.Background()
 	tc := testcluster.StartTestCluster(t, 1, base.TestClusterArgs{})
@@ -596,6 +587,13 @@ func TestCreateStatsProgress(t *testing.T) {
 		)
 	}
 
+	// Invalidate the stats cache so that we can be sure to get the latest stats.
+	var tableID descpb.ID
+	sqlDB.QueryRow(t, `SELECT id FROM system.namespace WHERE name = 't'`).Scan(&tableID)
+	tc.Servers[0].ExecutorConfig().(sql.ExecutorConfig).TableStatsCache.InvalidateTableStats(
+		ctx, tableID,
+	)
+
 	// Start another CREATE STATISTICS run and wait until it has scanned part of
 	// the table.
 	allowRequest = make(chan struct{})
@@ -680,7 +678,7 @@ func createStatsRequestFilter(allowProgressIota *chan struct{}) kvserverbase.Rep
 			_, tableID, _ := encoding.DecodeUvarintAscending(req.(*roachpb.ScanRequest).Key)
 			// Ensure that the tableID is within the expected range for a table,
 			// but is not a system table.
-			if tableID > 0 && tableID < 100 && !sqlbase.IsReservedID(sqlbase.ID(tableID)) {
+			if tableID > 0 && tableID < 100 && !descpb.IsReservedID(descpb.ID(tableID)) {
 				// Read from the channel twice to allow jobutils.RunJob to complete
 				// even though there is only one ScanRequest.
 				<-*allowProgressIota

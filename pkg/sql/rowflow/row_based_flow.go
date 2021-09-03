@@ -12,14 +12,14 @@ package rowflow
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -178,7 +178,7 @@ func findProcByOutputStreamID(
 			continue
 		}
 		if len(ospec.Streams) != 1 {
-			panic(fmt.Sprintf("pass-through router with %d streams", len(ospec.Streams)))
+			panic(errors.AssertionFailedf("pass-through router with %d streams", len(ospec.Streams)))
 		}
 		if ospec.Streams[0].StreamID == streamID {
 			return pspec
@@ -268,6 +268,16 @@ func (f *rowBasedFlow) setupInputSyncs(
 				return nil, errors.Errorf("unsupported input sync type %s", is.Type)
 			}
 
+			// Before we can safely use types we received over the wire in the
+			// processors, we need to make sure they are hydrated. All processors other
+			// than processors that scan over tables get their inputs from here, so
+			// this is a convenient place to do the hydration. Processors that scan
+			// over tables will have their hydration performed in ProcessorBase.Init.
+			resolver := f.TypeResolverFactory.NewTypeResolver(f.EvalCtx.Txn)
+			if err := resolver.HydrateTypeSlice(ctx, is.ColumnTypes); err != nil {
+				return nil, err
+			}
+
 			if is.Type == execinfrapb.InputSyncSpec_UNORDERED {
 				if opt == flowinfra.FuseNormally || len(is.Streams) == 1 {
 					// Unordered synchronizer: create a RowChannel for each input.
@@ -298,7 +308,7 @@ func (f *rowBasedFlow) setupInputSyncs(
 					streams[i] = rowChan
 				}
 				var err error
-				ordering := sqlbase.NoOrdering
+				ordering := colinfo.NoOrdering
 				if is.Type == execinfrapb.InputSyncSpec_ORDERED {
 					ordering = execinfrapb.ConvertToColumnOrdering(is.Ordering)
 				}
@@ -417,11 +427,11 @@ func (f *rowBasedFlow) Cleanup(ctx context.Context) {
 
 type copyingRowReceiver struct {
 	execinfra.RowReceiver
-	alloc sqlbase.EncDatumRowAlloc
+	alloc rowenc.EncDatumRowAlloc
 }
 
 func (r *copyingRowReceiver) Push(
-	row sqlbase.EncDatumRow, meta *execinfrapb.ProducerMetadata,
+	row rowenc.EncDatumRow, meta *execinfrapb.ProducerMetadata,
 ) execinfra.ConsumerStatus {
 	if row != nil {
 		row = r.alloc.CopyRow(row)

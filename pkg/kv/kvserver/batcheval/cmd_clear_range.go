@@ -69,6 +69,12 @@ func ClearRange(
 	to := args.EndKey
 	var pd result.Result
 
+	if !args.Deadline.IsEmpty() {
+		if now := cArgs.EvalCtx.Clock().Now(); args.Deadline.LessEq(now) {
+			return result.Result{}, errors.Errorf("ClearRange has deadline %s <= %s", args.Deadline, now)
+		}
+	}
+
 	// Before clearing, compute the delta in MVCCStats.
 	statsDelta, err := computeStatsDelta(ctx, readWriter, cArgs, from, to)
 	if err != nil {
@@ -81,11 +87,9 @@ func ClearRange(
 	// instead of using a range tombstone (inefficient for small ranges).
 	if total := statsDelta.Total(); total < ClearRangeBytesThreshold {
 		log.VEventf(ctx, 2, "delta=%d < threshold=%d; using non-range clear", total, ClearRangeBytesThreshold)
-		if err := readWriter.Iterate(from, to,
-			func(kv storage.MVCCKeyValue) (bool, error) {
-				return false, readWriter.Clear(kv.Key)
-			},
-		); err != nil {
+		if err := readWriter.MVCCIterate(from, to, storage.MVCCKeyAndIntentsIterKind, func(kv storage.MVCCKeyValue) error {
+			return readWriter.Clear(kv.Key)
+		}); err != nil {
 			return result.Result{}, err
 		}
 		return pd, nil
@@ -134,13 +138,13 @@ func computeStatsDelta(
 		// access to the stats. Concurrent changes to range-local keys are
 		// explicitly ignored (i.e. SysCount, SysBytes).
 		delta = cArgs.EvalCtx.GetMVCCStats()
-		delta.SysCount, delta.SysBytes = 0, 0 // no change to system stats
+		delta.SysCount, delta.SysBytes, delta.AbortSpanBytes = 0, 0, 0 // no change to system stats
 	}
 
 	// If we can't use the fast stats path, or race test is enabled,
 	// compute stats across the key span to be cleared.
 	if !fast || util.RaceEnabled {
-		iter := readWriter.NewIterator(storage.IterOptions{UpperBound: to})
+		iter := readWriter.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: to})
 		computed, err := iter.ComputeStats(from, to, delta.LastUpdateNanos)
 		iter.Close()
 		if err != nil {

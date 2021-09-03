@@ -27,7 +27,9 @@ import (
 // ErrCannotReuseClientConn is returned when a failed connection is
 // being reused. We require that new connections be created with
 // pkg/rpc.GRPCDial instead.
-var ErrCannotReuseClientConn = errors.New("cannot reuse client connection")
+var ErrCannotReuseClientConn = errors.New(errCannotReuseClientConnMsg)
+
+const errCannotReuseClientConnMsg = "cannot reuse client connection"
 
 type localRequestKey struct{}
 
@@ -50,6 +52,15 @@ func IsTimeout(err error) bool {
 	err = errors.Cause(err)
 	if s, ok := status.FromError(err); ok {
 		return s.Code() == codes.DeadlineExceeded
+	}
+	return false
+}
+
+// IsContextCanceled returns true if err's Cause is an error produced by gRPC
+// on context cancellation.
+func IsContextCanceled(err error) bool {
+	if s, ok := status.FromError(errors.UnwrapAll(err)); ok {
+		return s.Code() == codes.Canceled && s.Message() == context.Canceled.Error()
 	}
 	return false
 }
@@ -77,6 +88,15 @@ func IsClosedConnection(err error) bool {
 		return true
 	}
 	return netutil.IsClosedConnection(err)
+}
+
+// IsAuthenticationError returns true if err's Cause is an error produced by
+// gRPC due to invalid authentication credentials for the operation.
+func IsAuthenticationError(err error) bool {
+	if s, ok := status.FromError(errors.UnwrapAll(err)); ok {
+		return s.Code() == codes.Unauthenticated
+	}
+	return false
 }
 
 // RequestDidNotStart returns true if the given error from gRPC

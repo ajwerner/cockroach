@@ -25,7 +25,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	opentracing "github.com/opentracing/opentracing-go"
 )
 
 // Send executes a command on this range, dispatching it to the
@@ -65,13 +64,14 @@ func (r *Replica) sendWithRangeID(
 	r.maybeInitializeRaftGroup(ctx)
 
 	isReadOnly := ba.IsReadOnly()
-	useRaft := !isReadOnly && ba.IsWrite()
-
 	if err := r.checkBatchRequest(ba, isReadOnly); err != nil {
 		return nil, roachpb.NewError(err)
 	}
 
 	if err := r.maybeBackpressureBatch(ctx, ba); err != nil {
+		return nil, roachpb.NewError(err)
+	}
+	if err := r.maybeRateLimitBatch(ctx, ba); err != nil {
 		return nil, roachpb.NewError(err)
 	}
 
@@ -89,13 +89,13 @@ func (r *Replica) sendWithRangeID(
 
 	// Differentiate between read-write, read-only, and admin.
 	var pErr *roachpb.Error
-	if useRaft {
-		log.Event(ctx, "read-write path")
-		fn := (*Replica).executeWriteBatch
-		br, pErr = r.executeBatchWithConcurrencyRetries(ctx, ba, fn)
-	} else if isReadOnly {
+	if isReadOnly {
 		log.Event(ctx, "read-only path")
 		fn := (*Replica).executeReadOnlyBatch
+		br, pErr = r.executeBatchWithConcurrencyRetries(ctx, ba, fn)
+	} else if ba.IsWrite() {
+		log.Event(ctx, "read-write path")
+		fn := (*Replica).executeWriteBatch
 		br, pErr = r.executeBatchWithConcurrencyRetries(ctx, ba, fn)
 	} else if ba.IsAdmin() {
 		log.Event(ctx, "admin path")
@@ -116,19 +116,22 @@ func (r *Replica) sendWithRangeID(
 		}
 	}
 
-	r.maybeAddRangeInfoToResponse(ctx, ba, pErr, br)
-
-	return br, pErr
-}
-
-func (r *Replica) maybeAddRangeInfoToResponse(
-	ctx context.Context, ba *roachpb.BatchRequest, pErr *roachpb.Error, br *roachpb.BatchResponse,
-) {
 	// Return range information if it was requested. Note that we don't return it
 	// on errors because the code doesn't currently support returning both a br
 	// and a pErr here. Also, some errors (e.g. NotLeaseholderError) have custom
 	// ways of returning range info.
-	if ba.ReturnRangeInfo && pErr == nil {
+	if pErr == nil {
+		r.maybeAddRangeInfoToResponse(ctx, ba, br)
+	}
+
+	r.recordImpactOnRateLimiter(ctx, br)
+	return br, pErr
+}
+
+func (r *Replica) maybeAddRangeInfoToResponse(
+	ctx context.Context, ba *roachpb.BatchRequest, br *roachpb.BatchResponse,
+) {
+	if ba.ReturnRangeInfo {
 		desc, lease := r.GetDescAndLease(ctx)
 		br.RangeInfos = []roachpb.RangeInfo{{Desc: desc, Lease: lease}}
 
@@ -142,7 +145,82 @@ func (r *Replica) maybeAddRangeInfoToResponse(
 				reply.SetHeader(header)
 			}
 		}
+	} else if ba.ClientRangeInfo != nil {
+		returnRangeInfoIfClientStale(ctx, br, r, *ba.ClientRangeInfo)
 	}
+}
+
+// returnRangeInfoIfClientStale populates br.RangeInfos if the client doesn't
+// have up-to-date info about the range's descriptor and lease.
+func returnRangeInfoIfClientStale(
+	ctx context.Context, br *roachpb.BatchResponse, r *Replica, cinfo roachpb.ClientRangeInfo,
+) {
+	desc, lease := r.GetDescAndLease(ctx)
+	// Compare the client's info with the replica's info to detect if the client
+	// has stale knowledge. Note that the client can have more recent knowledge
+	// than the replica in case this is a follower.
+	needInfo := (cinfo.LeaseSequence < lease.Sequence) ||
+		(cinfo.DescriptorGeneration < desc.Generation)
+	if !needInfo {
+		return
+	}
+	log.VEventf(ctx, 3, "client had stale range info; returning an update")
+	br.RangeInfos = []roachpb.RangeInfo{
+		{
+			Desc:  desc,
+			Lease: lease,
+		},
+	}
+
+	// We're going to sometimes return info on the ranges coming right before or
+	// right after r, if it looks like r came from a range that has recently split
+	// and the client doesn't know about it. After a split, the client benefits
+	// from learning about both resulting ranges.
+
+	if cinfo.DescriptorGeneration >= desc.Generation {
+		return
+	}
+
+	maybeAddRange := func(rr KeyRange) {
+		if rr.Desc().Generation != desc.Generation {
+			// The next range does not look like it came from a split that produced
+			// both r and this next range. Of course, this has false negatives (e.g.
+			// if either the LHS or the RHS split multiple times since the client's
+			// version). For best fidelity, the client could send the range's start
+			// and end keys and the server could use that to return all overlapping
+			// descriptors (like we do for RangeKeyMismatchErrors), but sending those
+			// keys on every RPC seems too expensive.
+			return
+		}
+
+		var rangeInfo roachpb.RangeInfo
+		if rep, ok := rr.(*Replica); ok {
+			// Note that we return the lease even if it's expired. The kvclient can
+			// use it as it sees fit.
+			rangeInfo.Desc, rangeInfo.Lease = rep.GetDescAndLease(ctx)
+		} else {
+			rangeInfo.Desc = *rr.Desc()
+		}
+		br.RangeInfos = append(br.RangeInfos, rangeInfo)
+	}
+
+	r.store.VisitReplicasByKey(ctx, roachpb.RKeyMin, desc.StartKey, DescendingKeyOrder, func(ctx context.Context, prevR KeyRange) bool {
+		if !prevR.Desc().EndKey.Equal(desc.StartKey) {
+			// The next range does not correspond to the range immediately preceding r.
+			return false
+		}
+		maybeAddRange(prevR)
+		return false
+	})
+
+	r.store.VisitReplicasByKey(ctx, desc.EndKey, roachpb.RKeyMax, AscendingKeyOrder, func(ctx context.Context, nextR KeyRange) bool {
+		if !nextR.Desc().StartKey.Equal(desc.EndKey) {
+			// The next range does not correspond to the range immediately after r.
+			return false
+		}
+		maybeAddRange(nextR)
+		return false
+	})
 }
 
 // batchExecutionFn is a method on Replica that is able to execute a
@@ -254,6 +332,7 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 			Timestamp:       ba.Timestamp,
 			Priority:        ba.UserPriority,
 			ReadConsistency: ba.ReadConsistency,
+			WaitPolicy:      ba.WaitPolicy,
 			Requests:        ba.Requests,
 			LatchSpans:      latchSpans,
 			LockSpans:       lockSpans,
@@ -285,10 +364,13 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 		// error. It must have also handed back ownership of the concurrency
 		// guard without having already released the guard's latches.
 		g.AssertLatches()
+		if filter := r.store.cfg.TestingKnobs.TestingConcurrencyRetryFilter; filter != nil {
+			filter(ctx, *ba, pErr)
+		}
 		switch t := pErr.GetDetail().(type) {
 		case *roachpb.WriteIntentError:
 			// Drop latches, but retain lock wait-queues.
-			if g, pErr = r.handleWriteIntentError(ctx, ba, g, pErr, t); pErr != nil {
+			if g, pErr = r.handleWriteIntentError(ctx, ba, g, status.Lease, pErr, t); pErr != nil {
 				return nil, pErr
 			}
 		case *roachpb.TransactionPushError:
@@ -359,6 +441,7 @@ func (r *Replica) handleWriteIntentError(
 	ctx context.Context,
 	ba *roachpb.BatchRequest,
 	g *concurrency.Guard,
+	lease roachpb.Lease,
 	pErr *roachpb.Error,
 	t *roachpb.WriteIntentError,
 ) (*concurrency.Guard, *roachpb.Error) {
@@ -366,7 +449,7 @@ func (r *Replica) handleWriteIntentError(
 		return g, pErr
 	}
 	// g's latches will be dropped, but it retains its spot in lock wait-queues.
-	return r.concMgr.HandleWriterIntentError(ctx, g, t)
+	return r.concMgr.HandleWriterIntentError(ctx, g, lease.Sequence, t)
 }
 
 func (r *Replica) handleTransactionPushError(
@@ -458,7 +541,7 @@ func (r *Replica) executeAdminBatch(
 	}
 
 	args := ba.Requests[0].GetInner()
-	if sp := opentracing.SpanFromContext(ctx); sp != nil {
+	if sp := tracing.SpanFromContext(ctx); sp != nil {
 		sp.SetOperationName(reflect.TypeOf(args).String())
 	}
 
@@ -473,7 +556,7 @@ func (r *Replica) executeAdminBatch(
 	// NB: we pass nil for the spanlatch guard because we haven't acquired
 	// latches yet. This is ok because each individual request that the admin
 	// request sends will acquire latches.
-	if err := r.checkExecutionCanProceed(ctx, ba, nil /* g */, &status); err != nil {
+	if _, err := r.checkExecutionCanProceed(ctx, ba, nil /* g */, &status); err != nil {
 		return nil, roachpb.NewError(err)
 	}
 
@@ -595,14 +678,16 @@ func (r *Replica) collectSpans(
 	// TODO(bdarnell): revisit as the local portion gets its appropriate
 	// use.
 	if ba.IsLocking() {
-		guess := len(ba.Requests)
+		latchGuess := len(ba.Requests)
 		if et, ok := ba.GetArg(roachpb.EndTxn); ok {
 			// EndTxn declares a global write for each of its lock spans.
-			guess += len(et.(*roachpb.EndTxnRequest).LockSpans) - 1
+			latchGuess += len(et.(*roachpb.EndTxnRequest).LockSpans) - 1
 		}
-		latchSpans.Reserve(spanset.SpanReadWrite, spanset.SpanGlobal, guess)
+		latchSpans.Reserve(spanset.SpanReadWrite, spanset.SpanGlobal, latchGuess)
+		lockSpans.Reserve(spanset.SpanReadWrite, spanset.SpanGlobal, len(ba.Requests))
 	} else {
 		latchSpans.Reserve(spanset.SpanReadOnly, spanset.SpanGlobal, len(ba.Requests))
+		lockSpans.Reserve(spanset.SpanReadOnly, spanset.SpanGlobal, len(ba.Requests))
 	}
 
 	// For non-local, MVCC spans we annotate them with the request timestamp

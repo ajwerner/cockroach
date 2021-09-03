@@ -47,8 +47,7 @@ func RefreshRange(
 
 	refreshFrom := args.RefreshFrom
 	if refreshFrom.IsEmpty() {
-		// Compatibility with 19.2 nodes, which didn't set the args.RefreshFrom field.
-		refreshFrom = h.Txn.DeprecatedOrigTimestamp
+		return result.Result{}, errors.AssertionFailedf("empty RefreshFrom: %s", args)
 	}
 
 	// Iterate over values until we discover any value written at or after the
@@ -64,11 +63,11 @@ func RefreshRange(
 			Inconsistent: true,
 			Tombstones:   true,
 		},
-		func(kv roachpb.KeyValue) (bool, error) {
+		func(kv roachpb.KeyValue) error {
 			if ts := kv.Value.Timestamp; refreshFrom.LessEq(ts) {
-				return true, errors.Errorf("encountered recently written key %s @%s", kv.Key, ts)
+				return errors.Errorf("encountered recently written key %s @%s", kv.Key, ts)
 			}
-			return false, nil
+			return nil
 		})
 	if err != nil {
 		return result.Result{}, err

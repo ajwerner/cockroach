@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/errors"
@@ -189,8 +190,13 @@ func (u urlParser) setInternal(v string, warn bool) error {
 
 		switch sslMode := options.Get("sslmode"); sslMode {
 		case "", "disable":
-			if err := fl.Set(cliflags.ClientInsecure.Name, "true"); err != nil {
-				return errors.Wrapf(err, "setting insecure connection based on --url")
+			if u.sslStrict {
+				// For "strict" mode (RPC client commands) we don't support non-TLS
+				// yet. See https://github.com/cockroachdb/cockroach/issues/54007
+				// Instead, we see a request for no TLS to imply insecure mode.
+				if err := fl.Set(cliflags.ClientInsecure.Name, "true"); err != nil {
+					return errors.Wrapf(err, "setting secure connection based on --url")
+				}
 			}
 		case "require", "verify-ca", "verify-full":
 			if sslMode != "verify-full" && u.sslStrict {
@@ -289,9 +295,9 @@ func (u urlParser) setInternal(v string, warn bool) error {
 					return nil
 				}
 
-				userName := security.RootUser
+				userName := security.RootUserName()
 				if cliCtx.sqlConnUser != "" {
-					userName = cliCtx.sqlConnUser
+					userName, _ = security.MakeSQLUsernameFromUserInput(cliCtx.sqlConnUser, security.UsernameValidation)
 				}
 				if err := tryCertsDir("sslrootcert", security.CACertFilename()); err != nil {
 					return err
@@ -347,11 +353,11 @@ func (cliCtx *cliContext) makeClientConnURL() (url.URL, error) {
 
 	if netHost != "" {
 		// Only add TLS parameters when using a network connection.
-		userName := cliCtx.sqlConnUser
-		if userName == "" {
-			userName = security.RootUser
+		userName, _ := security.MakeSQLUsernameFromUserInput(cliCtx.sqlConnUser, security.UsernameValidation)
+		if userName.Undefined() {
+			userName = security.RootUserName()
 		}
-		sCtx := rpc.MakeSecurityContext(cliCtx.Config)
+		sCtx := rpc.MakeSecurityContext(cliCtx.Config, security.CommandTLSSettings{}, roachpb.SystemTenantID)
 		if err := sCtx.LoadSecurityOptions(
 			opts, userName,
 		); err != nil {

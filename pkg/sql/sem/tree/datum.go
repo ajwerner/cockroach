@@ -28,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
+	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -155,6 +156,13 @@ type Datum interface {
 // Datums is a slice of Datum values.
 type Datums []Datum
 
+const (
+	// SizeOfDatum is the memory size of a Datum reference.
+	SizeOfDatum = int64(unsafe.Sizeof(Datum(nil)))
+	// SizeOfDatums is the memory size of a Datum slice.
+	SizeOfDatums = int64(unsafe.Sizeof(Datums(nil)))
+)
+
 // Len returns the number of Datum values.
 func (d Datums) Len() int { return len(d) }
 
@@ -218,7 +226,7 @@ func (d Datums) IsDistinctFrom(evalCtx *EvalContext, other Datums) bool {
 
 // CompositeDatum is a Datum that may require composite encoding in
 // indexes. Any Datum implementing this interface must also add itself to
-// sqlbase/HasCompositeKeyEncoding.
+// colinfo.HasCompositeKeyEncoding.
 type CompositeDatum interface {
 	Datum
 	// IsComposite returns true if this datum is not round-tripable in a key
@@ -602,7 +610,7 @@ func (d *DBitArray) Format(ctx *FmtCtx) {
 	if f.HasFlags(fmtPgwireFormat) {
 		d.BitArray.Format(&ctx.Buffer)
 	} else {
-		withQuotes := !f.HasFlags(FmtFlags(lex.EncBareStrings))
+		withQuotes := !f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 		if withQuotes {
 			ctx.WriteString("B'")
 		}
@@ -677,6 +685,8 @@ func (d *DInt) Compare(ctx *EvalContext, other Datum) int {
 		v = *t
 	case *DFloat, *DDecimal:
 		return -t.Compare(ctx, d)
+	case *DOid:
+		v = t.DInt
 	default:
 		panic(makeUnsupportedComparisonMessage(d, other))
 	}
@@ -1056,14 +1066,18 @@ func (d *DDecimal) Format(ctx *FmtCtx) {
 	}
 }
 
+// shallowDecimalSize is the size of the fixed-size part of apd.Decimal in
+// bytes.
+const shallowDecimalSize = unsafe.Sizeof(apd.Decimal{})
+
 // SizeOfDecimal returns the size in bytes of an apd.Decimal.
 func SizeOfDecimal(d apd.Decimal) uintptr {
-	return uintptr(cap(d.Coeff.Bits())) * unsafe.Sizeof(big.Word(0))
+	return shallowDecimalSize + uintptr(cap(d.Coeff.Bits()))*unsafe.Sizeof(big.Word(0))
 }
 
 // Size implements the Datum interface.
 func (d *DDecimal) Size() uintptr {
-	return unsafe.Sizeof(*d) + SizeOfDecimal(d.Decimal)
+	return SizeOfDecimal(d.Decimal)
 }
 
 var (
@@ -1425,7 +1439,7 @@ func (d *DBytes) Format(ctx *FmtCtx) {
 		writeAsHexString(ctx, d)
 		ctx.WriteString(`"`)
 	} else {
-		withQuotes := !f.HasFlags(FmtFlags(lex.EncBareStrings))
+		withQuotes := !f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 		if withQuotes {
 			if f.HasFlags(fmtFormatByteLiterals) {
 				ctx.WriteByte('b')
@@ -1525,7 +1539,7 @@ func (*DUuid) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DUuid) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -1687,7 +1701,7 @@ func (*DIPAddr) AmbiguousFormat() bool {
 // Format implements the NodeFormatter interface.
 func (d *DIPAddr) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -1868,7 +1882,7 @@ func (*DDate) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DDate) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -1984,7 +1998,7 @@ func (*DTime) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DTime) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2109,7 +2123,7 @@ func (*DTimeTZ) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DTimeTZ) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2153,8 +2167,12 @@ var dZeroTimestamp = &DTimestamp{}
 
 // time.Time formats.
 const (
-	// TimestampOutputFormat is used to output all timestamps.
-	TimestampOutputFormat = "2006-01-02 15:04:05.999999-07:00"
+	// timestampTZOutputFormat is used to output all TimestampTZs.
+	// Note the second offset is missing here -- this is to maintain
+	// backward compatibility with casting timestamptz to strings.
+	timestampTZOutputFormat = "2006-01-02 15:04:05.999999-07:00"
+	// timestampOutputFormat is used to output all Timestamps.
+	timestampOutputFormat = "2006-01-02 15:04:05.999999"
 )
 
 // ParseDTimestamp parses and returns the *DTimestamp Datum value represented by
@@ -2337,11 +2355,11 @@ func (*DTimestamp) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DTimestamp) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-	ctx.WriteString(d.UTC().Format(TimestampOutputFormat))
+	ctx.WriteString(d.UTC().Format(timestampOutputFormat))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2494,11 +2512,22 @@ func (*DTimestampTZ) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DTimestampTZ) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
-	ctx.WriteString(d.Time.Format(TimestampOutputFormat))
+	ctx.WriteString(d.Time.Format(timestampTZOutputFormat))
+	_, offsetSecs := d.Time.Zone()
+	// Only output remaining seconds offsets if it is available.
+	// This is to maintain backward compatibility with older CRDB versions,
+	// where we only output HH:MM.
+	if secondOffset := offsetSecs % 60; secondOffset != 0 {
+		if secondOffset < 0 {
+			secondOffset = 60 + secondOffset
+		}
+		ctx.WriteByte(':')
+		ctx.WriteString(fmt.Sprintf("%02d", secondOffset))
+	}
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2695,7 +2724,7 @@ func (*DInterval) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DInterval) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2712,11 +2741,11 @@ func (d *DInterval) Size() uintptr {
 
 // DGeography is the Geometry Datum.
 type DGeography struct {
-	*geo.Geography
+	geo.Geography
 }
 
 // NewDGeography returns a new Geography Datum.
-func NewDGeography(g *geo.Geography) *DGeography {
+func NewDGeography(g geo.Geography) *DGeography {
 	return &DGeography{Geography: g}
 }
 
@@ -2764,7 +2793,7 @@ func (d *DGeography) Compare(ctx *EvalContext, other Datum) int {
 		// NULL is less than any non-NULL value.
 		return 1
 	}
-	return geo.CompareSpatialObject(d.Geography.SpatialObject(), other.(*DGeography).SpatialObject())
+	return d.Geography.Compare(other.(*DGeography).Geography)
 }
 
 // Prev implements the Datum interface.
@@ -2803,7 +2832,7 @@ func (*DGeography) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DGeography) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2815,16 +2844,16 @@ func (d *DGeography) Format(ctx *FmtCtx) {
 
 // Size implements the Datum interface.
 func (d *DGeography) Size() uintptr {
-	return unsafe.Sizeof(*d)
+	return d.Geography.SpatialObjectRef().MemSize()
 }
 
 // DGeometry is the Geometry Datum.
 type DGeometry struct {
-	*geo.Geometry
+	geo.Geometry
 }
 
 // NewDGeometry returns a new Geometry Datum.
-func NewDGeometry(g *geo.Geometry) *DGeometry {
+func NewDGeometry(g geo.Geometry) *DGeometry {
 	return &DGeometry{Geometry: g}
 }
 
@@ -2872,7 +2901,7 @@ func (d *DGeometry) Compare(ctx *EvalContext, other Datum) int {
 		// NULL is less than any non-NULL value.
 		return 1
 	}
-	return geo.CompareSpatialObject(d.Geometry.SpatialObject(), other.(*DGeometry).SpatialObject())
+	return d.Geometry.Compare(other.(*DGeometry).Geometry)
 }
 
 // Prev implements the Datum interface.
@@ -2911,7 +2940,7 @@ func (*DGeometry) AmbiguousFormat() bool { return true }
 // Format implements the NodeFormatter interface.
 func (d *DGeometry) Format(ctx *FmtCtx) {
 	f := ctx.flags
-	bareStrings := f.HasFlags(FmtFlags(lex.EncBareStrings))
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
 	if !bareStrings {
 		ctx.WriteByte('\'')
 	}
@@ -2923,7 +2952,116 @@ func (d *DGeometry) Format(ctx *FmtCtx) {
 
 // Size implements the Datum interface.
 func (d *DGeometry) Size() uintptr {
-	return unsafe.Sizeof(*d)
+	return d.Geometry.SpatialObjectRef().MemSize()
+}
+
+// DBox2D is the Datum representation of the Box2D type.
+type DBox2D struct {
+	geo.CartesianBoundingBox
+}
+
+// NewDBox2D returns a new Box2D Datum.
+func NewDBox2D(b geo.CartesianBoundingBox) *DBox2D {
+	return &DBox2D{CartesianBoundingBox: b}
+}
+
+// ParseDBox2D attempts to pass `str` as a Box2D type.
+func ParseDBox2D(str string) (*DBox2D, error) {
+	b, err := geo.ParseCartesianBoundingBox(str)
+	if err != nil {
+		return nil, errors.Wrapf(err, "could not parse geometry")
+	}
+	return &DBox2D{CartesianBoundingBox: b}, nil
+}
+
+// AsDBox2D attempts to retrieve a *DBox2D from an Expr, returning a
+// *DBox2D and a flag signifying whether the assertion was successful. The
+// function should be used instead of direct type assertions wherever a
+// *DBox2D wrapped by a *DOidWrapper is possible.
+func AsDBox2D(e Expr) (*DBox2D, bool) {
+	switch t := e.(type) {
+	case *DBox2D:
+		return t, true
+	case *DOidWrapper:
+		return AsDBox2D(t.Wrapped)
+	}
+	return nil, false
+}
+
+// MustBeDBox2D attempts to retrieve a *DBox2D from an Expr, panicking
+// if the assertion fails.
+func MustBeDBox2D(e Expr) *DBox2D {
+	i, ok := AsDBox2D(e)
+	if !ok {
+		panic(errors.AssertionFailedf("expected *DBox2D, found %T", e))
+	}
+	return i
+}
+
+// ResolvedType implements the TypedExpr interface.
+func (*DBox2D) ResolvedType() *types.T {
+	return types.Box2D
+}
+
+// Compare implements the Datum interface.
+func (d *DBox2D) Compare(ctx *EvalContext, other Datum) int {
+	if other == DNull {
+		// NULL is less than any non-NULL value.
+		return 1
+	}
+	o := other.(*DBox2D)
+	return d.CartesianBoundingBox.Compare(&o.CartesianBoundingBox)
+}
+
+// Prev implements the Datum interface.
+func (d *DBox2D) Prev(ctx *EvalContext) (Datum, bool) {
+	return nil, false
+}
+
+// Next implements the Datum interface.
+func (d *DBox2D) Next(ctx *EvalContext) (Datum, bool) {
+	return nil, false
+}
+
+// IsMax implements the Datum interface.
+func (d *DBox2D) IsMax(_ *EvalContext) bool {
+	return false
+}
+
+// IsMin implements the Datum interface.
+func (d *DBox2D) IsMin(_ *EvalContext) bool {
+	return false
+}
+
+// Max implements the Datum interface.
+func (d *DBox2D) Max(_ *EvalContext) (Datum, bool) {
+	return nil, false
+}
+
+// Min implements the Datum interface.
+func (d *DBox2D) Min(_ *EvalContext) (Datum, bool) {
+	return nil, false
+}
+
+// AmbiguousFormat implements the Datum interface.
+func (*DBox2D) AmbiguousFormat() bool { return true }
+
+// Format implements the NodeFormatter interface.
+func (d *DBox2D) Format(ctx *FmtCtx) {
+	f := ctx.flags
+	bareStrings := f.HasFlags(FmtFlags(lexbase.EncBareStrings))
+	if !bareStrings {
+		ctx.WriteByte('\'')
+	}
+	ctx.WriteString(d.CartesianBoundingBox.Repr())
+	if !bareStrings {
+		ctx.WriteByte('\'')
+	}
+}
+
+// Size implements the Datum interface.
+func (d *DBox2D) Size() uintptr {
+	return unsafe.Sizeof(*d) + unsafe.Sizeof(d.CartesianBoundingBox)
 }
 
 // DJSON is the JSON Datum.
@@ -3044,9 +3182,12 @@ func AsJSON(d Datum, loc *time.Location) (json.JSON, error) {
 	case *DTimestamp:
 		// This is RFC3339Nano, but without the TZ fields.
 		return json.FromString(t.UTC().Format("2006-01-02T15:04:05.999999999")), nil
-	case *DDate, *DUuid, *DOid, *DInterval, *DBytes, *DIPAddr, *DTime, *DTimeTZ, *DBitArray,
-		*DGeography, *DGeometry:
+	case *DDate, *DUuid, *DOid, *DInterval, *DBytes, *DIPAddr, *DTime, *DTimeTZ, *DBitArray, *DBox2D:
 		return json.FromString(AsStringWithFlags(t, FmtBareStrings)), nil
+	case *DGeometry:
+		return json.FromSpatialObject(t.Geometry.SpatialObject(), geo.DefaultGeoJSONDecimalDigits)
+	case *DGeography:
+		return json.FromSpatialObject(t.Geography.SpatialObject(), geo.DefaultGeoJSONDecimalDigits)
 	default:
 		if d == DNull {
 			return json.NullJSONValue, nil
@@ -3175,6 +3316,16 @@ func AsDTuple(e Expr) (*DTuple, bool) {
 		return AsDTuple(t.Wrapped)
 	}
 	return nil, false
+}
+
+// MustBeDTuple attempts to retrieve a *DTuple from an Expr, panicking if the
+// assertion fails.
+func MustBeDTuple(e Expr) *DTuple {
+	i, ok := AsDTuple(e)
+	if !ok {
+		panic(errors.AssertionFailedf("expected *DTuple, found %T", e))
+	}
+	return i
 }
 
 // maybePopulateType populates the tuple's type if it hasn't yet been
@@ -3852,6 +4003,12 @@ func MakeDEnumFromLogicalRepresentation(typ *types.T, rep string) (*DEnum, error
 	if err != nil {
 		return nil, err
 	}
+	// If this enum member is read only, we cannot construct it from the logical
+	// representation. This is to ensure that it will not be written until all
+	// nodes in the cluster are able to decode the physical representation.
+	if typ.TypeMeta.EnumData.IsMemberReadOnly[idx] {
+		return nil, errors.Newf("enum label %q is not yet public", rep)
+	}
 	return &DEnum{
 		EnumTyp:     typ,
 		PhysicalRep: typ.TypeMeta.EnumData.PhysicalRepresentations[idx],
@@ -3860,8 +4017,6 @@ func MakeDEnumFromLogicalRepresentation(typ *types.T, rep string) (*DEnum, error
 }
 
 // MakeAllDEnumsInType generates a slice of all values in an enum.
-// TODO (rohany): In the future, take an option of whether to include
-//  non-writeable enum values or not.
 func MakeAllDEnumsInType(typ *types.T) []Datum {
 	result := make([]Datum, len(typ.TypeMeta.EnumData.LogicalRepresentations))
 	for i := 0; i < len(result); i++ {
@@ -4000,6 +4155,42 @@ func (d *DEnum) AmbiguousFormat() bool {
 	return true
 }
 
+// MaxWriteable returns the largest member of the enum that is writeable.
+func (d *DEnum) MaxWriteable() (Datum, bool) {
+	enumData := d.EnumTyp.TypeMeta.EnumData
+	if len(enumData.PhysicalRepresentations) == 0 {
+		return nil, false
+	}
+	for i := len(enumData.PhysicalRepresentations) - 1; i >= 0; i-- {
+		if !enumData.IsMemberReadOnly[i] {
+			return &DEnum{
+				EnumTyp:     d.EnumTyp,
+				PhysicalRep: enumData.PhysicalRepresentations[i],
+				LogicalRep:  enumData.LogicalRepresentations[i],
+			}, true
+		}
+	}
+	return nil, false
+}
+
+// MinWriteable returns the smallest member of the enum that is writeable.
+func (d *DEnum) MinWriteable() (Datum, bool) {
+	enumData := d.EnumTyp.TypeMeta.EnumData
+	if len(enumData.PhysicalRepresentations) == 0 {
+		return nil, false
+	}
+	for i := 0; i < len(enumData.PhysicalRepresentations); i++ {
+		if !enumData.IsMemberReadOnly[i] {
+			return &DEnum{
+				EnumTyp:     d.EnumTyp,
+				PhysicalRep: enumData.PhysicalRepresentations[i],
+				LogicalRep:  enumData.LogicalRepresentations[i],
+			}, true
+		}
+	}
+	return nil, false
+}
+
 // DOid is the Postgres OID datum. It can represent either an OID type or any
 // of the reg* types, such as regproc or regclass.
 type DOid struct {
@@ -4074,14 +4265,20 @@ func (d *DOid) Compare(ctx *EvalContext, other Datum) int {
 		// NULL is less than any non-NULL value.
 		return 1
 	}
-	v, ok := UnwrapDatum(ctx, other).(*DOid)
-	if !ok {
+	var v DInt
+	switch t := UnwrapDatum(ctx, other).(type) {
+	case *DOid:
+		v = t.DInt
+	case *DInt:
+		v = *t
+	default:
 		panic(makeUnsupportedComparisonMessage(d, other))
 	}
-	if d.DInt < v.DInt {
+
+	if d.DInt < v {
 		return -1
 	}
-	if d.DInt > v.DInt {
+	if d.DInt > v {
 		return 1
 	}
 	return 0
@@ -4102,12 +4299,12 @@ func (d *DOid) Format(ctx *FmtCtx) {
 		ctx.WriteByte('(')
 		d.DInt.Format(ctx)
 		ctx.WriteByte(',')
-		lex.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lex.EncNoFlags)
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lexbase.EncNoFlags)
 		ctx.WriteByte(')')
 	} else {
 		// This is used to print the name of pseudo-procedures in e.g.
 		// pg_catalog.pg_type.typinput
-		lex.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lex.EncBareStrings)
+		lex.EncodeSQLStringWithFlags(&ctx.Buffer, d.name, lexbase.EncBareStrings)
 	}
 }
 
@@ -4411,7 +4608,7 @@ func NewDefaultDatum(evalCtx *EvalContext, t *types.T) (d Datum, err error) {
 		return dNullJSON, nil
 	case types.TimeTZFamily:
 		return dZeroTimeTZ, nil
-	case types.GeometryFamily, types.GeographyFamily:
+	case types.GeometryFamily, types.GeographyFamily, types.Box2DFamily:
 		// TODO(otan): force Geometry/Geography to not allow `NOT NULL` columns to
 		// make this impossible.
 		return nil, pgerror.Newf(
@@ -4431,6 +4628,21 @@ func NewDefaultDatum(evalCtx *EvalContext, t *types.T) (d Datum, err error) {
 		return NewDTuple(t, datums...), nil
 	case types.BitFamily:
 		return bitArrayZero, nil
+	case types.EnumFamily:
+		// The scenario in which this arises is when the column is being dropped and
+		// is NOT NULL. If there are no values for this enum, there's nothing that
+		// can be put here so we'll return
+		if len(t.TypeMeta.EnumData.PhysicalRepresentations) == 0 {
+			return nil, pgerror.Newf(
+				pgcode.NotNullViolation,
+				"%s has no values which can be used to satisfy the NOT NULL "+
+					"constraint while adding or dropping",
+				t.Name(),
+			)
+		}
+		// We fall back to using the smallest enum value during the dropping period.
+		return MakeDEnumFromPhysicalRepresentation(t,
+			t.TypeMeta.EnumData.PhysicalRepresentations[0])
 	default:
 		return nil, errors.AssertionFailedf("unhandled type %v", t.SQLString())
 	}
@@ -4490,6 +4702,7 @@ var baseDatumTypeSizes = map[types.Family]struct {
 }{
 	types.UnknownFamily:        {unsafe.Sizeof(dNull{}), fixedSize},
 	types.BoolFamily:           {unsafe.Sizeof(DBool(false)), fixedSize},
+	types.Box2DFamily:          {unsafe.Sizeof(DBox2D{CartesianBoundingBox: geo.CartesianBoundingBox{}}), fixedSize},
 	types.BitFamily:            {unsafe.Sizeof(DBitArray{}), variableSize},
 	types.IntFamily:            {unsafe.Sizeof(DInt(0)), fixedSize},
 	types.FloatFamily:          {unsafe.Sizeof(DFloat(0.0)), fixedSize},

@@ -179,6 +179,9 @@ define InvertedFilterPrivate {
     # further by applying set operations on the primary key columns.
     InvertedExpression SpanExpression
 
+    # PreFiltererState represents the optional pre-filtering state.
+    PreFiltererState PreFiltererState
+
     # The InvertedColumn is the id of the inverted column in the input. It is
     # used during execution to map rows from the input to their corresponding
     # spans in the SpanExpression.
@@ -231,6 +234,7 @@ define SemiJoin {
     Right RelExpr
     On FiltersExpr
     _ JoinPrivate
+    multiplicity JoinMultiplicity
 }
 
 [Relational, Join, JoinNonApply]
@@ -247,6 +251,10 @@ define AntiJoin {
 define JoinPrivate {
     # Flags modify what type of join we choose.
     Flags JoinFlags
+
+    # WasReordered indicates whether reorderings of the join tree rooted at this
+    # join have already been considered.
+    WasReordered bool
 }
 
 # IndexJoin represents an inner join between an input expression and a primary
@@ -327,6 +335,10 @@ define LookupJoinPrivate {
     # table (and thus each left row matches with at most one table row).
     LookupColsAreTableKey bool
 
+    # IsSecondJoinInPairedJoiner is true if this is the second join of a
+    # paired-joiner used for left joins.
+    IsSecondJoinInPairedJoiner bool
+
     # ConstFilters contains the constant filters that are represented as equality
     # conditions on the KeyCols. These filters are needed by the statistics code to
     # correctly estimate selectivity.
@@ -357,7 +369,7 @@ define InvertedJoinPrivate {
     JoinType Operator
 
     # InvertedExpr is the inverted join condition. It is used to get the keys
-    # to lookup in the inverted index based on the value of the input column.
+    # to lookup in the inverted index based on the values of the input columns.
     InvertedExpr ScalarExpr
 
     # Table identifies the table do to lookups in.
@@ -371,10 +383,13 @@ define InvertedJoinPrivate {
     # InvertedExpr.
     InvertedCol ColumnID
 
-    # InputCol is the column (produced by the input) that will be bound to
-    # InvertedExpr and used to determine the keys to scan in the inverted
-    # index.
-    InputCol ColumnID
+    # IsFirstJoinInPairedJoiner is true if this is the first join of a
+    # paired-joiner used for left joins.
+    IsFirstJoinInPairedJoiner bool
+
+    # ContinuationCol is the column ID of the continuation column when
+    # IsFirstJoinInPairedJoiner is true.
+    ContinuationCol ColumnID
 
     # Cols is the set of columns produced by the inverted join. This set can
     # contain columns from the input and columns from the index. Any columns
@@ -938,20 +953,12 @@ define WindowPrivate {
     # Ordering is the ordering that the window function is computed relative to
     # within each partition.
     Ordering OrderingChoice
-
-    # RangeOffsetColumn is the column ID of a single column from ORDER BY
-    # clause (when there is only one column). We store it separately because
-    # Ordering might be simplified (when that single column is in Partition),
-    # but the execution still needs to know the original ordering with RANGE
-    # mode of framing when at least one of the bounds has "offset". This column
-    # ID is used to reconstruct the Ordering during exec build phase.
-    RangeOffsetColumn ColumnID
 }
 
 # With executes Binding, making its results available to Main. Within Main, the
 # results of Binding may be referenced by a WithScan expression containing the
 # ID of this With.
-[Relational]
+[Relational, WithBinding]
 define With {
     Binding RelExpr
     Main RelExpr
@@ -976,6 +983,8 @@ define WithPrivate {
 
 # WithScan returns the results present in the With expression referenced
 # by ID.
+# Note that in order to contruct a WithScan, the WithID must have a bound
+# expression in the metadata.
 [Relational]
 define WithScan {
     _ WithScanPrivate
@@ -985,9 +994,6 @@ define WithScan {
 define WithScanPrivate {
     # With identifies the CTE to scan.
     With WithID
-
-    # BindingProps stores the relational properties of the referenced expression.
-    BindingProps RelPropsPtr
 
     # Name is used to identify the with being referenced for debugging purposes.
     Name string
@@ -1018,9 +1024,20 @@ define WithScanPrivate {
 #    - the Recursive query (which refers to the working table using a specific
 #      WithID) is evaluated; the results are emitted and also saved into a new
 #      "working table" for the next iteration.
-[Relational]
+[Relational, WithBinding]
 define RecursiveCTE {
+    # Binding is a dummy relational expression that is associated with the
+    # WithID; its logical properties are used by WithScan.
+    # TODO(radu): this is a little hacky; investigate other ways to fill out the
+    # WithScan properties in this case.
+    Binding RelExpr
+
+    # Initial is the expression that is executed once and returns the initial
+    # set of rows for the "working table".
     Initial RelExpr
+
+    # Recursive is the expression that is executed repeatedly; it reads the
+    # "working table" using WithScan.
     Recursive RelExpr
     _ RecursiveCTEPrivate
 }
@@ -1051,9 +1068,10 @@ define RecursiveCTEPrivate {
     OutCols ColList
 }
 
-# FakeRel is a mock relational operator used for testing; its logical properties
-# are pre-determined and stored in the private. It can be used as the child of
-# an operator for which we are calculating properties or statistics.
+# FakeRel is a mock relational operator used for testing and as a dummy binding
+# relation for building cascades; its logical properties are pre-determined and
+# stored in the private. It can be used as the child of an operator for which we
+# are calculating properties or statistics.
 [Relational]
 define FakeRel {
     _ FakeRelPrivate

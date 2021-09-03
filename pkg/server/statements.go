@@ -16,7 +16,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -28,14 +28,14 @@ func (s *statusServer) Statements(
 	ctx = propagateGatewayMetadata(ctx)
 	ctx = s.AnnotateCtx(ctx)
 
-	if _, err := s.admin.requireAdminUser(ctx); err != nil {
+	if _, err := s.privilegeChecker.requireViewActivityPermission(ctx); err != nil {
 		return nil, err
 	}
 
 	response := &serverpb.StatementsResponse{
 		Statements:            []serverpb.StatementsResponse_CollectedStatementStatistics{},
 		LastReset:             timeutil.Now(),
-		InternalAppNamePrefix: sqlbase.InternalAppNamePrefix,
+		InternalAppNamePrefix: catconstants.InternalAppNamePrefix,
 	}
 
 	localReq := &serverpb.StatementsRequest{
@@ -48,7 +48,7 @@ func (s *statusServer) Statements(
 			return nil, status.Errorf(codes.InvalidArgument, err.Error())
 		}
 		if local {
-			return s.StatementsLocal(ctx)
+			return s.StatementsLocal()
 		}
 		status, err := s.dialNode(ctx, requestedNodeID)
 		if err != nil {
@@ -72,6 +72,7 @@ func (s *statusServer) Statements(
 		func(nodeID roachpb.NodeID, resp interface{}) {
 			statementsResp := resp.(*serverpb.StatementsResponse)
 			response.Statements = append(response.Statements, statementsResp.Statements...)
+			response.Transactions = append(response.Transactions, statementsResp.Transactions...)
 			if response.LastReset.After(statementsResp.LastReset) {
 				response.LastReset = statementsResp.LastReset
 			}
@@ -86,14 +87,23 @@ func (s *statusServer) Statements(
 	return response, nil
 }
 
-func (s *statusServer) StatementsLocal(ctx context.Context) (*serverpb.StatementsResponse, error) {
+func (s *statusServer) StatementsLocal() (*serverpb.StatementsResponse, error) {
 	stmtStats := s.admin.server.sqlServer.pgServer.SQLServer.GetUnscrubbedStmtStats()
+	txnStats := s.admin.server.sqlServer.pgServer.SQLServer.GetUnscrubbedTxnStats()
 	lastReset := s.admin.server.sqlServer.pgServer.SQLServer.GetStmtStatsLastReset()
 
 	resp := &serverpb.StatementsResponse{
 		Statements:            make([]serverpb.StatementsResponse_CollectedStatementStatistics, len(stmtStats)),
 		LastReset:             lastReset,
-		InternalAppNamePrefix: sqlbase.InternalAppNamePrefix,
+		InternalAppNamePrefix: catconstants.InternalAppNamePrefix,
+		Transactions:          make([]serverpb.StatementsResponse_ExtendedCollectedTransactionStatistics, len(txnStats)),
+	}
+
+	for i, txn := range txnStats {
+		resp.Transactions[i] = serverpb.StatementsResponse_ExtendedCollectedTransactionStatistics{
+			StatsData: txn,
+			NodeID:    s.gossip.NodeID.Get(),
+		}
 	}
 
 	for i, stmt := range stmtStats {
@@ -102,6 +112,7 @@ func (s *statusServer) StatementsLocal(ctx context.Context) (*serverpb.Statement
 				KeyData: stmt.Key,
 				NodeID:  s.gossip.NodeID.Get(),
 			},
+			ID:    stmt.ID,
 			Stats: stmt.Stats,
 		}
 	}

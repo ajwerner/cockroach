@@ -44,17 +44,10 @@ NULL       /1       {5}       5
 statement ok
 SET experimental_distsql_planning = always
 
-query TTT
-EXPLAIN SELECT * FROM kv
+query T
+SELECT url FROM [EXPLAIN (DISTSQL) SELECT * FROM kv]
 ----
-·  distribution  full
-·  vectorized    true
-
-
-query BT
-EXPLAIN (DISTSQL) SELECT * FROM kv
-----
-true  https://cockroachdb.github.io/distsqlplan/decode.html#eJyk0s9O4zAQBvD7PkX0nXZXjvJ_DzktgiJFKm1pekBCOYR4VEWkcbAdBKry7qjOobQqYOjR9nz-zUizhXpqkGJyt5heZDPn91WWr_Lb6R8nn0wnlyvnr3O9nN84j89gaAWnWbkhhfQeARhCMERgiMGQoGDopKhIKSF3JVsTyPgLUp-hbrte764LhkpIQrqFrnVDSLEqHxpaUslJej4YOOmybgzTyXpTytf_poG8K1uVOq4XohgYRK_3fypdrglpMLAP3D3Xt0JyksQPqGI40dlMuKLzkqPC03R4QAf2Iwdfj-yFrhdZDh3ay6GFHLlebClH9nJkIceul1jKsb0cW8iJ-4MFO-EuSXWiVWS1P_5uAYmvadxWJXpZ0UKKyjDjcW5y5oKT0uNrMB6y1jyZBt-Hg0_D_w7C_nE4PEeOzgnH54STb4WL4ddbAAAA__9oS6Od
+https://cockroachdb.github.io/distsqlplan/decode.html#eJyk0s9q4zAQBvD7PoX5TruLjP_vwactbQqGNEnjHArBB9cagoljuZIdWoLfvUQupAlpqzZHSfPpNwOzg3qqECMdjUfXC6uTlXU7n95Zy9HDbHyVTKzfN0m6SO_Hf6y3kr9DwXqbgaEWnCb5hhTiJTww-GAIwBCCIULG0EhRkFJC7kt2OpDwZ8QuQ1k3Xbu_zhgKIQnxDm3ZVoQYi_yxojnlnKTjgoFTm5eVZtbb_40sN7l8AUPa5LWKLdvxkfUMomsPf6o2XxFir2cfuAeuq4XkJIkfUVl_prOJsEXjRCeF52n_iPbMR_a-HtnxbScwHNo3l30DObCd0FAOzOXAQA5tJzKUQ3M5NJAj-wcLdsadk2pErchof9z9AhJf0bCtSnSyoJkUhWaG41Tn9AUn1Q6v3nBIav2kG3wf9j4N_zsKu6dh_xI5uCQcXhKOvhXO-l-vAQAA__-hwaj8
 
 # Note that we want to test DistSQL physical planning and the obvious choice
 # would be to use EXPLAIN (DISTSQL). However, this explain variant doesn't have
@@ -73,25 +66,25 @@ EXPLAIN (VEC) SELECT * FROM kv WHERE k::REGCLASS IS NOT NULL
 │
 ├ Node 1
 │ └ *colexec.isNullSelOp
-│   └ *colexec.castOp
+│   └ *colexec.castInt64Int64Op
 │     └ *colexec.ParallelUnorderedSynchronizer
-│       ├ *colfetcher.colBatchScan
+│       ├ *colfetcher.ColBatchScan
 │       ├ *colrpc.Inbox
 │       ├ *colrpc.Inbox
 │       ├ *colrpc.Inbox
 │       └ *colrpc.Inbox
 ├ Node 2
 │ └ *colrpc.Outbox
-│   └ *colfetcher.colBatchScan
+│   └ *colfetcher.ColBatchScan
 ├ Node 3
 │ └ *colrpc.Outbox
-│   └ *colfetcher.colBatchScan
+│   └ *colfetcher.ColBatchScan
 ├ Node 4
 │ └ *colrpc.Outbox
-│   └ *colfetcher.colBatchScan
+│   └ *colfetcher.ColBatchScan
 └ Node 5
   └ *colrpc.Outbox
-    └ *colfetcher.colBatchScan
+    └ *colfetcher.ColBatchScan
 
 # Check that the plan is local when experimental DistSQL planning is disabled.
 statement ok
@@ -103,8 +96,8 @@ EXPLAIN (VEC) SELECT * FROM kv WHERE k::REGCLASS IS NOT NULL
 │
 └ Node 1
   └ *colexec.isNullSelOp
-    └ *colexec.castOp
-      └ *colfetcher.colBatchScan
+    └ *colexec.castInt64Int64Op
+      └ *colfetcher.ColBatchScan
 
 statement ok
 SET experimental_distsql_planning = always
@@ -116,31 +109,25 @@ EXPLAIN (VEC) SELECT k::REGCLASS FROM kv
 ----
 │
 ├ Node 1
-│ └ *colexec.castOp
+│ └ *colexec.castInt64Int64Op
 │   └ *colexec.ParallelUnorderedSynchronizer
-│     ├ *colfetcher.colBatchScan
+│     ├ *colfetcher.ColBatchScan
 │     ├ *colrpc.Inbox
 │     ├ *colrpc.Inbox
 │     ├ *colrpc.Inbox
 │     └ *colrpc.Inbox
 ├ Node 2
 │ └ *colrpc.Outbox
-│   └ *colfetcher.colBatchScan
+│   └ *colfetcher.ColBatchScan
 ├ Node 3
 │ └ *colrpc.Outbox
-│   └ *colfetcher.colBatchScan
+│   └ *colfetcher.ColBatchScan
 ├ Node 4
 │ └ *colrpc.Outbox
-│   └ *colfetcher.colBatchScan
+│   └ *colfetcher.ColBatchScan
 └ Node 5
   └ *colrpc.Outbox
-    └ *colfetcher.colBatchScan
-
-query TTT
-EXPLAIN SELECT k::REGCLASS FROM kv
-----
-·  distribution  partial
-·  vectorized    true
+    └ *colfetcher.ColBatchScan
 
 # Check that hash join is supported by the new factory.
 query II rowsort
@@ -172,8 +159,15 @@ EXPLAIN (VEC) SELECT k::REGCLASS FROM kv
 ----
 │
 └ Node 1
-  └ *colexec.castOp
-    └ *colfetcher.colBatchScan
+  └ *colexec.castInt64Int64Op
+    └ *colfetcher.ColBatchScan
 
 statement ok
 SET disable_partially_distributed_plans = false
+
+# Ensure that the new factory can materialize system columns.
+# TODO (rohany): The factory can't plan lookup joins yet. Add a test when it can.
+query B
+SELECT crdb_internal_mvcc_timestamp IS NOT NULL FROM kv LIMIT 1
+----
+true

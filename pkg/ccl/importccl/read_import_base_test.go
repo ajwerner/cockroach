@@ -14,9 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -111,9 +112,9 @@ func TestParallelImportProducerHandlesConsumerErrors(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	// Dummy descriptor for import
-	descr := sqlbase.TableDescriptor{
+	descr := descpb.TableDescriptor{
 		Name: "test",
-		Columns: []sqlbase.ColumnDescriptor{
+		Columns: []descpb.ColumnDescriptor{
 			{Name: "column", ID: 1, Type: types.Int, Nullable: true},
 		},
 	}
@@ -134,7 +135,7 @@ func TestParallelImportProducerHandlesConsumerErrors(t *testing.T) {
 		numWorkers: 1,
 		batchSize:  2,
 		evalCtx:    testEvalCtx,
-		tableDesc:  &descr,
+		tableDesc:  tabledesc.NewImmutable(descr),
 		kvCh:       kvCh,
 	}
 
@@ -150,9 +151,9 @@ func TestParallelImportProducerHandlesCancellation(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	// Dummy descriptor for import
-	descr := sqlbase.TableDescriptor{
+	descr := descpb.TableDescriptor{
 		Name: "test",
-		Columns: []sqlbase.ColumnDescriptor{
+		Columns: []descpb.ColumnDescriptor{
 			{Name: "column", ID: 1, Type: types.Int, Nullable: true},
 		},
 	}
@@ -173,7 +174,7 @@ func TestParallelImportProducerHandlesCancellation(t *testing.T) {
 		numWorkers: 1,
 		batchSize:  2,
 		evalCtx:    testEvalCtx,
-		tableDesc:  &descr,
+		tableDesc:  tabledesc.NewImmutable(descr),
 		kvCh:       kvCh,
 	}
 

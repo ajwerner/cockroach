@@ -41,8 +41,8 @@ func TestClosest(t *testing.T) {
 	g, _ := makeGossip(t, stopper)
 	nd, _ := g.GetNodeDescriptor(1)
 	of := NewOracleFactory(ClosestChoice, Config{
-		Gossip:   g,
-		NodeDesc: *nd,
+		NodeDescs: g,
+		NodeDesc:  *nd,
 	})
 	of.(*closestOracle).latencyFunc = func(s string) (time.Duration, bool) {
 		if strings.HasSuffix(s, "2") {
@@ -57,7 +57,7 @@ func TestClosest(t *testing.T) {
 			{NodeID: 2, StoreID: 2},
 			{NodeID: 3, StoreID: 3},
 		},
-	}, nil /* lease */, QueryState{})
+	}, nil /* leaseHolder */, QueryState{})
 	if err != nil {
 		t.Fatalf("Failed to choose closest replica: %v", err)
 	}

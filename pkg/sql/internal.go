@@ -15,16 +15,19 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -130,8 +133,8 @@ func (ie *InternalExecutor) initConnEx(
 	// their respective "pressure" on internal queries. Hence the choice here to
 	// add the delegate prefix to the current app name.
 	var appStatsBucketName string
-	if !strings.HasPrefix(sd.ApplicationName, sqlbase.InternalAppNamePrefix) {
-		appStatsBucketName = sqlbase.DelegatedAppNamePrefix + sd.ApplicationName
+	if !strings.HasPrefix(sd.ApplicationName, catconstants.InternalAppNamePrefix) {
+		appStatsBucketName = catconstants.DelegatedAppNamePrefix + sd.ApplicationName
 	} else {
 		// If this is already an "internal app", don't put more prefix.
 		appStatsBucketName = sd.ApplicationName
@@ -208,7 +211,7 @@ func (ie *InternalExecutor) QueryEx(
 	ctx context.Context,
 	opName string,
 	txn *kv.Txn,
-	session sqlbase.InternalExecutorSessionDataOverride,
+	session sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
 ) ([]tree.Datums, error) {
@@ -222,10 +225,10 @@ func (ie *InternalExecutor) QueryWithCols(
 	ctx context.Context,
 	opName string,
 	txn *kv.Txn,
-	session sqlbase.InternalExecutorSessionDataOverride,
+	session sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
-) ([]tree.Datums, sqlbase.ResultColumns, error) {
+) ([]tree.Datums, colinfo.ResultColumns, error) {
 	return ie.queryInternal(ctx, opName, txn, session, stmt, qargs...)
 }
 
@@ -233,10 +236,10 @@ func (ie *InternalExecutor) queryInternal(
 	ctx context.Context,
 	opName string,
 	txn *kv.Txn,
-	sessionDataOverride sqlbase.InternalExecutorSessionDataOverride,
+	sessionDataOverride sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
-) ([]tree.Datums, sqlbase.ResultColumns, error) {
+) ([]tree.Datums, colinfo.ResultColumns, error) {
 	res, err := ie.execInternal(ctx, opName, txn, sessionDataOverride, stmt, qargs...)
 	if err != nil {
 		return nil, nil, err
@@ -263,7 +266,7 @@ func (ie *InternalExecutor) QueryRowEx(
 	ctx context.Context,
 	opName string,
 	txn *kv.Txn,
-	session sqlbase.InternalExecutorSessionDataOverride,
+	session sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
 ) (tree.Datums, error) {
@@ -304,7 +307,7 @@ func (ie *InternalExecutor) ExecEx(
 	ctx context.Context,
 	opName string,
 	txn *kv.Txn,
-	session sqlbase.InternalExecutorSessionDataOverride,
+	session sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
 ) (int, error) {
@@ -318,14 +321,14 @@ func (ie *InternalExecutor) ExecEx(
 type result struct {
 	rows         []tree.Datums
 	rowsAffected int
-	cols         sqlbase.ResultColumns
+	cols         colinfo.ResultColumns
 	err          error
 }
 
 // applyOverrides overrides the respective fields from sd for all the fields set on o.
-func applyOverrides(o sqlbase.InternalExecutorSessionDataOverride, sd *sessiondata.SessionData) {
-	if o.User != "" {
-		sd.User = o.User
+func applyOverrides(o sessiondata.InternalExecutorOverride, sd *sessiondata.SessionData) {
+	if !o.User.Undefined() {
+		sd.UserProto = o.User.EncodeProto()
 	}
 	if o.Database != "" {
 		sd.Database = o.Database
@@ -336,23 +339,26 @@ func applyOverrides(o sqlbase.InternalExecutorSessionDataOverride, sd *sessionda
 	if o.SearchPath != nil {
 		sd.SearchPath = *o.SearchPath
 	}
+	if o.DatabaseIDToTempSchemaID != nil {
+		sd.DatabaseIDToTempSchemaID = o.DatabaseIDToTempSchemaID
+	}
 }
 
 func (ie *InternalExecutor) maybeRootSessionDataOverride(
 	opName string,
-) sqlbase.InternalExecutorSessionDataOverride {
+) sessiondata.InternalExecutorOverride {
 	if ie.sessionData == nil {
-		return sqlbase.InternalExecutorSessionDataOverride{
-			User:            security.RootUser,
-			ApplicationName: sqlbase.InternalAppNamePrefix + "-" + opName,
+		return sessiondata.InternalExecutorOverride{
+			User:            security.RootUserName(),
+			ApplicationName: catconstants.InternalAppNamePrefix + "-" + opName,
 		}
 	}
-	o := sqlbase.InternalExecutorSessionDataOverride{}
-	if ie.sessionData.User == "" {
-		o.User = security.RootUser
+	o := sessiondata.InternalExecutorOverride{}
+	if ie.sessionData.User().Undefined() {
+		o.User = security.RootUserName()
 	}
 	if ie.sessionData.ApplicationName == "" {
-		o.ApplicationName = sqlbase.InternalAppNamePrefix + "-" + opName
+		o.ApplicationName = catconstants.InternalAppNamePrefix + "-" + opName
 	}
 	return o
 }
@@ -366,7 +372,7 @@ func (ie *InternalExecutor) execInternal(
 	ctx context.Context,
 	opName string,
 	txn *kv.Txn,
-	sessionDataOverride sqlbase.InternalExecutorSessionDataOverride,
+	sessionDataOverride sessiondata.InternalExecutorOverride,
 	stmt string,
 	qargs ...interface{},
 ) (retRes result, retErr error) {
@@ -381,11 +387,11 @@ func (ie *InternalExecutor) execInternal(
 		sd = ie.s.newSessionData(SessionArgs{})
 	}
 	applyOverrides(sessionDataOverride, sd)
-	if sd.User == "" {
+	if sd.User().Undefined() {
 		return result{}, errors.AssertionFailedf("no user specified for internal query")
 	}
 	if sd.ApplicationName == "" {
-		sd.ApplicationName = sqlbase.InternalAppNamePrefix + "-" + opName
+		sd.ApplicationName = catconstants.InternalAppNamePrefix + "-" + opName
 	}
 
 	defer func() {
@@ -516,6 +522,8 @@ type internalClientComm struct {
 	sync func([]resWithPos)
 }
 
+var _ ClientComm = &internalClientComm{}
+
 type resWithPos struct {
 	*bufferedCommandResult
 	pos CmdPos
@@ -527,7 +535,8 @@ func (icc *internalClientComm) CreateStatementResult(
 	_ RowDescOpt,
 	pos CmdPos,
 	_ []pgwirebase.FormatCode,
-	_ sessiondata.DataConversionConfig,
+	_ sessiondatapb.DataConversionConfig,
+	_ *time.Location,
 	_ int,
 	_ string,
 	_ bool,

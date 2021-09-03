@@ -12,7 +12,6 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colcontainer"
@@ -75,7 +74,6 @@ func newSpillingQueue(
 	memoryLimit int64,
 	cfg colcontainer.DiskQueueCfg,
 	fdSemaphore semaphore.Semaphore,
-	batchSize int,
 	diskAcc *mon.BoundAccount,
 ) *spillingQueue {
 	// Reduce the memory limit by what the DiskQueue may need to buffer
@@ -84,7 +82,7 @@ func newSpillingQueue(
 	if memoryLimit < 0 {
 		memoryLimit = 0
 	}
-	itemsLen := memoryLimit / int64(colmem.EstimateBatchSizeBytes(typs, batchSize))
+	itemsLen := memoryLimit / int64(colmem.EstimateBatchSizeBytes(typs, coldata.BatchSize()))
 	if itemsLen == 0 {
 		// Make items at least of length 1. Even though batches will spill to disk
 		// directly (this can only happen with a very low memory limit), it's nice
@@ -99,7 +97,7 @@ func newSpillingQueue(
 		items:              make([]coldata.Batch, itemsLen),
 		diskQueueCfg:       cfg,
 		fdSemaphore:        fdSemaphore,
-		dequeueScratch:     unlimitedAllocator.NewMemBatchWithSize(typs, coldata.BatchSize()),
+		dequeueScratch:     unlimitedAllocator.NewMemBatchWithFixedCapacity(typs, coldata.BatchSize()),
 		diskAcc:            diskAcc,
 	}
 }
@@ -114,10 +112,9 @@ func newRewindableSpillingQueue(
 	memoryLimit int64,
 	cfg colcontainer.DiskQueueCfg,
 	fdSemaphore semaphore.Semaphore,
-	batchSize int,
 	diskAcc *mon.BoundAccount,
 ) *spillingQueue {
-	q := newSpillingQueue(unlimitedAllocator, typs, memoryLimit, cfg, fdSemaphore, batchSize, diskAcc)
+	q := newSpillingQueue(unlimitedAllocator, typs, memoryLimit, cfg, fdSemaphore, diskAcc)
 	q.rewindable = true
 	return q
 }
@@ -168,7 +165,7 @@ func (q *spillingQueue) dequeue(ctx context.Context) (coldata.Batch, error) {
 		// No more in-memory items. Fill the circular buffer as much as possible.
 		// Note that there must be at least one element on disk.
 		if !q.rewindable && q.curHeadIdx != q.curTailIdx {
-			colexecerror.InternalError(fmt.Sprintf("assertion failed in spillingQueue: curHeadIdx != curTailIdx, %d != %d", q.curHeadIdx, q.curTailIdx))
+			colexecerror.InternalError(errors.AssertionFailedf("assertion failed in spillingQueue: curHeadIdx != curTailIdx, %d != %d", q.curHeadIdx, q.curTailIdx))
 		}
 		// NOTE: Only one item is dequeued from disk since a deserialized batch is
 		// only valid until the next call to Dequeue. In practice we could Dequeue
@@ -184,7 +181,7 @@ func (q *spillingQueue) dequeue(ctx context.Context) (coldata.Batch, error) {
 		if !ok {
 			// There was no batch to dequeue from disk. This should not really
 			// happen, as it should have been caught by the q.empty() check above.
-			colexecerror.InternalError("disk queue was not empty but failed to dequeue element in spillingQueue")
+			colexecerror.InternalError(errors.AssertionFailedf("disk queue was not empty but failed to dequeue element in spillingQueue"))
 		}
 		// Account for this batch's memory.
 		q.unlimitedAllocator.RetainBatch(q.dequeueScratch)

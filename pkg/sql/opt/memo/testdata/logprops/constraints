@@ -6,6 +6,30 @@ exec-ddl
 CREATE TABLE kuv (k INT PRIMARY KEY, u FLOAT, v STRING)
 ----
 
+# A tight contradiction constraint is built for a false filter.
+build
+SELECT * FROM a WHERE false
+----
+project
+ ├── columns: x:1(int) y:2(int)
+ ├── cardinality: [0 - 0]
+ ├── prune: (1,2)
+ └── select
+      ├── columns: x:1(int) y:2(int) rowid:3(int!null) crdb_internal_mvcc_timestamp:4(decimal)
+      ├── cardinality: [0 - 0]
+      ├── key: (3)
+      ├── fd: (3)-->(1,2,4)
+      ├── prune: (1-4)
+      ├── interesting orderings: (+3)
+      ├── scan a
+      │    ├── columns: x:1(int) y:2(int) rowid:3(int!null) crdb_internal_mvcc_timestamp:4(decimal)
+      │    ├── key: (3)
+      │    ├── fd: (3)-->(1,2,4)
+      │    ├── prune: (1-4)
+      │    └── interesting orderings: (+3)
+      └── filters
+           └── false [type=bool, constraints=(contradiction; tight)]
+
 opt
 SELECT * FROM a WHERE x > 1
 ----
@@ -648,21 +672,21 @@ opt
 SELECT * FROM (SELECT (x, y) AS col FROM a) WHERE col > (1, 2)
 ----
 select
- ├── columns: col:4(tuple{int, int}!null)
+ ├── columns: col:5(tuple{int, int}!null)
  ├── immutable
  ├── project
- │    ├── columns: col:4(tuple{int, int})
- │    ├── prune: (4)
+ │    ├── columns: col:5(tuple{int, int})
+ │    ├── prune: (5)
  │    ├── scan a
  │    │    ├── columns: x:1(int) y:2(int)
  │    │    └── prune: (1,2)
  │    └── projections
- │         └── tuple [as=col:4, type=tuple{int, int}, outer=(1,2)]
+ │         └── tuple [as=col:5, type=tuple{int, int}, outer=(1,2)]
  │              ├── variable: x:1 [type=int]
  │              └── variable: y:2 [type=int]
  └── filters
-      └── gt [type=bool, outer=(4), immutable, constraints=(/4: [/(1, 3) - ]; tight)]
-           ├── variable: col:4 [type=tuple{int, int}]
+      └── gt [type=bool, outer=(5), immutable, constraints=(/5: [/(1, 3) - ]; tight)]
+           ├── variable: col:5 [type=tuple{int, int}]
            └── tuple [type=tuple{int, int}]
                 ├── const: 1 [type=int]
                 └── const: 2 [type=int]
@@ -977,7 +1001,7 @@ project
  ├── interesting orderings: (+1)
  └── scan e@secondary
       ├── columns: k:1(int!null) d:3(timestamp!null)
-      ├── constraint: /3/1: [/'2018-07-01 00:00:00.000001+00:00' - /'2018-07-07 23:59:59.999999+00:00']
+      ├── constraint: /3/1: [/'2018-07-01 00:00:00.000001' - /'2018-07-07 23:59:59.999999']
       ├── key: (1)
       ├── fd: (1)-->(3)
       ├── prune: (1)
@@ -988,20 +1012,20 @@ opt
 SELECT * FROM (SELECT (x, y) AS foo FROM a) WHERE foo IN ((3, 4), (1, 2))
 ----
 select
- ├── columns: foo:4(tuple{int, int}!null)
+ ├── columns: foo:5(tuple{int, int}!null)
  ├── project
- │    ├── columns: foo:4(tuple{int, int})
- │    ├── prune: (4)
+ │    ├── columns: foo:5(tuple{int, int})
+ │    ├── prune: (5)
  │    ├── scan a
  │    │    ├── columns: x:1(int) y:2(int)
  │    │    └── prune: (1,2)
  │    └── projections
- │         └── tuple [as=foo:4, type=tuple{int, int}, outer=(1,2)]
+ │         └── tuple [as=foo:5, type=tuple{int, int}, outer=(1,2)]
  │              ├── variable: x:1 [type=int]
  │              └── variable: y:2 [type=int]
  └── filters
-      └── in [type=bool, outer=(4), constraints=(/4: [/(1, 2) - /(1, 2)] [/(3, 4) - /(3, 4)]; tight)]
-           ├── variable: foo:4 [type=tuple{int, int}]
+      └── in [type=bool, outer=(5), constraints=(/5: [/(1, 2) - /(1, 2)] [/(3, 4) - /(3, 4)]; tight)]
+           ├── variable: foo:5 [type=tuple{int, int}]
            └── tuple [type=tuple{tuple{int, int}, tuple{int, int}}]
                 ├── tuple [type=tuple{int, int}]
                 │    ├── const: 3 [type=int]
@@ -1366,3 +1390,57 @@ select
                 └── eq [type=bool]
                      ├── variable: x:1 [type=int]
                      └── const: 3 [type=int]
+
+# Tests for the containment operator.
+
+exec-ddl
+CREATE TABLE f
+(
+    k INT PRIMARY KEY,
+    j JSON,
+    a INT[]
+)
+----
+
+# Containment implies the column is not null.
+opt
+SELECT 1 FROM f WHERE j @> '{"x": "y"}'
+----
+project
+ ├── columns: "?column?":5(int!null)
+ ├── immutable
+ ├── fd: ()-->(5)
+ ├── prune: (5)
+ ├── select
+ │    ├── columns: j:2(jsonb!null)
+ │    ├── immutable
+ │    ├── scan f
+ │    │    ├── columns: j:2(jsonb)
+ │    │    └── prune: (2)
+ │    └── filters
+ │         └── contains [type=bool, outer=(2), immutable, constraints=(/2: (/NULL - ])]
+ │              ├── variable: j:2 [type=jsonb]
+ │              └── const: '{"x": "y"}' [type=jsonb]
+ └── projections
+      └── const: 1 [as="?column?":5, type=int]
+
+opt
+SELECT 1 FROM f WHERE a @> ARRAY[1]
+----
+project
+ ├── columns: "?column?":5(int!null)
+ ├── immutable
+ ├── fd: ()-->(5)
+ ├── prune: (5)
+ ├── select
+ │    ├── columns: a:3(int[]!null)
+ │    ├── immutable
+ │    ├── scan f
+ │    │    ├── columns: a:3(int[])
+ │    │    └── prune: (3)
+ │    └── filters
+ │         └── contains [type=bool, outer=(3), immutable, constraints=(/3: (/NULL - ])]
+ │              ├── variable: a:3 [type=int[]]
+ │              └── const: ARRAY[1] [type=int[]]
+ └── projections
+      └── const: 1 [as="?column?":5, type=int]

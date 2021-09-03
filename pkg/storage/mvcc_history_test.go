@@ -21,6 +21,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -96,24 +97,21 @@ func TestMVCCHistories(t *testing.T) {
 
 				reportDataEntries := func(buf *bytes.Buffer) error {
 					hasData := false
-					err := engine.Iterate(
-						span.Key,
-						span.EndKey,
-						func(r MVCCKeyValue) (bool, error) {
-							hasData = true
-							if r.Key.Timestamp.IsEmpty() {
-								// Meta is at timestamp zero.
-								meta := enginepb.MVCCMetadata{}
-								if err := protoutil.Unmarshal(r.Value, &meta); err != nil {
-									fmt.Fprintf(buf, "meta: %v -> error decoding proto from %v: %v\n", r.Key, r.Value, err)
-								} else {
-									fmt.Fprintf(buf, "meta: %v -> %+v\n", r.Key, &meta)
-								}
+					err := engine.MVCCIterate(span.Key, span.EndKey, MVCCKeyAndIntentsIterKind, func(r MVCCKeyValue) error {
+						hasData = true
+						if r.Key.Timestamp.IsEmpty() {
+							// Meta is at timestamp zero.
+							meta := enginepb.MVCCMetadata{}
+							if err := protoutil.Unmarshal(r.Value, &meta); err != nil {
+								fmt.Fprintf(buf, "meta: %v -> error decoding proto from %v: %v\n", r.Key, r.Value, err)
 							} else {
-								fmt.Fprintf(buf, "data: %v -> %s\n", r.Key, roachpb.Value{RawBytes: r.Value}.PrettyPrint())
+								fmt.Fprintf(buf, "meta: %v -> %+v\n", r.Key, &meta)
 							}
-							return false, nil
-						})
+						} else {
+							fmt.Fprintf(buf, "data: %v -> %s\n", r.Key, roachpb.Value{RawBytes: r.Value}.PrettyPrint())
+						}
+						return nil
+					})
 					if !hasData {
 						buf.WriteString("<no data>\n")
 					}
@@ -138,7 +136,7 @@ func TestMVCCHistories(t *testing.T) {
 					switch d.Cmd {
 					case "skip":
 						if len(d.CmdArgs) == 0 || d.CmdArgs[0].Key == engineImpl.name {
-							e.t.Skip("skipped")
+							skip.IgnoreLint(e.t, "skipped")
 						}
 						return d.Expected
 					case "run":
@@ -520,7 +518,7 @@ func cmdCheckIntent(e *evalCtx) error {
 	}
 	metaKey := mvccKey(key)
 	var meta enginepb.MVCCMetadata
-	ok, _, _, err := e.engine.GetProto(metaKey, &meta)
+	ok, _, _, err := e.engine.MVCCGetProto(metaKey, &meta)
 	if err != nil {
 		return err
 	}
@@ -932,10 +930,9 @@ func (e *evalCtx) newTxn(
 			WriteTimestamp: ts,
 			Sequence:       0,
 		},
-		Name:                    txnName,
-		DeprecatedOrigTimestamp: ts,
-		ReadTimestamp:           ts,
-		Status:                  roachpb.PENDING,
+		Name:          txnName,
+		ReadTimestamp: ts,
+		Status:        roachpb.PENDING,
 	}
 	e.txnCounter = e.txnCounter.Add(1)
 	e.txns[txnName] = txn

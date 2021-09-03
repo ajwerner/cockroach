@@ -16,20 +16,22 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
+	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 )
@@ -49,6 +51,14 @@ var _ execinfra.Processor = &readImportDataProcessor{}
 
 func (cp *readImportDataProcessor) OutputTypes() []*types.T {
 	return csvOutputTypes
+}
+
+func injectTimeIntoEvalCtx(ctx *tree.EvalContext, walltime int64) {
+	sec := walltime / int64(time.Second)
+	nsec := walltime % int64(time.Second)
+	unixtime := timeutil.Unix(sec, nsec)
+	ctx.StmtTimestamp = unixtime
+	ctx.TxnTimestamp = unixtime
 }
 
 func newReadImportDataProcessor(
@@ -99,9 +109,9 @@ func (cp *readImportDataProcessor) Run(ctx context.Context) {
 		cp.output.Push(nil, &execinfrapb.ProducerMetadata{Err: err})
 		return
 	}
-	cp.output.Push(sqlbase.EncDatumRow{
-		sqlbase.DatumToEncDatum(types.Bytes, tree.NewDBytes(tree.DBytes(countsBytes))),
-		sqlbase.DatumToEncDatum(types.Bytes, tree.NewDBytes(tree.DBytes([]byte{}))),
+	cp.output.Push(rowenc.EncDatumRow{
+		rowenc.DatumToEncDatum(types.Bytes, tree.NewDBytes(tree.DBytes(countsBytes))),
+		rowenc.DatumToEncDatum(types.Bytes, tree.NewDBytes(tree.DBytes([]byte{}))),
 	}, nil)
 }
 
@@ -111,46 +121,12 @@ func makeInputConverter(
 	evalCtx *tree.EvalContext,
 	kvCh chan row.KVBatch,
 ) (inputConverter, error) {
-
-	// installTypeMetadata is a closure that performs the work of installing
-	// type metadata in all of the tables being imported.
-	installTypeMetadata := func(evalCtx *tree.EvalContext) error {
-		for _, table := range spec.Tables {
-			var colTypes []*types.T
-			for _, col := range table.Desc.Columns {
-				colTypes = append(colTypes, col.Type)
-			}
-			if err := execinfrapb.HydrateTypeSlice(evalCtx, colTypes); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	if evalCtx.Txn != nil {
-		// If we have a transaction, then use it.
-		if err := installTypeMetadata(evalCtx); err != nil {
-			return nil, err
-		}
-	} else if evalCtx.DB != nil {
-		// Otherwise, open up a new transaction to hydrate type metadata.
-		// We only perform this logic if evalCtx.DB != nil because there are
-		// some tests that pass an evalCtx with a nil DB to this function.
-		// TODO (rohany): Once we lease type descriptors, this should instead
-		//  look into the leased set using the DistSQLTypeResolver.
-		if err := evalCtx.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-			evalCtx.Txn = txn
-			return installTypeMetadata(evalCtx)
-		}); err != nil {
-			return nil, err
-		}
-	}
-
-	var singleTable *sqlbase.TableDescriptor
+	injectTimeIntoEvalCtx(evalCtx, spec.WalltimeNanos)
+	var singleTable *tabledesc.Immutable
 	var singleTableTargetCols tree.NameList
 	if len(spec.Tables) == 1 {
 		for _, table := range spec.Tables {
-			singleTable = table.Desc
+			singleTable = tabledesc.NewImmutable(*table.Desc)
 			singleTableTargetCols = make(tree.NameList, len(table.TargetCols))
 			for i, colName := range table.TargetCols {
 				singleTableTargetCols[i] = tree.Name(colName)
@@ -162,11 +138,36 @@ func makeInputConverter(
 		return nil, errors.Errorf("%s only supports reading a single, pre-specified table", format.String())
 	}
 
+	if singleTable != nil {
+		indexes := singleTable.DeletableIndexes()
+		for _, idx := range indexes {
+			if idx.IsPartial() {
+				return nil, unimplemented.NewWithIssue(50225, "cannot import into table with partial indexes")
+			}
+		}
+
+		// If we're using a format like CSV where data columns are not "named", and
+		// therefore cannot be mapped to schema columns, then require the user to
+		// use IMPORT INTO.
+		//
+		// We could potentially do something smarter here and check that only a
+		// suffix of the columns are computed, and then expect the data file to have
+		// #(visible columns) - #(computed columns).
+		if len(singleTableTargetCols) == 0 && !formatHasNamedColumns(spec.Format.Format) {
+			for _, col := range singleTable.VisibleColumns() {
+				if col.IsComputed() {
+					return nil, unimplemented.NewWithIssueDetail(56002, "import.computed",
+						"to use computed columns, use IMPORT INTO")
+				}
+			}
+		}
+	}
+
 	switch spec.Format.Format {
 	case roachpb.IOFileFormat_CSV:
 		isWorkload := true
 		for _, file := range spec.Uri {
-			if conf, err := cloudimpl.ExternalStorageConfFromURI(file, spec.User); err != nil || conf.Provider != roachpb.ExternalStorageProvider_Workload {
+			if conf, err := cloudimpl.ExternalStorageConfFromURI(file, spec.User()); err != nil || conf.Provider != roachpb.ExternalStorageProvider_Workload {
 				isWorkload = false
 				break
 			}
@@ -180,14 +181,14 @@ func makeInputConverter(
 	case roachpb.IOFileFormat_MysqlOutfile:
 		return newMysqloutfileReader(
 			spec.Format.MysqlOut, kvCh, spec.WalltimeNanos,
-			int(spec.ReaderParallelism), singleTable, evalCtx)
+			int(spec.ReaderParallelism), singleTable, singleTableTargetCols, evalCtx)
 	case roachpb.IOFileFormat_Mysqldump:
-		return newMysqldumpReader(ctx, kvCh, spec.Tables, evalCtx)
+		return newMysqldumpReader(ctx, kvCh, spec.WalltimeNanos, spec.Tables, evalCtx)
 	case roachpb.IOFileFormat_PgCopy:
 		return newPgCopyReader(spec.Format.PgCopy, kvCh, spec.WalltimeNanos,
-			int(spec.ReaderParallelism), singleTable, evalCtx)
+			int(spec.ReaderParallelism), singleTable, singleTableTargetCols, evalCtx)
 	case roachpb.IOFileFormat_PgDump:
-		return newPgDumpReader(ctx, kvCh, spec.Format.PgDump, spec.Tables, evalCtx)
+		return newPgDumpReader(ctx, kvCh, spec.Format.PgDump, spec.WalltimeNanos, spec.Tables, evalCtx)
 	case roachpb.IOFileFormat_Avro:
 		return newAvroInputReader(
 			kvCh, singleTable, spec.Format.Avro, spec.WalltimeNanos,

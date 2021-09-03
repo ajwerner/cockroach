@@ -16,15 +16,14 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	opentracing "github.com/opentracing/opentracing-go"
 )
 
 // Processor is a common interface implemented by all processors, used by the
@@ -38,6 +37,17 @@ type Processor interface {
 	Run(context.Context)
 }
 
+// DoesNotUseTxn is an interface implemented by some processors to mark that
+// they do not use a txn. The DistSQLPlanner forbids multiple processors in a
+// local flow from running in parallel if this is unknown since concurrent use
+// of the RootTxn is forbidden (in a distributed flow these are leaf txns, so
+// it doesn't matter).
+// Implementing this interface lets the DistSQLPlanner know that it is ok to
+// run this processor in an additional goroutine.
+type DoesNotUseTxn interface {
+	DoesNotUseTxn() bool
+}
+
 // ProcOutputHelper is a helper type that performs filtering and projection on
 // the output of a processor.
 type ProcOutputHelper struct {
@@ -47,18 +57,18 @@ type ProcOutputHelper struct {
 	// If output is nil, one can invoke ProcessRow to obtain the
 	// post-processed row directly.
 	output   RowReceiver
-	RowAlloc sqlbase.EncDatumRowAlloc
+	RowAlloc rowenc.EncDatumRowAlloc
 
-	filter *ExprHelper
+	filter *execinfrapb.ExprHelper
 	// renderExprs has length > 0 if we have a rendering. Only one of renderExprs
 	// and outputCols can be set.
-	renderExprs []ExprHelper
+	renderExprs []execinfrapb.ExprHelper
 	// outputCols is non-nil if we have a projection. Only one of renderExprs and
 	// outputCols can be set. Note that 0-length projections are possible, in
 	// which case outputCols will be 0-length but non-nil.
 	outputCols []uint32
 
-	outputRow sqlbase.EncDatumRow
+	outputRow rowenc.EncDatumRow
 
 	// OutputTypes is the schema of the rows produced by the processor after
 	// post-processing (i.e. the rows that are pushed through a router).
@@ -93,7 +103,11 @@ func (h *ProcOutputHelper) Reset() {
 // Note that the types slice may be stored directly; the caller should not
 // modify it.
 func (h *ProcOutputHelper) Init(
-	post *execinfrapb.PostProcessSpec, typs []*types.T, evalCtx *tree.EvalContext, output RowReceiver,
+	post *execinfrapb.PostProcessSpec,
+	typs []*types.T,
+	semaCtx *tree.SemaContext,
+	evalCtx *tree.EvalContext,
+	output RowReceiver,
 ) error {
 	if !post.Projection && len(post.OutputColumns) > 0 {
 		return errors.Errorf("post-processing has projection unset but output columns set: %s", post)
@@ -104,8 +118,8 @@ func (h *ProcOutputHelper) Init(
 	h.output = output
 	h.numInternalCols = len(typs)
 	if post.Filter != (execinfrapb.Expression{}) {
-		h.filter = &ExprHelper{}
-		if err := h.filter.Init(post.Filter, typs, evalCtx); err != nil {
+		h.filter = &execinfrapb.ExprHelper{}
+		if err := h.filter.Init(post.Filter, typs, semaCtx, evalCtx); err != nil {
 			return err
 		}
 	}
@@ -133,7 +147,7 @@ func (h *ProcOutputHelper) Init(
 		if cap(h.renderExprs) >= nRenders {
 			h.renderExprs = h.renderExprs[:nRenders]
 		} else {
-			h.renderExprs = make([]ExprHelper, nRenders)
+			h.renderExprs = make([]execinfrapb.ExprHelper, nRenders)
 		}
 		if cap(h.OutputTypes) >= nRenders {
 			h.OutputTypes = h.OutputTypes[:nRenders]
@@ -141,8 +155,8 @@ func (h *ProcOutputHelper) Init(
 			h.OutputTypes = make([]*types.T, nRenders)
 		}
 		for i, expr := range post.RenderExprs {
-			h.renderExprs[i] = ExprHelper{}
-			if err := h.renderExprs[i].Init(expr, typs, evalCtx); err != nil {
+			h.renderExprs[i] = execinfrapb.ExprHelper{}
+			if err := h.renderExprs[i].Init(expr, typs, semaCtx, evalCtx); err != nil {
 				return err
 			}
 			h.OutputTypes[i] = h.renderExprs[i].Expr.ResolvedType()
@@ -214,7 +228,7 @@ func (h *ProcOutputHelper) NeededColumns() (colIdxs util.FastIntSet) {
 //
 // Note: check out rowexec.emitHelper() for a useful wrapper.
 func (h *ProcOutputHelper) EmitRow(
-	ctx context.Context, row sqlbase.EncDatumRow,
+	ctx context.Context, row rowenc.EncDatumRow,
 ) (ConsumerStatus, error) {
 	if h.output == nil {
 		panic("output RowReceiver not initialized for emitting rows")
@@ -262,8 +276,8 @@ func (h *ProcOutputHelper) EmitRow(
 // limit is returned at the same time as a DrainRequested status. In that case,
 // the caller is supposed to both deal with the row and start draining.
 func (h *ProcOutputHelper) ProcessRow(
-	ctx context.Context, row sqlbase.EncDatumRow,
-) (_ sqlbase.EncDatumRow, moreRowsOK bool, _ error) {
+	ctx context.Context, row rowenc.EncDatumRow,
+) (_ rowenc.EncDatumRow, moreRowsOK bool, _ error) {
 	if h.rowIdx >= h.maxRowIdx {
 		return nil, false, nil
 	}
@@ -294,7 +308,7 @@ func (h *ProcOutputHelper) ProcessRow(
 			if err != nil {
 				return nil, false, err
 			}
-			h.outputRow[i] = sqlbase.DatumToEncDatum(h.OutputTypes[i], datum)
+			h.outputRow[i] = rowenc.DatumToEncDatum(h.OutputTypes[i], datum)
 		}
 	} else if h.outputCols != nil {
 		// Projection.
@@ -461,7 +475,7 @@ type ProcessorBase struct {
 	// (i.e. hasn't been closed). Initialized using flowCtx.Ctx (which should not be otherwise
 	// used).
 	Ctx  context.Context
-	span opentracing.Span
+	span *tracing.Span
 	// origCtx is the context from which ctx was derived. InternalClose() resets
 	// ctx to this.
 	origCtx context.Context
@@ -583,7 +597,10 @@ func (pb *ProcessorBase) MoveToDraining(err error) {
 		// However, calling it with an error in states other than StateRunning is
 		// not permitted.
 		if err != nil {
-			log.Fatalf(pb.Ctx, "MoveToDraining called in state %s with err: %s",
+			log.ReportOrPanic(
+				pb.Ctx,
+				&pb.FlowCtx.Cfg.Settings.SV,
+				"MoveToDraining called in state %s with err: %+v",
 				pb.State, err)
 		}
 		return
@@ -610,7 +627,11 @@ func (pb *ProcessorBase) MoveToDraining(err error) {
 // also moves from StateDraining to StateTrailingMeta when appropriate.
 func (pb *ProcessorBase) DrainHelper() *execinfrapb.ProducerMetadata {
 	if pb.State == StateRunning {
-		log.Fatal(pb.Ctx, "drain helper called in StateRunning")
+		log.ReportOrPanic(
+			pb.Ctx,
+			&pb.FlowCtx.Cfg.Settings.SV,
+			"drain helper called in StateRunning",
+		)
 	}
 
 	// trailingMeta always has priority; it seems like a good idea because it
@@ -681,7 +702,12 @@ func (pb *ProcessorBase) popTrailingMeta() *execinfrapb.ProducerMetadata {
 // draining its inputs (if it wants to drain them).
 func (pb *ProcessorBase) moveToTrailingMeta() {
 	if pb.State == StateTrailingMeta || pb.State == StateExhausted {
-		log.Fatalf(pb.Ctx, "moveToTrailingMeta called in state: %s", pb.State)
+		log.ReportOrPanic(
+			pb.Ctx,
+			&pb.FlowCtx.Cfg.Settings.SV,
+			"moveToTrailingMeta called in state: %s",
+			pb.State,
+		)
 	}
 
 	if pb.FinishTrace != nil {
@@ -712,7 +738,7 @@ func (pb *ProcessorBase) moveToTrailingMeta() {
 // nil, in which case the caller shouldn't return anything to its consumer; it
 // should continue processing other rows, with the awareness that the processor
 // might have been transitioned to the draining phase.
-func (pb *ProcessorBase) ProcessRowHelper(row sqlbase.EncDatumRow) sqlbase.EncDatumRow {
+func (pb *ProcessorBase) ProcessRowHelper(row rowenc.EncDatumRow) rowenc.EncDatumRow {
 	outRow, ok, err := pb.Out.ProcessRow(pb.Ctx, row)
 	if err != nil {
 		pb.MoveToDraining(err)
@@ -798,11 +824,14 @@ func (pb *ProcessorBase) InitWithEvalCtx(
 	pb.inputsToDrain = opts.InputsToDrain
 
 	// Hydrate all types used in the processor.
-	if err := execinfrapb.HydrateTypeSlice(evalCtx, types); err != nil {
+	resolver := flowCtx.TypeResolverFactory.NewTypeResolver(evalCtx.Txn)
+	if err := resolver.HydrateTypeSlice(evalCtx.Context, types); err != nil {
 		return err
 	}
+	semaCtx := tree.MakeSemaContext()
+	semaCtx.TypeResolver = resolver
 
-	return pb.Out.Init(post, types, pb.EvalCtx, output)
+	return pb.Out.Init(post, types, &semaCtx, pb.EvalCtx, output)
 }
 
 // AddInputToDrain adds an input to drain when moving the processor to a
@@ -819,7 +848,7 @@ func (pb *ProcessorBase) AppendTrailingMeta(meta execinfrapb.ProducerMetadata) {
 
 // ProcessorSpan creates a child span for a processor (if we are doing any
 // tracing). The returned span needs to be finished using tracing.FinishSpan.
-func ProcessorSpan(ctx context.Context, name string) (context.Context, opentracing.Span) {
+func ProcessorSpan(ctx context.Context, name string) (context.Context, *tracing.Span) {
 	return tracing.ChildSpanSeparateRecording(ctx, name)
 }
 
@@ -905,7 +934,7 @@ func NewLimitedMonitor(
 type LocalProcessor interface {
 	RowSourcedProcessor
 	// InitWithOutput initializes this processor.
-	InitWithOutput(post *execinfrapb.PostProcessSpec, output RowReceiver) error
+	InitWithOutput(flowCtx *FlowCtx, post *execinfrapb.PostProcessSpec, output RowReceiver) error
 	// SetInput initializes this LocalProcessor with an input RowSource. Not all
 	// LocalProcessors need inputs, but this needs to be called if a
 	// LocalProcessor expects to get its data from another RowSource.

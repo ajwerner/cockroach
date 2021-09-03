@@ -25,11 +25,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -83,21 +86,32 @@ var (
 	}
 )
 
-func createTempSchema(params runParams, sKey sqlbase.DescriptorKey) (sqlbase.ID, error) {
-	id, err := catalogkv.GenerateUniqueDescID(params.ctx, params.p.ExecCfg().DB, params.p.ExecCfg().Codec)
+func (p *planner) getOrCreateTemporarySchema(
+	ctx context.Context, dbID descpb.ID,
+) (descpb.ID, error) {
+	tempSchemaName := p.TemporarySchemaName()
+	sKey := catalogkeys.NewSchemaKey(dbID, tempSchemaName)
+	schemaID, err := catalogkv.GetDescriptorID(ctx, p.txn, p.ExecCfg().Codec, sKey)
 	if err != nil {
-		return sqlbase.InvalidID, err
+		return descpb.InvalidID, err
+	} else if schemaID == descpb.InvalidID {
+		// The temporary schema has not been created yet.
+		id, err := catalogkv.GenerateUniqueDescID(ctx, p.ExecCfg().DB, p.ExecCfg().Codec)
+		if err != nil {
+			return descpb.InvalidID, err
+		}
+		if err := p.createSchemaNamespaceEntry(ctx, sKey.Key(p.ExecCfg().Codec), id); err != nil {
+			return descpb.InvalidID, err
+		}
+		p.sessionDataMutator.SetTemporarySchemaName(sKey.Name())
+		p.sessionDataMutator.SetTemporarySchemaIDForDatabase(uint32(dbID), uint32(id))
+		return id, nil
 	}
-	if err := params.p.createSchemaWithID(params.ctx, sKey.Key(params.ExecCfg().Codec), id); err != nil {
-		return sqlbase.InvalidID, err
-	}
-
-	params.p.sessionDataMutator.SetTemporarySchemaName(sKey.Name())
-	return id, nil
+	return schemaID, nil
 }
 
-func (p *planner) createSchemaWithID(
-	ctx context.Context, schemaNameKey roachpb.Key, schemaID sqlbase.ID,
+func (p *planner) createSchemaNamespaceEntry(
+	ctx context.Context, schemaNameKey roachpb.Key, schemaID descpb.ID,
 ) error {
 	if p.ExtendedEvalContext().Tracing.KVTracingEnabled() {
 		log.VEventf(ctx, 2, "CPut %s -> %d", schemaNameKey, schemaID)
@@ -139,8 +153,8 @@ func temporarySchemaSessionID(scName string) (bool, ClusterWideID, error) {
 // getTemporaryObjectNames returns all the temporary objects under the
 // temporary schema of the given dbID.
 func getTemporaryObjectNames(
-	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, dbID sqlbase.ID, tempSchemaName string,
-) (TableNames, error) {
+	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, dbID descpb.ID, tempSchemaName string,
+) (tree.TableNames, error) {
 	dbDesc, err := catalogkv.MustGetDatabaseDescByID(ctx, txn, codec, dbID)
 	if err != nil {
 		return nil, err
@@ -190,7 +204,7 @@ func cleanupSessionTempObjects(
 			// itself may still exist (eg. a temporary table was created and then
 			// dropped). So we remove the namespace table entry of the temporary
 			// schema.
-			if err := sqlbase.RemoveSchemaNamespaceEntry(ctx, txn, codec, id, tempSchemaName); err != nil {
+			if err := catalogkv.RemoveSchemaNamespaceEntry(ctx, txn, codec, id, tempSchemaName); err != nil {
 				return err
 			}
 		}
@@ -205,7 +219,7 @@ func cleanupSchemaObjects(
 	txn *kv.Txn,
 	codec keys.SQLCodec,
 	ie sqlutil.InternalExecutor,
-	dbID sqlbase.ID,
+	dbID descpb.ID,
 	schemaName string,
 ) error {
 	tbNames, err := getTemporaryObjectNames(ctx, txn, codec, dbID, schemaName)
@@ -214,19 +228,18 @@ func cleanupSchemaObjects(
 	}
 	a := catalogkv.UncachedPhysicalAccessor{}
 
-	searchPath := sqlbase.DefaultSearchPath.WithTemporarySchemaName(schemaName)
-	override := sqlbase.InternalExecutorSessionDataOverride{
-		SearchPath: &searchPath,
-		User:       security.RootUser,
-	}
+	// We construct the database ID -> temp Schema ID map here so that the
+	// drop statements executed by the internal executor can resolve the temporary
+	// schemaID later.
+	databaseIDToTempSchemaID := make(map[uint32]uint32)
 
 	// TODO(andrei): We might want to accelerate the deletion of this data.
-	var tables sqlbase.IDs
-	var views sqlbase.IDs
-	var sequences sqlbase.IDs
+	var tables descpb.IDs
+	var views descpb.IDs
+	var sequences descpb.IDs
 
-	descsByID := make(map[sqlbase.ID]*TableDescriptor, len(tbNames))
-	tblNamesByID := make(map[sqlbase.ID]tree.TableName, len(tbNames))
+	tblDescsByID := make(map[descpb.ID]catalog.TableDescriptor, len(tbNames))
+	tblNamesByID := make(map[descpb.ID]tree.TableName, len(tbNames))
 	for _, tbName := range tbNames {
 		objDesc, err := a.GetObjectDesc(
 			ctx,
@@ -241,10 +254,14 @@ func cleanupSchemaObjects(
 		if err != nil {
 			return err
 		}
-		desc := objDesc.TableDesc()
+		// TODO(ajwerner): Deal with temporary types or ensure that they cannot
+		// exist.
+		desc := objDesc.(*tabledesc.Immutable)
 
-		descsByID[desc.ID] = desc
+		tblDescsByID[desc.ID] = desc
 		tblNamesByID[desc.ID] = tbName
+
+		databaseIDToTempSchemaID[uint32(desc.ParentID)] = uint32(desc.GetParentSchemaID())
 
 		if desc.SequenceOpts != nil {
 			sequences = append(sequences, desc.ID)
@@ -255,14 +272,21 @@ func cleanupSchemaObjects(
 		}
 	}
 
+	searchPath := sessiondata.DefaultSearchPathForUser(security.RootUserName()).WithTemporarySchemaName(schemaName)
+	override := sessiondata.InternalExecutorOverride{
+		SearchPath:               &searchPath,
+		User:                     security.RootUserName(),
+		DatabaseIDToTempSchemaID: databaseIDToTempSchemaID,
+	}
+
 	for _, toDelete := range []struct {
 		// typeName is the type of table being deleted, e.g. view, table, sequence
 		typeName string
 		// ids represents which ids we wish to remove.
-		ids sqlbase.IDs
+		ids descpb.IDs
 		// preHook is used to perform any operations needed before calling
 		// delete on all the given ids.
-		preHook func(sqlbase.ID) error
+		preHook func(descpb.ID) error
 	}{
 		// Drop views before tables to avoid deleting required dependencies.
 		{"VIEW", views, nil},
@@ -272,21 +296,21 @@ func cleanupSchemaObjects(
 		{
 			"SEQUENCE",
 			sequences,
-			func(id sqlbase.ID) error {
-				desc := descsByID[id]
+			func(id descpb.ID) error {
+				desc := tblDescsByID[id]
 				// For any dependent tables, we need to drop the sequence dependencies.
 				// This can happen if a permanent table references a temporary table.
-				for _, d := range desc.DependedOnBy {
+				return desc.ForeachDependedOnBy(func(d *descpb.TableDescriptor_Reference) error {
 					// We have already cleaned out anything we are depended on if we've seen
 					// the descriptor already.
-					if _, ok := descsByID[d.ID]; ok {
-						continue
+					if _, ok := tblDescsByID[d.ID]; ok {
+						return nil
 					}
-					dTableDesc, err := sqlbase.GetTableDescFromID(ctx, txn, codec, d.ID)
+					dTableDesc, err := catalogkv.MustGetTableDescByID(ctx, txn, codec, d.ID)
 					if err != nil {
 						return err
 					}
-					db, err := sqlbase.GetDatabaseDescFromID(ctx, txn, codec, dTableDesc.GetParentID())
+					db, err := catalogkv.MustGetDatabaseDescByID(ctx, txn, codec, dTableDesc.GetParentID())
 					if err != nil {
 						return err
 					}
@@ -327,8 +351,8 @@ func cleanupSchemaObjects(
 							}
 						}
 					}
-				}
-				return nil
+					return nil
+				})
 			},
 		},
 	} {
@@ -364,7 +388,7 @@ func cleanupSchemaObjects(
 }
 
 // isMeta1LeaseholderFunc helps us avoid an import into pkg/storage.
-type isMeta1LeaseholderFunc func(hlc.Timestamp) (bool, error)
+type isMeta1LeaseholderFunc func(context.Context, hlc.Timestamp) (bool, error)
 
 // TemporaryObjectCleaner is a background thread job that periodically
 // cleans up orphaned temporary objects by sessions which did not close
@@ -374,8 +398,8 @@ type TemporaryObjectCleaner struct {
 	db                               *kv.DB
 	codec                            keys.SQLCodec
 	makeSessionBoundInternalExecutor sqlutil.SessionBoundInternalExecutorFactory
-	// statusServer gives access to the Status service.
-	statusServer           serverpb.OptionalStatusServer
+	// statusServer gives access to the SQLStatus service.
+	statusServer           serverpb.SQLStatusServer
 	isMeta1LeaseholderFunc isMeta1LeaseholderFunc
 	testingKnobs           ExecutorTestingKnobs
 	metrics                *temporaryObjectCleanerMetrics
@@ -402,7 +426,7 @@ func NewTemporaryObjectCleaner(
 	codec keys.SQLCodec,
 	registry *metric.Registry,
 	makeSessionBoundInternalExecutor sqlutil.SessionBoundInternalExecutorFactory,
-	statusServer serverpb.OptionalStatusServer,
+	statusServer serverpb.SQLStatusServer,
 	isMeta1LeaseholderFunc isMeta1LeaseholderFunc,
 	testingKnobs ExecutorTestingKnobs,
 ) *TemporaryObjectCleaner {
@@ -458,7 +482,7 @@ func (c *TemporaryObjectCleaner) doTemporaryObjectCleanup(
 
 	// We only want to perform the cleanup if we are holding the meta1 lease.
 	// This ensures only one server can perform the job at a time.
-	isLeaseholder, err := c.isMeta1LeaseholderFunc(c.db.Clock().Now())
+	isLeaseholder, err := c.isMeta1LeaseholderFunc(ctx, c.db.Clock().Now())
 	if err != nil {
 		return err
 	}
@@ -474,7 +498,7 @@ func (c *TemporaryObjectCleaner) doTemporaryObjectCleanup(
 	txn := kv.NewTxn(ctx, c.db, 0)
 
 	// Build a set of all session IDs with temporary objects.
-	var dbIDs []sqlbase.ID
+	var dbIDs []descpb.ID
 	if err := retryFunc(ctx, func() error {
 		var err error
 		dbIDs, err = catalogkv.GetAllDatabaseDescriptorIDs(ctx, txn, c.codec)
@@ -485,7 +509,7 @@ func (c *TemporaryObjectCleaner) doTemporaryObjectCleanup(
 
 	sessionIDs := make(map[ClusterWideID]struct{})
 	for _, dbID := range dbIDs {
-		var schemaNames map[sqlbase.ID]string
+		var schemaNames map[descpb.ID]string
 		if err := retryFunc(ctx, func() error {
 			var err error
 			schemaNames, err = resolver.GetForDatabase(ctx, txn, c.codec, dbID)
@@ -512,16 +536,11 @@ func (c *TemporaryObjectCleaner) doTemporaryObjectCleanup(
 		return nil
 	}
 
-	statusServer, err := c.statusServer.OptionalErr(47894)
-	if err != nil {
-		return err
-	}
-
 	// Get active sessions.
 	var response *serverpb.ListSessionsResponse
 	if err := retryFunc(ctx, func() error {
 		var err error
-		response, err = statusServer.ListSessions(
+		response, err = c.statusServer.ListSessions(
 			ctx,
 			&serverpb.ListSessionsRequest{},
 		)

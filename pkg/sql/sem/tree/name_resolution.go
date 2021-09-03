@@ -238,11 +238,9 @@ func (c *ColumnItem) Resolve(
 }
 
 // ObjectNameTargetResolver is the helper interface to resolve object
-// names when the object is not expected to exist.
-//
-// TODO(ajwerner): figure out what scMeta is supposed to be. Currently it's
-// the database but with User-defined schemas, should it be the schema?
-// Should it be both?
+// names when the object is not expected to exist. The planner implements
+// LookupSchema to return an object consisting of the parent database and
+// resolved target schema.
 type ObjectNameTargetResolver interface {
 	LookupSchema(ctx context.Context, dbName, scName string) (found bool, scMeta SchemaMeta, err error)
 }
@@ -300,7 +298,7 @@ func ResolveExisting(
 		if u.HasExplicitCatalog() {
 			// Already 3 parts: nothing to search. Delegate to the resolver.
 			namePrefix.CatalogName = Name(u.Catalog())
-			namePrefix.SchemaName = Name(u.Schema())
+			namePrefix.SchemaName = Name(scName)
 			found, result, err := r.LookupObject(ctx, lookupFlags, u.Catalog(), scName, u.Object())
 			return found, namePrefix, result, err
 		}
@@ -316,6 +314,7 @@ func ResolveExisting(
 		if found, objMeta, err := r.LookupObject(ctx, lookupFlags, curDb, scName, u.Object()); found || err != nil {
 			if err == nil {
 				namePrefix.CatalogName = Name(curDb)
+				namePrefix.SchemaName = Name(scName)
 			}
 			return found, namePrefix, objMeta, err
 		}
@@ -375,6 +374,8 @@ func ResolveTarget(
 		}
 		if u.HasExplicitCatalog() {
 			// Already 3 parts: nothing to do.
+			namePrefix.CatalogName = Name(u.Catalog())
+			namePrefix.SchemaName = Name(scName)
 			found, scMeta, err = r.LookupSchema(ctx, u.Catalog(), scName)
 			return found, namePrefix, scMeta, err
 		}
@@ -383,6 +384,7 @@ func ResolveTarget(
 		if found, scMeta, err = r.LookupSchema(ctx, curDb, scName); found || err != nil {
 			if err == nil {
 				namePrefix.CatalogName = Name(curDb)
+				namePrefix.SchemaName = Name(scName)
 			}
 			return found, namePrefix, scMeta, err
 		}
@@ -429,6 +431,7 @@ func (tp *ObjectNamePrefix) Resolve(
 		}
 		if tp.ExplicitCatalog {
 			// Catalog name is explicit; nothing to do.
+			tp.SchemaName = Name(scName)
 			return r.LookupSchema(ctx, tp.Catalog(), scName)
 		}
 		// Try with the current database. This may be empty, because
@@ -437,6 +440,7 @@ func (tp *ObjectNamePrefix) Resolve(
 		if found, scMeta, err = r.LookupSchema(ctx, curDb, scName); found || err != nil {
 			if err == nil {
 				tp.CatalogName = Name(curDb)
+				tp.SchemaName = Name(scName)
 			}
 			return found, scMeta, err
 		}
@@ -508,6 +512,14 @@ func (n *UnresolvedName) ResolveFunction(
 		// it in the global namespace.
 		prefix = ""
 	}
+	if prefix == sessiondata.PublicSchemaName {
+		// If the user specified public, it may be from a PostgreSQL extension.
+		// Double check the function definition allows resolution on the public
+		// schema, and resolve as such if appropriate.
+		if d, ok := FunDefs[function]; ok && d.AvailableOnPublicSchema {
+			return d, nil
+		}
+	}
 
 	if prefix != "" {
 		fullName = prefix + "." + function
@@ -559,9 +571,18 @@ func newSourceNotFoundError(fmt string, args ...interface{}) error {
 type CommonLookupFlags struct {
 	// if required is set, lookup will return an error if the item is not found.
 	Required bool
+	// RequireMutable specifies whether to return a mutable descriptor.
+	RequireMutable bool
 	// if AvoidCached is set, lookup will avoid the cache (if any).
 	AvoidCached bool
+	// IncludeOffline specifies if offline descriptors should be visible.
+	IncludeOffline bool
+	// IncludeOffline specifies if dropped descriptors should be visible.
+	IncludeDropped bool
 }
+
+// SchemaLookupFlags is the flag struct suitable for GetSchema().
+type SchemaLookupFlags = CommonLookupFlags
 
 // DatabaseLookupFlags is the flag struct suitable for GetDatabaseDesc().
 type DatabaseLookupFlags = CommonLookupFlags
@@ -628,9 +649,6 @@ func (r RequiredTableKind) String() string {
 // ObjectLookupFlags is the flag struct suitable for GetObjectDesc().
 type ObjectLookupFlags struct {
 	CommonLookupFlags
-	// return a MutableTableDescriptor
-	RequireMutable         bool
-	IncludeOffline         bool
 	AllowWithoutPrimaryKey bool
 	// Control what type of object is being requested.
 	DesiredObjectKind DesiredObjectKind

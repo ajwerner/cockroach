@@ -103,7 +103,7 @@ build-with-dep-files := $(or $(if $(MAKECMDGOALS),,implicit-all),$(filter-out he
 ## Which package to run tests against, e.g. "./pkg/foo".
 PKG := ./pkg/...
 
-## Tests to run for use with `make test` or `make check-libroach`.
+## Tests to run for use with `make test`
 TESTS := .
 
 ## Benchmarks to run for use with `make bench`.
@@ -121,7 +121,7 @@ TESTCONFIG :=
 SUBTESTS :=
 
 ## Test timeout to use for the linter.
-LINTTIMEOUT := 20m
+LINTTIMEOUT := 30m
 
 ## Test timeout to use for regular tests.
 TESTTIMEOUT := 30m
@@ -202,8 +202,7 @@ help: ## Print help for targets with comments.
 		"make testlogic TESTCONFIG=local" "Run the logic tests for the cluster configuration 'local'." \
 		"make fuzz" "Run all fuzz tests for 12m each (or whatever the default TESTTIMEOUT is)." \
 		"make fuzz PKG=./pkg/sql/... TESTTIMEOUT=1m" "Run all fuzz tests under the sql directory for 1m each." \
-		"make fuzz PKG=./pkg/sql/sem/tree TESTS=Decimal TESTTIMEOUT=1m" "Run the Decimal fuzz tests in the tree directory for 1m." \
-		"make check-libroach TESTS=ccl" "Run the libroach tests matching .*ccl.*"
+		"make fuzz PKG=./pkg/sql/sem/tree TESTS=Decimal TESTTIMEOUT=1m" "Run the Decimal fuzz tests in the tree directory for 1m."
 
 BUILDTYPE := development
 
@@ -311,13 +310,26 @@ $(call make-lazy,yellow)
 $(call make-lazy,cyan)
 $(call make-lazy,term-reset)
 
+# Warn maintainers for if ccache is not found.
+ifeq (, $(shell which ccache))
+$(info $(yellow)Warning: 'ccache' not found, consider installing it for faster builds$(term-reset))
+endif
+
+# Warn maintainers if bazel is not found.
+#
+# TODO(irfansharif): Assert here instead, on a fixed version of bazel (3.7.0). Something like:
+#
+#   $(error $(yellow)'bazel' not found (`brew install bazel` for macs)$(term-reset))
+ifeq (, $(shell which bazel))
+$(info $(yellow)Warning: 'bazel' not found (`brew install bazel` for macs)$(term-reset))
+endif
+
 # Force vendor directory to rebuild.
 .PHONY: vendor_rebuild
 vendor_rebuild: bin/.submodules-initialized
-	# Use -mod=mod, as -mod=vendor will try install from the vendor directory
-	# which may be mismatching upon rebuild.
-	$(GO_INSTALL) -v -mod=mod github.com/goware/modvendor
+	$(GO_INSTALL) -v github.com/goware/modvendor
 	./build/vendor_rebuild.sh
+	bazel run //:gazelle
 
 # Tell Make to delete the target if its recipe fails. Otherwise, if a recipe
 # modifies its target before failing, the target's timestamp will make it appear
@@ -378,6 +390,7 @@ bin/.bootstrap: $(GITHOOKS) | bin/.submodules-initialized
 		github.com/mattn/goveralls \
 		github.com/mibk/dupl \
 		github.com/mmatczuk/go_generics/cmd/go_generics \
+		github.com/pseudomuto/protoc-gen-doc/cmd/protoc-gen-doc \
 		github.com/wadey/gocovmerge \
 		golang.org/x/lint/golint \
 		golang.org/x/perf/cmd/benchstat \
@@ -423,6 +436,7 @@ endif
 
 target-is-windows := $(findstring w64,$(TARGET_TRIPLE))
 target-is-macos := $(findstring darwin,$(TARGET_TRIPLE))
+target-is-linux := $(findstring linux,$(TARGET_TRIPLE))
 
 # CMAKE_TARGET_MESSAGES=OFF prevents CMake from printing progress messages
 # whenever a target is fully built to prevent spammy output from make when
@@ -446,11 +460,8 @@ override xgo := GOFLAGS= GOOS=$(XGOOS) GOARCH=$(XGOARCH) CC=$(XCC) CXX=$(XCXX) $
 endif
 
 C_DEPS_DIR := $(abspath c-deps)
-CRYPTOPP_SRC_DIR := $(C_DEPS_DIR)/cryptopp
 JEMALLOC_SRC_DIR := $(C_DEPS_DIR)/jemalloc
 PROTOBUF_SRC_DIR := $(C_DEPS_DIR)/protobuf
-ROCKSDB_SRC_DIR  := $(C_DEPS_DIR)/rocksdb
-SNAPPY_SRC_DIR   := $(C_DEPS_DIR)/snappy
 GEOS_SRC_DIR     := $(C_DEPS_DIR)/geos
 PROJ_SRC_DIR     := $(C_DEPS_DIR)/proj
 LIBEDIT_SRC_DIR  := $(C_DEPS_DIR)/libedit
@@ -463,7 +474,6 @@ use-msan               := $(findstring msan,$(GOFLAGS))
 
 # User-requested build variants.
 ENABLE_LIBROACH_ASSERTIONS ?=
-ENABLE_ROCKSDB_ASSERTIONS ?=
 
 BUILD_DIR := $(GOPATH)/native/$(TARGET_TRIPLE)
 
@@ -476,11 +486,8 @@ ifdef host-is-mingw
 BUILD_DIR := $(shell cygpath -m $(BUILD_DIR))
 endif
 
-CRYPTOPP_DIR := $(BUILD_DIR)/cryptopp$(if $(use-msan),_msan)
 JEMALLOC_DIR := $(BUILD_DIR)/jemalloc$(if $(use-msan),_msan)
 PROTOBUF_DIR := $(BUILD_DIR)/protobuf$(if $(use-msan),_msan)
-ROCKSDB_DIR  := $(BUILD_DIR)/rocksdb$(if $(use-msan),_msan)$(if $(use-stdmalloc),_stdmalloc)$(if $(ENABLE_ROCKSDB_ASSERTIONS),_assert)
-SNAPPY_DIR   := $(BUILD_DIR)/snappy$(if $(use-msan),_msan)
 GEOS_DIR     := $(BUILD_DIR)/geos$(if $(use-msan),_msan)
 PROJ_DIR     := $(BUILD_DIR)/proj$(if $(use-msan),_msan)
 LIBEDIT_DIR  := $(BUILD_DIR)/libedit$(if $(use-msan),_msan)
@@ -489,14 +496,10 @@ KRB5_DIR     := $(BUILD_DIR)/krb5$(if $(use-msan),_msan)
 # Can't share with protobuf because protoc is always built for the host.
 PROTOC_DIR := $(GOPATH)/native/$(HOST_TRIPLE)/protobuf
 
-LIBCRYPTOPP := $(CRYPTOPP_DIR)/libcryptopp.a
 LIBJEMALLOC := $(JEMALLOC_DIR)/lib/libjemalloc.a
 LIBPROTOBUF := $(PROTOBUF_DIR)/libprotobuf.a
-LIBROCKSDB  := $(ROCKSDB_DIR)/librocksdb.a
-LIBSNAPPY   := $(SNAPPY_DIR)/libsnappy.a
 LIBEDIT     := $(LIBEDIT_DIR)/src/.libs/libedit.a
 LIBROACH    := $(LIBROACH_DIR)/libroach.a
-LIBROACHCCL := $(LIBROACH_DIR)/libroachccl.a
 LIBPROJ     := $(PROJ_DIR)/lib/libproj$(if $(target-is-windows),_4_9).a
 LIBKRB5     := $(KRB5_DIR)/lib/libgssapi_krb5.a
 PROTOC      := $(PROTOC_DIR)/protoc
@@ -515,13 +518,15 @@ LIBGEOS     := $(DYN_LIB_DIR)/libgeos.$(DYN_EXT)
 C_LIBS_COMMON = \
 	$(if $(use-stdmalloc),,$(LIBJEMALLOC)) \
 	$(if $(target-is-windows),,$(LIBEDIT)) \
-	$(LIBPROTOBUF) $(LIBSNAPPY) $(LIBROCKSDB) $(LIBPROJ) $(LIBGEOS)
-C_LIBS_OSS = $(C_LIBS_COMMON) $(LIBROACH)
-C_LIBS_CCL = $(C_LIBS_COMMON) $(LIBCRYPTOPP) $(LIBROACHCCL)
+	$(LIBPROJ) $(LIBGEOS) $(LIBROACH)
+C_LIBS_SHORT = $(C_LIBS_COMMON)
+C_LIBS_OSS = $(C_LIBS_COMMON) $(LIBPROTOBUF)
+C_LIBS_CCL = $(C_LIBS_COMMON) $(LIBPROTOBUF)
 
 # We only include krb5 on linux, non-musl builds.
 ifeq "$(findstring linux-gnu,$(TARGET_TRIPLE))" "linux-gnu"
 C_LIBS_CCL += $(LIBKRB5)
+C_LIBS_SHORT += $(LIBKRB5)
 KRB_CPPFLAGS := $(KRB5_DIR)/include
 KRB_DIR := $(KRB5_DIR)/lib
 override TAGS += gss
@@ -572,7 +577,7 @@ $(BASE_CGO_FLAGS_FILES): Makefile build/defs.mk.sig | bin/.submodules-initialize
 	@echo 'package $(if $($(@D)-package),$($(@D)-package),$(notdir $(@D)))' >> $@
 	@echo >> $@
 	@echo '// #cgo CPPFLAGS: $(addprefix -I,$(JEMALLOC_DIR)/include $(KRB_CPPFLAGS))' >> $@
-	@echo '// #cgo LDFLAGS: $(addprefix -L,$(CRYPTOPP_DIR) $(PROTOBUF_DIR) $(JEMALLOC_DIR)/lib $(SNAPPY_DIR) $(LIBEDIT_DIR)/src/.libs $(ROCKSDB_DIR) $(LIBROACH_DIR) $(KRB_DIR) $(PROJ_DIR)/lib)' >> $@
+	@echo '// #cgo LDFLAGS: $(addprefix -L,$(PROTOBUF_DIR) $(JEMALLOC_DIR)/lib $(LIBEDIT_DIR)/src/.libs $(LIBROACH_DIR) $(KRB_DIR) $(PROJ_DIR)/lib)' >> $@
 	@echo 'import "C"' >> $@
 
 vendor/github.com/knz/go-libedit/unix/zcgo_flags_extra.go: Makefile | bin/.submodules-initialized
@@ -604,19 +609,6 @@ vendor/github.com/knz/go-libedit/unix/zcgo_flags_extra.go: Makefile | bin/.submo
 # only rebuild the affected objects, but in practice dependencies on configure
 # flags are not tracked correctly, and these stale artifacts can cause
 # particularly hard-to-debug errors.
-#
-# Flags needed to make cryptopp to runtime detection of AES cpu instruction sets.
-# pclmul and ssse3 need to be defined for the overall AES switch but are only used
-# in GCM mode (not currently in use by cockroach).
-$(CRYPTOPP_DIR)/Makefile: aes := $(if $(findstring x86_64,$(TARGET_TRIPLE)),-maes -mpclmul -mssse3)
-$(CRYPTOPP_DIR)/Makefile: $(C_DEPS_DIR)/cryptopp-rebuild | bin/.submodules-initialized
-	rm -rf $(CRYPTOPP_DIR)
-	mkdir -p $(CRYPTOPP_DIR)
-	@# NOTE: If you change the CMake flags below, bump the version in
-	@# $(C_DEPS_DIR)/cryptopp-rebuild. See above for rationale.
-	cd $(CRYPTOPP_DIR) && CFLAGS+=" $(aes)" && CXXFLAGS+=" $(aes)" cmake $(xcmake-flags) $(CRYPTOPP_SRC_DIR) \
-	  -DCMAKE_BUILD_TYPE=Release
-
 $(JEMALLOC_SRC_DIR)/configure.ac: | bin/.submodules-initialized
 
 $(JEMALLOC_SRC_DIR)/configure: $(JEMALLOC_SRC_DIR)/configure.ac
@@ -647,7 +639,7 @@ $(PROTOBUF_DIR)/Makefile: $(C_DEPS_DIR)/protobuf-rebuild | bin/.submodules-initi
 	mkdir -p $(PROTOBUF_DIR)
 	@# NOTE: If you change the CMake flags below, bump the version in
 	@# $(C_DEPS_DIR)/protobuf-rebuild. See above for rationale.
-	cd $(PROTOBUF_DIR) && cmake $(xcmake-flags) -Dprotobuf_BUILD_TESTS=OFF $(PROTOBUF_SRC_DIR)/cmake \
+	cd $(PROTOBUF_DIR) && cmake $(xcmake-flags) -Dprotobuf_WITH_ZLIB=OFF -Dprotobuf_BUILD_TESTS=OFF $(PROTOBUF_SRC_DIR)/cmake \
 	  -DCMAKE_BUILD_TYPE=Release
 
 ifneq ($(PROTOC_DIR),$(PROTOBUF_DIR))
@@ -660,27 +652,6 @@ $(PROTOC_DIR)/Makefile: $(C_DEPS_DIR)/protobuf-rebuild | bin/.submodules-initial
 	  -DCMAKE_BUILD_TYPE=Release
 endif
 
-$(ROCKSDB_DIR)/Makefile: sse := $(if $(findstring x86_64,$(TARGET_TRIPLE)),-msse3)
-$(ROCKSDB_DIR)/Makefile: $(C_DEPS_DIR)/rocksdb-rebuild | bin/.submodules-initialized $(LIBSNAPPY) $(if $(use-stdmalloc),,$(LIBJEMALLOC))
-	rm -rf $(ROCKSDB_DIR)
-	mkdir -p $(ROCKSDB_DIR)
-	@# NOTE: If you change the CMake flags below, bump the version in
-	@# $(C_DEPS_DIR)/rocksdb-rebuild. See above for rationale.
-	cd $(ROCKSDB_DIR) && CFLAGS+=" $(sse)" && CXXFLAGS+=" $(sse)" && cmake $(xcmake-flags) $(ROCKSDB_SRC_DIR) \
-	  $(if $(findstring release,$(BUILDTYPE)),-DPORTABLE=ON) -DWITH_GFLAGS=OFF \
-	  -DSNAPPY_LIBRARIES=$(LIBSNAPPY) -DSNAPPY_INCLUDE_DIR="$(SNAPPY_SRC_DIR);$(SNAPPY_DIR)" -DWITH_SNAPPY=ON \
-	  $(if $(use-stdmalloc),,-DJEMALLOC_LIBRARIES=$(LIBJEMALLOC) -DJEMALLOC_INCLUDE_DIR=$(JEMALLOC_DIR)/include -DWITH_JEMALLOC=ON) \
-	  -DCMAKE_BUILD_TYPE=$(if $(ENABLE_ROCKSDB_ASSERTIONS),Debug,Release) \
-	  -DUSE_RTTI=1 -DFAIL_ON_WARNINGS=0
-
-$(SNAPPY_DIR)/Makefile: $(C_DEPS_DIR)/snappy-rebuild | bin/.submodules-initialized
-	rm -rf $(SNAPPY_DIR)
-	mkdir -p $(SNAPPY_DIR)
-	@# NOTE: If you change the CMake flags below, bump the version in
-	@# $(C_DEPS_DIR)/snappy-rebuild. See above for rationale.
-	cd $(SNAPPY_DIR) && cmake $(xcmake-flags) $(SNAPPY_SRC_DIR) \
-	  -DCMAKE_BUILD_TYPE=Release
-
 $(GEOS_DIR)/Makefile: $(C_DEPS_DIR)/geos-rebuild | bin/.submodules-initialized
 	rm -rf $(GEOS_DIR)
 	mkdir -p $(GEOS_DIR)
@@ -692,6 +663,14 @@ $(GEOS_DIR)/Makefile: $(C_DEPS_DIR)/geos-rebuild | bin/.submodules-initialized
 	@# directories.
 	mkdir $(GEOS_DIR)/capi/geos
 	cp $(GEOS_SRC_DIR)/include/geos/export.h $(GEOS_DIR)/capi/geos
+
+$(LIBROACH_DIR)/Makefile: $(C_DEPS_DIR)/libroach-rebuild | bin/.submodules-initialized
+	rm -rf $(LIBROACH_DIR)
+	mkdir -p $(LIBROACH_DIR)
+	@# NOTE: If you change the CMake flags below, bump the version in
+	@# $(C_DEPS_DIR)/libroach-rebuild. See above for rationale.
+	cd $(LIBROACH_DIR) && cmake $(xcmake-flags) $(LIBROACH_SRC_DIR) \
+	  -DCMAKE_BUILD_TYPE=$(if $(ENABLE_LIBROACH_ASSERTIONS),Debug,Release)
 
 $(PROJ_DIR)/Makefile: $(C_DEPS_DIR)/proj-rebuild | bin/.submodules-initialized
 	rm -rf $(PROJ_DIR)
@@ -709,20 +688,6 @@ $(LIBEDIT_DIR)/Makefile: $(C_DEPS_DIR)/libedit-rebuild $(LIBEDIT_SRC_DIR)/config
 	@# NOTE: If you change the configure flags below, bump the version in
 	@# $(C_DEPS_DIR)/libedit-rebuild. See above for rationale.
 	cd $(LIBEDIT_DIR) && $(LIBEDIT_SRC_DIR)/configure $(xconfigure-flags) --disable-examples --disable-shared
-
-# TODO(benesch): make it possible to build libroach without CCL code. Because
-# libroach and libroachccl are defined in the same CMake project, CMake requires
-# that the CCL code be present even if only the OSS target will be built.
-$(LIBROACH_DIR)/Makefile: $(C_DEPS_DIR)/libroach-rebuild | bin/.submodules-initialized bin/.cpp_protobuf_sources bin/.cpp_ccl_protobuf_sources
-	rm -rf $(LIBROACH_DIR)
-	mkdir -p $(LIBROACH_DIR)
-	@# NOTE: If you change the CMake flags below, bump the version in
-	@# $(C_DEPS_DIR)/libroach-rebuild. See above for rationale.
-	cd $(LIBROACH_DIR) && cmake $(xcmake-flags) $(LIBROACH_SRC_DIR) \
-		-DCMAKE_BUILD_TYPE=$(if $(ENABLE_LIBROACH_ASSERTIONS),Debug,Release) \
-		-DPROTOBUF_LIB=$(LIBPROTOBUF) -DROCKSDB_LIB=$(LIBROCKSDB) \
-		-DJEMALLOC_LIB=$(LIBJEMALLOC) -DSNAPPY_LIB=$(LIBSNAPPY) \
-		-DCRYPTOPP_LIB=$(LIBCRYPTOPP)
 
 # Most of our C and C++ dependencies use Makefiles that are generated by CMake,
 # which are rather slow, taking upwards of 500ms to determine that nothing has
@@ -756,20 +721,44 @@ $(LIBROACH_DIR)/Makefile: $(C_DEPS_DIR)/libroach-rebuild | bin/.submodules-initi
 $(PROTOC): $(PROTOC_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD | $(LIBPROTOBUF)
 	@uptodate $@ $(PROTOBUF_SRC_DIR) || $(MAKE) --no-print-directory -C $(PROTOC_DIR) protoc
 
-$(LIBCRYPTOPP): $(CRYPTOPP_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
-	@uptodate $@ $(CRYPTOPP_SRC_DIR) || $(MAKE) --no-print-directory -C $(CRYPTOPP_DIR) static
-
 $(LIBJEMALLOC): $(JEMALLOC_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
 	@uptodate $@ $(JEMALLOC_SRC_DIR) || $(MAKE) --no-print-directory -C $(JEMALLOC_DIR) build_lib_static
 
 $(LIBPROTOBUF): $(PROTOBUF_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
 	@uptodate $@ $(PROTOBUF_SRC_DIR) || $(MAKE) --no-print-directory -C $(PROTOBUF_DIR) libprotobuf
 
-$(LIBSNAPPY): $(SNAPPY_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
-	@uptodate $@ $(SNAPPY_SRC_DIR) || $(MAKE) --no-print-directory -C $(SNAPPY_DIR) snappy
+ifdef is-cross-compile
+ifdef target-is-macos
+geos_require_install_name_tool := 1
+endif
+ifdef target-is-linux
+geos_require_patchelf := 1
+endif
+endif
 
+# For dlopen to work with OSX from any location, we need the @rpath directory prefix.
+# However, no matter what CMake flags I try, cross-compiling OSX does not output
+# the correct rpath locations. As such, use the install-name-tool to do the work
+# of setting the correct rpaths on OSX.
 GEOS_NATIVE_LIB_DIR = $(GEOS_DIR)/$(if $(target-is-windows),bin,lib)
-$(LIBGEOS): $(GEOS_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
+ifdef geos_require_install_name_tool
+$(LIBGEOS): libgeos_inner .ALWAYS_REBUILD
+	$(TARGET_TRIPLE)-install_name_tool -id @rpath/libgeos.3.8.1.dylib lib/libgeos.dylib
+	$(TARGET_TRIPLE)-install_name_tool -id @rpath/libgeos_c.1.dylib lib/libgeos_c.dylib
+	$(TARGET_TRIPLE)-install_name_tool -change "$(GEOS_NATIVE_LIB_DIR)/libgeos.3.8.1.dylib" "@rpath/libgeos.3.8.1.dylib" lib.docker_amd64/libgeos_c.dylib
+else ifdef geos_require_patchelf
+# We apply a similar fix for linux, allowing one to dlopen libgeos_c.so without
+# dlopening libgeos.so. Setting the rpath in the CMakeLists.txt does not work
+# for cross compilation.
+$(LIBGEOS): libgeos_inner .ALWAYS_REBUILD
+	patchelf --set-rpath '/usr/local/lib/cockroach/' lib/libgeos_c.so
+	patchelf --set-soname libgeos.so lib/libgeos.so
+	patchelf --replace-needed libgeos.so.3.8.1 libgeos.so lib/libgeos_c.so
+else
+$(LIBGEOS): libgeos_inner .ALWAYS_REBUILD
+endif
+
+libgeos_inner: $(GEOS_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
 	@uptodate $(GEOS_NATIVE_LIB_DIR)/libgeos.$(DYN_EXT) $(GEOS_SRC_DIR) || $(MAKE) --no-print-directory -C $(GEOS_DIR) geos_c
 	mkdir -p $(DYN_LIB_DIR)
 	rm -f $(DYN_LIB_DIR)/lib{geos,geos_c}.$(DYN_EXT)
@@ -781,40 +770,22 @@ $(LIBPROJ): $(PROJ_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
 $(LIBEDIT): $(LIBEDIT_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
 	@uptodate $@ $(LIBEDIT_SRC_DIR) || $(MAKE) --no-print-directory -C $(LIBEDIT_DIR)/src
 
-$(LIBROCKSDB): $(ROCKSDB_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
-	@uptodate $@ $(ROCKSDB_SRC_DIR) || $(MAKE) --no-print-directory -C $(ROCKSDB_DIR) rocksdb
-
-libroach-inputs := $(LIBROACH_SRC_DIR) $(ROCKSDB_SRC_DIR)/include $(PROTOBUF_SRC_DIR)/src
-
 $(LIBROACH): $(LIBROACH_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
-	@uptodate $@ $(libroach-inputs) || $(MAKE) --no-print-directory -C $(LIBROACH_DIR) roach
-
-$(LIBROACHCCL): $(LIBROACH_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
-	@uptodate $@ $(libroach-inputs) || $(MAKE) --no-print-directory -C $(LIBROACH_DIR) roachccl
+	@uptodate $@ $(LIBROACH_SRC_DIR) || $(MAKE) --no-print-directory -C $(LIBROACH_DIR) roach
 
 $(LIBKRB5): $(KRB5_DIR)/Makefile bin/uptodate .ALWAYS_REBUILD
 	@uptodate $@ $(KRB5_SRC_DIR)/src || $(MAKE) --no-print-directory -C $(KRB5_DIR)
 
 # Convenient names for maintainers. Not used by other targets in the Makefile.
-.PHONY: protoc libcryptopp libjemalloc libprotobuf libsnappy libgeos libproj librocksdb libroach libroachccl libkrb5
+.PHONY: protoc libjemalloc libprotobuf libgeos libproj libroach libkrb5
 protoc:      $(PROTOC)
-libcryptopp: $(LIBCRYPTOPP)
 libedit:     $(LIBEDIT)
 libjemalloc: $(LIBJEMALLOC)
 libprotobuf: $(LIBPROTOBUF)
-libsnappy:   $(LIBSNAPPY)
 libgeos:     $(LIBGEOS)
 libproj:     $(LIBPROJ)
-librocksdb:  $(LIBROCKSDB)
 libroach:    $(LIBROACH)
-libroachccl: $(LIBROACHCCL)
 libkrb5:     $(LIBKRB5)
-
-PHONY: check-libroach
-check-libroach: ## Run libroach tests.
-check-libroach: $(LIBROACH_DIR)/Makefile $(LIBJEMALLOC) $(LIBPROTOBUF) $(LIBSNAPPY) $(LIBROCKSDB) $(LIBCRYPTOPP)
-	@$(MAKE) --no-print-directory -C $(LIBROACH_DIR)
-	cd $(LIBROACH_DIR) && ctest -V -R $(TESTS)
 
 override TAGS += make $(native-tag)
 
@@ -827,7 +798,7 @@ export LC_ALL=C
 # Go binary. It is not intended to be perfect. Upgrading the compiler toolchain
 # in place will go unnoticed, for example. Similar problems exist in all Make-
 # based build systems and are not worth solving.
-build/defs.mk.sig: sig = $(PATH):$(CURDIR):$(GO):$(GOPATH):$(CC):$(CXX):$(TARGET_TRIPLE):$(BUILDTYPE):$(IGNORE_GOVERS):$(ENABLE_LIBROACH_ASSERTIONS):$(ENABLE_ROCKSDB_ASSERTIONS)
+build/defs.mk.sig: sig = $(PATH):$(CURDIR):$(GO):$(GOPATH):$(CC):$(CXX):$(TARGET_TRIPLE):$(BUILDTYPE):$(IGNORE_GOVERS):$(ENABLE_LIBROACH_ASSERTIONS)
 build/defs.mk.sig: .ALWAYS_REBUILD
 	@echo '$(sig)' | cmp -s - $@ || echo '$(sig)' > $@
 
@@ -841,32 +812,30 @@ SQLPARSER_TARGETS = \
 	pkg/sql/parser/help_messages.go \
 	pkg/sql/lex/tokens.go \
 	pkg/sql/lex/keywords.go \
-	pkg/sql/lex/reserved_keywords.go
+	pkg/sql/lexbase/reserved_keywords.go
 
-PROTOBUF_TARGETS := bin/.go_protobuf_sources bin/.gw_protobuf_sources bin/.cpp_protobuf_sources bin/.cpp_ccl_protobuf_sources
+PROTOBUF_TARGETS := bin/.go_protobuf_sources bin/.gw_protobuf_sources
 
-DOCGEN_TARGETS := bin/.docgen_bnfs bin/.docgen_functions docs/generated/redact_safe.md
+DOCGEN_TARGETS := bin/.docgen_bnfs bin/.docgen_functions docs/generated/redact_safe.md bin/.docgen_http
 
 EXECGEN_TARGETS = \
   pkg/col/coldata/vec.eg.go \
+  pkg/sql/colconv/datum_to_vec.eg.go \
+  pkg/sql/colconv/vec_to_datum.eg.go \
   pkg/sql/colexec/and_or_projection.eg.go \
   pkg/sql/colexec/cast.eg.go \
   pkg/sql/colexec/const.eg.go \
+  pkg/sql/colexec/default_cmp_expr.eg.go \
+  pkg/sql/colexec/default_cmp_proj_ops.eg.go \
+  pkg/sql/colexec/default_cmp_sel_ops.eg.go \
   pkg/sql/colexec/distinct.eg.go \
   pkg/sql/colexec/hashjoiner.eg.go \
   pkg/sql/colexec/hashtable_distinct.eg.go \
   pkg/sql/colexec/hashtable_full_default.eg.go \
   pkg/sql/colexec/hashtable_full_deleting.eg.go \
   pkg/sql/colexec/hash_aggregator.eg.go \
-  pkg/sql/colexec/hash_any_not_null_agg.eg.go \
-  pkg/sql/colexec/hash_avg_agg.eg.go \
-  pkg/sql/colexec/hash_bool_and_or_agg.eg.go \
-  pkg/sql/colexec/hash_concat_agg.eg.go \
-  pkg/sql/colexec/hash_count_agg.eg.go \
-  pkg/sql/colexec/hash_min_max_agg.eg.go \
-  pkg/sql/colexec/hash_sum_agg.eg.go \
-  pkg/sql/colexec/hash_sum_int_agg.eg.go \
   pkg/sql/colexec/hash_utils.eg.go \
+  pkg/sql/colexec/is_null_ops.eg.go \
   pkg/sql/colexec/like_ops.eg.go \
   pkg/sql/colexec/mergejoinbase.eg.go \
   pkg/sql/colexec/mergejoiner_exceptall.eg.go \
@@ -877,16 +846,7 @@ EXECGEN_TARGETS = \
   pkg/sql/colexec/mergejoiner_leftouter.eg.go \
   pkg/sql/colexec/mergejoiner_leftsemi.eg.go \
   pkg/sql/colexec/mergejoiner_rightouter.eg.go \
-  pkg/sql/colexec/ordered_any_not_null_agg.eg.go \
-  pkg/sql/colexec/ordered_avg_agg.eg.go \
-  pkg/sql/colexec/ordered_bool_and_or_agg.eg.go \
-  pkg/sql/colexec/ordered_concat_agg.eg.go \
-  pkg/sql/colexec/ordered_count_agg.eg.go \
-  pkg/sql/colexec/ordered_min_max_agg.eg.go \
-  pkg/sql/colexec/ordered_sum_agg.eg.go \
-  pkg/sql/colexec/ordered_sum_int_agg.eg.go \
   pkg/sql/colexec/ordered_synchronizer.eg.go \
-  pkg/sql/colexec/overloads_test_utils.eg.go \
   pkg/sql/colexec/proj_const_left_ops.eg.go \
   pkg/sql/colexec/proj_const_right_ops.eg.go \
   pkg/sql/colexec/proj_non_const_ops.eg.go \
@@ -899,11 +859,27 @@ EXECGEN_TARGETS = \
   pkg/sql/colexec/select_in.eg.go \
   pkg/sql/colexec/sort.eg.go \
   pkg/sql/colexec/substring.eg.go \
-  pkg/sql/colexec/utils.eg.go \
   pkg/sql/colexec/values_differ.eg.go \
   pkg/sql/colexec/vec_comparators.eg.go \
-  pkg/sql/colexec/vec_to_datum.eg.go \
-  pkg/sql/colexec/window_peer_grouper.eg.go
+  pkg/sql/colexec/window_peer_grouper.eg.go \
+  pkg/sql/colexec/colexecagg/hash_any_not_null_agg.eg.go \
+  pkg/sql/colexec/colexecagg/hash_avg_agg.eg.go \
+  pkg/sql/colexec/colexecagg/hash_bool_and_or_agg.eg.go \
+  pkg/sql/colexec/colexecagg/hash_concat_agg.eg.go \
+  pkg/sql/colexec/colexecagg/hash_count_agg.eg.go \
+  pkg/sql/colexec/colexecagg/hash_default_agg.eg.go \
+  pkg/sql/colexec/colexecagg/hash_min_max_agg.eg.go \
+  pkg/sql/colexec/colexecagg/hash_sum_agg.eg.go \
+  pkg/sql/colexec/colexecagg/hash_sum_int_agg.eg.go \
+  pkg/sql/colexec/colexecagg/ordered_any_not_null_agg.eg.go \
+  pkg/sql/colexec/colexecagg/ordered_avg_agg.eg.go \
+  pkg/sql/colexec/colexecagg/ordered_bool_and_or_agg.eg.go \
+  pkg/sql/colexec/colexecagg/ordered_concat_agg.eg.go \
+  pkg/sql/colexec/colexecagg/ordered_count_agg.eg.go \
+  pkg/sql/colexec/colexecagg/ordered_default_agg.eg.go \
+  pkg/sql/colexec/colexecagg/ordered_min_max_agg.eg.go \
+  pkg/sql/colexec/colexecagg/ordered_sum_agg.eg.go \
+  pkg/sql/colexec/colexecagg/ordered_sum_int_agg.eg.go
 
 OPTGEN_TARGETS = \
 	pkg/sql/opt/memo/expr.og.go \
@@ -911,10 +887,12 @@ OPTGEN_TARGETS = \
 	pkg/sql/opt/xform/explorer.og.go \
 	pkg/sql/opt/norm/factory.og.go \
 	pkg/sql/opt/rule_name.og.go \
-	pkg/sql/opt/rule_name_string.go
+	pkg/sql/opt/rule_name_string.go \
+	pkg/sql/opt/exec/factory.og.go \
+	pkg/sql/opt/exec/explain/explain_factory.og.go
 
 go-targets-ccl := \
-	$(COCKROACH) $(COCKROACHSHORT) \
+	$(COCKROACH) \
 	bin/workload \
 	go-install \
 	bench benchshort \
@@ -924,7 +902,7 @@ go-targets-ccl := \
 	generate \
 	lint lintshort
 
-go-targets := $(go-targets-ccl) $(COCKROACHOSS)
+go-targets := $(go-targets-ccl) $(COCKROACHOSS) $(COCKROACHSHORT)
 
 .DEFAULT_GOAL := all
 all: build
@@ -942,6 +920,8 @@ $(COCKROACHOSS): BUILDTARGET = ./pkg/cmd/cockroach-oss
 $(COCKROACHOSS): $(C_LIBS_OSS) pkg/ui/distoss/bindata.go
 
 $(COCKROACHSHORT): BUILDTARGET = ./pkg/cmd/cockroach-short
+$(COCKROACHSHORT): TAGS += short
+$(COCKROACHSHORT): $(C_LIBS_SHORT)
 
 $(go-targets-ccl): $(C_LIBS_CCL)
 
@@ -961,9 +941,9 @@ $(go-targets): override LINKFLAGS += \
 	$(if $(BUILD_TAGGED_RELEASE),-X "github.com/cockroachdb/cockroach/pkg/util/log.crashReportEnv=$(if $(BUILDINFO_TAG),$(BUILDINFO_TAG),$(shell cat .buildinfo/tag))")
 
 # The build.utcTime format must remain in sync with TimeFormat in
-# pkg/build/info.go. It is not installed in tests to avoid busting the cache on
-# every rebuild.
-$(COCKROACH) $(COCKROACHOSS) $(COCKROACHSHORT) go-install: override LINKFLAGS += \
+# pkg/build/info.go. It is not installed in tests or in `buildshort` to avoid
+# busting the cache on every rebuild.
+$(COCKROACH) $(COCKROACHOSS) go-install: override LINKFLAGS += \
 	-X "github.com/cockroachdb/cockroach/pkg/build.utcTime=$(shell date -u '+%Y/%m/%d %H:%M:%S')"
 
 SETTINGS_DOC_PAGE := docs/generated/settings/settings.html
@@ -992,7 +972,7 @@ $(COCKROACH) $(COCKROACHOSS) $(COCKROACHSHORT) go-install:
 .PHONY: build buildoss buildshort
 build: ## Build the CockroachDB binary.
 buildoss: ## Build the CockroachDB binary without any CCL-licensed code.
-buildshort: ## Build the CockroachDB binary without the admin UI.
+buildshort: ## Build the CockroachDB binary without the admin UI and RocksDB.
 build: $(COCKROACH)
 buildoss: $(COCKROACHOSS)
 buildshort: $(COCKROACHSHORT)
@@ -1268,14 +1248,6 @@ UI_JS_OSS := pkg/ui/src/js/protos.js
 UI_TS_OSS := pkg/ui/src/js/protos.d.ts
 UI_PROTOS_OSS := $(UI_JS_OSS) $(UI_TS_OSS)
 
-CPP_PROTOS := $(filter %/roachpb/api.proto %/roachpb/metadata.proto %/roachpb/data.proto %/roachpb/internal.proto %/roachpb/errors.proto %util/tracing/recorded_span.proto %/concurrency/lock/locking.proto %/enginepb/mvcc.proto %/enginepb/mvcc3.proto %/enginepb/file_registry.proto %/enginepb/rocksdb.proto %/hlc/legacy_timestamp.proto %/hlc/timestamp.proto %/log/log.proto %/unresolved_addr.proto,$(GO_PROTOS))
-CPP_HEADERS := $(subst ./pkg,$(CPP_PROTO_ROOT),$(CPP_PROTOS:%.proto=%.pb.h))
-CPP_SOURCES := $(subst ./pkg,$(CPP_PROTO_ROOT),$(CPP_PROTOS:%.proto=%.pb.cc))
-
-CPP_PROTOS_CCL := $(filter %/ccl/baseccl/encryption_options.proto %/ccl/storageccl/engineccl/enginepbccl/key_registry.proto %/ccl/storageccl/engineccl/enginepbccl/stats.proto,$(GO_PROTOS))
-CPP_HEADERS_CCL := $(subst ./pkg,$(CPP_PROTO_CCL_ROOT),$(CPP_PROTOS_CCL:%.proto=%.pb.h))
-CPP_SOURCES_CCL := $(subst ./pkg,$(CPP_PROTO_CCL_ROOT),$(CPP_PROTOS_CCL:%.proto=%.pb.cc))
-
 $(GOGOPROTO_PROTO): bin/.submodules-initialized
 $(ERRORS_PROTO): bin/.submodules-initialized
 
@@ -1305,20 +1277,6 @@ bin/.gw_protobuf_sources: $(PROTOC) $(GW_SERVER_PROTOS) $(GW_TS_PROTOS) $(GO_PRO
 	gofmt -s -w $(GW_SOURCES)
 	@# TODO(jordan,benesch) This can be removed along with the above TODO.
 	goimports -w $(GW_SOURCES)
-	touch $@
-
-bin/.cpp_protobuf_sources: $(PROTOC) $(CPP_PROTOS)
-	rm -rf $(CPP_PROTO_ROOT)
-	mkdir -p $(CPP_PROTO_ROOT)
-	build/werror.sh $(PROTOC) -Ipkg:$(GOGO_PROTOBUF_PATH):$(PROTOBUF_PATH) --cpp_out=lite:$(CPP_PROTO_ROOT) $(CPP_PROTOS)
-	$(SED_INPLACE) -E '/gogoproto/d' $(CPP_HEADERS) $(CPP_SOURCES)
-	touch $@
-
-bin/.cpp_ccl_protobuf_sources: $(PROTOC) $(CPP_PROTOS_CCL)
-	rm -rf $(CPP_PROTO_CCL_ROOT)
-	mkdir -p $(CPP_PROTO_CCL_ROOT)
-	build/werror.sh $(PROTOC) -Ipkg:$(GOGO_PROTOBUF_PATH):$(PROTOBUF_PATH) --cpp_out=lite:$(CPP_PROTO_CCL_ROOT) $(CPP_PROTOS_CCL)
-	$(SED_INPLACE) -E '/gogoproto/d' $(CPP_HEADERS_CCL) $(CPP_SOURCES_CCL)
 	touch $@
 
 # The next two rules must be kept exactly the same except the CCL one depends
@@ -1514,7 +1472,7 @@ pkg/sql/parser/gen/sql-gen.y: pkg/sql/parser/sql.y pkg/sql/parser/replace_help_r
 	mv -f $@.tmp $@
 	rm pkg/sql/parser/gen/types_regex.tmp
 
-pkg/sql/lex/reserved_keywords.go: pkg/sql/parser/sql.y pkg/sql/parser/reserved_keywords.awk | bin/.bootstrap
+pkg/sql/lexbase/reserved_keywords.go: pkg/sql/parser/sql.y pkg/sql/parser/reserved_keywords.awk | bin/.bootstrap
 	awk -f pkg/sql/parser/reserved_keywords.awk < $< > $@.tmp || rm $@.tmp
 	mv -f $@.tmp $@
 	gofmt -s -w $@
@@ -1552,16 +1510,24 @@ bin/.docgen_functions: bin/docgen
 	docgen functions docs/generated/sql --quiet
 	touch $@
 
+bin/.docgen_http: bin/docgen $(PROTOC)
+	docgen http \
+	--protoc $(PROTOC) \
+	--gendoc ./bin/protoc-gen-doc \
+	--out docs/generated/http \
+	--protobuf pkg:$(GOGO_PROTOBUF_PATH):$(PROTOBUF_PATH):$(COREOS_PATH):$(GRPC_GATEWAY_GOOGLEAPIS_PATH):$(ERRORS_PATH)
+	touch $@
+
 .PHONY: docs/generated/redact_safe.md
 
 docs/generated/redact_safe.md:
 	@(echo "The following types are considered always safe for reporting:"; echo; \
 	  echo "File | Type"; echo "--|--") >$@.tmp || { rm -f $@.tmp; exit 1; }
 	@git grep -n '^func \(.*\) SafeValue\(\)' | \
-	  grep -v '^pkg/util/redact' | \
+	  grep -v '^vendor/github.com/cockroachdb/redact' | \
 	  sed -E -e 's/^([^:]*):[0-9]+:func \(([^ ]* )?(.*)\) SafeValue.*$$/\1 | \`\3\`/g' >>$@.tmp || { rm -f $@.tmp; exit 1; }
 	@git grep -n 'redact\.RegisterSafeType' | \
-	  grep -v '^pkg/util/redact' | \
+	  grep -v '^vendor/github.com/cockroachdb/redact' | \
 	  sed -E -e 's/^([^:]*):[0-9]+:.*redact\.RegisterSafeType\((.*)\).*/\1 | \`\2\`/g' >>$@.tmp || { rm -f $@.tmp; exit 1; }
 	@mv -f $@.tmp $@
 
@@ -1571,6 +1537,7 @@ $(SETTINGS_DOC_PAGE): $(settings-doc-gen)
 	@$(settings-doc-gen) gen settings-list --format=html > $@
 
 .PHONY: execgen
+execgen: ## Regenerate generated code for the vectorized execution engine.
 execgen: $(EXECGEN_TARGETS) bin/execgen
 	for i in $(EXECGEN_TARGETS); do echo EXECGEN $$i && ./bin/execgen -fmt=false $$i > $$i; done
 	goimports -w $(EXECGEN_TARGETS)
@@ -1584,6 +1551,7 @@ execgen: $(EXECGEN_TARGETS) bin/execgen
 optgen-defs := pkg/sql/opt/ops/*.opt
 optgen-norm-rules := pkg/sql/opt/norm/rules/*.opt
 optgen-xform-rules := pkg/sql/opt/xform/rules/*.opt
+optgen-exec-defs := pkg/sql/opt/exec/factory.opt
 
 pkg/sql/opt/memo/expr.og.go: $(optgen-defs) bin/optgen
 	optgen -out $@ exprs $(optgen-defs)
@@ -1603,6 +1571,12 @@ pkg/sql/opt/xform/explorer.og.go: $(optgen-defs) $(optgen-xform-rules) bin/optge
 pkg/sql/opt/norm/factory.og.go: $(optgen-defs) $(optgen-norm-rules) bin/optgen
 	optgen -out $@ factory $(optgen-defs) $(optgen-norm-rules)
 
+pkg/sql/opt/exec/factory.og.go: $(optgen-defs) $(optgen-exec-defs) bin/optgen
+	optgen -out $@ execfactory $(optgen-exec-defs)
+
+pkg/sql/opt/exec/explain/explain_factory.og.go: $(optgen-defs) $(optgen-exec-defs) bin/optgen
+	optgen -out $@ execexplain $(optgen-exec-defs)
+
 # Format non-generated .cc and .h files in libroach using clang-format.
 .PHONY: c-deps-fmt
 c-deps-fmt:
@@ -1610,11 +1584,8 @@ c-deps-fmt:
 
 .PHONY: clean-c-deps
 clean-c-deps:
-	rm -rf $(CRYPTOPP_DIR)
 	rm -rf $(JEMALLOC_DIR)
 	rm -rf $(PROTOBUF_DIR)
-	rm -rf $(ROCKSDB_DIR)
-	rm -rf $(SNAPPY_DIR)
 	rm -rf $(GEOS_DIR)
 	rm -rf $(PROJ_DIR)
 	rm -rf $(LIBROACH_DIR)
@@ -1622,32 +1593,37 @@ clean-c-deps:
 
 .PHONY: unsafe-clean-c-deps
 unsafe-clean-c-deps:
-	git -C $(CRYPTOPP_SRC_DIR) clean -dxf
 	git -C $(JEMALLOC_SRC_DIR) clean -dxf
 	git -C $(PROTOBUF_SRC_DIR) clean -dxf
-	git -C $(ROCKSDB_SRC_DIR)  clean -dxf
-	git -C $(SNAPPY_SRC_DIR)   clean -dxf
 	git -C $(GEOS_SRC_DIR)     clean -dxf
 	git -C $(PROJ_SRC_DIR)     clean -dxf
 	git -C $(LIBROACH_SRC_DIR) clean -dxf
 	git -C $(KRB5_SRC_DIR)     clean -dxf
 
-.PHONY: clean
-clean: ## Remove build artifacts.
-clean: clean-c-deps
-	rm -rf bin/.go_protobuf_sources bin/.gw_protobuf_sources bin/.cpp_protobuf_sources build/defs.mk*
-	-$(GO) clean $(GOFLAGS) $(GOMODVENDORFLAGS) -tags '$(TAGS)' -ldflags '$(LINKFLAGS)' -i -cache github.com/cockroachdb/cockroach...
-	$(FIND_RELEVANT) -type f \( -name 'zcgo_flags*.go' -o -name '*.test' \) -exec rm {} +
+.PHONY: cleanshort
+cleanshort: ## Clean up go build artifacts and go proto-generated code.
+cleanshort:
+	rm -rf bin/.go_protobuf_sources bin/.gw_protobuf_sources
+	-$(GO) clean $(GOFLAGS) -tags '$(TAGS)' -ldflags '$(LINKFLAGS)' -i github.com/cockroachdb/cockroach...
+	$(FIND_RELEVANT) -type f -name '*.test' -exec rm {} +
 	for f in cockroach*; do if [ -f "$$f" ]; then rm "$$f"; fi; done
-	rm -rf artifacts bin $(ARCHIVE) pkg/sql/parser/gen
+	rm -rf $(ARCHIVE) pkg/sql/parser/gen
+
+.PHONY: clean
+clean: ## Like cleanshort, but also includes C++ artifacts and the go build cache.
+clean: cleanshort clean-c-deps
+	rm -rf build/defs.mk*
+	-$(GO) clean $(GOFLAGS) $(GOMODVENDORFLAGS) -tags '$(TAGS)' -ldflags '$(LINKFLAGS)' -i -cache github.com/cockroachdb/cockroach...
+	$(FIND_RELEVANT) -type f -name 'zcgo_flags*.go' -exec rm {} +
+	rm -rf artifacts bin
 
 .PHONY: maintainer-clean
-maintainer-clean: ## Like clean, but also remove some auto-generated source code.
+maintainer-clean: ## Like clean, but also remove some auto-generated SQL parser, optgen, and UI protos code.
 maintainer-clean: clean ui-maintainer-clean
 	rm -f $(SQLPARSER_TARGETS) $(OPTGEN_TARGETS) $(UI_PROTOS_OSS) $(UI_PROTOS_CCL)
 
 .PHONY: unsafe-clean
-unsafe-clean: ## Like maintainer-clean, but also remove ALL untracked/ignored files.
+unsafe-clean: ## Like maintainer-clean, but also remove all untracked/ignored files.
 unsafe-clean: maintainer-clean unsafe-clean-c-deps
 	git clean -dxf
 
@@ -1681,9 +1657,11 @@ bins = \
   bin/roachprod \
   bin/roachprod-stress \
   bin/roachtest \
+	bin/skip-test \
   bin/teamcity-trigger \
   bin/uptodate \
   bin/urlcheck \
+	bin/whoownsit \
   bin/workload \
   bin/zerosum
 
@@ -1731,6 +1709,11 @@ fuzz: ## Run fuzz tests.
 fuzz: bin/fuzz
 	bin/fuzz $(TESTFLAGS) -tests $(TESTS) -timeout $(TESTTIMEOUT) $(PKG)
 
+# Short hand to re-generate all bazel BUILD files.
+bazel-generate: ## Generate all bazel BUILD files.
+	@echo 'Generating DEPS.bzl and BUILD files using gazelle'
+	@bazel run //:gazelle -- update-repos -from_file=go.mod -build_file_proto_mode=disable -to_macro=DEPS.bzl%go_deps
+	@bazel run //:gazelle
 
 # No need to include all the dependency files if the user is just
 # requesting help or cleanup.
@@ -1781,3 +1764,4 @@ build/variables.mk: Makefile build/archive/contents/Makefile pkg/ui/Makefile bui
 include build/variables.mk
 $(foreach v,$(filter-out $(strip $(VALID_VARS)),$(.VARIABLES)),\
 	$(if $(findstring command line,$(origin $v)),$(error Variable '$v' is not recognized by this Makefile)))
+

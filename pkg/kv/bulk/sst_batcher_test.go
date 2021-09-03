@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -64,9 +65,9 @@ func makeIntTableKVs(numKeys, valueSize, maxRevisions int) []storage.MVCCKeyValu
 	return kvs
 }
 
-func makeRocksSST(t testing.TB, kvs []storage.MVCCKeyValue) []byte {
-	w, err := storage.MakeRocksDBSstFileWriter()
-	require.NoError(t, err)
+func makePebbleSST(t testing.TB, kvs []storage.MVCCKeyValue) []byte {
+	memFile := &storage.MemFile{}
+	w := storage.MakeIngestionSSTWriter(memFile)
 	defer w.Close()
 
 	for i := range kvs {
@@ -74,9 +75,8 @@ func makeRocksSST(t testing.TB, kvs []storage.MVCCKeyValue) []byte {
 			t.Fatal(err)
 		}
 	}
-	sst, err := w.Finish()
-	require.NoError(t, err)
-	return sst
+	require.NoError(t, w.Finish())
+	return memFile.Data()
 }
 
 func TestAddBatched(t *testing.T) {
@@ -174,9 +174,6 @@ func runTestImport(t *testing.T, batchSizeValue int64) {
 			}
 			r := roachpb.RangeInfo{
 				Desc: *tok.Desc(),
-			}
-			if l := tok.Lease(); l != nil {
-				r.Lease = *l
 			}
 			mockCache.Insert(ctx, r)
 
@@ -286,9 +283,7 @@ func TestAddBigSpanningSSTWithSplits(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	ctx := context.Background()
 
-	if testing.Short() {
-		t.Skip("this test needs to do a larger SST to see the quadratic mem usage on retries kick in.")
-	}
+	skip.UnderShort(t, "this test needs to do a larger SST to see the quadratic mem usage on retries kick in.")
 
 	const numKeys, valueSize, splitEvery = 500, 5000, 1
 
@@ -298,7 +293,7 @@ func TestAddBigSpanningSSTWithSplits(t *testing.T) {
 	kvs = kvs[:numKeys]
 
 	// Create a large SST.
-	sst := makeRocksSST(t, kvs)
+	sst := makePebbleSST(t, kvs)
 
 	var splits []roachpb.Key
 	for i := range kvs {

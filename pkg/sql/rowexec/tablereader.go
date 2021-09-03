@@ -17,15 +17,17 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 // tableReader is the start of a computation flow; it performs KV operations to
@@ -47,7 +49,7 @@ type tableReader struct {
 	// fetcher wraps a row.Fetcher, allowing the tableReader to add a stat
 	// collection layer.
 	fetcher rowFetcher
-	alloc   sqlbase.DatumAlloc
+	alloc   rowenc.DatumAlloc
 
 	// rowsRead is the number of rows read and is tracked unconditionally.
 	rowsRead int64
@@ -58,6 +60,7 @@ var _ execinfra.RowSource = &tableReader{}
 var _ execinfrapb.MetadataSource = &tableReader{}
 var _ execinfra.Releasable = &tableReader{}
 var _ execinfra.OpNode = &tableReader{}
+var _ execinfra.IOReader = &tableReader{}
 
 const tableReaderProcName = "table reader"
 
@@ -88,13 +91,26 @@ func newTableReader(
 	tr.parallelize = spec.Parallelize && tr.limitHint == 0
 	tr.maxTimestampAge = time.Duration(spec.MaxTimestampAgeNanos)
 
+	tableDesc := tabledesc.NewImmutable(spec.Table)
 	returnMutations := spec.Visibility == execinfra.ScanVisibilityPublicAndNotPublic
-	types := spec.Table.ColumnTypesWithMutations(returnMutations)
+	resultTypes := tableDesc.ColumnTypesWithMutations(returnMutations)
+	columnIdxMap := tableDesc.ColumnIdxMapWithMutations(returnMutations)
+
+	// Add all requested system columns to the output.
+	var sysColDescs []descpb.ColumnDescriptor
+	if spec.HasSystemColumns {
+		sysColDescs = colinfo.AllSystemColumnDescs
+	}
+	for i := range sysColDescs {
+		resultTypes = append(resultTypes, sysColDescs[i].Type)
+		columnIdxMap[sysColDescs[i].ID] = len(columnIdxMap)
+	}
+
 	tr.ignoreMisplannedRanges = flowCtx.Local
 	if err := tr.Init(
 		tr,
 		post,
-		types,
+		resultTypes,
 		flowCtx,
 		processorID,
 		output,
@@ -114,10 +130,21 @@ func newTableReader(
 	neededColumns := tr.Out.NeededColumns()
 
 	var fetcher row.Fetcher
-	columnIdxMap := spec.Table.ColumnIdxMapWithMutations(returnMutations)
 	if _, _, err := initRowFetcher(
-		flowCtx, &fetcher, &spec.Table, int(spec.IndexIdx), columnIdxMap, spec.Reverse,
-		neededColumns, spec.IsCheck, &tr.alloc, spec.Visibility, spec.LockingStrength,
+		flowCtx,
+		&fetcher,
+		tableDesc,
+		int(spec.IndexIdx),
+		columnIdxMap,
+		spec.Reverse,
+		neededColumns,
+		spec.IsCheck,
+		flowCtx.EvalCtx.Mon,
+		&tr.alloc,
+		spec.Visibility,
+		spec.LockingStrength,
+		spec.LockingWaitPolicy,
+		sysColDescs,
 	); err != nil {
 		return nil, err
 	}
@@ -132,7 +159,7 @@ func newTableReader(
 		tr.spans[i] = s.Span
 	}
 
-	if sp := opentracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && tracing.IsRecording(sp) {
 		tr.fetcher = newRowFetcherStatCollector(&fetcher)
 		tr.FinishTrace = tr.outputStatsToTrace
 	} else {
@@ -144,7 +171,7 @@ func newTableReader(
 
 func (tr *tableReader) generateTrailingMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
 	trailingMeta := tr.generateMeta(ctx)
-	tr.InternalClose()
+	tr.close()
 	return trailingMeta
 }
 
@@ -203,7 +230,7 @@ func TestingSetScannedRowProgressFrequency(val int64) func() {
 }
 
 // Next is part of the RowSource interface.
-func (tr *tableReader) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (tr *tableReader) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	for tr.State == execinfra.StateRunning {
 		// Check if it is time to emit a progress update.
 		if tr.rowsRead >= tableReaderProgressFrequency {
@@ -232,10 +259,17 @@ func (tr *tableReader) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadat
 	return nil, tr.DrainHelper()
 }
 
+func (tr *tableReader) close() {
+	if tr.InternalClose() {
+		if tr.fetcher != nil {
+			tr.fetcher.Close(tr.Ctx)
+		}
+	}
+}
+
 // ConsumerClosed is part of the RowSource interface.
 func (tr *tableReader) ConsumerClosed() {
-	// The consumer is done, Next() will not be called again.
-	tr.InternalClose()
+	tr.close()
 }
 
 var _ execinfrapb.DistSQLSpanStats = &TableReaderStats{}
@@ -264,12 +298,22 @@ func (tr *tableReader) outputStatsToTrace() {
 	if !ok {
 		return
 	}
-	if sp := opentracing.SpanFromContext(tr.Ctx); sp != nil {
+	if sp := tracing.SpanFromContext(tr.Ctx); sp != nil {
 		tracing.SetSpanStats(sp, &TableReaderStats{
 			InputStats: is,
-			BytesRead:  tr.fetcher.GetBytesRead(),
+			BytesRead:  tr.GetBytesRead(),
 		})
 	}
+}
+
+// GetBytesRead is part of the execinfra.IOReader interface.
+func (tr *tableReader) GetBytesRead() int64 {
+	return tr.fetcher.GetBytesRead()
+}
+
+// GetRowsRead is part of the execinfra.IOReader interface.
+func (tr *tableReader) GetRowsRead() int64 {
+	return tr.rowsRead
 }
 
 func (tr *tableReader) generateMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
@@ -277,7 +321,7 @@ func (tr *tableReader) generateMeta(ctx context.Context) []execinfrapb.ProducerM
 	if !tr.ignoreMisplannedRanges {
 		nodeID, ok := tr.FlowCtx.NodeID.OptionalNodeID()
 		if ok {
-			ranges := execinfra.MisplannedRanges(ctx, tr.fetcher.GetRangesInfo(), nodeID)
+			ranges := execinfra.MisplannedRanges(ctx, tr.spans, nodeID, tr.FlowCtx.Cfg.RangeCache)
 			if ranges != nil {
 				trailingMeta = append(trailingMeta, execinfrapb.ProducerMetadata{Ranges: ranges})
 			}
@@ -289,7 +333,7 @@ func (tr *tableReader) generateMeta(ctx context.Context) []execinfrapb.ProducerM
 
 	meta := execinfrapb.GetProducerMeta()
 	meta.Metrics = execinfrapb.GetMetricsMeta()
-	meta.Metrics.BytesRead, meta.Metrics.RowsRead = tr.fetcher.GetBytesRead(), tr.rowsRead
+	meta.Metrics.BytesRead, meta.Metrics.RowsRead = tr.GetBytesRead(), tr.GetRowsRead()
 	trailingMeta = append(trailingMeta, *meta)
 	return trailingMeta
 }
@@ -306,5 +350,5 @@ func (tr *tableReader) ChildCount(bool) int {
 
 // Child is part of the execinfra.OpNode interface.
 func (tr *tableReader) Child(nth int, _ bool) execinfra.OpNode {
-	panic(fmt.Sprintf("invalid index %d", nth))
+	panic(errors.AssertionFailedf("invalid index %d", nth))
 }

@@ -138,7 +138,7 @@ func generateMVCCScan(
 }
 
 // Prints the key where an iterator is positioned, or valid = false if invalid.
-func printIterState(iter storage.Iterator) string {
+func printIterState(iter storage.MVCCIterator) string {
 	if ok, err := iter.Valid(); !ok || err != nil {
 		if err != nil {
 			return fmt.Sprintf("valid = %v, err = %s", ok, err.Error())
@@ -395,10 +395,9 @@ func (t txnOpenOp) run(ctx context.Context) string {
 			WriteTimestamp: t.ts,
 			Sequence:       0,
 		},
-		Name:                    string(t.id),
-		DeprecatedOrigTimestamp: t.ts,
-		ReadTimestamp:           t.ts,
-		Status:                  roachpb.PENDING,
+		Name:          string(t.id),
+		ReadTimestamp: t.ts,
+		Status:        roachpb.PENDING,
 	}
 	t.m.setTxn(t.id, txn)
 	return txn.Name
@@ -465,7 +464,7 @@ type iterOpenOp struct {
 
 func (i iterOpenOp) run(ctx context.Context) string {
 	rw := i.m.getReadWriter(i.rw)
-	iter := rw.NewIterator(storage.IterOptions{
+	iter := rw.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{
 		Prefix:     false,
 		LowerBound: i.key,
 		UpperBound: i.endKey.Next(),

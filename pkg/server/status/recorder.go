@@ -31,6 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/cgroups"
@@ -79,9 +80,13 @@ var recordHistogramQuantiles = []quantile{
 // directly in order to simplify testing.
 type storeMetrics interface {
 	StoreID() roachpb.StoreID
-	Descriptor(bool) (*roachpb.StoreDescriptor, error)
+	Descriptor(context.Context, bool) (*roachpb.StoreDescriptor, error)
 	Registry() *metric.Registry
 }
+
+var childMetricsEnabled = settings.RegisterBoolSetting("server.child_metrics.enabled",
+	"enables the exporting of child metrics, additional prometheus time series with extra labels",
+	false)
 
 // MetricsRecorder is used to periodically record the information in a number of
 // metric registries.
@@ -247,10 +252,10 @@ func (mr *MetricsRecorder) scrapeIntoPrometheus(pm *metric.PrometheusExporter) {
 			log.Warning(context.TODO(), "MetricsRecorder asked to scrape metrics before NodeID allocation")
 		}
 	}
-
-	pm.ScrapeRegistry(mr.mu.nodeRegistry)
+	includeChildMetrics := childMetricsEnabled.Get(&mr.settings.SV)
+	pm.ScrapeRegistry(mr.mu.nodeRegistry, includeChildMetrics)
 	for _, reg := range mr.mu.storeRegistries {
-		pm.ScrapeRegistry(reg)
+		pm.ScrapeRegistry(reg, includeChildMetrics)
 	}
 }
 
@@ -457,9 +462,9 @@ func (mr *MetricsRecorder) GenerateNodeStatus(ctx context.Context) *statuspb.Nod
 		})
 
 		// Gather descriptor from store.
-		descriptor, err := mr.mu.stores[storeID].Descriptor(false /* useCached */)
+		descriptor, err := mr.mu.stores[storeID].Descriptor(ctx, false /* useCached */)
 		if err != nil {
-			log.Errorf(ctx, "Could not record status summaries: Store %d could not return descriptor, error: %s", storeID, err)
+			log.Errorf(ctx, "could not record status summaries: Store %d could not return descriptor, error: %s", storeID, err)
 			continue
 		}
 

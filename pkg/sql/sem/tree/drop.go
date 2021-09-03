@@ -105,14 +105,19 @@ func (node *DropTable) Format(ctx *FmtCtx) {
 
 // DropView represents a DROP VIEW statement.
 type DropView struct {
-	Names        TableNames
-	IfExists     bool
-	DropBehavior DropBehavior
+	Names          TableNames
+	IfExists       bool
+	DropBehavior   DropBehavior
+	IsMaterialized bool
 }
 
 // Format implements the NodeFormatter interface.
 func (node *DropView) Format(ctx *FmtCtx) {
-	ctx.WriteString("DROP VIEW ")
+	ctx.WriteString("DROP ")
+	if node.IsMaterialized {
+		ctx.WriteString("MATERIALIZED ")
+	}
+	ctx.WriteString("VIEW ")
 	if node.IfExists {
 		ctx.WriteString("IF EXISTS ")
 	}
@@ -187,6 +192,28 @@ func (node *DropType) Format(ctx *FmtCtx) {
 	}
 	if node.DropBehavior != DropDefault {
 		ctx.WriteByte(' ')
+		ctx.WriteString(node.DropBehavior.String())
+	}
+}
+
+// DropSchema represents a DROP SCHEMA command.
+type DropSchema struct {
+	Names        ObjectNamePrefixList
+	IfExists     bool
+	DropBehavior DropBehavior
+}
+
+var _ Statement = &DropSchema{}
+
+// Format implements the NodeFormatter interface.
+func (node *DropSchema) Format(ctx *FmtCtx) {
+	ctx.WriteString("DROP SCHEMA ")
+	if node.IfExists {
+		ctx.WriteString("IF EXISTS ")
+	}
+	ctx.FormatNode(&node.Names)
+	if node.DropBehavior != DropDefault {
+		ctx.WriteString(" ")
 		ctx.WriteString(node.DropBehavior.String())
 	}
 }

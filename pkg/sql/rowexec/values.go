@@ -12,13 +12,13 @@ package rowexec
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
 )
 
 // valuesProcessor is a processor that has no inputs and generates "pre-canned"
@@ -34,7 +34,7 @@ type valuesProcessor struct {
 	numRows uint64
 
 	sd     flowinfra.StreamDecoder
-	rowBuf sqlbase.EncDatumRow
+	rowBuf rowenc.EncDatumRow
 }
 
 var _ execinfra.Processor = &valuesProcessor{}
@@ -82,12 +82,12 @@ func (v *valuesProcessor) Start(ctx context.Context) context.Context {
 		return ctx
 	}
 
-	v.rowBuf = make(sqlbase.EncDatumRow, len(v.columns))
+	v.rowBuf = make(rowenc.EncDatumRow, len(v.columns))
 	return ctx
 }
 
 // Next is part of the RowSource interface.
-func (v *valuesProcessor) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (v *valuesProcessor) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	for v.State == execinfra.StateRunning {
 		row, meta, err := v.sd.GetRow(v.rowBuf)
 		if err != nil {
@@ -145,5 +145,5 @@ func (v *valuesProcessor) ChildCount(verbose bool) int {
 
 // Child is part of the execinfra.OpNode interface.
 func (v *valuesProcessor) Child(nth int, verbose bool) execinfra.OpNode {
-	panic(fmt.Sprintf("invalid index %d", nth))
+	panic(errors.AssertionFailedf("invalid index %d", nth))
 }

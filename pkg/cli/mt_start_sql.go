@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
@@ -31,6 +30,28 @@ var mtStartSQLCmd = &cobra.Command{
 Start a standalone SQL server.
 
 This functionality is **experimental** and for internal use only.
+
+The following certificates are required:
+
+- ca.crt, node.{crt,key}: CA cert and key pair for serving the SQL endpoint.
+  Note that under no circumstances should the node certs be shared with those of
+  the same name used at the KV layer, as this would pose a severe security risk.
+- ca-client-tenant.crt, client-tenant.X.{crt,key}: CA cert and key pair for
+  authentication and authorization with the KV layer (as tenant X).
+- ca-server-tenant.crt: to authenticate KV layer.
+
+                 ca.crt        ca-client-tenant.crt        ca-server-tenant.crt
+user ---------------> sql server ----------------------------> kv
+ client.Y.crt    node.crt      client-tenant.X.crt         server-tenant.crt
+ client.Y.key    node.key      client-tenant.X.key         server-tenant.key
+
+Note that CA certificates need to be present on the "other" end of the arrow as
+well unless it can be verified using a trusted root certificate store. That is,
+
+- ca.crt needs to be passed in the Postgres connection string (sslrootcert) if
+  sslmode=verify-ca.
+- ca-server-tenant.crt needs to be present on the SQL server.
+- ca-client-tenant.crt needs to be present on the KV server.
 `,
 	Args: cobra.NoArgs,
 	RunE: MaybeDecorateGRPCError(runStartSQL),
@@ -39,7 +60,18 @@ This functionality is **experimental** and for internal use only.
 func runStartSQL(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	const clusterName = ""
-	stopper := stop.NewStopper()
+
+	// Remove the default store, which avoids using it to set up logging.
+	// Instead, we'll default to logging to stderr unless --log-dir is
+	// specified. This makes sense since the standalone SQL server is
+	// at the time of writing stateless and may not be provisioned with
+	// suitable storage.
+	serverCfg.Stores.Specs = nil
+
+	stopper, err := setupAndInitializeLoggingAndProfiling(ctx, cmd)
+	if err != nil {
+		return err
+	}
 	defer stopper.Stop(ctx)
 
 	st := serverCfg.BaseConfig.Settings
@@ -65,7 +97,7 @@ func runStartSQL(cmd *cobra.Command, args []string) error {
 		tempStorageMaxSizeBytes,
 	)
 
-	addr, err := server.StartTenant(
+	addr, httpAddr, err := server.StartTenant(
 		ctx,
 		stopper,
 		clusterName,
@@ -75,7 +107,7 @@ func runStartSQL(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	log.Infof(ctx, "SQL server for tenant %s listening at %s", serverCfg.SQLConfig.TenantID, addr)
+	log.Infof(ctx, "SQL server for tenant %s listening at %s, http at %s", serverCfg.SQLConfig.TenantID, addr, httpAddr)
 
 	// TODO(tbg): make the other goodies in `./cockroach start` reusable, such as
 	// logging to files, periodic memory output, heap and goroutine dumps, debug

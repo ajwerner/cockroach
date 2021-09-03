@@ -21,7 +21,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -33,27 +34,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var configID = sqlbase.ID(1)
-var configDescKey = sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, keys.MaxReservedDescID)
+var configID = descpb.ID(1)
+var configDescKey = catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, keys.MaxReservedDescID)
 
 // forceNewConfig forces a system config update by writing a bogus descriptor with an
 // incremented value inside. It then repeatedly fetches the gossip config until the
 // just-written descriptor is found.
 func forceNewConfig(t testing.TB, s *server.TestServer) *config.SystemConfig {
 	configID++
-	configDesc := &sqlbase.Descriptor{
-		Union: &sqlbase.Descriptor_Database{
-			Database: &sqlbase.DatabaseDescriptor{
+	configDesc := &descpb.Descriptor{
+		Union: &descpb.Descriptor_Database{
+			Database: &descpb.DatabaseDescriptor{
 				Name:       "sentinel",
 				ID:         configID,
-				Privileges: &sqlbase.PrivilegeDescriptor{},
+				Privileges: &descpb.PrivilegeDescriptor{},
 			},
 		},
 	}
 
 	// This needs to be done in a transaction with the system trigger set.
 	if err := s.DB().Txn(context.Background(), func(ctx context.Context, txn *kv.Txn) error {
-		if err := txn.SetSystemConfigTrigger(); err != nil {
+		if err := txn.SetSystemConfigTrigger(true /* forSystemTenant */); err != nil {
 			return err
 		}
 		return txn.Put(ctx, configDescKey, configDesc)
@@ -64,7 +65,7 @@ func forceNewConfig(t testing.TB, s *server.TestServer) *config.SystemConfig {
 }
 
 func waitForConfigChange(t testing.TB, s *server.TestServer) *config.SystemConfig {
-	var foundDesc sqlbase.Descriptor
+	var foundDesc descpb.Descriptor
 	var cfg *config.SystemConfig
 	testutils.SucceedsSoon(t, func() error {
 		if cfg = s.Gossip().GetSystemConfig(); cfg != nil {
@@ -136,7 +137,7 @@ func TestGetZoneConfig(t *testing.T) {
 			// Verify sql.GetZoneConfigInTxn.
 			if err := s.DB().Txn(context.Background(), func(ctx context.Context, txn *kv.Txn) error {
 				_, zoneCfg, subzone, err := sql.GetZoneConfigInTxn(
-					ctx, txn, config.SystemTenantObjectID(tc.objectID), &sqlbase.IndexDescriptor{}, tc.partitionName, false,
+					ctx, txn, config.SystemTenantObjectID(tc.objectID), &descpb.IndexDescriptor{}, tc.partitionName, false,
 				)
 				if err != nil {
 					return err
@@ -374,7 +375,7 @@ func TestCascadingZoneConfig(t *testing.T) {
 			// Verify sql.GetZoneConfigInTxn.
 			if err := s.DB().Txn(context.Background(), func(ctx context.Context, txn *kv.Txn) error {
 				_, zoneCfg, subzone, err := sql.GetZoneConfigInTxn(
-					ctx, txn, config.SystemTenantObjectID(tc.objectID), &sqlbase.IndexDescriptor{}, tc.partitionName, false,
+					ctx, txn, config.SystemTenantObjectID(tc.objectID), &descpb.IndexDescriptor{}, tc.partitionName, false,
 				)
 				if err != nil {
 					return err

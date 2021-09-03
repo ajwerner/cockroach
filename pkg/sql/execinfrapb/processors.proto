@@ -92,7 +92,7 @@ message ProcessorCoreUnion {
   optional CSVWriterSpec CSVWriter = 20;
   optional SamplerSpec Sampler = 15;
   optional SampleAggregatorSpec SampleAggregator = 16;
-  optional InterleavedReaderJoinerSpec interleavedReaderJoiner = 17;
+  reserved 17;
   optional MetadataTestSenderSpec metadataTestSender = 18;
   optional MetadataTestReceiverSpec metadataTestReceiver = 19;
   optional ZigzagJoinerSpec zigzagJoiner = 21;
@@ -106,6 +106,8 @@ message ProcessorCoreUnion {
   optional InvertedFiltererSpec invertedFilterer = 29;
   optional InvertedJoinerSpec invertedJoiner = 30;
   optional BackupDataSpec backupData = 31;
+  optional SplitAndScatterSpec splitAndScatter = 32;
+  optional RestoreDataSpec restoreData = 33;
 
   reserved 6, 12;
 }

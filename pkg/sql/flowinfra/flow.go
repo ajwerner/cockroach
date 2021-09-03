@@ -17,11 +17,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/mutations"
+	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 type flowStatus int
@@ -114,10 +115,11 @@ type Flow interface {
 	// mailboxes exited).
 	Cleanup(context.Context)
 
-	// ConcurrentExecution returns true if multiple processors/operators in the
-	// flow will execute concurrently (i.e. if not all of them have been fused).
+	// ConcurrentTxnUse returns true if multiple processors/operators in the flow
+	// will execute concurrently (i.e. if not all of them have been fused) and
+	// more than one goroutine will be using a txn.
 	// Can only be called after Setup().
-	ConcurrentExecution() bool
+	ConcurrentTxnUse() bool
 }
 
 // FlowBase is the shared logic between row based and vectorized flows. It
@@ -127,6 +129,7 @@ type FlowBase struct {
 	execinfra.FlowCtx
 
 	flowRegistry *FlowRegistry
+
 	// processors contains a subset of the processors in the flow - the ones that
 	// run in their own goroutines. Some processors that implement RowSource are
 	// scheduled to run in their consumer's goroutine; those are not present here.
@@ -176,6 +179,17 @@ func (f *FlowBase) Setup(
 	ctx, f.ctxCancel = contextutil.WithCancel(ctx)
 	f.ctxDone = ctx.Done()
 	f.spec = spec
+
+	mutationsTestingMaxBatchSize := int64(0)
+	if f.FlowCtx.Cfg.Settings != nil {
+		mutationsTestingMaxBatchSize = mutations.MutationsTestingMaxBatchSize.Get(&f.FlowCtx.Cfg.Settings.SV)
+	}
+	if mutationsTestingMaxBatchSize != 0 {
+		mutations.SetMaxBatchSizeForTests(int(mutationsTestingMaxBatchSize))
+	} else {
+		mutations.ResetMaxBatchSizeForTests()
+	}
+
 	return ctx, nil
 }
 
@@ -185,9 +199,18 @@ func (f *FlowBase) SetTxn(txn *kv.Txn) {
 	f.EvalCtx.Txn = txn
 }
 
-// ConcurrentExecution is part of the Flow interface.
-func (f *FlowBase) ConcurrentExecution() bool {
-	return len(f.processors) > 1
+// ConcurrentTxnUse is part of the Flow interface.
+func (f *FlowBase) ConcurrentTxnUse() bool {
+	numProcessorsThatMightUseTxn := 0
+	for _, proc := range f.processors {
+		if txnUser, ok := proc.(execinfra.DoesNotUseTxn); !ok || !txnUser.DoesNotUseTxn() {
+			numProcessorsThatMightUseTxn++
+			if numProcessorsThatMightUseTxn > 1 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var _ Flow = &FlowBase{}
@@ -418,6 +441,11 @@ func (f *FlowBase) Cleanup(ctx context.Context) {
 		panic("flow cleanup called twice")
 	}
 
+	// Release any descriptors accessed by this flow
+	if f.TypeResolverFactory != nil {
+		f.TypeResolverFactory.CleanupFunc(ctx)
+	}
+
 	// This closes the monitor opened in ServerImpl.setupFlow.
 	f.EvalCtx.Stop(ctx)
 	for _, p := range f.processors {
@@ -428,7 +456,7 @@ func (f *FlowBase) Cleanup(ctx context.Context) {
 	if log.V(1) {
 		log.Infof(ctx, "cleaning up")
 	}
-	sp := opentracing.SpanFromContext(ctx)
+	sp := tracing.SpanFromContext(ctx)
 	// Local flows do not get registered.
 	if !f.IsLocal() && f.status != FlowNotStarted {
 		f.flowRegistry.UnregisterFlow(f.ID)
@@ -462,7 +490,7 @@ func (f *FlowBase) cancel() {
 		go func(receiver InboundStreamHandler) {
 			// Stream has yet to be started; send an error to its
 			// receiver and prevent it from being connected.
-			receiver.Timeout(sqlbase.QueryCanceledError)
+			receiver.Timeout(cancelchecker.QueryCanceledError)
 		}(receiver)
 	}
 }

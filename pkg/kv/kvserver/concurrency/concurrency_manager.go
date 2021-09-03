@@ -28,7 +28,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
-	"github.com/cockroachdb/errors"
 )
 
 // managerImpl implements the Manager interface.
@@ -246,7 +245,7 @@ func (m *managerImpl) FinishReq(g *Guard) {
 
 // HandleWriterIntentError implements the ContentionHandler interface.
 func (m *managerImpl) HandleWriterIntentError(
-	ctx context.Context, g *Guard, t *roachpb.WriteIntentError,
+	ctx context.Context, g *Guard, seq roachpb.LeaseSequence, t *roachpb.WriteIntentError,
 ) (*Guard, *Error) {
 	if g.ltg == nil {
 		log.Fatalf(ctx, "cannot handle WriteIntentError %v for request without "+
@@ -259,9 +258,9 @@ func (m *managerImpl) HandleWriterIntentError(
 	wait := false
 	for i := range t.Intents {
 		intent := &t.Intents[i]
-		added, err := m.lt.AddDiscoveredLock(intent, g.ltg)
+		added, err := m.lt.AddDiscoveredLock(intent, seq, g.ltg)
 		if err != nil {
-			log.Fatalf(ctx, "%v", errors.HandleAsAssertionFailure(err))
+			log.Fatalf(ctx, "%v", err)
 		}
 		if !added {
 			wait = true
@@ -308,14 +307,14 @@ func (m *managerImpl) HandleTransactionPushError(
 // OnLockAcquired implements the LockManager interface.
 func (m *managerImpl) OnLockAcquired(ctx context.Context, acq *roachpb.LockAcquisition) {
 	if err := m.lt.AcquireLock(&acq.Txn, acq.Key, lock.Exclusive, acq.Durability); err != nil {
-		log.Fatalf(ctx, "%v", errors.HandleAsAssertionFailure(err))
+		log.Fatalf(ctx, "%v", err)
 	}
 }
 
 // OnLockUpdated implements the LockManager interface.
 func (m *managerImpl) OnLockUpdated(ctx context.Context, up *roachpb.LockUpdate) {
 	if err := m.lt.UpdateLocks(up); err != nil {
-		log.Fatalf(ctx, "%v", errors.HandleAsAssertionFailure(err))
+		log.Fatalf(ctx, "%v", err)
 	}
 }
 
@@ -335,10 +334,10 @@ func (m *managerImpl) OnRangeDescUpdated(desc *roachpb.RangeDescriptor) {
 }
 
 // OnRangeLeaseUpdated implements the RangeStateListener interface.
-func (m *managerImpl) OnRangeLeaseUpdated(isLeaseholder bool) {
+func (m *managerImpl) OnRangeLeaseUpdated(seq roachpb.LeaseSequence, isLeaseholder bool) {
 	if isLeaseholder {
-		m.lt.Enable()
-		m.twq.Enable()
+		m.lt.Enable(seq)
+		m.twq.Enable(seq)
 	} else {
 		// Disable all queues - the concurrency manager will no longer be
 		// informed about all state transitions to locks and transactions.

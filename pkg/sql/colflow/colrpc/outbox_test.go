@@ -55,9 +55,7 @@ func TestOutboxCatchesPanics(t *testing.T) {
 
 	inboxMemAccount := testMemMonitor.MakeBoundAccount()
 	defer inboxMemAccount.Close(ctx)
-	inbox, err := NewInbox(
-		colmem.NewAllocator(ctx, &inboxMemAccount, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0),
-	)
+	inbox, err := NewInbox(ctx, colmem.NewAllocator(ctx, &inboxMemAccount, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0))
 	require.NoError(t, err)
 
 	streamHandlerErrCh := handleStream(ctx, inbox, rpcLayer.server, func() { close(rpcLayer.server.csChan) })
@@ -116,7 +114,7 @@ func TestOutboxDrainsMetadataSources(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		b := testAllocator.NewMemBatch(typs)
+		b := testAllocator.NewMemBatchWithMaxCapacity(typs)
 		b.SetLength(0)
 		input.Add(b, typs)
 

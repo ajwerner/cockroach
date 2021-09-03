@@ -14,8 +14,12 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
 )
@@ -23,8 +27,8 @@ import (
 type splitNode struct {
 	optColumnsSlot
 
-	tableDesc      *sqlbase.TableDescriptor
-	index          *sqlbase.IndexDescriptor
+	tableDesc      *tabledesc.Immutable
+	index          *descpb.IndexDescriptor
 	rows           planNode
 	run            splitRun
 	expirationTime hlc.Timestamp
@@ -71,7 +75,7 @@ func (n *splitNode) Values() tree.Datums {
 	}
 	return tree.Datums{
 		tree.NewDBytes(tree.DBytes(n.run.lastSplitKey)),
-		tree.NewDString(keys.PrettyPrint(nil /* valDirs */, n.run.lastSplitKey)),
+		tree.NewDString(catalogkeys.PrettyKey(nil /* valDirs */, n.run.lastSplitKey, 2)),
 		splitEnforcedUntil,
 	}
 }
@@ -84,16 +88,16 @@ func (n *splitNode) Close(ctx context.Context) {
 // Both tableDesc and index are required (index can be the primary index).
 func getRowKey(
 	codec keys.SQLCodec,
-	tableDesc *sqlbase.TableDescriptor,
-	index *sqlbase.IndexDescriptor,
+	tableDesc catalog.TableDescriptor,
+	index *descpb.IndexDescriptor,
 	values []tree.Datum,
 ) ([]byte, error) {
-	colMap := make(map[sqlbase.ColumnID]int)
+	colMap := make(map[descpb.ColumnID]int)
 	for i := range values {
 		colMap[index.ColumnIDs[i]] = i
 	}
-	prefix := sqlbase.MakeIndexKeyPrefix(codec, tableDesc, index.ID)
-	key, _, err := sqlbase.EncodePartialIndexKey(
+	prefix := rowenc.MakeIndexKeyPrefix(codec, tableDesc, index.ID)
+	key, _, err := rowenc.EncodePartialIndexKey(
 		tableDesc, index, len(values), colMap, values, prefix,
 	)
 	if err != nil {

@@ -26,7 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
@@ -80,7 +80,11 @@ func resolveBlankPaddedChar(s string, t *types.T) string {
 // that have various width encodings and therefore need padding (chars).
 // It is ignored (and can be nil) for types which do not need padding.
 func (b *writeBuffer) writeTextDatum(
-	ctx context.Context, d tree.Datum, conv sessiondata.DataConversionConfig, t *types.T,
+	ctx context.Context,
+	d tree.Datum,
+	conv sessiondatapb.DataConversionConfig,
+	sessionLoc *time.Location,
+	t *types.T,
 ) {
 	if log.V(2) {
 		log.Infof(ctx, "pgwire writing TEXT datum of type: %T, %#v", d, d)
@@ -152,6 +156,11 @@ func (b *writeBuffer) writeTextDatum(
 		b.putInt32(int32(len(s)))
 		b.write(s)
 
+	case *tree.DBox2D:
+		s := v.Repr()
+		b.putInt32(int32(len(s)))
+		b.write([]byte(s))
+
 	case *tree.DGeography:
 		s := v.Geography.EWKBHex()
 		b.putInt32(int32(len(s)))
@@ -170,7 +179,7 @@ func (b *writeBuffer) writeTextDatum(
 
 	case *tree.DTimestampTZ:
 		// Start at offset 4 because `putInt32` clobbers the first 4 bytes.
-		s := formatTs(v.Time, conv.Location, b.putbuf[4:4])
+		s := formatTs(v.Time, sessionLoc, b.putbuf[4:4])
 		b.putInt32(int32(len(s)))
 		b.write(s)
 
@@ -457,6 +466,13 @@ func (b *writeBuffer) writeBinaryDatum(
 		}
 		b.writeLengthPrefixedBuffer(&subWriter.wrapped)
 
+	case *tree.DBox2D:
+		b.putInt32(32)
+		b.putInt64(int64(math.Float64bits(v.LoX)))
+		b.putInt64(int64(math.Float64bits(v.HiX)))
+		b.putInt64(int64(math.Float64bits(v.LoY)))
+		b.putInt64(int64(math.Float64bits(v.HiY)))
+
 	case *tree.DGeography:
 		b.putInt32(int32(len(v.EWKB())))
 		b.write(v.EWKB())
@@ -514,7 +530,7 @@ const (
 	pgTimeTZFormat            = pgTimeFormat + "-07:00"
 	pgDateFormat              = "2006-01-02"
 	pgTimeStampFormatNoOffset = pgDateFormat + " " + pgTimeFormat
-	pgTimeStampFormat         = pgTimeStampFormatNoOffset + "-07:00"
+	pgTimeStampFormat         = pgTimeStampFormatNoOffset + "-07:00:00"
 	pgTime2400Format          = "24:00:00"
 )
 

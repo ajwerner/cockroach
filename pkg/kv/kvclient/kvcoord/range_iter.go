@@ -71,18 +71,18 @@ func (ri *RangeIterator) Desc() *roachpb.RangeDescriptor {
 	return ri.token.Desc()
 }
 
-// Lease returns information about the lease of the range at which the iterator
-// is currently positioned. The iterator must be valid.
+// Leaseholder returns information about the leaseholder of the range at which
+// the iterator is currently positioned. The iterator must be valid.
 //
 // The lease information comes from a cache, and so it can be stale. Returns nil
 // if no lease information is known.
 //
 // The returned lease is immutable.
-func (ri *RangeIterator) Lease() *roachpb.Lease {
+func (ri *RangeIterator) Leaseholder() *roachpb.ReplicaDescriptor {
 	if !ri.Valid() {
 		panic(ri.Error())
 	}
-	return ri.token.Lease()
+	return ri.token.Leaseholder()
 }
 
 // Token returns the eviction token corresponding to the range
@@ -171,8 +171,10 @@ func (ri *RangeIterator) Seek(ctx context.Context, key roachpb.RKey, scanDir Sca
 
 	// Retry loop for looking up next range in the span. The retry loop
 	// deals with retryable range descriptor lookups.
+	var err error
 	for r := retry.StartWithCtx(ctx, ri.ds.rpcRetryOptions); r.Next(); {
-		rngInfo, err := ri.ds.getRoutingInfo(ctx, ri.key, ri.token, ri.scanDir == Descending)
+		var rngInfo EvictionToken
+		rngInfo, err = ri.ds.getRoutingInfo(ctx, ri.key, ri.token, ri.scanDir == Descending)
 
 		// getRoutingInfo may fail retryably if, for example, the first
 		// range isn't available via Gossip. Assume that all errors at
@@ -181,6 +183,9 @@ func (ri *RangeIterator) Seek(ctx context.Context, key roachpb.RKey, scanDir Sca
 		// for before reaching this point.
 		if err != nil {
 			log.VEventf(ctx, 1, "range descriptor lookup failed: %s", err)
+			if !isRangeLookupErrorRetryable(err) {
+				break
+			}
 			continue
 		}
 		if log.V(2) {
@@ -192,9 +197,9 @@ func (ri *RangeIterator) Seek(ctx context.Context, key roachpb.RKey, scanDir Sca
 	}
 
 	// Check for an early exit from the retry loop.
-	if err := ri.ds.deduceRetryEarlyExitError(ctx); err != nil {
-		ri.err = err
+	if deducedErr := ri.ds.deduceRetryEarlyExitError(ctx); deducedErr != nil {
+		ri.err = deducedErr
 	} else {
-		ri.err = errors.Errorf("RangeIterator failed to seek to %s", key)
+		ri.err = errors.Wrapf(err, "RangeIterator failed to seek to %s", key)
 	}
 }

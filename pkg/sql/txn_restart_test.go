@@ -359,7 +359,7 @@ func (ta *TxnAborter) statementFilter(ctx context.Context, stmt string, err erro
 	ta.mu.Unlock()
 	if shouldAbort {
 		if err := ta.abortTxn(ri.key); err != nil {
-			panic(fmt.Sprintf("TxnAborter failed to abort: %s", err))
+			panic(errors.AssertionFailedf("TxnAborter failed to abort: %s", err))
 		}
 	}
 }
@@ -1314,7 +1314,7 @@ func TestDistSQLRetryableError(t *testing.T) {
 
 	restarted := true
 
-	tc := serverutils.StartTestCluster(t, 3, /* numNodes */
+	tc := serverutils.StartNewTestCluster(t, 3, /* numNodes */
 		base.TestClusterArgs{
 			ReplicationMode: base.ReplicationManual,
 			ServerArgs: base.TestServerArgs{

@@ -16,7 +16,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
-	"github.com/cockroachdb/cockroach/pkg/sql/lex"
+	"github.com/cockroachdb/cockroach/pkg/sql/lexbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -134,8 +134,9 @@ const (
 	// This is used e.g. when processing the calls inside ROWS FROM.
 	RejectNestedGenerators
 
-	// RejectStableFunctions rejects any stable functions.
-	RejectStableFunctions
+	// RejectStableOperators rejects any stable functions or operators (including
+	// casts).
+	RejectStableOperators
 
 	// RejectVolatileFunctions rejects any volatile functions.
 	RejectVolatileFunctions
@@ -339,6 +340,9 @@ func (expr *BinaryExpr) TypeCheck(
 	}
 
 	binOp := fns[0].(*BinOp)
+	if err := semaCtx.checkVolatility(binOp.Volatility); err != nil {
+		return nil, pgerror.Wrapf(err, pgcode.InvalidParameterValue, "%s", expr.Operator)
+	}
 
 	// Register operator usage in telemetry.
 	if binOp.counter != nil {
@@ -405,27 +409,26 @@ func (expr *CaseExpr) TypeCheck(
 	return expr, nil
 }
 
-func isCastDeepValid(castFrom, castTo *types.T) (bool, telemetry.Counter) {
+func isCastDeepValid(castFrom, castTo *types.T) (bool, telemetry.Counter, Volatility) {
 	toFamily := castTo.Family()
 	fromFamily := castFrom.Family()
 	switch {
 	case toFamily == types.ArrayFamily && fromFamily == types.ArrayFamily:
-		ok, c := isCastDeepValid(castFrom.ArrayContents(), castTo.ArrayContents())
+		ok, c, v := isCastDeepValid(castFrom.ArrayContents(), castTo.ArrayContents())
 		if ok {
 			telemetry.Inc(sqltelemetry.ArrayCastCounter)
 		}
-		return ok, c
+		return ok, c, v
 	case toFamily == types.EnumFamily && fromFamily == types.EnumFamily:
 		// Casts from ENUM to ENUM type can only succeed if the two enums
-		// types are equivalent.
-		return castFrom.Equivalent(castTo), sqltelemetry.EnumCastCounter
+		return castFrom.Equivalent(castTo), sqltelemetry.EnumCastCounter, VolatilityImmutable
 	}
 
 	cast := lookupCast(fromFamily, toFamily)
 	if cast == nil {
-		return false, nil
+		return false, nil, 0
 	}
-	return true, cast.counter
+	return true, cast.counter, cast.volatility
 }
 
 func isEmptyArray(expr Expr) bool {
@@ -485,15 +488,19 @@ func (expr *CastExpr) TypeCheck(
 
 	castFrom := typedSubExpr.ResolvedType()
 
-	if ok, c := isCastDeepValid(castFrom, exprType); ok {
-		telemetry.Inc(c)
-		expr.Expr = typedSubExpr
-		expr.Type = exprType
-		expr.typ = exprType
-		return expr, nil
+	ok, c, volatility := isCastDeepValid(castFrom, exprType)
+	if !ok {
+		return nil, pgerror.Newf(pgcode.CannotCoerce, "invalid cast: %s -> %s", castFrom, exprType)
+	}
+	if err := semaCtx.checkVolatility(volatility); err != nil {
+		return nil, pgerror.Wrapf(err, pgcode.InvalidParameterValue, "%s::%s", castFrom, exprType)
 	}
 
-	return nil, pgerror.Newf(pgcode.CannotCoerce, "invalid cast: %s -> %s", castFrom, exprType)
+	telemetry.Inc(c)
+	expr.Expr = typedSubExpr
+	expr.Type = exprType
+	expr.typ = exprType
+	return expr, nil
 }
 
 // TypeCheck implements the Expr interface.
@@ -690,11 +697,11 @@ func (expr *ComparisonExpr) TypeCheck(
 	ctx context.Context, semaCtx *SemaContext, desired *types.T,
 ) (TypedExpr, error) {
 	var leftTyped, rightTyped TypedExpr
-	var fn *CmpOp
+	var cmpOp *CmpOp
 	var alwaysNull bool
 	var err error
-	if expr.Operator.hasSubOperator() {
-		leftTyped, rightTyped, fn, alwaysNull, err = typeCheckComparisonOpWithSubOperator(
+	if expr.Operator.HasSubOperator() {
+		leftTyped, rightTyped, cmpOp, alwaysNull, err = typeCheckComparisonOpWithSubOperator(
 			ctx,
 			semaCtx,
 			expr.Operator,
@@ -703,7 +710,7 @@ func (expr *ComparisonExpr) TypeCheck(
 			expr.Right,
 		)
 	} else {
-		leftTyped, rightTyped, fn, alwaysNull, err = typeCheckComparisonOp(
+		leftTyped, rightTyped, cmpOp, alwaysNull, err = typeCheckComparisonOp(
 			ctx,
 			semaCtx,
 			expr.Operator,
@@ -719,13 +726,17 @@ func (expr *ComparisonExpr) TypeCheck(
 		return DNull, nil
 	}
 
+	if err := semaCtx.checkVolatility(cmpOp.Volatility); err != nil {
+		return nil, pgerror.Wrapf(err, pgcode.InvalidParameterValue, "%s", expr.Operator)
+	}
+
 	// Register operator usage in telemetry.
-	if fn.counter != nil {
-		telemetry.Inc(fn.counter)
+	if cmpOp.counter != nil {
+		telemetry.Inc(cmpOp.counter)
 	}
 
 	expr.Left, expr.Right = leftTyped, rightTyped
-	expr.fn = fn
+	expr.Fn = cmpOp
 	expr.typ = types.Bool
 	return expr, nil
 }
@@ -774,7 +785,7 @@ func (sc *SemaContext) checkFunctionUsage(expr *FuncExpr, def *FunctionDefinitio
 	if def.UnsupportedWithIssue != 0 {
 		// Note: no need to embed the function name in the message; the
 		// caller will add the function name as prefix.
-		const msg = "this function is not supported"
+		const msg = "this function is not yet supported"
 		if def.UnsupportedWithIssue < 0 {
 			return unimplemented.New(def.Name+"()", msg)
 		}
@@ -826,13 +837,24 @@ func (sc *SemaContext) checkFunctionUsage(expr *FuncExpr, def *FunctionDefinitio
 	return nil
 }
 
-// checkOverloadUsage checks whether the given built-in overload is allowed in
-// the current context.
-func (sc *SemaContext) checkOverloadUsage(overload *Overload) error {
+// NewContextDependentOpsNotAllowedError creates an error for the case when
+// context-dependent operators are not allowed in the given context.
+func NewContextDependentOpsNotAllowedError(context string) error {
+	// The code FeatureNotSupported is a bit misleading here,
+	// because we probably can't support the feature at all. However
+	// this error code matches PostgreSQL's in the same conditions.
+	return pgerror.Newf(pgcode.FeatureNotSupported,
+		"context-dependent operators are not allowed in %s", context,
+	)
+}
+
+// checkVolatility checks whether an operator with the given volatility is
+// allowed in the current context.
+func (sc *SemaContext) checkVolatility(v Volatility) error {
 	if sc == nil {
 		return nil
 	}
-	switch overload.Volatility {
+	switch v {
 	case VolatilityVolatile:
 		if sc.Properties.required.rejectFlags&RejectVolatileFunctions != 0 {
 			// The code FeatureNotSupported is a bit misleading here,
@@ -842,14 +864,8 @@ func (sc *SemaContext) checkOverloadUsage(overload *Overload) error {
 				"volatile functions are not allowed in %s", sc.Properties.required.context)
 		}
 	case VolatilityStable:
-		if sc.Properties.required.rejectFlags&RejectStableFunctions != 0 {
-			// The code FeatureNotSupported is a bit misleading here,
-			// because we probably can't support the feature at all. However
-			// this error code matches PostgreSQL's in the same conditions.
-			return pgerror.Newf(pgcode.FeatureNotSupported,
-				"context-dependent functions are not allowed in %s",
-				sc.Properties.required.context,
-			)
+		if sc.Properties.required.rejectFlags&RejectStableOperators != 0 {
+			return NewContextDependentOpsNotAllowedError(sc.Properties.required.context)
 		}
 	}
 	return nil
@@ -1037,7 +1053,7 @@ func (expr *FuncExpr) TypeCheck(
 			strings.Join(typeNames, ", "),
 		)
 	}
-	if err := semaCtx.checkOverloadUsage(overloadImpl); err != nil {
+	if err := semaCtx.checkVolatility(overloadImpl.Volatility); err != nil {
 		return nil, pgerror.Wrapf(err, pgcode.InvalidParameterValue, "%s()", def.Name)
 	}
 	if overloadImpl.counter != nil {
@@ -1323,6 +1339,9 @@ func (expr *UnaryExpr) TypeCheck(
 	}
 
 	unaryOp := fns[0].(*UnaryOp)
+	if err := semaCtx.checkVolatility(unaryOp.Volatility); err != nil {
+		return nil, pgerror.Wrapf(err, pgcode.InvalidParameterValue, "%s", expr.Operator)
+	}
 
 	// Register operator usage in telemetry.
 	if unaryOp.counter != nil {
@@ -1400,7 +1419,7 @@ func (expr *Tuple) TypeCheck(
 	if len(expr.Labels) > 0 {
 		labels = make([]string, len(expr.Labels))
 		for i := range expr.Labels {
-			labels[i] = lex.NormalizeName(expr.Labels[i])
+			labels[i] = lexbase.NormalizeName(expr.Labels[i])
 		}
 	}
 	expr.typ = types.MakeLabeledTuple(contents, labels)
@@ -1607,6 +1626,12 @@ func (d *DInterval) TypeCheck(_ context.Context, _ *SemaContext, _ *types.T) (Ty
 
 // TypeCheck implements the Expr interface. It is implemented as an idempotent
 // identity function for Datum.
+func (d *DBox2D) TypeCheck(_ context.Context, _ *SemaContext, _ *types.T) (TypedExpr, error) {
+	return d, nil
+}
+
+// TypeCheck implements the Expr interface. It is implemented as an idempotent
+// identity function for Datum.
 func (d *DGeography) TypeCheck(_ context.Context, _ *SemaContext, _ *types.T) (TypedExpr, error) {
 	return d, nil
 }
@@ -1712,6 +1737,7 @@ const (
 	compSignatureWithSubOpFmt = "<%s> %s %s <%s>"
 	compExprsFmt              = "%s %s %s: %v"
 	compExprsWithSubOpFmt     = "%s %s %s %s: %v"
+	invalidCompErrFmt         = "invalid comparison between different %s types: %s"
 	unsupportedCompErrFmt     = "unsupported comparison operator: %s"
 	unsupportedUnaryOpErrFmt  = "unsupported unary operator: %s"
 	unsupportedBinaryOpErrFmt = "unsupported binary operator: %s"
@@ -1731,7 +1757,7 @@ func typeCheckComparisonOpWithSubOperator(
 
 	// Determine the set of comparisons are possible for the sub-operation,
 	// which will be memoized.
-	foldedOp, _, _, _, _ := foldComparisonExpr(subOp, nil, nil)
+	foldedOp, _, _, _, _ := FoldComparisonExpr(subOp, nil, nil)
 	ops := CmpOps[foldedOp]
 
 	var cmpTypeLeft, cmpTypeRight *types.T
@@ -1856,7 +1882,7 @@ func typeCheckSubqueryWithIn(left, right *types.T) error {
 func typeCheckComparisonOp(
 	ctx context.Context, semaCtx *SemaContext, op ComparisonOperator, left, right Expr,
 ) (_ TypedExpr, _ TypedExpr, _ *CmpOp, alwaysNull bool, _ error) {
-	foldedOp, foldedLeft, foldedRight, switched, _ := foldComparisonExpr(op, left, right)
+	foldedOp, foldedLeft, foldedRight, switched, _ := FoldComparisonExpr(op, left, right)
 	ops := CmpOps[foldedOp]
 
 	_, leftIsTuple := foldedLeft.(*Tuple)
@@ -1999,6 +2025,13 @@ func typeCheckComparisonOp(
 	if len(fns) != 1 || typeMismatch {
 		sig := fmt.Sprintf(compSignatureFmt, leftReturn, op, rightReturn)
 		if len(fns) == 0 || typeMismatch {
+			// For some typeMismatch errors, we want to emit a more specific error
+			// message than "unknown comparison". In particular, comparison between
+			// two different enum types is invalid, rather than just unsupported.
+			if typeMismatch && leftFamily == types.EnumFamily && rightFamily == types.EnumFamily {
+				return nil, nil, nil, false,
+					pgerror.Newf(pgcode.InvalidParameterValue, invalidCompErrFmt, "enum", sig)
+			}
 			return nil, nil, nil, false,
 				pgerror.Newf(pgcode.InvalidParameterValue, unsupportedCompErrFmt, sig)
 		}
@@ -2575,7 +2608,7 @@ func (v stripFuncsVisitor) VisitPre(expr Expr) (recurse bool, newExpr Expr) {
 	case *BinaryExpr:
 		t.Fn = nil
 	case *ComparisonExpr:
-		t.fn = nil
+		t.Fn = nil
 	case *FuncExpr:
 		t.fn = nil
 		t.fnProps = nil

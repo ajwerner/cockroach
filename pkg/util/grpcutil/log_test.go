@@ -11,79 +11,51 @@
 package grpcutil
 
 import (
-	"regexp"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/errors"
-	"github.com/petermattis/goid"
 )
 
 func TestShouldPrint(t *testing.T) {
-	const duration = 100 * time.Millisecond
+	testutils.RunTrueAndFalse(t, "argsMatch", func(t *testing.T, argsMatch bool) {
+		msg := "blablabla"
+		if argsMatch {
+			msg = "grpc: addrConn.createTransport failed to connect to 127.0.0.1:1234 (connection refused)"
+		}
 
-	formatRe, err := regexp.Compile("^foo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	argRe, err := regexp.Compile("[a-z][0-9]")
-	if err != nil {
-		t.Fatal(err)
-	}
+		args := []interface{}{msg}
+		curriedShouldPrint := func() bool {
+			return shouldPrintWarning(args...)
+		}
 
-	testutils.RunTrueAndFalse(t, "formatMatch", func(t *testing.T, formatMatch bool) {
-		testutils.RunTrueAndFalse(t, "argsMatch", func(t *testing.T, argsMatch bool) {
-			format := "bar=%s"
-			if formatMatch {
-				format = "foobar=%s"
-			}
-			args := []interface{}{errors.New("baz")}
-			if argsMatch {
-				args = []interface{}{errors.New("a1")}
-			}
-			curriedShouldPrint := func() bool {
-				return shouldPrint(formatRe, argRe, duration, format, args...)
-			}
+		// First call should always print.
+		if !curriedShouldPrint() {
+			t.Error("1st call: should print expected true, got false")
+		}
 
-			// First call should always print.
+		// Should print if non-matching.
+		alwaysPrint := !argsMatch
+		if alwaysPrint {
 			if !curriedShouldPrint() {
-				t.Error("expected first call to print")
+				t.Error("2nd call: should print expected true, got false")
 			}
+		} else {
+			if curriedShouldPrint() {
+				t.Error("2nd call: should print expected false, got true")
+			}
+		}
 
-			// Call from another goroutine should always print.
-			done := make(chan bool)
-			go func() {
-				done <- curriedShouldPrint()
-			}()
-			if !<-done {
-				t.Error("expected other-goroutine call to print")
-			}
-
-			// Should print if non-matching.
-			alwaysPrint := !(formatMatch && argsMatch)
-
-			if alwaysPrint {
-				if !curriedShouldPrint() {
-					t.Error("expected second call to print")
-				}
-			} else {
-				if curriedShouldPrint() {
-					t.Error("unexpected second call to print")
-				}
-			}
-
-			if !alwaysPrint {
-				// Force printing by pretending the previous output was well in the
-				// past.
-				spamMu.Lock()
-				spamMu.gids[goid.Get()] = timeutil.Now().Add(-time.Hour)
-				spamMu.Unlock()
-			}
-			if !curriedShouldPrint() {
-				t.Error("expected third call to print")
-			}
-		})
+		if !alwaysPrint {
+			// Force printing by pretending the previous output was well in the
+			// past.
+			spamMu.Lock()
+			spamMu.strs[msg] = timeutil.Now().Add(-time.Hour)
+			spamMu.Unlock()
+		}
+		if !curriedShouldPrint() {
+			t.Error("3rd call (after reset): should print expected true, got false")
+		}
 	})
 }

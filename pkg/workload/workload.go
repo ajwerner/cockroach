@@ -74,7 +74,7 @@ type Flagser interface {
 // to have been created and initialized before running these.
 type Opser interface {
 	Generator
-	Ops(urls []string, reg *histogram.Registry) (QueryLoad, error)
+	Ops(ctx context.Context, urls []string, reg *histogram.Registry) (QueryLoad, error)
 }
 
 // Hookser returns any hooks associated with the generator.
@@ -239,7 +239,7 @@ func TypedTuples(count int, typs []*types.T, fn func(int) []interface{}) Batched
 				case time.Time:
 					col.Bytes().Set(0, []byte(d.Round(time.Microsecond).UTC().Format(timestampOutputFormat)))
 				default:
-					panic(fmt.Sprintf(`unhandled datum type %T`, d))
+					panic(errors.AssertionFailedf(`unhandled datum type %T`, d))
 				}
 			}
 		}
@@ -252,7 +252,7 @@ func TypedTuples(count int, typs []*types.T, fn func(int) []interface{}) Batched
 // heavy. In performance-critical code, FillBatch should be used directly,
 // instead.
 func (b BatchedTuples) BatchRows(batchIdx int) [][]interface{} {
-	cb := coldata.NewMemBatchWithSize(nil, 0, coldata.StandardColumnFactory)
+	cb := coldata.NewMemBatchWithCapacity(nil, 0, coldata.StandardColumnFactory)
 	var a bufalloc.ByteAllocator
 	b.FillBatch(batchIdx, cb, &a)
 	return ColBatchToRows(cb)
@@ -458,6 +458,6 @@ func ApproxDatumSize(x interface{}) int64 {
 	case time.Time:
 		return 12
 	default:
-		panic(fmt.Sprintf("unsupported type %T: %v", x, x))
+		panic(errors.AssertionFailedf("unsupported type %T: %v", x, x))
 	}
 }

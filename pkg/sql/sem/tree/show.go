@@ -84,6 +84,7 @@ const (
 // ShowBackup represents a SHOW BACKUP statement.
 type ShowBackup struct {
 	Path                 Expr
+	InCollection         Expr
 	Details              BackupDetails
 	ShouldIncludeSchemas bool
 	Options              KVOptions
@@ -91,6 +92,11 @@ type ShowBackup struct {
 
 // Format implements the NodeFormatter interface.
 func (node *ShowBackup) Format(ctx *FmtCtx) {
+	if node.InCollection != nil && node.Path == nil {
+		ctx.WriteString("SHOW BACKUPS IN ")
+		ctx.FormatNode(node.InCollection)
+		return
+	}
 	ctx.WriteString("SHOW BACKUP ")
 	if node.Details == BackupRangeDetails {
 		ctx.WriteString("RANGES ")
@@ -101,6 +107,10 @@ func (node *ShowBackup) Format(ctx *FmtCtx) {
 		ctx.WriteString("SCHEMAS ")
 	}
 	ctx.FormatNode(node.Path)
+	if node.InCollection != nil {
+		ctx.WriteString(" IN ")
+		ctx.FormatNode(node.InCollection)
+	}
 	if len(node.Options) > 0 {
 		ctx.WriteString(" WITH ")
 		ctx.FormatNode(&node.Options)
@@ -135,6 +145,22 @@ func (node *ShowDatabases) Format(ctx *FmtCtx) {
 	if node.WithComment {
 		ctx.WriteString(" WITH COMMENT")
 	}
+}
+
+// ShowEnums represents a SHOW ENUMS statement.
+type ShowEnums struct{}
+
+// Format implements the NodeFormatter interface.
+func (node *ShowEnums) Format(ctx *FmtCtx) {
+	ctx.WriteString("SHOW ENUMS")
+}
+
+// ShowTypes represents a SHOW TYPES statement.
+type ShowTypes struct{}
+
+// Format implements the NodeFormatter interface.
+func (node *ShowTypes) Format(ctx *FmtCtx) {
+	ctx.WriteString("SHOW TYPES")
 }
 
 // ShowTraceType is an enum of SHOW TRACE variants.
@@ -226,6 +252,10 @@ type ShowJobs struct {
 
 	// Whether to block and wait for completion of all running jobs to be displayed.
 	Block bool
+
+	// If non-nil, only display jobs started by the specified
+	// schedules.
+	Schedules *Select
 }
 
 // Format implements the NodeFormatter interface.
@@ -241,6 +271,24 @@ func (node *ShowJobs) Format(ctx *FmtCtx) {
 	if node.Jobs != nil {
 		ctx.WriteString(" ")
 		ctx.FormatNode(node.Jobs)
+	}
+	if node.Schedules != nil {
+		ctx.WriteString(" FOR SCHEDULES ")
+		node.Schedules.Format(ctx)
+	}
+}
+
+// ShowRegions represents a SHOW REGIONS statement
+type ShowRegions struct {
+	Database Name
+}
+
+// Format implements the NodeFormatter interface.
+func (node *ShowRegions) Format(ctx *FmtCtx) {
+	ctx.WriteString("SHOW REGIONS")
+	if node.Database != "" {
+		ctx.WriteString(" FROM DATABASE ")
+		node.Database.Format(ctx)
 	}
 }
 
@@ -307,6 +355,25 @@ func (node *ShowTables) Format(ctx *FmtCtx) {
 
 	if node.WithComment {
 		ctx.WriteString(" WITH COMMENT")
+	}
+}
+
+// ShowTransactions represents a SHOW TRANSACTIONS statement
+type ShowTransactions struct {
+	All     bool
+	Cluster bool
+}
+
+// Format implements the NodeFormatter interface.
+func (node *ShowTransactions) Format(ctx *FmtCtx) {
+	ctx.WriteString("SHOW ")
+	if node.All {
+		ctx.WriteString("ALL ")
+	}
+	if node.Cluster {
+		ctx.WriteString("CLUSTER TRANSACTIONS")
+	} else {
+		ctx.WriteString("LOCAL TRANSACTIONS")
 	}
 }
 
@@ -531,5 +598,96 @@ func (node *ShowPartitions) Format(ctx *FmtCtx) {
 	} else {
 		ctx.Printf("SHOW PARTITIONS FROM TABLE ")
 		ctx.FormatNode(node.Table)
+	}
+}
+
+// ScheduledJobExecutorType is a type identifying the names of
+// the supported scheduled job executors.
+type ScheduledJobExecutorType int
+
+const (
+	// InvalidExecutor is a placeholder for an invalid executor type.
+	InvalidExecutor ScheduledJobExecutorType = iota
+
+	// ScheduledBackupExecutor is an executor responsible for
+	// the execution of the scheduled backups.
+	ScheduledBackupExecutor
+)
+
+var scheduleExecutorInternalNames = map[ScheduledJobExecutorType]string{
+	InvalidExecutor:         "unknown-executor",
+	ScheduledBackupExecutor: "scheduled-backup-executor",
+}
+
+// InternalName returns an internal executor name.
+// This name can be used to filter matching schedules.
+func (t ScheduledJobExecutorType) InternalName() string {
+	return scheduleExecutorInternalNames[t]
+}
+
+// UserName returns a user friendly executor name.
+func (t ScheduledJobExecutorType) UserName() string {
+	switch t {
+	case ScheduledBackupExecutor:
+		return "BACKUP"
+	}
+	return "unsupported-executor"
+}
+
+// ScheduleState describes what kind of schedules to display
+type ScheduleState int
+
+const (
+	// SpecifiedSchedules indicates that show schedules should
+	// only show subset of schedules.
+	SpecifiedSchedules ScheduleState = iota
+
+	// ActiveSchedules indicates that show schedules should
+	// only show those schedules that are currently active.
+	ActiveSchedules
+
+	// PausedSchedules indicates that show schedules should
+	// only show those schedules that are currently paused.
+	PausedSchedules
+)
+
+// Format implements the NodeFormatter interface.
+func (s ScheduleState) Format(ctx *FmtCtx) {
+	switch s {
+	case ActiveSchedules:
+		ctx.WriteString("RUNNING")
+	case PausedSchedules:
+		ctx.WriteString("PAUSED")
+	default:
+		// Nothing
+	}
+}
+
+// ShowSchedules represents a SHOW SCHEDULES statement.
+type ShowSchedules struct {
+	WhichSchedules ScheduleState
+	ExecutorType   ScheduledJobExecutorType
+	ScheduleID     Expr
+}
+
+var _ Statement = &ShowSchedules{}
+
+// Format implements the NodeFormatter interface.
+func (n *ShowSchedules) Format(ctx *FmtCtx) {
+	if n.ScheduleID != nil {
+		ctx.Printf("SHOW SCHEDULE %s", AsString(n.ScheduleID))
+		return
+	}
+	ctx.Printf("SHOW")
+
+	if n.WhichSchedules != SpecifiedSchedules {
+		ctx.WriteString(" ")
+		n.WhichSchedules.Format(ctx)
+	}
+
+	ctx.Printf(" SCHEDULES")
+
+	if n.ExecutorType != InvalidExecutor {
+		ctx.Printf(" FOR %s", n.ExecutorType.UserName())
 	}
 }

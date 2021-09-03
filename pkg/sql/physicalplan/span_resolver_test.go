@@ -23,9 +23,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan/replicaoracle"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
@@ -87,7 +89,7 @@ func TestSpanResolverUsesCaches(t *testing.T) {
 	lr := physicalplan.NewSpanResolver(
 		s3.Cfg.Settings,
 		s3.DistSenderI().(*kvcoord.DistSender),
-		gossip.MakeExposedGossip(s3.Gossip()),
+		s3.Gossip(),
 		s3.GetNode().Descriptor, nil,
 		replicaoracle.BinPackingChoice)
 
@@ -165,13 +167,13 @@ func populateCache(db *gosql.DB, expectedNumRows int) error {
 // `CREATE TABLE test (k INT PRIMARY KEY)` at row with value pk (the row will be
 // the first on the right of the split).
 func splitRangeAtVal(
-	ts *server.TestServer, tableDesc *sqlbase.TableDescriptor, pk int,
+	ts *server.TestServer, tableDesc *tabledesc.Immutable, pk int,
 ) (roachpb.RangeDescriptor, roachpb.RangeDescriptor, error) {
 	if len(tableDesc.Indexes) != 0 {
 		return roachpb.RangeDescriptor{}, roachpb.RangeDescriptor{},
 			errors.AssertionFailedf("expected table with just a PK, got: %+v", tableDesc)
 	}
-	pik, err := sqlbase.TestingMakePrimaryIndexKey(tableDesc, pk)
+	pik, err := rowenc.TestingMakePrimaryIndexKey(tableDesc, pk)
 	if err != nil {
 		return roachpb.RangeDescriptor{}, roachpb.RangeDescriptor{}, err
 	}
@@ -196,7 +198,7 @@ func TestSpanResolver(t *testing.T) {
 	lr := physicalplan.NewSpanResolver(
 		s.(*server.TestServer).Cfg.Settings,
 		s.DistSenderI().(*kvcoord.DistSender),
-		gossip.MakeExposedGossip(s.GossipI().(*gossip.Gossip)),
+		s.GossipI().(*gossip.Gossip),
 		s.(*server.TestServer).GetNode().Descriptor, nil,
 		replicaoracle.BinPackingChoice)
 
@@ -292,7 +294,7 @@ func TestMixedDirections(t *testing.T) {
 	lr := physicalplan.NewSpanResolver(
 		s.(*server.TestServer).Cfg.Settings,
 		s.DistSenderI().(*kvcoord.DistSender),
-		gossip.MakeExposedGossip(s.GossipI().(*gossip.Gossip)),
+		s.GossipI().(*gossip.Gossip),
 		s.(*server.TestServer).GetNode().Descriptor,
 		nil,
 		replicaoracle.BinPackingChoice)
@@ -319,7 +321,7 @@ func TestMixedDirections(t *testing.T) {
 
 func setupRanges(
 	db *gosql.DB, s *server.TestServer, cdb *kv.DB, t *testing.T,
-) ([]roachpb.RangeDescriptor, *sqlbase.TableDescriptor) {
+) ([]roachpb.RangeDescriptor, *tabledesc.Immutable) {
 	if _, err := db.Exec(`CREATE DATABASE t`); err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +337,7 @@ func setupRanges(
 		}
 	}
 
-	tableDesc := sqlbase.TestingGetTableDescriptor(cdb, keys.SystemSQLCodec, "t", "test")
+	tableDesc := catalogkv.TestingGetTableDescriptor(cdb, keys.SystemSQLCodec, "t", "test")
 	// Split every SQL row to its own range.
 	rowRanges := make([]roachpb.RangeDescriptor, len(values))
 	for i, val := range values {
@@ -411,7 +413,7 @@ func resolveSpans(
 
 func onlyReplica(rng roachpb.RangeDescriptor) rngInfo {
 	if len(rng.InternalReplicas) != 1 {
-		panic(fmt.Sprintf("expected one replica in %+v", rng))
+		panic(errors.AssertionFailedf("expected one replica in %+v", rng))
 	}
 	return rngInfo{ReplicaDescriptor: rng.InternalReplicas[0], rngDesc: rng}
 }
@@ -422,7 +424,7 @@ func selectReplica(nodeID roachpb.NodeID, rng roachpb.RangeDescriptor) rngInfo {
 			return rngInfo{ReplicaDescriptor: rep, rngDesc: rng}
 		}
 	}
-	panic(fmt.Sprintf("no replica on node %d in: %s", nodeID, &rng))
+	panic(errors.AssertionFailedf("no replica on node %d in: %s", nodeID, &rng))
 }
 
 func expectResolved(actual [][]rngInfo, expected ...[]rngInfo) error {
@@ -449,9 +451,9 @@ func expectResolved(actual [][]rngInfo, expected ...[]rngInfo) error {
 	return nil
 }
 
-func makeSpan(tableDesc *sqlbase.TableDescriptor, i, j int) roachpb.Span {
+func makeSpan(tableDesc *tabledesc.Immutable, i, j int) roachpb.Span {
 	makeKey := func(val int) roachpb.Key {
-		key, err := sqlbase.TestingMakePrimaryIndexKey(tableDesc, val)
+		key, err := rowenc.TestingMakePrimaryIndexKey(tableDesc, val)
 		if err != nil {
 			panic(err)
 		}

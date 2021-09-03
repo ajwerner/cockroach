@@ -68,7 +68,7 @@ import (
 // NOTE: This is not used by CockroachDB and has been preserved to serve as an
 // oracle to prove the correctness of the new export logic.
 type MVCCIncrementalIterator struct {
-	iter Iterator
+	iter MVCCIterator
 
 	// A time-bound iterator cannot be used by itself due to a bug in the time-
 	// bound iterator (#28358). This was historically augmented with an iterator
@@ -76,7 +76,7 @@ type MVCCIncrementalIterator struct {
 	// issues remained (#43799), so now the iterator above is the main iterator
 	// the timeBoundIter is used to check if any keys can be skipped by the main
 	// iterator.
-	timeBoundIter Iterator
+	timeBoundIter MVCCIterator
 
 	startTime hlc.Timestamp
 	endTime   hlc.Timestamp
@@ -88,7 +88,7 @@ type MVCCIncrementalIterator struct {
 	meta enginepb.MVCCMetadata
 }
 
-var _ SimpleIterator = &MVCCIncrementalIterator{}
+var _ SimpleMVCCIterator = &MVCCIncrementalIterator{}
 
 // MVCCIncrementalIterOptions bundles options for NewMVCCIncrementalIterator.
 type MVCCIncrementalIterOptions struct {
@@ -110,17 +110,19 @@ type MVCCIncrementalIterOptions struct {
 func NewMVCCIncrementalIterator(
 	reader Reader, opts MVCCIncrementalIterOptions,
 ) *MVCCIncrementalIterator {
-	var iter Iterator
-	var timeBoundIter Iterator
+	var iter MVCCIterator
+	var timeBoundIter MVCCIterator
 	if !opts.IterOptions.MinTimestampHint.IsEmpty() && !opts.IterOptions.MaxTimestampHint.IsEmpty() {
 		// An iterator without the timestamp hints is created to ensure that the
 		// iterator visits every required version of every key that has changed.
-		iter = reader.NewIterator(IterOptions{
+		iter = reader.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{
 			UpperBound: opts.IterOptions.UpperBound,
 		})
-		timeBoundIter = reader.NewIterator(opts.IterOptions)
+		// The timeBoundIter is only required to see versioned keys, since the
+		// intents will be found by iter.
+		timeBoundIter = reader.NewMVCCIterator(MVCCKeyIterKind, opts.IterOptions)
 	} else {
-		iter = reader.NewIterator(opts.IterOptions)
+		iter = reader.NewMVCCIterator(MVCCKeyAndIntentsIterKind, opts.IterOptions)
 	}
 
 	return &MVCCIncrementalIterator{

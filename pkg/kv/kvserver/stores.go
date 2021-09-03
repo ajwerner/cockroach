@@ -61,7 +61,7 @@ func NewStores(ambient log.AmbientContext, clock *hlc.Clock) *Stores {
 
 // IsMeta1Leaseholder returns whether the specified stores owns
 // the meta1 lease. Returns an error if any.
-func (ls *Stores) IsMeta1Leaseholder(now hlc.Timestamp) (bool, error) {
+func (ls *Stores) IsMeta1Leaseholder(ctx context.Context, now hlc.Timestamp) (bool, error) {
 	repl, _, err := ls.GetReplicaForRangeID(1)
 	if roachpb.IsRangeNotFoundError(err) {
 		return false, nil
@@ -69,7 +69,7 @@ func (ls *Stores) IsMeta1Leaseholder(now hlc.Timestamp) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return repl.OwnsValidLease(now), nil
+	return repl.OwnsValidLease(ctx, now), nil
 }
 
 // GetStoreCount returns the number of stores this node is exporting.
@@ -274,24 +274,12 @@ func (ls *Stores) updateBootstrapInfoLocked(bi *gossip.BootstrapInfo) error {
 	return err
 }
 
-// ReadVersionFromEngineOrZero reads the persisted cluster version from the
-// engine, falling back to the zero value.
-func ReadVersionFromEngineOrZero(
-	ctx context.Context, reader storage.Reader,
-) (clusterversion.ClusterVersion, error) {
-	var cv clusterversion.ClusterVersion
-	cv, err := ReadClusterVersion(ctx, reader)
-	if err != nil {
-		return clusterversion.ClusterVersion{}, err
-	}
-	return cv, nil
-}
-
 // WriteClusterVersionToEngines writes the given version to the given engines,
 // Returns nil on success; otherwise returns first error encountered writing to
-// the stores.
+// the stores. It makes no attempt to validate the supplied version.
 //
-// WriteClusterVersion makes no attempt to validate the supplied version.
+// At the time of writing this is used during bootstrap, initial server start
+// (to perhaps fill into additional stores), and during cluster version bumps.
 func WriteClusterVersionToEngines(
 	ctx context.Context, engines []storage.Engine, cv clusterversion.ClusterVersion,
 ) error {
@@ -341,7 +329,7 @@ func SynthesizeClusterVersionFromEngines(
 	for _, eng := range engines {
 		eng := eng.(storage.Reader) // we're read only
 		var cv clusterversion.ClusterVersion
-		cv, err := ReadVersionFromEngineOrZero(ctx, eng)
+		cv, err := ReadClusterVersion(ctx, eng)
 		if err != nil {
 			return clusterversion.ClusterVersion{}, err
 		}

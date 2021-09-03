@@ -102,7 +102,32 @@ func (b Overload) FixedReturnType() *types.T {
 	if b.ReturnType == nil {
 		return nil
 	}
-	return returnTypeToFixedType(b.ReturnType)
+	return returnTypeToFixedType(b.ReturnType, nil)
+}
+
+// InferReturnTypeFromInputArgTypes returns the type that the function returns,
+// inferring the type based on the function's inputTypes if necessary.
+func (b Overload) InferReturnTypeFromInputArgTypes(inputTypes []*types.T) *types.T {
+	retTyp := b.FixedReturnType()
+	// If the output type of the function depends on its inputs, then
+	// the output of FixedReturnType will be ambiguous. In the ambiguous
+	// cases, use the information about the input types to construct the
+	// appropriate output type. The tree.ReturnTyper interface is
+	// []tree.TypedExpr -> *types.T, so construct the []tree.TypedExpr
+	// from the types that we know are the inputs. Note that we don't
+	// try to create datums of each input type, and instead use this
+	// "TypedDummy" construct. This is because some types don't have resident
+	// members (like an ENUM with no values), and we shouldn't error out
+	// trying to infer the return type in those cases.
+	if retTyp.IsAmbiguous() {
+		args := make([]TypedExpr, len(inputTypes))
+		for i, t := range inputTypes {
+			args[i] = &TypedDummy{Typ: t}
+		}
+		// Evaluate ReturnType with the fake input set of arguments.
+		retTyp = returnTypeToFixedType(b.ReturnType, args)
+	}
+	return retTyp
 }
 
 // Signature returns a human-readable signature.
@@ -409,8 +434,8 @@ func FirstNonNullReturnType() ReturnTyper {
 	}
 }
 
-func returnTypeToFixedType(s ReturnTyper) *types.T {
-	if t := s(nil); t != UnknownReturnType {
+func returnTypeToFixedType(s ReturnTyper, inputTyps []TypedExpr) *types.T {
+	if t := s(inputTyps); t != UnknownReturnType {
 		return t
 	}
 	return types.Any
@@ -516,10 +541,22 @@ func typeCheckOverloadedExprs(
 	// Filter out overloads on resolved types.
 	for _, i := range s.resolvableIdxs {
 		paramDesired := types.Any
-		if len(s.overloadIdxs) == 1 {
-			// Once we get down to a single overload candidate, begin desiring its
-			// parameter types for the corresponding argument expressions.
-			paramDesired = s.overloads[s.overloadIdxs[0]].params().GetAt(i)
+
+		// If all remaining candidates require the same type for this parameter,
+		// begin desiring that type for the corresponding argument expression.
+		// Note that this is always the case when we have a single overload left.
+		var sameType *types.T
+		for _, ovIdx := range s.overloadIdxs {
+			typ := s.overloads[ovIdx].params().GetAt(i)
+			if sameType == nil {
+				sameType = typ
+			} else if !typ.Identical(sameType) {
+				sameType = nil
+				break
+			}
+		}
+		if sameType != nil {
+			paramDesired = sameType
 		}
 		typ, err := exprs[i].TypeCheck(ctx, semaCtx, paramDesired)
 		if err != nil {
@@ -924,15 +961,17 @@ func formatCandidates(prefix string, candidates []overloadImpl) string {
 		buf.WriteByte('(')
 		params := candidate.params()
 		tLen := params.Length()
+		inputTyps := make([]TypedExpr, tLen)
 		for i := 0; i < tLen; i++ {
 			t := params.GetAt(i)
+			inputTyps[i] = &TypedDummy{Typ: t}
 			if i > 0 {
 				buf.WriteString(", ")
 			}
 			buf.WriteString(t.String())
 		}
 		buf.WriteString(") -> ")
-		buf.WriteString(returnTypeToFixedType(candidate.returnType()).String())
+		buf.WriteString(returnTypeToFixedType(candidate.returnType(), inputTyps).String())
 		if candidate.preferred() {
 			buf.WriteString(" [preferred]")
 		}

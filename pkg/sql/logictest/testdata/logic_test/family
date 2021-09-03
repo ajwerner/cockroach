@@ -1,4 +1,3 @@
-# LogicTest: !3node-tenant(50048)
 # a is the primary key so b gets optimized into a one column value. The c, d
 # family has two columns, so it's encoded as a tuple
 statement ok
@@ -14,7 +13,7 @@ CREATE TABLE abcd(
 query TT
 SHOW CREATE TABLE abcd
 ----
-abcd  CREATE TABLE abcd (
+abcd  CREATE TABLE public.abcd (
       a INT8 NOT NULL,
       b INT8 NULL,
       c INT8 NULL,
@@ -148,7 +147,7 @@ ALTER TABLE abcd ADD COLUMN j INT CREATE IF NOT EXISTS FAMILY f_j
 query TT
 SHOW CREATE TABLE abcd
 ----
-abcd  CREATE TABLE abcd (
+abcd  CREATE TABLE public.abcd (
       a INT8 NOT NULL,
       b INT8 NULL,
       c INT8 NULL,
@@ -174,7 +173,7 @@ ALTER TABLE abcd DROP c, DROP d, DROP e, DROP h, DROP i, DROP j
 query TT
 SHOW CREATE TABLE abcd
 ----
-abcd  CREATE TABLE abcd (
+abcd  CREATE TABLE public.abcd (
       a INT8 NOT NULL,
       b INT8 NULL,
       f DECIMAL NULL,
@@ -193,7 +192,7 @@ CREATE TABLE f1 (
 query TT
 SHOW CREATE TABLE f1
 ----
-f1  CREATE TABLE f1 (
+f1  CREATE TABLE public.f1 (
     a INT8 NOT NULL,
     b STRING NULL,
     c STRING NULL,
@@ -207,7 +206,7 @@ CREATE TABLE assign_at_create (a INT PRIMARY KEY FAMILY pri, b INT FAMILY foo, c
 query TT
 SHOW CREATE TABLE assign_at_create
 ----
-assign_at_create  CREATE TABLE assign_at_create (
+assign_at_create  CREATE TABLE public.assign_at_create (
                   a INT8 NOT NULL,
                   b INT8 NULL,
                   c INT8 NULL,
@@ -245,7 +244,7 @@ ALTER TABLE rename_col RENAME c TO e
 query TT
 SHOW CREATE TABLE rename_col
 ----
-rename_col  CREATE TABLE rename_col (
+rename_col  CREATE TABLE public.rename_col (
             a INT8 NOT NULL,
             d INT8 NULL,
             e STRING NULL,
@@ -299,7 +298,7 @@ query TT
 SELECT field, description FROM [EXPLAIN SELECT a FROM t1 WHERE a = 10] WHERE field IN ('table', 'spans')
 ----
 table  t1@primary
-spans  /10/0-/10/1
+spans  [/10 - /10]
 
 # A point lookup on a non-nullable column allows us to scan only that column
 # family.
@@ -312,7 +311,7 @@ query TT
 SELECT field, description FROM [EXPLAIN SELECT b FROM t1 WHERE a = 10] WHERE field IN ('table', 'spans')
 ----
 table  t1@primary
-spans  /10/2/1-/10/2/2
+spans  [/10 - /10]
 
 # Even if we also select the primary key column, we can still scan the single
 # column family because that column can be decoded from the key.
@@ -325,7 +324,7 @@ query TT
 SELECT field, description FROM [EXPLAIN SELECT a, b FROM t1 WHERE a = 10] WHERE field IN ('table', 'spans')
 ----
 table  t1@primary
-spans  /10/2/1-/10/2/2
+spans  [/10 - /10]
 
 # A point lookup on a nullable column requires also scanning column family 0 as
 # a sentinel.
@@ -338,7 +337,7 @@ query TT
 SELECT field, description FROM [EXPLAIN SELECT c FROM t1 WHERE a = 10] WHERE field IN ('table', 'spans')
 ----
 table  t1@primary
-spans  /10/0-/10/1/2
+spans  [/10 - /10]
 
 # A point lookup on two columns in non-adjacent column families results in two
 # spans.
@@ -351,7 +350,7 @@ query TT
 SELECT field, description FROM [EXPLAIN SELECT b, d FROM t1 WHERE a = 10] WHERE field IN ('table', 'spans')
 ----
 table  t1@primary
-spans  /10/0-/10/1 /10/2/1-/10/2/2
+spans  [/10 - /10]
 
 # Unique secondary indexes store non-indexed primary key columns in column
 # family 0.
@@ -367,7 +366,7 @@ query TT
 SELECT field, description FROM [EXPLAIN SELECT a FROM t1 WHERE b = 20] WHERE field IN ('table', 'spans')
 ----
 table  t1@b_idx
-spans  /20/0-/20/1
+spans  [/20 - /20]
 
 # If the primary key column is composite, we do need to scan its column family
 # to retrieve its value.
@@ -388,7 +387,7 @@ query TT
 SELECT field, description FROM [EXPLAIN SELECT a FROM t2 WHERE a = 10] WHERE field IN ('table', 'spans')
 ----
 table  t2@primary
-spans  /1E+1/3/1-/1E+1/3/2
+spans  [/10 - /10]
 
 # A point lookup on `a` and `b` should scan both of their families.
 query TI
@@ -400,7 +399,7 @@ query TT
 SELECT field, description FROM [EXPLAIN SELECT a, b FROM t2 WHERE a = 10] WHERE field IN ('table', 'spans')
 ----
 table  t2@primary
-spans  /1E+1/2/1-/1E+1/3/2
+spans  [/10 - /10]
 
 # Secondary indexes always store their composite values in column family 0.
 statement ok
@@ -416,7 +415,7 @@ query TT
 SELECT field, description FROM [EXPLAIN SELECT a FROM t2@a_idx WHERE a = 10] WHERE field IN ('table', 'spans')
 ----
 table  t2@a_idx
-spans  /1E+1/0-/1E+1/1
+spans  [/10 - /10]
 
 # A point lookup on `a` and `b` should use column family 0 and b's family.
 query TI
@@ -428,7 +427,7 @@ query TT
 SELECT field, description FROM [EXPLAIN SELECT a, b FROM t2@a_idx WHERE a = 10] WHERE field IN ('table', 'spans')
 ----
 table  t2@a_idx
-spans  /1E+1/0-/1E+1/1 /1E+1/2/1-/1E+1/2/2
+spans  [/10 - /10]
 
 # ------------------------------------------------------------------------------
 # UPSERT/INSERT..ON CONFLICT cases.

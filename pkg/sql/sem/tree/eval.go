@@ -22,14 +22,20 @@ import (
 
 	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/geo"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
+	"github.com/cockroachdb/cockroach/pkg/sql/roleoption"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/arith"
@@ -230,13 +236,16 @@ var UnaryOps = unaryOpFixups(map[UnaryOperator]unaryOpOverload{
 	},
 })
 
+// TwoArgFn is a function that operates on two Datum arguments.
+type TwoArgFn func(*EvalContext, Datum, Datum) (Datum, error)
+
 // BinOp is a binary operator.
 type BinOp struct {
 	LeftType     *types.T
 	RightType    *types.T
 	ReturnType   *types.T
 	NullableArgs bool
-	Fn           func(*EvalContext, Datum, Datum) (Datum, error)
+	Fn           TwoArgFn
 	Volatility   Volatility
 
 	types   TypeList
@@ -373,6 +382,24 @@ func ArrayContains(ctx *EvalContext, haystack *DArray, needles *DArray) (*DBool,
 		}
 	}
 	return DBoolTrue, nil
+}
+
+// JSONExistsAny return true if any value in dArray is exist in the json
+func JSONExistsAny(_ *EvalContext, json DJSON, dArray *DArray) (*DBool, error) {
+	// TODO(justin): this can be optimized.
+	for _, k := range dArray.Array {
+		if k == DNull {
+			continue
+		}
+		e, err := json.JSON.Exists(string(MustBeDString(k)))
+		if err != nil {
+			return nil, err
+		}
+		if e {
+			return DBoolTrue, nil
+		}
+	}
+	return DBoolFalse, nil
 }
 
 func initArrayToArrayConcatenation() {
@@ -1914,7 +1941,7 @@ type CmpOp struct {
 	NullableArgs bool
 
 	// Datum return type is a union between *DBool and dNull.
-	Fn func(*EvalContext, Datum, Datum) (Datum, error)
+	Fn TwoArgFn
 
 	Volatility Volatility
 
@@ -2051,6 +2078,7 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 		// detected during type checking.
 		makeEqFn(types.AnyCollatedString, types.AnyCollatedString, VolatilityLeakProof),
 		makeEqFn(types.Float, types.Float, VolatilityLeakProof),
+		makeEqFn(types.Box2D, types.Box2D, VolatilityLeakProof),
 		makeEqFn(types.Geography, types.Geography, VolatilityLeakProof),
 		makeEqFn(types.Geometry, types.Geometry, VolatilityLeakProof),
 		makeEqFn(types.INet, types.INet, VolatilityLeakProof),
@@ -2075,6 +2103,8 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 		makeEqFn(types.Float, types.Int, VolatilityLeakProof),
 		makeEqFn(types.Int, types.Decimal, VolatilityLeakProof),
 		makeEqFn(types.Int, types.Float, VolatilityLeakProof),
+		makeEqFn(types.Int, types.Oid, VolatilityLeakProof),
+		makeEqFn(types.Oid, types.Int, VolatilityLeakProof),
 		makeEqFn(types.Timestamp, types.Date, VolatilityImmutable),
 		makeEqFn(types.Timestamp, types.TimestampTZ, VolatilityStable),
 		makeEqFn(types.TimestampTZ, types.Date, VolatilityStable),
@@ -2105,6 +2135,7 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 		// the operator is leak proof under the assumption that these cases will be
 		// detected during type checking.
 		makeLtFn(types.Float, types.Float, VolatilityLeakProof),
+		makeLtFn(types.Box2D, types.Box2D, VolatilityLeakProof),
 		makeLtFn(types.Geography, types.Geography, VolatilityLeakProof),
 		makeLtFn(types.Geometry, types.Geometry, VolatilityLeakProof),
 		makeLtFn(types.INet, types.INet, VolatilityLeakProof),
@@ -2128,6 +2159,8 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 		makeLtFn(types.Float, types.Int, VolatilityLeakProof),
 		makeLtFn(types.Int, types.Decimal, VolatilityLeakProof),
 		makeLtFn(types.Int, types.Float, VolatilityLeakProof),
+		makeLtFn(types.Int, types.Oid, VolatilityLeakProof),
+		makeLtFn(types.Oid, types.Int, VolatilityLeakProof),
 		makeLtFn(types.Timestamp, types.Date, VolatilityImmutable),
 		makeLtFn(types.Timestamp, types.TimestampTZ, VolatilityStable),
 		makeLtFn(types.TimestampTZ, types.Date, VolatilityStable),
@@ -2158,6 +2191,7 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 		// detected during type checking.
 		makeLeFn(types.AnyCollatedString, types.AnyCollatedString, VolatilityLeakProof),
 		makeLeFn(types.Float, types.Float, VolatilityLeakProof),
+		makeLeFn(types.Box2D, types.Box2D, VolatilityLeakProof),
 		makeLeFn(types.Geography, types.Geography, VolatilityLeakProof),
 		makeLeFn(types.Geometry, types.Geometry, VolatilityLeakProof),
 		makeLeFn(types.INet, types.INet, VolatilityLeakProof),
@@ -2181,6 +2215,8 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 		makeLeFn(types.Float, types.Int, VolatilityLeakProof),
 		makeLeFn(types.Int, types.Decimal, VolatilityLeakProof),
 		makeLeFn(types.Int, types.Float, VolatilityLeakProof),
+		makeLeFn(types.Int, types.Oid, VolatilityLeakProof),
+		makeLeFn(types.Oid, types.Int, VolatilityLeakProof),
 		makeLeFn(types.Timestamp, types.Date, VolatilityImmutable),
 		makeLeFn(types.Timestamp, types.TimestampTZ, VolatilityStable),
 		makeLeFn(types.TimestampTZ, types.Date, VolatilityStable),
@@ -2220,6 +2256,7 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 		// detected during type checking.
 		makeIsFn(types.AnyCollatedString, types.AnyCollatedString, VolatilityLeakProof),
 		makeIsFn(types.Float, types.Float, VolatilityLeakProof),
+		makeIsFn(types.Box2D, types.Box2D, VolatilityLeakProof),
 		makeIsFn(types.Geography, types.Geography, VolatilityLeakProof),
 		makeIsFn(types.Geometry, types.Geometry, VolatilityLeakProof),
 		makeIsFn(types.INet, types.INet, VolatilityLeakProof),
@@ -2244,6 +2281,8 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 		makeIsFn(types.Float, types.Int, VolatilityLeakProof),
 		makeIsFn(types.Int, types.Decimal, VolatilityLeakProof),
 		makeIsFn(types.Int, types.Float, VolatilityLeakProof),
+		makeIsFn(types.Int, types.Oid, VolatilityLeakProof),
+		makeIsFn(types.Oid, types.Int, VolatilityLeakProof),
 		makeIsFn(types.Timestamp, types.Date, VolatilityImmutable),
 		makeIsFn(types.Timestamp, types.TimestampTZ, VolatilityStable),
 		makeIsFn(types.TimestampTZ, types.Date, VolatilityStable),
@@ -2275,6 +2314,7 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 		makeEvalTupleIn(types.AnyCollatedString, VolatilityLeakProof),
 		makeEvalTupleIn(types.AnyTuple, VolatilityLeakProof),
 		makeEvalTupleIn(types.Float, VolatilityLeakProof),
+		makeEvalTupleIn(types.Box2D, VolatilityLeakProof),
 		makeEvalTupleIn(types.Geography, VolatilityLeakProof),
 		makeEvalTupleIn(types.Geometry, VolatilityLeakProof),
 		makeEvalTupleIn(types.INet, VolatilityLeakProof),
@@ -2325,17 +2365,24 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 		},
 	},
 
-	RegMatch: {
-		&CmpOp{
-			LeftType:  types.String,
-			RightType: types.String,
-			Fn: func(ctx *EvalContext, left Datum, right Datum) (Datum, error) {
-				key := regexpKey{s: string(MustBeDString(right)), caseInsensitive: false}
-				return matchRegexpWithKey(ctx, left, key)
+	RegMatch: append(
+		cmpOpOverload{
+			&CmpOp{
+				LeftType:  types.String,
+				RightType: types.String,
+				Fn: func(ctx *EvalContext, left Datum, right Datum) (Datum, error) {
+					key := regexpKey{s: string(MustBeDString(right)), caseInsensitive: false}
+					return matchRegexpWithKey(ctx, left, key)
+				},
+				Volatility: VolatilityImmutable,
 			},
-			Volatility: VolatilityImmutable,
 		},
-	},
+		makeBox2DComparisonOperators(
+			func(lhs, rhs *geo.CartesianBoundingBox) bool {
+				return lhs.Covers(rhs)
+			},
+		)...,
+	),
 
 	RegIMatch: {
 		&CmpOp{
@@ -2371,21 +2418,8 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 		&CmpOp{
 			LeftType:  types.Jsonb,
 			RightType: types.StringArray,
-			Fn: func(_ *EvalContext, left Datum, right Datum) (Datum, error) {
-				// TODO(justin): this can be optimized.
-				for _, k := range MustBeDArray(right).Array {
-					if k == DNull {
-						continue
-					}
-					e, err := left.(*DJSON).JSON.Exists(string(MustBeDString(k)))
-					if err != nil {
-						return nil, err
-					}
-					if e {
-						return DBoolTrue, nil
-					}
-				}
-				return DBoolFalse, nil
+			Fn: func(ctx *EvalContext, left Datum, right Datum) (Datum, error) {
+				return JSONExistsAny(ctx, MustBeDJSON(left), MustBeDArray(right))
 			},
 			Volatility: VolatilityImmutable,
 		},
@@ -2464,43 +2498,137 @@ var CmpOps = cmpOpFixups(map[ComparisonOperator]cmpOpOverload{
 			Volatility: VolatilityImmutable,
 		},
 	},
-	Overlaps: {
-		&CmpOp{
-			LeftType:  types.AnyArray,
-			RightType: types.AnyArray,
-			Fn: func(ctx *EvalContext, left Datum, right Datum) (Datum, error) {
-				array := MustBeDArray(left)
-				other := MustBeDArray(right)
-				if !array.ParamTyp.Equivalent(other.ParamTyp) {
-					return nil, pgerror.New(pgcode.DatatypeMismatch, "cannot compare arrays with different element types")
-				}
-				for _, needle := range array.Array {
-					// Nulls don't compare to each other in && syntax.
-					if needle == DNull {
-						continue
+	Overlaps: append(
+		cmpOpOverload{
+			&CmpOp{
+				LeftType:  types.AnyArray,
+				RightType: types.AnyArray,
+				Fn: func(ctx *EvalContext, left Datum, right Datum) (Datum, error) {
+					array := MustBeDArray(left)
+					other := MustBeDArray(right)
+					if !array.ParamTyp.Equivalent(other.ParamTyp) {
+						return nil, pgerror.New(pgcode.DatatypeMismatch, "cannot compare arrays with different element types")
 					}
-					for _, hay := range other.Array {
-						if needle.Compare(ctx, hay) == 0 {
-							return DBoolTrue, nil
+					for _, needle := range array.Array {
+						// Nulls don't compare to each other in && syntax.
+						if needle == DNull {
+							continue
+						}
+						for _, hay := range other.Array {
+							if needle.Compare(ctx, hay) == 0 {
+								return DBoolTrue, nil
+							}
 						}
 					}
+					return DBoolFalse, nil
+				},
+				Volatility: VolatilityImmutable,
+			},
+			&CmpOp{
+				LeftType:  types.INet,
+				RightType: types.INet,
+				Fn: func(_ *EvalContext, left, right Datum) (Datum, error) {
+					ipAddr := MustBeDIPAddr(left).IPAddr
+					other := MustBeDIPAddr(right).IPAddr
+					return MakeDBool(DBool(ipAddr.ContainsOrContainedBy(&other))), nil
+				},
+				Volatility: VolatilityImmutable,
+			},
+		},
+		makeBox2DComparisonOperators(
+			func(lhs, rhs *geo.CartesianBoundingBox) bool {
+				return lhs.Intersects(rhs)
+			},
+		)...,
+	),
+})
+
+const experimentalBox2DClusterSettingName = "sql.spatial.experimental_box2d_comparison_operators.enabled"
+
+var experimentalBox2DClusterSetting = settings.RegisterPublicBoolSetting(
+	experimentalBox2DClusterSettingName,
+	"enables the use of certain experimental box2d comparison operators",
+	false,
+)
+
+func checkExperimentalBox2DComparisonOperatorEnabled(ctx *EvalContext) error {
+	if !experimentalBox2DClusterSetting.Get(&ctx.Settings.SV) {
+		return errors.WithHintf(
+			pgerror.Newf(
+				pgcode.FeatureNotSupported,
+				"this box2d comparison operator is experimental",
+			),
+			"To enable box2d comparators, use `SET CLUSTER SETTING %s = on`.",
+			experimentalBox2DClusterSettingName,
+		)
+	}
+	return nil
+}
+
+func makeBox2DComparisonOperators(op func(lhs, rhs *geo.CartesianBoundingBox) bool) cmpOpOverload {
+	return cmpOpOverload{
+		&CmpOp{
+			LeftType:  types.Box2D,
+			RightType: types.Box2D,
+			Fn: func(ctx *EvalContext, left Datum, right Datum) (Datum, error) {
+				if err := checkExperimentalBox2DComparisonOperatorEnabled(ctx); err != nil {
+					return nil, err
 				}
-				return DBoolFalse, nil
+				ret := op(
+					&MustBeDBox2D(left).CartesianBoundingBox,
+					&MustBeDBox2D(right).CartesianBoundingBox,
+				)
+				return MakeDBool(DBool(ret)), nil
 			},
 			Volatility: VolatilityImmutable,
 		},
 		&CmpOp{
-			LeftType:  types.INet,
-			RightType: types.INet,
-			Fn: func(_ *EvalContext, left, right Datum) (Datum, error) {
-				ipAddr := MustBeDIPAddr(left).IPAddr
-				other := MustBeDIPAddr(right).IPAddr
-				return MakeDBool(DBool(ipAddr.ContainsOrContainedBy(&other))), nil
+			LeftType:  types.Box2D,
+			RightType: types.Geometry,
+			Fn: func(ctx *EvalContext, left Datum, right Datum) (Datum, error) {
+				if err := checkExperimentalBox2DComparisonOperatorEnabled(ctx); err != nil {
+					return nil, err
+				}
+				ret := op(
+					&MustBeDBox2D(left).CartesianBoundingBox,
+					MustBeDGeometry(right).CartesianBoundingBox(),
+				)
+				return MakeDBool(DBool(ret)), nil
 			},
 			Volatility: VolatilityImmutable,
 		},
-	},
-})
+		&CmpOp{
+			LeftType:  types.Geometry,
+			RightType: types.Box2D,
+			Fn: func(ctx *EvalContext, left Datum, right Datum) (Datum, error) {
+				if err := checkExperimentalBox2DComparisonOperatorEnabled(ctx); err != nil {
+					return nil, err
+				}
+				ret := op(
+					MustBeDGeometry(left).CartesianBoundingBox(),
+					&MustBeDBox2D(right).CartesianBoundingBox,
+				)
+				return MakeDBool(DBool(ret)), nil
+			},
+			Volatility: VolatilityImmutable,
+		},
+		&CmpOp{
+			LeftType:  types.Geometry,
+			RightType: types.Geometry,
+			Fn: func(ctx *EvalContext, left Datum, right Datum) (Datum, error) {
+				if err := checkExperimentalBox2DComparisonOperatorEnabled(ctx); err != nil {
+					return nil, err
+				}
+				ret := op(
+					MustBeDGeometry(left).CartesianBoundingBox(),
+					MustBeDGeometry(right).CartesianBoundingBox(),
+				)
+				return MakeDBool(DBool(ret)), nil
+			},
+			Volatility: VolatilityImmutable,
+		},
+	}
+}
 
 // This map contains the inverses for operators in the CmpOps map that have
 // inverses.
@@ -2510,7 +2638,7 @@ func init() {
 	cmpOpsInverse = make(map[ComparisonOperator]ComparisonOperator)
 	for cmpOpIdx := range comparisonOpName {
 		cmpOp := ComparisonOperator(cmpOpIdx)
-		newOp, _, _, _, _ := foldComparisonExpr(cmpOp, DNull, DNull)
+		newOp, _, _, _, _ := FoldComparisonExpr(cmpOp, DNull, DNull)
 		if newOp != cmpOp {
 			cmpOpsInverse[newOp] = cmpOp
 			cmpOpsInverse[cmpOp] = newOp
@@ -2702,7 +2830,7 @@ func evalDatumsCmp(
 			continue
 		}
 
-		_, newLeft, newRight, _, not := foldComparisonExpr(subOp, left, elem)
+		_, newLeft, newRight, _, not := FoldComparisonExpr(subOp, left, elem)
 		d, err := fn.Fn(ctx, newLeft.(Datum), newRight.(Datum))
 		if err != nil {
 			return nil, err
@@ -2872,6 +3000,7 @@ type EvalDatabase interface {
 // EvalPlanner is a limited planner that can be used from EvalContext.
 type EvalPlanner interface {
 	EvalDatabase
+	TypeReferenceResolver
 	// ParseType parses a column type.
 	ParseType(sql string) (*types.T, error)
 
@@ -2892,6 +3021,10 @@ type EvalSessionAccessor interface {
 
 	// HasAdminRole returns true iff the current session user has the admin role.
 	HasAdminRole(ctx context.Context) (bool, error)
+
+	// HasAdminRole returns nil iff the current session user has the specified
+	// role option.
+	HasRoleOption(ctx context.Context, roleOption roleoption.Option) (bool, error)
 }
 
 // ClientNoticeSender is a limited interface to send notices to the
@@ -2901,8 +3034,9 @@ type EvalSessionAccessor interface {
 // interface only work on the gateway node (i.e. not from
 // distributed processors).
 type ClientNoticeSender interface {
-	// SendClientNotice sends a notice out-of-band to the client.
-	SendClientNotice(ctx context.Context, notice error)
+	// BufferClientNotice buffers the notice to send to the client.
+	// This is flushed before the connection is closed.
+	BufferClientNotice(ctx context.Context, notice pgnotice.Notice)
 }
 
 // InternalExecutor is a subset of sqlutil.InternalExecutor (which, in turn, is
@@ -2953,6 +3087,12 @@ type PrivilegedAccessor interface {
 // be used from EvalContext.
 type SequenceOperators interface {
 	EvalDatabase
+
+	// GetSerialSequenceNameFromColumn returns the sequence name for a given table and column
+	// provided it is part of a SERIAL sequence.
+	// Returns an empty string if the sequence name does not exist.
+	GetSerialSequenceNameFromColumn(ctx context.Context, tableName *TableName, columnName Name) (*TableName, error)
+
 	// IncrementSequence increments the given sequence and returns the result.
 	// It returns an error if the given name is not a sequence.
 	// The caller must ensure that seqName is fully qualified already.
@@ -2975,7 +3115,7 @@ type SequenceOperators interface {
 type TenantOperator interface {
 	// CreateTenant attempts to install a new tenant in the system. It returns
 	// an error if the tenant already exists.
-	CreateTenant(ctx context.Context, tenantID uint64, tenantInfo []byte) error
+	CreateTenant(ctx context.Context, tenantID uint64) error
 
 	// DestroyTenant attempts to uninstall an existing tenant from the system.
 	// It returns an error if the tenant does not exist.
@@ -3100,9 +3240,6 @@ type EvalContext struct {
 
 	Tenant TenantOperator
 
-	// TypeResolver is a type resolver that can be used during execution.
-	TypeResolver TypeReferenceResolver
-
 	// The transaction in which the statement is executing.
 	Txn *kv.Txn
 	// A handle to the database.
@@ -3135,6 +3272,8 @@ type EvalContext struct {
 	// tiny amount, yet the account reserves a lot more resulting in
 	// significantly overestimating the memory usage.
 	SingleDatumAggMemAccount *mon.BoundAccount
+
+	SQLLivenessReader sqlliveness.Reader
 }
 
 // MakeTestingEvalContext returns an EvalContext that includes a MemoryMonitor.
@@ -3156,11 +3295,13 @@ func MakeTestingEvalContext(st *cluster.Settings) EvalContext {
 // EvalContext so do not start or close the memory monitor.
 func MakeTestingEvalContextWithMon(st *cluster.Settings, monitor *mon.BytesMonitor) EvalContext {
 	ctx := EvalContext{
-		Codec:       keys.SystemSQLCodec,
-		Txn:         &kv.Txn{},
-		SessionData: &sessiondata.SessionData{VectorizeMode: sessiondata.VectorizeOn},
-		Settings:    st,
-		NodeID:      base.TestingIDContainer,
+		Codec: keys.SystemSQLCodec,
+		Txn:   &kv.Txn{},
+		SessionData: &sessiondata.SessionData{SessionData: sessiondatapb.SessionData{
+			VectorizeMode: sessiondatapb.VectorizeOn,
+		}},
+		Settings: st,
+		NodeID:   base.TestingIDContainer,
 	}
 	monitor.Start(context.Background(), nil /* pool */, mon.MakeStandaloneBudget(math.MaxInt64))
 	ctx.Mon = monitor
@@ -3224,7 +3365,7 @@ func (ctx *EvalContext) GetClusterTimestamp() *DDecimal {
 	if ts == (hlc.Timestamp{}) {
 		panic(errors.AssertionFailedf("zero cluster timestamp in txn"))
 	}
-	return TimestampToDecimal(ts)
+	return TimestampToDecimalDatum(ts)
 }
 
 // HasPlaceholders returns true if this EvalContext's placeholders have been
@@ -3236,11 +3377,11 @@ func (ctx *EvalContext) HasPlaceholders() bool {
 // TimestampToDecimal converts the logical timestamp into a decimal
 // value with the number of nanoseconds in the integer part and the
 // logical counter in the decimal part.
-func TimestampToDecimal(ts hlc.Timestamp) *DDecimal {
+func TimestampToDecimal(ts hlc.Timestamp) apd.Decimal {
 	// Compute Walltime * 10^10 + Logical.
 	// We need 10 decimals for the Logical field because its maximum
 	// value is 4294967295 (2^32-1), a value with 10 decimal digits.
-	var res DDecimal
+	var res apd.Decimal
 	val := &res.Coeff
 	val.SetInt64(ts.WallTime)
 	val.Mul(val, big10E10)
@@ -3253,8 +3394,32 @@ func TimestampToDecimal(ts hlc.Timestamp) *DDecimal {
 
 	// Shift 10 decimals to the right, so that the logical
 	// field appears as fractional part.
-	res.Decimal.Exponent = -10
-	return &res
+	res.Exponent = -10
+	return res
+}
+
+// DecimalToInexactDTimestamp is the inverse of TimestampToDecimal. It converts
+// a decimal constructed from an hlc.Timestamp into an approximate DTimestamp
+// containing the walltime of the hlc.Timestamp.
+func DecimalToInexactDTimestamp(d *DDecimal) (*DTimestamp, error) {
+	var coef big.Int
+	coef.Set(&d.Decimal.Coeff)
+	// The physical portion of the HLC is stored shifted up by 10^10, so shift
+	// it down and clear out the logical component.
+	coef.Div(&coef, big10E10)
+	if !coef.IsInt64() {
+		return nil, pgerror.Newf(pgcode.DatetimeFieldOverflow, "timestamp value out of range: %s", d.String())
+	}
+	return TimestampToInexactDTimestamp(hlc.Timestamp{WallTime: coef.Int64()}), nil
+}
+
+// TimestampToDecimalDatum is the same as TimestampToDecimal, but
+// returns a datum.
+func TimestampToDecimalDatum(ts hlc.Timestamp) *DDecimal {
+	res := TimestampToDecimal(ts)
+	return &DDecimal{
+		Decimal: res,
+	}
 }
 
 // TimestampToInexactDTimestamp converts the logical timestamp into an
@@ -3332,10 +3497,7 @@ func (ctx *EvalContext) SetStmtTimestamp(ts time.Time) {
 
 // GetLocation returns the session timezone.
 func (ctx *EvalContext) GetLocation() *time.Location {
-	if ctx.SessionData == nil || ctx.SessionData.DataConversion.Location == nil {
-		return time.UTC
-	}
-	return ctx.SessionData.DataConversion.Location
+	return ctx.SessionData.GetLocation()
 }
 
 // Ctx returns the session's context.
@@ -3454,7 +3616,7 @@ func (expr *CaseExpr) Eval(ctx *EvalContext) (Datum, error) {
 // pgSignatureRegexp matches a Postgres function type signature, capturing the
 // name of the function into group 1.
 // e.g. function(a, b, c) or function( a )
-var pgSignatureRegexp = regexp.MustCompile(`^\s*([\w\.]+)\s*\((?:(?:\s*\w+\s*,)*\s*\w+)?\s*\)\s*$`)
+var pgSignatureRegexp = regexp.MustCompile(`^\s*([\w\."]+)\s*\((?:(?:\s*[\w"]+\s*,)*\s*[\w"]+)?\s*\)\s*$`)
 
 // regTypeInfo contains details on a pg_catalog table that has a reg* type.
 type regTypeInfo struct {
@@ -3624,6 +3786,8 @@ func (expr *CoalesceExpr) Eval(ctx *EvalContext) (Datum, error) {
 }
 
 // Eval implements the TypedExpr interface.
+// Note: if you're modifying this function, please make sure to adjust
+// colexec.comparisonExprAdapter implementations accordingly.
 func (expr *ComparisonExpr) Eval(ctx *EvalContext) (Datum, error) {
 	left, err := expr.Left.(TypedExpr).Eval(ctx)
 	if err != nil {
@@ -3635,33 +3799,42 @@ func (expr *ComparisonExpr) Eval(ctx *EvalContext) (Datum, error) {
 	}
 
 	op := expr.Operator
-	if op.hasSubOperator() {
-		var datums Datums
-		// Right is either a tuple or an array of Datums.
-		if !expr.fn.NullableArgs && right == DNull {
-			return DNull, nil
-		} else if tuple, ok := AsDTuple(right); ok {
-			datums = tuple.D
-		} else if array, ok := AsDArray(right); ok {
-			datums = array.Array
-		} else {
-			return nil, errors.AssertionFailedf("unhandled right expression %s", right)
-		}
-		return evalDatumsCmp(ctx, op, expr.SubOperator, expr.fn, left, datums)
+	if op.HasSubOperator() {
+		return EvalComparisonExprWithSubOperator(ctx, expr, left, right)
 	}
 
-	_, newLeft, newRight, _, not := foldComparisonExpr(op, left, right)
-	if !expr.fn.NullableArgs && (newLeft == DNull || newRight == DNull) {
+	_, newLeft, newRight, _, not := FoldComparisonExpr(op, left, right)
+	if !expr.Fn.NullableArgs && (newLeft == DNull || newRight == DNull) {
 		return DNull, nil
 	}
-	d, err := expr.fn.Fn(ctx, newLeft.(Datum), newRight.(Datum))
-	if err != nil {
-		return nil, err
+	d, err := expr.Fn.Fn(ctx, newLeft.(Datum), newRight.(Datum))
+	if d == DNull || err != nil {
+		return d, err
 	}
-	if b, ok := d.(*DBool); ok {
-		return MakeDBool(*b != DBool(not)), nil
+	b, ok := d.(*DBool)
+	if !ok {
+		return nil, errors.AssertionFailedf("%v is %T and not *DBool", d, d)
 	}
-	return d, nil
+	return MakeDBool(*b != DBool(not)), nil
+}
+
+// EvalComparisonExprWithSubOperator evaluates a comparison expression that has
+// sub-operator.
+func EvalComparisonExprWithSubOperator(
+	ctx *EvalContext, expr *ComparisonExpr, left, right Datum,
+) (Datum, error) {
+	var datums Datums
+	// Right is either a tuple or an array of Datums.
+	if !expr.Fn.NullableArgs && right == DNull {
+		return DNull, nil
+	} else if tuple, ok := AsDTuple(right); ok {
+		datums = tuple.D
+	} else if array, ok := AsDArray(right); ok {
+		datums = array.Array
+	} else {
+		return nil, errors.AssertionFailedf("unhandled right expression %s", right)
+	}
+	return evalDatumsCmp(ctx, expr.Operator, expr.SubOperator, expr.Fn, left, datums)
 }
 
 // EvalArgsAndGetGenerator evaluates the arguments and instanciates a
@@ -4097,6 +4270,11 @@ func (t *DInterval) Eval(_ *EvalContext) (Datum, error) {
 }
 
 // Eval implements the TypedExpr interface.
+func (t *DBox2D) Eval(_ *EvalContext) (Datum, error) {
+	return t, nil
+}
+
+// Eval implements the TypedExpr interface.
 func (t *DGeography) Eval(_ *EvalContext) (Datum, error) {
 	return t, nil
 }
@@ -4205,11 +4383,11 @@ func evalComparison(ctx *EvalContext, op ComparisonOperator, left, right Datum) 
 		pgcode.UndefinedFunction, "unsupported comparison operator: <%s> %s <%s>", ltype, op, rtype)
 }
 
-// foldComparisonExpr folds a given comparison operation and its expressions
+// FoldComparisonExpr folds a given comparison operation and its expressions
 // into an equivalent operation that will hit in the CmpOps map, returning
 // this new operation, along with potentially flipped operands and "flipped"
 // and "not" flags.
-func foldComparisonExpr(
+func FoldComparisonExpr(
 	op ComparisonOperator, left, right Expr,
 ) (newOp ComparisonOperator, newLeft Expr, newRight Expr, flipped bool, not bool) {
 	switch op {
@@ -5007,9 +5185,7 @@ func anchorPattern(pattern string, caseInsensitive bool) string {
 
 // FindEqualComparisonFunction looks up an overload of the "=" operator
 // for a given pair of input operand types.
-func FindEqualComparisonFunction(
-	leftType, rightType *types.T,
-) (func(*EvalContext, Datum, Datum) (Datum, error), bool) {
+func FindEqualComparisonFunction(leftType, rightType *types.T) (TwoArgFn, bool) {
 	fn, found := CmpOps[EQ].LookupImpl(leftType, rightType)
 	if found {
 		return fn.Fn, true

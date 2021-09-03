@@ -36,12 +36,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 var (
-	// ErrNoLivenessRecord is returned when asking for liveness information
-	// about a node for which nothing is known.
-	ErrNoLivenessRecord = errors.New("node not in the liveness table")
+	// ErrMissingLivenessRecord is returned when asking for liveness information
+	// about a node for which nothing is known. This happens when attempting to
+	// {d,r}ecommission a non-existent node.
+	ErrMissingLivenessRecord = errors.New("missing liveness record")
+
+	// errLivenessRecordCacheMiss is returned when asking for the liveness
+	// record of a given node and it is not found in the in-memory cache.
+	errLivenessRecordCacheMiss = errors.New("liveness record not found in cache")
 
 	// errChangeMembershipStatusFailed is returned when we're not able to
 	// conditionally write the target membership status. It's safe to retry
@@ -80,6 +86,12 @@ var (
 		Measurement: "Nodes",
 		Unit:        metric.Unit_COUNT,
 	}
+	metaHeartbeatsInFlight = metric.Metadata{
+		Name:        "liveness.heartbeatsinflight",
+		Help:        "Number of in-flight liveness heartbeats from this node",
+		Measurement: "Requests",
+		Unit:        metric.Unit_COUNT,
+	}
 	metaHeartbeatSuccesses = metric.Metadata{
 		Name:        "liveness.heartbeatsuccesses",
 		Help:        "Number of successful node liveness heartbeats from this node",
@@ -109,6 +121,7 @@ var (
 // LivenessMetrics holds metrics for use with node liveness activity.
 type LivenessMetrics struct {
 	LiveNodes          *metric.Gauge
+	HeartbeatsInFlight *metric.Gauge
 	HeartbeatSuccesses *metric.Counter
 	HeartbeatFailures  *metric.Counter
 	EpochIncrements    *metric.Counter
@@ -117,7 +130,7 @@ type LivenessMetrics struct {
 
 // IsLiveCallback is invoked when a node's IsLive state changes to true.
 // Callbacks can be registered via NodeLiveness.RegisterCallback().
-type IsLiveCallback func(nodeID roachpb.NodeID)
+type IsLiveCallback func(kvserverpb.Liveness)
 
 // HeartbeatCallback is invoked whenever this node updates its own liveness status,
 // indicating that it is alive.
@@ -163,18 +176,52 @@ type NodeLiveness struct {
 	// heartbeatPaused contains an atomically-swapped number representing a bool
 	// (1 or 0). heartbeatToken is a channel containing a token which is taken
 	// when heartbeating or when pausing the heartbeat. Used for testing.
-	heartbeatPaused uint32
-	heartbeatToken  chan struct{}
-	metrics         LivenessMetrics
+	heartbeatPaused      uint32
+	heartbeatToken       chan struct{}
+	metrics              LivenessMetrics
+	onNodeDecommissioned func(kvserverpb.Liveness) // noop if nil
 
 	mu struct {
 		syncutil.RWMutex
-		callbacks         []IsLiveCallback
-		nodes             map[roachpb.NodeID]LivenessRecord
-		heartbeatCallback HeartbeatCallback
+		onIsLive []IsLiveCallback // see NodeLivenessOptions.OnSelfLive
+		// nodes is an in-memory cache of liveness records that NodeLiveness
+		// knows about (having learnt of them through gossip or through KV).
+		// It's a look-aside cache, and is accessed primarily through
+		// `getLivenessLocked` and callers.
+		//
+		// TODO(irfansharif): The caching story for NodeLiveness is a bit
+		// complicated. This can be attributed to the fact that pre-20.2, we
+		// weren't always guaranteed for us liveness records for every given
+		// node. Because of this it wasn't possible to have a
+		// look-through cache (it wouldn't know where to fetch from if a record
+		// was found to be missing).
+		//
+		// Now that we're always guaranteed to have a liveness records present,
+		// we should change this out to be a look-through cache instead (it can
+		// fall back to KV when a given record is missing). This would help
+		// simplify our current structure where do the following:
+		//
+		// - Consult this cache to find an existing liveness record
+		// - If missing, fetch the record from KV
+		// - Update the liveness record in KV
+		// - Add the updated record into this cache (see `maybeUpdate`)
+		//
+		// (See `Start` for an example of this pattern.)
+		//
+		// What we want instead is a bit simpler:
+		//
+		// - Consult this cache to find an existing liveness record
+		// - If missing, fetch the record from KV, update and return from cache
+		// - Update the liveness record in KV
+		// - Add the updated record into this cache
+		//
+		// More concretely, we want `getLivenessRecordFromKV` to be tucked away
+		// within `getLivenessLocked`.
+		nodes      map[roachpb.NodeID]LivenessRecord
+		onSelfLive HeartbeatCallback // set in Start()
 		// Before heartbeating, we write to each of these engines to avoid
 		// maintaining liveness when a local disks is stalled.
-		engines []storage.Engine
+		engines []storage.Engine // set in Start()
 	}
 }
 
@@ -189,40 +236,61 @@ type LivenessRecord struct {
 	raw []byte
 }
 
+// NodeLivenessOptions is the input to NewNodeLiveness.
+//
+// Note that there is yet another struct, NodeLivenessStartOptions, which
+// is supplied when the instance is started. This is necessary as during
+// server startup, some inputs can only be constructed at Start time. The
+// separation has grown organically and various options could in principle
+// be moved back and forth.
+type NodeLivenessOptions struct {
+	AmbientCtx              log.AmbientContext
+	Settings                *cluster.Settings
+	Gossip                  *gossip.Gossip
+	Clock                   *hlc.Clock
+	DB                      *kv.DB
+	LivenessThreshold       time.Duration
+	RenewalDuration         time.Duration
+	HistogramWindowInterval time.Duration
+	// OnNodeDecommissioned is invoked whenever the instance learns that a
+	// node was permanently removed from the cluster. This method must be
+	// idempotent as it may be invoked multiple times and defaults to a
+	// noop.
+	OnNodeDecommissioned func(kvserverpb.Liveness)
+}
+
 // NewNodeLiveness returns a new instance of NodeLiveness configured
 // with the specified gossip instance.
-func NewNodeLiveness(
-	ambient log.AmbientContext,
-	clock *hlc.Clock,
-	db *kv.DB,
-	g *gossip.Gossip,
-	livenessThreshold time.Duration,
-	renewalDuration time.Duration,
-	st *cluster.Settings,
-	histogramWindow time.Duration,
-) *NodeLiveness {
+func NewNodeLiveness(opts NodeLivenessOptions) *NodeLiveness {
 	nl := &NodeLiveness{
-		ambientCtx:        ambient,
-		clock:             clock,
-		db:                db,
-		gossip:            g,
-		livenessThreshold: livenessThreshold,
-		heartbeatInterval: livenessThreshold - renewalDuration,
-		selfSem:           make(chan struct{}, 1),
-		st:                st,
-		otherSem:          make(chan struct{}, 1),
-		heartbeatToken:    make(chan struct{}, 1),
+		ambientCtx:           opts.AmbientCtx,
+		clock:                opts.Clock,
+		db:                   opts.DB,
+		gossip:               opts.Gossip,
+		livenessThreshold:    opts.LivenessThreshold,
+		heartbeatInterval:    opts.LivenessThreshold - opts.RenewalDuration,
+		selfSem:              make(chan struct{}, 1),
+		st:                   opts.Settings,
+		otherSem:             make(chan struct{}, 1),
+		heartbeatToken:       make(chan struct{}, 1),
+		onNodeDecommissioned: opts.OnNodeDecommissioned,
 	}
 	nl.metrics = LivenessMetrics{
 		LiveNodes:          metric.NewFunctionalGauge(metaLiveNodes, nl.numLiveNodes),
+		HeartbeatsInFlight: metric.NewGauge(metaHeartbeatsInFlight),
 		HeartbeatSuccesses: metric.NewCounter(metaHeartbeatSuccesses),
 		HeartbeatFailures:  metric.NewCounter(metaHeartbeatFailures),
 		EpochIncrements:    metric.NewCounter(metaEpochIncrements),
-		HeartbeatLatency:   metric.NewLatency(metaHeartbeatLatency, histogramWindow),
+		HeartbeatLatency:   metric.NewLatency(metaHeartbeatLatency, opts.HistogramWindowInterval),
 	}
 	nl.mu.nodes = make(map[roachpb.NodeID]LivenessRecord)
 	nl.heartbeatToken <- struct{}{}
 
+	// NB: we should consider moving this registration to .Start() once we
+	// have ensured that nobody uses the server's KV client (kv.DB) before
+	// nl.Start() is invoked. At the time of writing this invariant does
+	// not hold (which is a problem, since the node itself won't be live
+	// at this point, and requests routed to it will hang).
 	livenessRegex := gossip.MakePrefixPattern(gossip.KeyNodeLivenessPrefix)
 	nl.gossip.RegisterCallback(livenessRegex, nl.livenessGossipUpdate)
 
@@ -245,22 +313,34 @@ func (nl *NodeLiveness) sem(nodeID roachpb.NodeID) chan struct{} {
 // to report work that needed to be done and which may or may not have
 // been done by the time this call returns. See the explanation in
 // pkg/server/drain.go for details.
-func (nl *NodeLiveness) SetDraining(ctx context.Context, drain bool, reporter func(int, string)) {
+func (nl *NodeLiveness) SetDraining(
+	ctx context.Context, drain bool, reporter func(int, redact.SafeString),
+) error {
 	ctx = nl.ambientCtx.AnnotateCtx(ctx)
 	for r := retry.StartWithCtx(ctx, base.DefaultRetryOptions()); r.Next(); {
-		oldLivenessRec, err := nl.SelfEx()
-		if err != nil && !errors.Is(err, ErrNoLivenessRecord) {
-			log.Errorf(ctx, "unexpected error getting liveness: %+v", err)
+		oldLivenessRec, ok := nl.SelfEx()
+		if !ok {
+			// There was a cache miss, let's now fetch the record from KV
+			// directly.
+			nodeID := nl.gossip.NodeID.Get()
+			livenessRec, err := nl.getLivenessRecordFromKV(ctx, nodeID)
+			if err != nil {
+				return err
+			}
+			oldLivenessRec = livenessRec
 		}
-		err = nl.setDrainingInternal(ctx, oldLivenessRec, drain, reporter)
-		if err != nil {
+		if err := nl.setDrainingInternal(ctx, oldLivenessRec, drain, reporter); err != nil {
 			if log.V(1) {
 				log.Infof(ctx, "attempting to set liveness draining status to %v: %v", drain, err)
 			}
 			continue
 		}
-		return
+		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return errors.New("failed to drain self")
 }
 
 // SetMembershipStatus changes the liveness record to reflect the target
@@ -321,7 +401,8 @@ func (nl *NodeLiveness) SetMembershipStatus(
 			return false, errors.Wrap(err, "unable to get liveness")
 		}
 		if kv.Value == nil {
-			return false, ErrNoLivenessRecord
+			// We must be trying to decommission a node that does not exist.
+			return false, ErrMissingLivenessRecord
 		}
 		if err := kv.Value.GetProto(&oldLiveness); err != nil {
 			return false, errors.Wrap(err, "invalid liveness record")
@@ -336,8 +417,8 @@ func (nl *NodeLiveness) SetMembershipStatus(
 		// Offer it to make sure that when we actually try to update the
 		// liveness, the previous view is correct. This, too, is required to
 		// de-flake TestNodeLivenessDecommissionAbsent.
-		nl.maybeUpdate(oldLivenessRec)
-		return nl.setMembershipStatusInternal(ctx, nodeID, oldLivenessRec, targetStatus)
+		nl.maybeUpdate(ctx, oldLivenessRec)
+		return nl.setMembershipStatusInternal(ctx, oldLivenessRec, targetStatus)
 	}
 
 	for {
@@ -351,7 +432,10 @@ func (nl *NodeLiveness) SetMembershipStatus(
 }
 
 func (nl *NodeLiveness) setDrainingInternal(
-	ctx context.Context, oldLivenessRec LivenessRecord, drain bool, reporter func(int, string),
+	ctx context.Context,
+	oldLivenessRec LivenessRecord,
+	drain bool,
+	reporter func(int, redact.SafeString),
 ) error {
 	nodeID := nl.gossip.NodeID.Get()
 	sem := nl.sem(nodeID)
@@ -365,17 +449,13 @@ func (nl *NodeLiveness) setDrainingInternal(
 		<-sem
 	}()
 
-	// Let's compute what our new liveness record should be.
-	var newLiveness kvserverpb.Liveness
 	if oldLivenessRec.Liveness == (kvserverpb.Liveness{}) {
-		// Liveness record didn't previously exist, so we create one.
-		newLiveness = kvserverpb.Liveness{
-			NodeID: nodeID,
-			Epoch:  1,
-		}
-	} else {
-		newLiveness = oldLivenessRec.Liveness
+		return errors.AssertionFailedf("invalid old liveness record; found to be empty")
 	}
+
+	// Let's compute what our new liveness record should be. We start off with a
+	// copy of our existing liveness record.
+	newLiveness := oldLivenessRec.Liveness
 
 	if reporter != nil && drain && !newLiveness.Draining {
 		// Report progress to the Drain RPC.
@@ -390,7 +470,7 @@ func (nl *NodeLiveness) setDrainingInternal(
 		ignoreCache: true,
 	}
 	written, err := nl.updateLiveness(ctx, update, func(actual LivenessRecord) error {
-		nl.maybeUpdate(actual)
+		nl.maybeUpdate(ctx, actual)
 
 		if actual.Draining == update.newLiveness.Draining {
 			return errNodeDrainingSet
@@ -407,7 +487,7 @@ func (nl *NodeLiveness) setDrainingInternal(
 		return err
 	}
 
-	nl.maybeUpdate(written)
+	nl.maybeUpdate(ctx, written)
 	return nil
 }
 
@@ -436,36 +516,66 @@ type livenessUpdate struct {
 	oldRaw []byte
 }
 
-func (nl *NodeLiveness) setMembershipStatusInternal(
-	ctx context.Context,
-	nodeID roachpb.NodeID,
-	oldLivenessRec LivenessRecord,
-	targetStatus kvserverpb.MembershipStatus,
-) (statusChanged bool, err error) {
-	// Let's compute what our new liveness record should be.
-	var newLiveness kvserverpb.Liveness
-	if oldLivenessRec.Liveness == (kvserverpb.Liveness{}) {
-		// Liveness record didn't previously exist, so we create one.
-		//
-		// TODO(irfansharif): This code feels a bit unwieldy because it's
-		// possible for a liveness record to not exist previously. It is just
-		// generally difficult to write it at startup. When a node joins the
-		// cluster, this completes before it has had a chance to write its
-		// liveness record. If it gets decommissioned immediately, there won't
-		// be one yet. The Connect RPC can solve this though, I think? We can
-		// bootstrap clusters with a liveness record for n1. Any other node at
-		// some point has to join the cluster for the first time via the Connect
-		// RPC, which as part of its job can make sure the liveness record
-		// exists before responding to the new node.
-		newLiveness = kvserverpb.Liveness{
-			NodeID: nodeID,
-			Epoch:  1,
+// CreateLivenessRecord creates a liveness record for the node specified by the
+// given node ID. This is typically used when adding a new node to a running
+// cluster, or when bootstrapping a cluster through a given node.
+//
+// This is a pared down version of Start; it exists only to durably
+// persist a liveness to record the node's existence. Nodes will heartbeat their
+// records after starting up, and incrementing to epoch=1 when doing so, at
+// which point we'll set an appropriate expiration timestamp, gossip the
+// liveness record, and update our in-memory representation of it.
+//
+// NB: An existing liveness record is not overwritten by this method, we return
+// an error instead.
+func (nl *NodeLiveness) CreateLivenessRecord(ctx context.Context, nodeID roachpb.NodeID) error {
+	// We start off at epoch=0, entrusting the initial heartbeat to increment it
+	// to epoch=1 to signal the very first time the node is up and running.
+	liveness := kvserverpb.Liveness{NodeID: nodeID, Epoch: 0}
+
+	// We skip adding an expiration, we only really care about the liveness
+	// record existing within KV.
+
+	v := new(roachpb.Value)
+	if err := nl.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		b := txn.NewBatch()
+		key := keys.NodeLivenessKey(nodeID)
+		if err := v.SetProto(&liveness); err != nil {
+			log.Fatalf(ctx, "failed to marshall proto: %s", err)
 		}
-	} else {
-		// We start off with a copy of our existing liveness record.
-		newLiveness = oldLivenessRec.Liveness
+		// Given we're looking to create a new liveness record here, we don't
+		// expect to find anything.
+		b.CPut(key, v, nil)
+
+		// We don't bother adding a gossip trigger, that'll happen with the
+		// first heartbeat. We still keep it as a 1PC commit to avoid leaving
+		// write intents.
+		b.AddRawRequest(&roachpb.EndTxnRequest{
+			Commit:     true,
+			Require1PC: true,
+		})
+		return txn.Run(ctx, b)
+	}); err != nil {
+		return err
 	}
 
+	// We'll learn about this liveness record through gossip eventually, so we
+	// don't bother updating our in-memory view of node liveness.
+
+	log.Infof(ctx, "created liveness record for n%d", nodeID)
+	return nil
+}
+
+func (nl *NodeLiveness) setMembershipStatusInternal(
+	ctx context.Context, oldLivenessRec LivenessRecord, targetStatus kvserverpb.MembershipStatus,
+) (statusChanged bool, err error) {
+	if oldLivenessRec.Liveness == (kvserverpb.Liveness{}) {
+		return false, errors.AssertionFailedf("invalid old liveness record; found to be empty")
+	}
+
+	// Let's compute what our new liveness record should be. We start off with a
+	// copy of our existing liveness record.
+	newLiveness := oldLivenessRec.Liveness
 	newLiveness.Membership = targetStatus
 	if oldLivenessRec.Membership == newLiveness.Membership {
 		// No-op. Return early.
@@ -477,11 +587,8 @@ func (nl *NodeLiveness) setMembershipStatusInternal(
 		return false, nil
 	}
 
-	if oldLivenessRec.Liveness != (kvserverpb.Liveness{}) {
-		err := kvserverpb.ValidateLivenessTransition(oldLivenessRec.Liveness, newLiveness)
-		if err != nil {
-			return false, err
-		}
+	if err := kvserverpb.ValidateLivenessTransition(oldLivenessRec.Liveness, newLiveness); err != nil {
+		return false, err
 	}
 
 	update := livenessUpdate{
@@ -519,41 +626,53 @@ func (nl *NodeLiveness) GetLivenessThreshold() time.Duration {
 // whether or not its liveness has expired regardless of the liveness status. It
 // is an error if the specified node is not in the local liveness table.
 func (nl *NodeLiveness) IsLive(nodeID roachpb.NodeID) (bool, error) {
-	liveness, err := nl.GetLiveness(nodeID)
-	if err != nil {
-		return false, err
+	liveness, ok := nl.GetLiveness(nodeID)
+	if !ok {
+		// TODO(irfansharif): We only expect callers to supply us with node IDs
+		// they learnt through existing liveness records, which implies we
+		// should never find ourselves here. We should clean up this conditional
+		// once we re-visit the caching structure used within NodeLiveness;
+		// we should be able to return ErrMissingLivenessRecord instead.
+		return false, errLivenessRecordCacheMiss
 	}
 	// NB: We use clock.Now().GoTime() instead of clock.PhysicalTime() in order to
 	// consider clock signals from other nodes.
 	return liveness.IsLive(nl.clock.Now().GoTime()), nil
 }
 
-// StartHeartbeat starts a periodic heartbeat to refresh this node's last
-// heartbeat in the node liveness table. The optionally provided
-// HeartbeatCallback will be invoked whenever this node updates its own
-// liveness. The slice of engines will be written to before each heartbeat to
-// avoid maintaining liveness in the presence of disk stalls.
-func (nl *NodeLiveness) StartHeartbeat(
-	ctx context.Context, stopper *stop.Stopper, engines []storage.Engine, alive HeartbeatCallback,
-) {
-	log.VEventf(ctx, 1, "starting liveness heartbeat")
-	retryOpts := base.DefaultRetryOptions()
-	retryOpts.Closer = stopper.ShouldQuiesce()
+// NodeLivenessStartOptions are the arguments to `NodeLiveness.Start`.
+type NodeLivenessStartOptions struct {
+	Stopper *stop.Stopper
+	Engines []storage.Engine
+	// OnSelfLive is invoked after every successful heartbeat
+	// of the local liveness instance's heartbeat loop.
+	OnSelfLive HeartbeatCallback
+}
 
-	if len(engines) == 0 {
+// Start starts a periodic heartbeat to refresh this node's last
+// heartbeat in the node liveness table. The optionally provided
+// HeartbeatCallback will be invoked whenever this node updates its
+// own liveness. The slice of engines will be written to before each
+// heartbeat to avoid maintaining liveness in the presence of disk stalls.
+func (nl *NodeLiveness) Start(ctx context.Context, opts NodeLivenessStartOptions) {
+	log.VEventf(ctx, 1, "starting node liveness instance")
+	retryOpts := base.DefaultRetryOptions()
+	retryOpts.Closer = opts.Stopper.ShouldQuiesce()
+
+	if len(opts.Engines) == 0 {
 		// Avoid silently forgetting to pass the engines. It happened before.
 		log.Fatalf(ctx, "must supply at least one engine")
 	}
 
 	nl.mu.Lock()
-	nl.mu.heartbeatCallback = alive
-	nl.mu.engines = engines
+	nl.mu.onSelfLive = opts.OnSelfLive
+	nl.mu.engines = opts.Engines
 	nl.mu.Unlock()
 
-	stopper.RunWorker(ctx, func(context.Context) {
+	opts.Stopper.RunWorker(ctx, func(context.Context) {
 		ambient := nl.ambientCtx
 		ambient.AddLogTag("liveness-hb", nil)
-		ctx, cancel := stopper.WithCancelOnStop(context.Background())
+		ctx, cancel := opts.Stopper.WithCancelOnStop(context.Background())
 		defer cancel()
 		ctx, sp := ambient.AnnotateCtxWithSpan(ctx, "liveness heartbeat loop")
 		defer sp.Finish()
@@ -564,7 +683,7 @@ func (nl *NodeLiveness) StartHeartbeat(
 		for {
 			select {
 			case <-nl.heartbeatToken:
-			case <-stopper.ShouldStop():
+			case <-opts.Stopper.ShouldStop():
 				return
 			}
 			// Give the context a timeout approximately as long as the time we
@@ -573,11 +692,17 @@ func (nl *NodeLiveness) StartHeartbeat(
 				func(ctx context.Context) error {
 					// Retry heartbeat in the event the conditional put fails.
 					for r := retry.StartWithCtx(ctx, retryOpts); r.Next(); {
-						liveness, err := nl.Self()
-						if err != nil && !errors.Is(err, ErrNoLivenessRecord) {
-							log.Errorf(ctx, "unexpected error getting liveness: %+v", err)
+						oldLiveness, ok := nl.Self()
+						if !ok {
+							nodeID := nl.gossip.NodeID.Get()
+							liveness, err := nl.getLivenessFromKV(ctx, nodeID)
+							if err != nil {
+								log.Infof(ctx, "unable to get liveness record from KV: %s", err)
+								continue
+							}
+							oldLiveness = liveness
 						}
-						if err := nl.heartbeatInternal(ctx, liveness, incrementEpoch); err != nil {
+						if err := nl.heartbeatInternal(ctx, oldLiveness, incrementEpoch); err != nil {
 							if errors.Is(err, ErrEpochIncremented) {
 								log.Infof(ctx, "%s; retrying", err)
 								continue
@@ -589,45 +714,68 @@ func (nl *NodeLiveness) StartHeartbeat(
 					}
 					return nil
 				}); err != nil {
-				log.Warningf(ctx, "failed node liveness heartbeat: %+v", err)
+				log.Warningf(ctx, heartbeatFailureLogFormat, err)
 			}
 
 			nl.heartbeatToken <- struct{}{}
 			select {
 			case <-ticker.C:
-			case <-stopper.ShouldStop():
+			case <-opts.Stopper.ShouldStop():
 				return
 			}
 		}
 	})
 }
 
-// PauseHeartbeat stops or restarts the periodic heartbeat depending on the
-// pause parameter. When pause is true, waits until it acquires the heartbeatToken
-// (unless heartbeat was already paused); this ensures that no heartbeats happen
-// after this is called. This function is only safe for use in tests.
-func (nl *NodeLiveness) PauseHeartbeat(pause bool) {
-	if pause {
-		if swapped := atomic.CompareAndSwapUint32(&nl.heartbeatPaused, 0, 1); swapped {
-			<-nl.heartbeatToken
-		}
-	} else {
+const heartbeatFailureLogFormat = `failed node liveness heartbeat: %+v
+
+An inability to maintain liveness will prevent a node from participating in a
+cluster. If this problem persists, it may be a sign of resource starvation or
+of network connectivity problems. For help troubleshooting, visit:
+
+    https://www.cockroachlabs.com/docs/stable/cluster-setup-troubleshooting.html#node-liveness-issues
+
+`
+
+// PauseHeartbeatLoopForTest stops the periodic heartbeat. The function
+// waits until it acquires the heartbeatToken (unless heartbeat was
+// already paused); this ensures that no heartbeats happen after this is
+// called. Returns a closure to call to re-enable the heartbeat loop.
+// This function is only safe for use in tests.
+func (nl *NodeLiveness) PauseHeartbeatLoopForTest() func() {
+	if swapped := atomic.CompareAndSwapUint32(&nl.heartbeatPaused, 0, 1); swapped {
+		<-nl.heartbeatToken
+	}
+	return func() {
 		if swapped := atomic.CompareAndSwapUint32(&nl.heartbeatPaused, 1, 0); swapped {
 			nl.heartbeatToken <- struct{}{}
 		}
 	}
 }
 
-// DisableAllHeartbeatsForTest disables all node liveness heartbeats, including
-// those triggered from outside the normal StartHeartbeat loop. Returns a
-// closure to call to re-enable heartbeats. Only safe for use in tests.
-func (nl *NodeLiveness) DisableAllHeartbeatsForTest() func() {
-	nl.PauseHeartbeat(true)
+// PauseSynchronousHeartbeatsForTest disables all node liveness
+// heartbeats triggered from outside the normal Start loop.
+// Returns a closure to call to re-enable synchronous heartbeats. Only
+// safe for use in tests.
+func (nl *NodeLiveness) PauseSynchronousHeartbeatsForTest() func() {
 	nl.selfSem <- struct{}{}
 	nl.otherSem <- struct{}{}
 	return func() {
 		<-nl.selfSem
 		<-nl.otherSem
+	}
+}
+
+// PauseAllHeartbeatsForTest disables all node liveness heartbeats,
+// including those triggered from outside the normal Start
+// loop. Returns a closure to call to re-enable heartbeats. Only safe
+// for use in tests.
+func (nl *NodeLiveness) PauseAllHeartbeatsForTest() func() {
+	enableLoop := nl.PauseHeartbeatLoopForTest()
+	enableSync := nl.PauseSynchronousHeartbeatsForTest()
+	return func() {
+		enableLoop()
+		enableSync()
 	}
 }
 
@@ -649,7 +797,7 @@ var errNodeAlreadyLive = errors.New("node already live")
 // TODO(bdarnell): Fix error semantics here.
 //
 // This method is rarely called directly; heartbeats are normally sent
-// by the StartHeartbeat loop.
+// by the Start loop.
 // TODO(bdarnell): Should we just remove this synchronous heartbeat completely?
 func (nl *NodeLiveness) Heartbeat(ctx context.Context, liveness kvserverpb.Liveness) error {
 	return nl.heartbeatInternal(ctx, liveness, false /* increment epoch */)
@@ -657,16 +805,34 @@ func (nl *NodeLiveness) Heartbeat(ctx context.Context, liveness kvserverpb.Liven
 
 func (nl *NodeLiveness) heartbeatInternal(
 	ctx context.Context, oldLiveness kvserverpb.Liveness, incrementEpoch bool,
-) error {
+) (err error) {
 	ctx, sp := tracing.EnsureChildSpan(ctx, nl.ambientCtx.Tracer, "liveness heartbeat")
 	defer sp.Finish()
 	defer func(start time.Time) {
 		dur := timeutil.Now().Sub(start)
 		nl.metrics.HeartbeatLatency.RecordValue(dur.Nanoseconds())
 		if dur > time.Second {
-			log.Warningf(ctx, "slow heartbeat took %0.1fs", dur.Seconds())
+			log.Warningf(ctx, "slow heartbeat took %s; err=%v", dur, err)
 		}
 	}(timeutil.Now())
+
+	// Collect a clock reading from before we begin queuing on the heartbeat
+	// semaphore. This method (attempts to, see [*]) guarantees that, if
+	// successful, the liveness record's expiration will be at least the
+	// liveness threshold above the time that the method was called.
+	// Collecting this clock reading before queuing allows us to enforce
+	// this while avoiding redundant liveness heartbeats during thundering
+	// herds without needing to explicitly coalesce heartbeats.
+	//
+	// [*]: see TODO below about how errNodeAlreadyLive handling does not
+	//      enforce this guarantee.
+	beforeQueueTS := nl.clock.Now()
+	minExpiration := hlc.LegacyTimestamp(
+		beforeQueueTS.Add(nl.livenessThreshold.Nanoseconds(), 0))
+
+	// Before queueing, record the heartbeat as in-flight.
+	nl.metrics.HeartbeatsInFlight.Inc(1)
+	defer nl.metrics.HeartbeatsInFlight.Dec(1)
 
 	// Allow only one heartbeat at a time.
 	nodeID := nl.gossip.NodeID.Get()
@@ -680,34 +846,43 @@ func (nl *NodeLiveness) heartbeatInternal(
 		<-sem
 	}()
 
-	// Let's compute what our new liveness record should be.
-	var newLiveness kvserverpb.Liveness
-	if oldLiveness == (kvserverpb.Liveness{}) {
-		// Liveness record didn't previously exist, so we create one.
-		newLiveness = kvserverpb.Liveness{
-			NodeID: nodeID,
-			Epoch:  1,
-		}
-	} else {
-		newLiveness = oldLiveness
-		if incrementEpoch {
-			newLiveness.Epoch++
-			newLiveness.Draining = false // Clear draining field.
+	// If we are not intending to increment the node's liveness epoch, detect
+	// whether this heartbeat is needed anymore. It is possible that we queued
+	// for long enough on the semaphore such that other heartbeat attempts ahead
+	// of us already incremented the expiration past what we wanted. Note that
+	// if we allowed the heartbeat to proceed in this case, we know that it
+	// would hit a ConditionFailedError and return a errNodeAlreadyLive down
+	// below.
+	if !incrementEpoch {
+		curLiveness, ok := nl.Self()
+		if ok && minExpiration.Less(curLiveness.Expiration) {
+			return nil
 		}
 	}
 
-	// We need to add the maximum clock offset to the expiration because it's
-	// used when determining liveness for a node.
-	{
-		newLiveness.Expiration = hlc.LegacyTimestamp(
-			nl.clock.Now().Add((nl.livenessThreshold).Nanoseconds(), 0))
-		// This guards against the system clock moving backwards. As long
-		// as the cockroach process is running, checks inside hlc.Clock
-		// will ensure that the clock never moves backwards, but these
-		// checks don't work across process restarts.
-		if newLiveness.Expiration.Less(oldLiveness.Expiration) {
-			return errors.Errorf("proposed liveness update expires earlier than previous record")
-		}
+	if oldLiveness == (kvserverpb.Liveness{}) {
+		return errors.AssertionFailedf("invalid old liveness record; found to be empty")
+	}
+
+	// Let's compute what our new liveness record should be. Start off with our
+	// existing view of things.
+	newLiveness := oldLiveness
+	if incrementEpoch {
+		newLiveness.Epoch++
+		newLiveness.Draining = false // clear draining field
+	}
+
+	// Grab a new clock reading to compute the new expiration time,
+	// since we may have queued on the semaphore for a while.
+	afterQueueTS := nl.clock.Now()
+	newLiveness.Expiration = hlc.LegacyTimestamp(
+		afterQueueTS.Add(nl.livenessThreshold.Nanoseconds(), 0))
+	// This guards against the system clock moving backwards. As long
+	// as the cockroach process is running, checks inside hlc.Clock
+	// will ensure that the clock never moves backwards, but these
+	// checks don't work across process restarts.
+	if newLiveness.Expiration.Less(oldLiveness.Expiration) {
+		return errors.Errorf("proposed liveness update expires earlier than previous record")
 	}
 
 	update := livenessUpdate{
@@ -716,7 +891,7 @@ func (nl *NodeLiveness) heartbeatInternal(
 	}
 	written, err := nl.updateLiveness(ctx, update, func(actual LivenessRecord) error {
 		// Update liveness to actual value on mismatch.
-		nl.maybeUpdate(actual)
+		nl.maybeUpdate(ctx, actual)
 
 		// If the actual liveness is different than expected, but is
 		// considered live, treat the heartbeat as a success. This can
@@ -730,6 +905,17 @@ func (nl *NodeLiveness) heartbeatInternal(
 		// expired while in flight, so maybe we don't have to care about
 		// that and only need to distinguish between same and different
 		// epochs in our return value.
+		//
+		// TODO(nvanbenschoten): Unlike the early return above, this doesn't
+		// guarantee that the resulting expiration is past minExpiration,
+		// only that it's different than our oldLiveness. Is that ok? It
+		// hasn't caused issues so far, but we might want to detect this
+		// case and retry, at least in the case of the liveness heartbeat
+		// loop. The downside of this is that a heartbeat that's intending
+		// to bump the expiration of a record out 9s into the future may
+		// return a success even if the expiration is only 5 seconds in the
+		// future. The next heartbeat will then start with only 0.5 seconds
+		// before expiration.
 		if actual.IsLive(nl.clock.Now().GoTime()) && !incrementEpoch {
 			return errNodeAlreadyLive
 		}
@@ -746,26 +932,26 @@ func (nl *NodeLiveness) heartbeatInternal(
 	}
 
 	log.VEventf(ctx, 1, "heartbeat %+v", written.Expiration)
-	nl.maybeUpdate(written)
+	nl.maybeUpdate(ctx, written)
 	nl.metrics.HeartbeatSuccesses.Inc(1)
 	return nil
 }
 
-// Self returns the liveness record for this node. ErrNoLivenessRecord
+// Self returns the liveness record for this node. ErrMissingLivenessRecord
 // is returned in the event that the node has neither heartbeat its
 // liveness record successfully, nor received a gossip message containing
 // a former liveness update on restart.
-func (nl *NodeLiveness) Self() (kvserverpb.Liveness, error) {
-	rec, err := nl.SelfEx()
-	if err != nil {
-		return kvserverpb.Liveness{}, err
+func (nl *NodeLiveness) Self() (_ kvserverpb.Liveness, ok bool) {
+	rec, ok := nl.SelfEx()
+	if !ok {
+		return kvserverpb.Liveness{}, false
 	}
-	return rec.Liveness, err
+	return rec.Liveness, true
 }
 
 // SelfEx is like Self, but returns the raw, encoded value that the database has
 // for this liveness record in addition to the decoded liveness proto.
-func (nl *NodeLiveness) SelfEx() (LivenessRecord, error) {
+func (nl *NodeLiveness) SelfEx() (_ LivenessRecord, ok bool) {
 	nl.mu.RLock()
 	defer nl.mu.RUnlock()
 	return nl.getLivenessLocked(nl.gossip.NodeID.Get())
@@ -774,8 +960,8 @@ func (nl *NodeLiveness) SelfEx() (LivenessRecord, error) {
 // IsLiveMapEntry encapsulates data about current liveness for a
 // node.
 type IsLiveMapEntry struct {
+	kvserverpb.Liveness
 	IsLive bool
-	Epoch  int64
 }
 
 // IsLiveMap is a type alias for a map from NodeID to IsLiveMapEntry.
@@ -796,8 +982,8 @@ func (nl *NodeLiveness) GetIsLiveMap() IsLiveMap {
 			continue
 		}
 		lMap[nID] = IsLiveMapEntry{
-			IsLive: isLive,
-			Epoch:  l.Epoch,
+			Liveness: l.Liveness,
+			IsLive:   isLive,
 		}
 	}
 	return lMap
@@ -816,22 +1002,66 @@ func (nl *NodeLiveness) GetLivenesses() []kvserverpb.Liveness {
 	return livenesses
 }
 
-// GetLiveness returns the liveness record for the specified nodeID.
-// ErrNoLivenessRecord is returned in the event that nothing is yet known about
-// nodeID via liveness gossip. The record returned also includes the raw,
-// encoded value that the database has for this liveness record in addition to
-// the decoded liveness proto.
-func (nl *NodeLiveness) GetLiveness(nodeID roachpb.NodeID) (LivenessRecord, error) {
+// GetLiveness returns the liveness record for the specified nodeID. If the
+// liveness record is not found (due to gossip propagation delays or due to the
+// node not existing), we surface that to the caller. The record returned also
+// includes the raw, encoded value that the database has for this liveness
+// record in addition to the decoded liveness proto.
+func (nl *NodeLiveness) GetLiveness(nodeID roachpb.NodeID) (_ LivenessRecord, ok bool) {
 	nl.mu.RLock()
 	defer nl.mu.RUnlock()
 	return nl.getLivenessLocked(nodeID)
 }
 
-func (nl *NodeLiveness) getLivenessLocked(nodeID roachpb.NodeID) (LivenessRecord, error) {
+// getLivenessLocked returns the liveness record for the specified nodeID,
+// consulting the in-memory cache. If nothing is found (could happen due to
+// gossip propagation delays or the node not existing), we surface that to the
+// caller.
+func (nl *NodeLiveness) getLivenessLocked(nodeID roachpb.NodeID) (_ LivenessRecord, ok bool) {
 	if l, ok := nl.mu.nodes[nodeID]; ok {
-		return l, nil
+		return l, true
 	}
-	return LivenessRecord{}, ErrNoLivenessRecord
+	return LivenessRecord{}, false
+}
+
+// getLivenessFromKV fetches the liveness record from KV for a given node, and
+// updates the internal in-memory cache when doing so.
+func (nl *NodeLiveness) getLivenessFromKV(
+	ctx context.Context, nodeID roachpb.NodeID,
+) (kvserverpb.Liveness, error) {
+	livenessRec, err := nl.getLivenessRecordFromKV(ctx, nodeID)
+	if err != nil {
+		return kvserverpb.Liveness{}, err
+	}
+	return livenessRec.Liveness, nil
+}
+
+// getLivenessRecordFromKV is like getLivenessFromKV, but returns the raw,
+// encoded value that the database has for this liveness record in addition to
+// the decoded liveness proto.
+func (nl *NodeLiveness) getLivenessRecordFromKV(
+	ctx context.Context, nodeID roachpb.NodeID,
+) (LivenessRecord, error) {
+	kv, err := nl.db.Get(ctx, keys.NodeLivenessKey(nodeID))
+	if err != nil {
+		return LivenessRecord{}, errors.Wrap(err, "unable to get liveness")
+	}
+	if kv.Value == nil {
+		return LivenessRecord{}, errors.AssertionFailedf("missing liveness record")
+	}
+	var liveness kvserverpb.Liveness
+	if err := kv.Value.GetProto(&liveness); err != nil {
+		return LivenessRecord{}, errors.Wrap(err, "invalid liveness record")
+	}
+
+	livenessRec := LivenessRecord{
+		Liveness: liveness,
+		raw:      kv.Value.TagAndDataBytes(),
+	}
+
+	// Update our cache with the liveness record we just found.
+	nl.maybeUpdate(ctx, livenessRec)
+	return livenessRec, nil
 }
 
 // IncrementEpoch is called to attempt to revoke another node's
@@ -881,7 +1111,7 @@ func (nl *NodeLiveness) IncrementEpoch(ctx context.Context, liveness kvserverpb.
 	update.newLiveness.Epoch++
 
 	written, err := nl.updateLiveness(ctx, update, func(actual LivenessRecord) error {
-		nl.maybeUpdate(actual)
+		nl.maybeUpdate(ctx, actual)
 
 		if actual.Epoch > liveness.Epoch {
 			return ErrEpochAlreadyIncremented
@@ -895,7 +1125,7 @@ func (nl *NodeLiveness) IncrementEpoch(ctx context.Context, liveness kvserverpb.
 	}
 
 	log.Infof(ctx, "incremented n%d liveness epoch to %d", written.NodeID, written.Epoch)
-	nl.maybeUpdate(written)
+	nl.maybeUpdate(ctx, written)
 	nl.metrics.EpochIncrements.Inc(1)
 	return nil
 }
@@ -911,7 +1141,7 @@ func (nl *NodeLiveness) Metrics() LivenessMetrics {
 func (nl *NodeLiveness) RegisterCallback(cb IsLiveCallback) {
 	nl.mu.Lock()
 	defer nl.mu.Unlock()
-	nl.mu.callbacks = append(nl.mu.callbacks, cb)
+	nl.mu.onIsLive = append(nl.mu.onIsLive, cb)
 }
 
 // updateLiveness does a conditional put on the node liveness record for the
@@ -955,7 +1185,6 @@ func (nl *NodeLiveness) updateLiveness(
 		}
 		written, err := nl.updateLivenessAttempt(ctx, update, handleCondFailed)
 		if err != nil {
-			// Intentionally don't errors.Cause() the error, or we'd hop past errRetryLiveness.
 			if errors.HasType(err, (*errRetryLiveness)(nil)) {
 				log.Infof(ctx, "retrying liveness update after %s", err)
 				continue
@@ -981,11 +1210,14 @@ func (nl *NodeLiveness) updateLivenessAttempt(
 			log.Fatalf(ctx, "unexpected oldRaw when ignoreCache not specified")
 		}
 
-		l, err := nl.GetLiveness(update.newLiveness.NodeID)
-		if err != nil && !errors.Is(err, ErrNoLivenessRecord) {
-			return LivenessRecord{}, err
+		l, ok := nl.GetLiveness(update.newLiveness.NodeID)
+		if !ok {
+			// TODO(irfansharif): See TODO in `NodeLiveness.IsLive`, the same
+			// applies to this conditional. We probably want to be able to
+			// return ErrMissingLivenessRecord here instead.
+			return LivenessRecord{}, errLivenessRecordCacheMiss
 		}
-		if err == nil && l.Liveness != update.oldLiveness {
+		if l.Liveness != update.oldLiveness {
 			return LivenessRecord{}, handleCondFailed(l)
 		}
 		oldRaw = l.raw
@@ -1033,7 +1265,7 @@ func (nl *NodeLiveness) updateLivenessAttempt(
 	}
 
 	nl.mu.RLock()
-	cb := nl.mu.heartbeatCallback
+	cb := nl.mu.onSelfLive
 	nl.mu.RUnlock()
 	if cb != nil {
 		cb(ctx)
@@ -1043,48 +1275,52 @@ func (nl *NodeLiveness) updateLivenessAttempt(
 
 // maybeUpdate replaces the liveness (if it appears newer) and invokes the
 // registered callbacks if the node became live in the process.
-func (nl *NodeLiveness) maybeUpdate(new LivenessRecord) {
-	// An empty new means that we haven't updated anything.
-	if new.Liveness == (kvserverpb.Liveness{}) {
-		return
+func (nl *NodeLiveness) maybeUpdate(ctx context.Context, newLivenessRec LivenessRecord) {
+	if newLivenessRec.Liveness == (kvserverpb.Liveness{}) {
+		log.Fatal(ctx, "invalid new liveness record; found to be empty")
 	}
 
+	var shouldReplace bool
 	nl.mu.Lock()
-	old := nl.mu.nodes[new.NodeID]
+	oldLivenessRec, ok := nl.getLivenessLocked(newLivenessRec.NodeID)
+	if !ok {
+		shouldReplace = true
+	} else {
+		shouldReplace = shouldReplaceLiveness(ctx, oldLivenessRec.Liveness, newLivenessRec.Liveness)
+	}
 
-	should := shouldReplaceLiveness(old.Liveness, new.Liveness)
-	var callbacks []IsLiveCallback
-	if should {
-		nl.mu.nodes[new.NodeID] = new
-		callbacks = append(callbacks, nl.mu.callbacks...)
+	var onIsLive []IsLiveCallback
+	if shouldReplace {
+		nl.mu.nodes[newLivenessRec.NodeID] = newLivenessRec
+		onIsLive = append(onIsLive, nl.mu.onIsLive...)
 	}
 	nl.mu.Unlock()
 
-	if !should {
+	if !shouldReplace {
 		return
 	}
 
 	now := nl.clock.Now().GoTime()
-	if !old.IsLive(now) && new.IsLive(now) {
-		for _, fn := range callbacks {
-			fn(new.NodeID)
+	if !oldLivenessRec.IsLive(now) && newLivenessRec.IsLive(now) {
+		for _, fn := range onIsLive {
+			fn(newLivenessRec.Liveness)
 		}
+	}
+	if newLivenessRec.Membership.Decommissioned() && nl.onNodeDecommissioned != nil {
+		nl.onNodeDecommissioned(newLivenessRec.Liveness)
 	}
 }
 
 // shouldReplaceLiveness checks to see if the new liveness is in fact newer
 // than the old liveness.
-func shouldReplaceLiveness(old, new kvserverpb.Liveness) bool {
+func shouldReplaceLiveness(ctx context.Context, old, new kvserverpb.Liveness) bool {
 	if (old == kvserverpb.Liveness{}) {
-		return true
+		log.Fatal(ctx, "invalid old liveness record; found to be empty")
 	}
 
-	// Compare Epoch, and if no change there, Expiration.
-	if old.Epoch != new.Epoch {
-		return old.Epoch < new.Epoch
-	}
-	if old.Expiration != new.Expiration {
-		return old.Expiration.Less(new.Expiration)
+	// Compare liveness information. If old < new, replace.
+	if cmp := old.Compare(new); cmp != 0 {
+		return cmp < 0
 	}
 
 	// If Epoch and Expiration are unchanged, assume that the update is newer
@@ -1103,12 +1339,13 @@ func shouldReplaceLiveness(old, new kvserverpb.Liveness) bool {
 // in-memory liveness info up to date.
 func (nl *NodeLiveness) livenessGossipUpdate(_ string, content roachpb.Value) {
 	var liveness kvserverpb.Liveness
+	ctx := context.TODO()
 	if err := content.GetProto(&liveness); err != nil {
-		log.Errorf(context.TODO(), "%v", err)
+		log.Errorf(ctx, "%v", err)
 		return
 	}
 
-	nl.maybeUpdate(LivenessRecord{Liveness: liveness, raw: content.TagAndDataBytes()})
+	nl.maybeUpdate(ctx, LivenessRecord{Liveness: liveness, raw: content.TagAndDataBytes()})
 }
 
 // numLiveNodes is used to populate a metric that tracks the number of live
@@ -1120,8 +1357,6 @@ func (nl *NodeLiveness) livenessGossipUpdate(_ string, content roachpb.Value) {
 // nodes reporting the metric, so it's simplest to just have all live nodes
 // report it.
 func (nl *NodeLiveness) numLiveNodes() int64 {
-	ctx := nl.ambientCtx.AnnotateCtx(context.Background())
-
 	selfID := nl.gossip.NodeID.Get()
 	if selfID == 0 {
 		return 0
@@ -1130,12 +1365,8 @@ func (nl *NodeLiveness) numLiveNodes() int64 {
 	nl.mu.RLock()
 	defer nl.mu.RUnlock()
 
-	self, err := nl.getLivenessLocked(selfID)
-	if errors.Is(err, ErrNoLivenessRecord) {
-		return 0
-	}
-	if err != nil {
-		log.Warningf(ctx, "looking up own liveness: %+v", err)
+	self, ok := nl.getLivenessLocked(selfID)
+	if !ok {
 		return 0
 	}
 	now := nl.clock.Now().GoTime()
@@ -1159,9 +1390,9 @@ func (nl *NodeLiveness) numLiveNodes() int64 {
 func (nl *NodeLiveness) AsLiveClock() closedts.LiveClockFn {
 	return func(nodeID roachpb.NodeID) (hlc.Timestamp, ctpb.Epoch, error) {
 		now := nl.clock.Now()
-		liveness, err := nl.GetLiveness(nodeID)
-		if err != nil {
-			return hlc.Timestamp{}, 0, err
+		liveness, ok := nl.GetLiveness(nodeID)
+		if !ok {
+			return hlc.Timestamp{}, 0, errLivenessRecordCacheMiss
 		}
 		if !liveness.IsLive(now.GoTime()) {
 			return hlc.Timestamp{}, 0, errLiveClockNotLive

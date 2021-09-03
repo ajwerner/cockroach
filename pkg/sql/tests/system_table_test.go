@@ -20,14 +20,17 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/datadriven"
-	"github.com/gogo/protobuf/proto"
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/require"
 )
@@ -48,7 +51,7 @@ func TestInitialKeys(t *testing.T) {
 			nonDescKeys = 2
 		}
 
-		ms := sqlbase.MakeMetadataSchema(codec, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef())
+		ms := bootstrap.MakeMetadataSchema(codec, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef())
 		kv, _ /* splits */ := ms.GetInitialValues()
 		expected := nonDescKeys + keysPerDesc*ms.SystemDescriptorCount()
 		if actual := len(kv); actual != expected {
@@ -56,13 +59,13 @@ func TestInitialKeys(t *testing.T) {
 		}
 
 		// Add an additional table.
-		sqlbase.SystemAllowedPrivileges[keys.MaxReservedDescID] = privilege.List{privilege.ALL}
+		descpb.SystemAllowedPrivileges[keys.MaxReservedDescID] = privilege.List{privilege.ALL}
 		desc, err := sql.CreateTestTableDescriptor(
 			context.Background(),
 			keys.SystemDatabaseID,
 			keys.MaxReservedDescID,
 			"CREATE TABLE system.x (val INTEGER PRIMARY KEY)",
-			sqlbase.NewDefaultPrivilegeDescriptor(),
+			descpb.NewDefaultPrivilegeDescriptor(security.NodeUserName()),
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -120,7 +123,7 @@ func TestInitialKeysAndSplits(t *testing.T) {
 				codec = keys.MakeSQLCodec(roachpb.MakeTenantID(id))
 			}
 
-			ms := sqlbase.MakeMetadataSchema(
+			ms := bootstrap.MakeMetadataSchema(
 				codec, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef(),
 			)
 			kvs, splits := ms.GetInitialValues()
@@ -155,37 +158,39 @@ func TestInitialKeysAndSplits(t *testing.T) {
 func TestSystemTableLiterals(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	ctx := context.Background()
 	type testcase struct {
-		id     sqlbase.ID
+		id     descpb.ID
 		schema string
-		pkg    *sqlbase.ImmutableTableDescriptor
+		pkg    *tabledesc.Immutable
 	}
 
 	for _, test := range []testcase{
-		{keys.NamespaceTableID, sqlbase.NamespaceTableSchema, sqlbase.NamespaceTable},
-		{keys.DescriptorTableID, sqlbase.DescriptorTableSchema, sqlbase.DescriptorTable},
-		{keys.UsersTableID, sqlbase.UsersTableSchema, sqlbase.UsersTable},
-		{keys.ZonesTableID, sqlbase.ZonesTableSchema, sqlbase.ZonesTable},
-		{keys.LeaseTableID, sqlbase.LeaseTableSchema, sqlbase.LeaseTable},
-		{keys.EventLogTableID, sqlbase.EventLogTableSchema, sqlbase.EventLogTable},
-		{keys.RangeEventTableID, sqlbase.RangeEventTableSchema, sqlbase.RangeEventTable},
-		{keys.UITableID, sqlbase.UITableSchema, sqlbase.UITable},
-		{keys.JobsTableID, sqlbase.JobsTableSchema, sqlbase.JobsTable},
-		{keys.SettingsTableID, sqlbase.SettingsTableSchema, sqlbase.SettingsTable},
-		{keys.DescIDSequenceID, sqlbase.DescIDSequenceSchema, sqlbase.DescIDSequence},
-		{keys.TenantsTableID, sqlbase.TenantsTableSchema, sqlbase.TenantsTable},
-		{keys.WebSessionsTableID, sqlbase.WebSessionsTableSchema, sqlbase.WebSessionsTable},
-		{keys.TableStatisticsTableID, sqlbase.TableStatisticsTableSchema, sqlbase.TableStatisticsTable},
-		{keys.LocationsTableID, sqlbase.LocationsTableSchema, sqlbase.LocationsTable},
-		{keys.RoleMembersTableID, sqlbase.RoleMembersTableSchema, sqlbase.RoleMembersTable},
-		{keys.CommentsTableID, sqlbase.CommentsTableSchema, sqlbase.CommentsTable},
-		{keys.ProtectedTimestampsMetaTableID, sqlbase.ProtectedTimestampsMetaTableSchema, sqlbase.ProtectedTimestampsMetaTable},
-		{keys.ProtectedTimestampsRecordsTableID, sqlbase.ProtectedTimestampsRecordsTableSchema, sqlbase.ProtectedTimestampsRecordsTable},
-		{keys.RoleOptionsTableID, sqlbase.RoleOptionsTableSchema, sqlbase.RoleOptionsTable},
-		{keys.StatementBundleChunksTableID, sqlbase.StatementBundleChunksTableSchema, sqlbase.StatementBundleChunksTable},
-		{keys.StatementDiagnosticsRequestsTableID, sqlbase.StatementDiagnosticsRequestsTableSchema, sqlbase.StatementDiagnosticsRequestsTable},
-		{keys.StatementDiagnosticsTableID, sqlbase.StatementDiagnosticsTableSchema, sqlbase.StatementDiagnosticsTable},
-		{keys.ScheduledJobsTableID, sqlbase.ScheduledJobsTableSchema, sqlbase.ScheduledJobsTable},
+		{keys.NamespaceTableID, systemschema.NamespaceTableSchema, systemschema.NamespaceTable},
+		{keys.DescriptorTableID, systemschema.DescriptorTableSchema, systemschema.DescriptorTable},
+		{keys.UsersTableID, systemschema.UsersTableSchema, systemschema.UsersTable},
+		{keys.ZonesTableID, systemschema.ZonesTableSchema, systemschema.ZonesTable},
+		{keys.LeaseTableID, systemschema.LeaseTableSchema, systemschema.LeaseTable},
+		{keys.EventLogTableID, systemschema.EventLogTableSchema, systemschema.EventLogTable},
+		{keys.RangeEventTableID, systemschema.RangeEventTableSchema, systemschema.RangeEventTable},
+		{keys.UITableID, systemschema.UITableSchema, systemschema.UITable},
+		{keys.JobsTableID, systemschema.JobsTableSchema, systemschema.JobsTable},
+		{keys.SettingsTableID, systemschema.SettingsTableSchema, systemschema.SettingsTable},
+		{keys.DescIDSequenceID, systemschema.DescIDSequenceSchema, systemschema.DescIDSequence},
+		{keys.TenantsTableID, systemschema.TenantsTableSchema, systemschema.TenantsTable},
+		{keys.WebSessionsTableID, systemschema.WebSessionsTableSchema, systemschema.WebSessionsTable},
+		{keys.TableStatisticsTableID, systemschema.TableStatisticsTableSchema, systemschema.TableStatisticsTable},
+		{keys.LocationsTableID, systemschema.LocationsTableSchema, systemschema.LocationsTable},
+		{keys.RoleMembersTableID, systemschema.RoleMembersTableSchema, systemschema.RoleMembersTable},
+		{keys.CommentsTableID, systemschema.CommentsTableSchema, systemschema.CommentsTable},
+		{keys.ProtectedTimestampsMetaTableID, systemschema.ProtectedTimestampsMetaTableSchema, systemschema.ProtectedTimestampsMetaTable},
+		{keys.ProtectedTimestampsRecordsTableID, systemschema.ProtectedTimestampsRecordsTableSchema, systemschema.ProtectedTimestampsRecordsTable},
+		{keys.RoleOptionsTableID, systemschema.RoleOptionsTableSchema, systemschema.RoleOptionsTable},
+		{keys.StatementBundleChunksTableID, systemschema.StatementBundleChunksTableSchema, systemschema.StatementBundleChunksTable},
+		{keys.StatementDiagnosticsRequestsTableID, systemschema.StatementDiagnosticsRequestsTableSchema, systemschema.StatementDiagnosticsRequestsTable},
+		{keys.StatementDiagnosticsTableID, systemschema.StatementDiagnosticsTableSchema, systemschema.StatementDiagnosticsTable},
+		{keys.ScheduledJobsTableID, systemschema.ScheduledJobsTableSchema, systemschema.ScheduledJobsTable},
+		{keys.SqllivenessID, systemschema.SqllivenessTableSchema, systemschema.SqllivenessTable},
 	} {
 		privs := *test.pkg.Privileges
 		gen, err := sql.CreateTestTableDescriptor(
@@ -198,10 +203,10 @@ func TestSystemTableLiterals(t *testing.T) {
 		if err != nil {
 			t.Fatalf("test: %+v, err: %v", test, err)
 		}
-		require.NoError(t, gen.ValidateTable())
+		require.NoError(t, gen.ValidateTable(ctx))
 
-		if !proto.Equal(test.pkg.TableDesc(), gen.TableDesc()) {
-			diff := strings.Join(pretty.Diff(&test.pkg, &gen), "\n")
+		if !test.pkg.TableDesc().Equal(gen.TableDesc()) {
+			diff := strings.Join(pretty.Diff(test.pkg.TableDesc(), gen.TableDesc()), "\n")
 			t.Errorf("%s table descriptor generated from CREATE TABLE statement does not match "+
 				"hardcoded table descriptor:\n%s", test.pkg.Name, diff)
 		}

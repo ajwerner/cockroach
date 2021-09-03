@@ -18,12 +18,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -33,7 +34,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 // A sample aggregator processor aggregates results from multiple sampler
@@ -54,8 +54,8 @@ type sampleAggregator struct {
 	// and released before the sampleAggregator is finished.
 	tempMemAcc mon.BoundAccount
 
-	tableID     sqlbase.ID
-	sampledCols []sqlbase.ColumnID
+	tableID     descpb.ID
+	sampledCols []descpb.ColumnID
 	sketches    []sketchInfo
 
 	// Input column indices for special columns.
@@ -231,7 +231,7 @@ func (s *sampleAggregator) mainLoop(ctx context.Context) (earlyExit bool, err er
 
 	var rowsProcessed uint64
 	progressUpdates := util.Every(SampleAggregatorProgressInterval)
-	var da sqlbase.DatumAlloc
+	var da rowenc.DatumAlloc
 	for {
 		row, meta := s.input.Next()
 		if meta != nil {
@@ -329,7 +329,7 @@ func (s *sampleAggregator) mainLoop(ctx context.Context) (earlyExit bool, err er
 }
 
 func (s *sampleAggregator) processSketchRow(
-	sketch *sketchInfo, row sqlbase.EncDatumRow, da *sqlbase.DatumAlloc,
+	sketch *sketchInfo, row rowenc.EncDatumRow, da *rowenc.DatumAlloc,
 ) error {
 	var tmpSketch hyperloglog.Sketch
 
@@ -363,7 +363,7 @@ func (s *sampleAggregator) processSketchRow(
 }
 
 func (s *sampleAggregator) sampleRow(
-	ctx context.Context, sr *stats.SampleReservoir, sampleRow sqlbase.EncDatumRow, rank uint64,
+	ctx context.Context, sr *stats.SampleReservoir, sampleRow rowenc.EncDatumRow, rank uint64,
 ) error {
 	if err := sr.SampleRow(ctx, s.EvalCtx, sampleRow, rank); err != nil {
 		if code := pgerror.GetPGCode(err); code != pgcode.OutOfMemory {
@@ -382,10 +382,10 @@ func (s *sampleAggregator) sampleRow(
 func (s *sampleAggregator) writeResults(ctx context.Context) error {
 	// Turn off tracing so these writes don't affect the results of EXPLAIN
 	// ANALYZE.
-	if span := opentracing.SpanFromContext(ctx); span != nil && tracing.IsRecording(span) {
+	if span := tracing.SpanFromContext(ctx); span != nil && tracing.IsRecording(span) {
 		// TODO(rytaft): this also hides writes in this function from SQL session
 		// traces.
-		ctx = opentracing.ContextWithSpan(ctx, nil)
+		ctx = tracing.ContextWithSpan(ctx, nil)
 	}
 
 	// TODO(andrei): This method would benefit from a session interface on the
@@ -446,7 +446,7 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 				histogram = &h
 			}
 
-			columnIDs := make([]sqlbase.ColumnID, len(si.spec.Columns))
+			columnIDs := make([]descpb.ColumnID, len(si.spec.Columns))
 			for i, c := range si.spec.Columns {
 				columnIDs[i] = s.sampledCols[c]
 			}
@@ -488,7 +488,7 @@ func (s *sampleAggregator) writeResults(ctx context.Context) error {
 	}
 
 	if g, ok := s.FlowCtx.Cfg.Gossip.Optional(47925); ok {
-		// Gossip invalidation of the stat caches for this table.
+		// Gossip refresh of the stat caches for this table.
 		return stats.GossipTableStatAdded(g, s.tableID)
 	}
 	return nil
@@ -514,7 +514,7 @@ func (s *sampleAggregator) generateHistogram(
 	}
 	values := make(tree.Datums, 0, len(samples))
 
-	var da sqlbase.DatumAlloc
+	var da rowenc.DatumAlloc
 	for _, sample := range samples {
 		ed := &sample.Row[colIdx]
 		// Ignore NULLs (they are counted separately).
@@ -538,4 +538,12 @@ func (s *sampleAggregator) generateHistogram(
 		}
 	}
 	return stats.EquiDepthHistogram(evalCtx, values, numRows, distinctCount, maxBuckets)
+}
+
+var _ execinfra.DoesNotUseTxn = &sampleAggregator{}
+
+// DoesNotUseTxn implements the DoesNotUseTxn interface.
+func (s *sampleAggregator) DoesNotUseTxn() bool {
+	txnUser, ok := s.input.(execinfra.DoesNotUseTxn)
+	return ok && txnUser.DoesNotUseTxn()
 }

@@ -1,3 +1,6 @@
+statement ok
+SET CLUSTER SETTING sql.cross_db_views.enabled = TRUE
+
 # NOTE: Keep this table at the beginning of the file to ensure that its numeric
 #       reference is 53 (the numeric reference of the first table). If the
 #       numbering scheme in cockroach changes, this test will break.
@@ -183,27 +186,27 @@ x y
 query TT
 SHOW CREATE VIEW v1
 ----
-v1  CREATE VIEW v1 (a, b) AS SELECT a, b FROM test.public.t
+v1  CREATE VIEW public.v1 (a, b) AS SELECT a, b FROM test.public.t
 
 query TT
 SHOW CREATE VIEW v2
 ----
-v2  CREATE VIEW v2 (x, y) AS SELECT a, b FROM test.public.t
+v2  CREATE VIEW public.v2 (x, y) AS SELECT a, b FROM test.public.t
 
 query TT
 SHOW CREATE VIEW v6
 ----
-v6  CREATE VIEW v6 (x, y) AS SELECT a, b FROM test.public.v1
+v6  CREATE VIEW public.v6 (x, y) AS SELECT a, b FROM test.public.v1
 
 query TT
 SHOW CREATE VIEW v7
 ----
-v7  CREATE VIEW v7 (x, y) AS SELECT a, b FROM test.public.v1 ORDER BY a DESC LIMIT 2
+v7  CREATE VIEW public.v7 (x, y) AS SELECT a, b FROM test.public.v1 ORDER BY a DESC LIMIT 2
 
 query TT
 SHOW CREATE VIEW test2.v1
 ----
-test2.public.v1  CREATE VIEW v1 (x, y) AS SELECT x, y FROM test.public.v2
+test2.public.v1  CREATE VIEW public.v1 (x, y) AS SELECT x, y FROM test.public.v2
 
 statement ok
 GRANT SELECT ON t TO testuser
@@ -252,7 +255,7 @@ SELECT * FROM v6
 query TT
 SHOW CREATE VIEW v1
 ----
-v1  CREATE VIEW v1 (a, b) AS SELECT a, b FROM test.public.t
+v1  CREATE VIEW public.v1 (a, b) AS SELECT a, b FROM test.public.t
 
 user root
 
@@ -524,7 +527,7 @@ CREATE VIEW w AS WITH a AS (SELECT 1 AS x) SELECT x FROM a
 query T
 SELECT create_statement FROM [SHOW CREATE w]
 ----
-CREATE VIEW w (x) AS WITH a AS (SELECT 1 AS x) SELECT x FROM a
+CREATE VIEW public.w (x) AS WITH a AS (SELECT 1 AS x) SELECT x FROM a
 
 statement ok
 CREATE VIEW w2 AS WITH t AS (SELECT x FROM w) SELECT x FROM t
@@ -532,7 +535,7 @@ CREATE VIEW w2 AS WITH t AS (SELECT x FROM w) SELECT x FROM t
 query T
 SELECT create_statement FROM [SHOW CREATE w2]
 ----
-CREATE VIEW w2 (x) AS WITH t AS (SELECT x FROM test.public.w) SELECT x FROM t
+CREATE VIEW public.w2 (x) AS WITH t AS (SELECT x FROM test.public.w) SELECT x FROM t
 
 statement ok
 CREATE VIEW w3 AS (WITH t AS (SELECT x FROM w) SELECT x FROM t)
@@ -540,7 +543,7 @@ CREATE VIEW w3 AS (WITH t AS (SELECT x FROM w) SELECT x FROM t)
 query T
 SELECT create_statement FROM [SHOW CREATE w3]
 ----
-CREATE VIEW w3 (x) AS (WITH t AS (SELECT x FROM test.public.w) SELECT x FROM t)
+CREATE VIEW public.w3 (x) AS (WITH t AS (SELECT x FROM test.public.w) SELECT x FROM t)
 
 statement ok
 CREATE TABLE ab (a INT PRIMARY KEY, b INT)
@@ -584,7 +587,7 @@ CREATE VIEW v47704 AS
 query T
 SELECT create_statement FROM [ SHOW CREATE VIEW v47704 ]
 ----
-CREATE VIEW v47704 (first_value) AS SELECT first_value(a47704.foo) OVER (PARTITION BY a47704.foo ORDER BY a47704.foo) FROM test.public.a47704 JOIN test.public.b47704 ON a47704.foo = b47704.foo
+CREATE VIEW public.v47704 (first_value) AS SELECT first_value(a47704.foo) OVER (PARTITION BY a47704.foo ORDER BY a47704.foo) FROM test.public.a47704 JOIN test.public.b47704 ON a47704.foo = b47704.foo
 
 statement ok
 SELECT * FROM v47704
@@ -762,3 +765,82 @@ CREATE VIEW vregclass AS SELECT 1 FROM (SELECT 1) AS foo WHERE 'tregclass'::regc
 
 statement error pq: cannot drop relation "tregclass" because view "vregclass" depends on it
 DROP TABLE tregclass
+
+# Test that we disallow cross-database references from views, depending on the
+# cluster setting.
+subtest cross_db_views
+
+statement ok
+SET CLUSTER SETTING sql.cross_db_views.enabled = FALSE
+
+statement ok
+CREATE DATABASE db1
+
+statement ok
+CREATE DATABASE db2
+
+statement ok
+USE db1
+
+statement ok
+CREATE TABLE ab (a INT, b INT)
+
+statement ok
+CREATE VIEW v1 AS SELECT a+b FROM ab
+
+statement ok
+CREATE VIEW db1.public.v2 AS SELECT a+b FROM db1.public.ab
+
+statement error the view cannot refer to other databases
+CREATE VIEW db2.v AS SELECT a+b FROM db1.public.ab
+
+statement ok
+CREATE VIEW db2.replace AS SELECT 1
+
+statement error the view cannot refer to other databases
+CREATE OR REPLACE VIEW db2.replace AS SELECT a+b FROM db1.public.ab
+
+statement ok
+CREATE SEQUENCE db2.seq
+
+statement error the view cannot refer to other databases
+CREATE VIEW v2 AS SELECT last_value FROM db2.seq
+
+# Verify that cross-schema views are allowed.
+statement ok
+CREATE SCHEMA sc2
+
+statement ok
+CREATE VIEW db1.sc2.v AS SELECT a+b FROM db1.public.ab
+
+statement ok
+CREATE TABLE db1.sc2.cd (c INT, d INT)
+
+statement ok
+CREATE VIEW db1.public.v3 AS SELECT a+b+c+d FROM db1.public.ab, db1.sc2.cd
+
+# Verify that views involving system tables are allowed.
+
+statement ok
+CREATE VIEW sys AS SELECT id FROM system.descriptor
+
+statement ok
+CREATE VIEW sys2 AS SELECT id, a+b FROM system.descriptor, ab
+
+statement ok
+USE db2
+
+statement ok
+CREATE TABLE cd (c INT, d INT)
+
+statement error the view cannot refer to other databases
+CREATE VIEW v AS SELECT a+b+c+d FROM cd, db1.public.ab
+
+statement ok
+SET CLUSTER SETTING sql.cross_db_views.enabled = TRUE
+
+statement ok
+CREATE VIEW db2.v1 AS SELECT a+b FROM db1.public.ab
+
+statement ok
+CREATE VIEW db2.v2 AS SELECT a+b+c+d FROM cd, db1.public.ab

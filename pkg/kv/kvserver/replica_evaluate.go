@@ -89,7 +89,10 @@ func optimizePuts(
 	if firstUnoptimizedIndex < optimizePutThreshold { // don't bother if below this threshold
 		return origReqs
 	}
-	iter := reader.NewIterator(storage.IterOptions{
+	// iter is being used to find the parts of the key range that is empty. We
+	// don't need to see intents for this purpose since intents also have
+	// provisional values that we will see.
+	iter := reader.NewMVCCIterator(storage.MVCCKeyIterKind, storage.IterOptions{
 		// We want to include maxKey in our scan. Since UpperBound is exclusive, we
 		// need to set it to the key after maxKey.
 		UpperBound: maxKey.Next(),
@@ -391,12 +394,6 @@ func evaluateBatch(
 		}
 	}
 
-	if writeTooOldState.err != nil {
-		if baHeader.Txn != nil && baHeader.Txn.Status.IsCommittedOrStaging() {
-			log.Fatalf(ctx, "committed txn with writeTooOld err: %s", writeTooOldState.err)
-		}
-	}
-
 	// If there's a write too old error that we can't defer, return it.
 	if writeTooOldState.cantDeferWTOE {
 		return nil, mergedResult, roachpb.NewErrorWithTxn(writeTooOldState.err, baHeader.Txn)
@@ -490,6 +487,25 @@ func evaluateCommand(
 		log.Infof(ctx, "evaluated %s command %+v: %+v, err=%v", args.Method(), args, reply, err)
 	}
 
+	if filter := rec.EvalKnobs().TestingPostEvalFilter; filter != nil {
+		filterArgs := kvserverbase.FilterArgs{
+			Ctx:   ctx,
+			CmdID: raftCmdID,
+			Index: index,
+			Sid:   rec.StoreID(),
+			Req:   args,
+			Hdr:   h,
+			Err:   err,
+		}
+		if pErr := filter(filterArgs); pErr != nil {
+			if pErr.GetTxn() == nil {
+				pErr.SetTxn(h.Txn)
+			}
+			log.Infof(ctx, "test injecting error: %s", pErr)
+			return result.Result{}, pErr
+		}
+	}
+
 	// Create a roachpb.Error by initializing txn from the request/response header.
 	var pErr *roachpb.Error
 	if err != nil {
@@ -525,26 +541,15 @@ func canDoServersideRetry(
 	deadline *hlc.Timestamp,
 ) bool {
 	if ba.Txn != nil {
+		if !ba.CanForwardReadTimestamp {
+			return false
+		}
 		if deadline != nil {
 			log.Fatal(ctx, "deadline passed for transactional request")
 		}
-		canFwdRTS := ba.CanForwardReadTimestamp
 		if etArg, ok := ba.GetArg(roachpb.EndTxn); ok {
-			// If the request provided an EndTxn request, also check its
-			// CanCommitAtHigherTimestamp flag. This ensures that we're backwards
-			// compatable and gives us a chance to make sure that these flags are
-			// in-sync until the CanCommitAtHigherTimestamp is migrated away.
 			et := etArg.(*roachpb.EndTxnRequest)
-			canFwdCTS := batcheval.CanForwardCommitTimestampWithoutRefresh(ba.Txn, et)
-			if canFwdRTS && !canFwdCTS {
-				log.Fatalf(ctx, "unexpected mismatch between Batch.CanForwardReadTimestamp "+
-					"(%+v) and EndTxn.CanCommitAtHigherTimestamp (%+v)", ba, et)
-			}
-			canFwdRTS = canFwdCTS
 			deadline = et.Deadline
-		}
-		if !canFwdRTS {
-			return false
 		}
 	}
 	var newTimestamp hlc.Timestamp

@@ -14,14 +14,15 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 // mergeJoiner performs merge join, it has two input row sources with the same
@@ -31,10 +32,10 @@ import (
 type mergeJoiner struct {
 	joinerBase
 
-	cancelChecker *sqlbase.CancelChecker
+	cancelChecker *cancelchecker.CancelChecker
 
 	leftSource, rightSource execinfra.RowSource
-	leftRows, rightRows     []sqlbase.EncDatumRow
+	leftRows, rightRows     []rowenc.EncDatumRow
 	leftIdx, rightIdx       int
 	emitUnmatchedRight      bool
 	matchedRight            util.FastIntSet
@@ -73,7 +74,7 @@ func newMergeJoiner(
 		rightSource: rightSource,
 	}
 
-	if sp := opentracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && tracing.IsRecording(sp) {
 		m.leftSource = newInputStatCollector(m.leftSource)
 		m.rightSource = newInputStatCollector(m.rightSource)
 		m.FinishTrace = m.outputStatsToTrace
@@ -81,7 +82,7 @@ func newMergeJoiner(
 
 	if err := m.joinerBase.init(
 		m /* self */, flowCtx, processorID, leftSource.OutputTypes(), rightSource.OutputTypes(),
-		spec.Type, spec.OnExpr, leftEqCols, rightEqCols, 0, post, output,
+		spec.Type, spec.OnExpr, leftEqCols, rightEqCols, post, output,
 		execinfra.ProcStateOpts{
 			InputsToDrain: []execinfra.RowSource{leftSource, rightSource},
 			TrailingMetaCallback: func(context.Context) []execinfrapb.ProducerMetadata {
@@ -115,12 +116,12 @@ func newMergeJoiner(
 func (m *mergeJoiner) Start(ctx context.Context) context.Context {
 	m.streamMerger.start(ctx)
 	ctx = m.StartInternal(ctx, mergeJoinerProcName)
-	m.cancelChecker = sqlbase.NewCancelChecker(ctx)
+	m.cancelChecker = cancelchecker.NewCancelChecker(ctx)
 	return ctx
 }
 
 // Next is part of the Processor interface.
-func (m *mergeJoiner) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (m *mergeJoiner) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	for m.State == execinfra.StateRunning {
 		row, meta := m.nextRow()
 		if meta != nil {
@@ -141,7 +142,7 @@ func (m *mergeJoiner) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata
 	return nil, m.DrainHelper()
 }
 
-func (m *mergeJoiner) nextRow() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (m *mergeJoiner) nextRow() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	// The loops below form a restartable state machine that iterates over a
 	// batch of rows from the left and right side of the join. The state machine
 	// returns a result for every row that should be output.
@@ -160,13 +161,13 @@ func (m *mergeJoiner) nextRow() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetad
 				}
 				if renderedRow != nil {
 					m.matchedRightCount++
-					if m.joinType == sqlbase.LeftAntiJoin || m.joinType == sqlbase.ExceptAllJoin {
+					if m.joinType == descpb.LeftAntiJoin || m.joinType == descpb.ExceptAllJoin {
 						break
 					}
 					if m.emitUnmatchedRight {
 						m.matchedRight.Add(ridx)
 					}
-					if m.joinType == sqlbase.LeftSemiJoin || m.joinType == sqlbase.IntersectAllJoin {
+					if m.joinType == descpb.LeftSemiJoin || m.joinType == descpb.IntersectAllJoin {
 						// Semi-joins and INTERSECT ALL only need to know if there is at
 						// least one match, so can skip the rest of the right rows.
 						m.rightIdx = len(m.rightRows)
@@ -293,7 +294,7 @@ func (m *mergeJoiner) outputStatsToTrace() {
 	if !ok {
 		return
 	}
-	if sp := opentracing.SpanFromContext(m.Ctx); sp != nil {
+	if sp := tracing.SpanFromContext(m.Ctx); sp != nil {
 		tracing.SetSpanStats(
 			sp,
 			&MergeJoinerStats{
@@ -329,6 +330,6 @@ func (m *mergeJoiner) Child(nth int, verbose bool) execinfra.OpNode {
 		}
 		panic("right input to mergeJoiner is not an execinfra.OpNode")
 	default:
-		panic(fmt.Sprintf("invalid index %d", nth))
+		panic(errors.AssertionFailedf("invalid index %d", nth))
 	}
 }

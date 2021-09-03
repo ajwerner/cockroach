@@ -30,13 +30,11 @@ import (
 func hashRange(t *testing.T, reader storage.Reader, start, end roachpb.Key) []byte {
 	t.Helper()
 	h := sha256.New()
-	if err := reader.Iterate(start, end,
-		func(kv storage.MVCCKeyValue) (bool, error) {
-			h.Write(kv.Key.Key)
-			h.Write(kv.Value)
-			return false, nil
-		},
-	); err != nil {
+	if err := reader.MVCCIterate(start, end, storage.MVCCKeyAndIntentsIterKind, func(kv storage.MVCCKeyValue) error {
+		h.Write(kv.Key.Key)
+		h.Write(kv.Value)
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	return h.Sum(nil)
@@ -44,7 +42,7 @@ func hashRange(t *testing.T, reader storage.Reader, start, end roachpb.Key) []by
 
 func getStats(t *testing.T, reader storage.Reader) enginepb.MVCCStats {
 	t.Helper()
-	iter := reader.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
+	iter := reader.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
 	defer iter.Close()
 	s, err := storage.ComputeStatsGo(iter, roachpb.KeyMin, roachpb.KeyMax, 1100)
 	if err != nil {
@@ -56,12 +54,12 @@ func getStats(t *testing.T, reader storage.Reader) enginepb.MVCCStats {
 // createTestRocksDBEngine returns a new in-memory RocksDB engine with 1MB of
 // storage capacity.
 func createTestRocksDBEngine(ctx context.Context) storage.Engine {
-	return storage.NewInMem(ctx, enginepb.EngineTypeRocksDB, roachpb.Attributes{}, 1<<20)
+	return storage.NewInMem(ctx, roachpb.Attributes{}, 1<<20)
 }
 
 // createTestPebbleEngine returns a new in-memory Pebble storage engine.
 func createTestPebbleEngine(ctx context.Context) storage.Engine {
-	return storage.NewInMem(ctx, enginepb.EngineTypePebble, roachpb.Attributes{}, 1<<20)
+	return storage.NewInMem(ctx, roachpb.Attributes{}, 1<<20)
 }
 
 var engineImpls = []struct {

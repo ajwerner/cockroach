@@ -17,10 +17,11 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/distsqlutils"
@@ -38,7 +39,7 @@ func TestColumnarizerResetsInternalBatch(t *testing.T) {
 	// internal batch is reset.
 	nRows := coldata.BatchSize() * 2
 	nCols := len(typs)
-	rows := sqlbase.MakeIntRows(nRows, nCols)
+	rows := rowenc.MakeIntRows(nRows, nCols)
 	input := execinfra.NewRepeatableRowSource(typs, rows)
 
 	ctx := context.Background()
@@ -91,14 +92,14 @@ func TestColumnarizerDrainsAndClosesInput(t *testing.T) {
 
 	// If the metadata is obtained through this Next call, the Columnarizer still
 	// returns it in DrainMeta.
-	_ = c.Next(ctx)
+	err = colexecerror.CatchVectorizedRuntimeError(func() { c.Next(ctx) })
+	require.True(t, testutils.IsError(err, errMsg), "unexpected error %v", err)
 
 	// Calling DrainMeta from the vectorized execution engine should propagate to
 	// non-vectorized components as calling ConsumerDone and then draining their
 	// metadata.
 	meta := c.DrainMeta(ctx)
-	require.True(t, len(meta) == 1)
-	require.True(t, testutils.IsError(meta[0].Err, errMsg))
+	require.True(t, len(meta) == 0)
 	require.True(t, rb.Done)
 	require.Equal(t, execinfra.DrainRequested, rb.ConsumerStatus, "unexpected consumer status %d", rb.ConsumerStatus)
 	// Closing the Columnarizer should call ConsumerClosed on the processor.
@@ -110,7 +111,7 @@ func BenchmarkColumnarize(b *testing.B) {
 	types := []*types.T{types.Int, types.Int}
 	nRows := 10000
 	nCols := 2
-	rows := sqlbase.MakeIntRows(nRows, nCols)
+	rows := rowenc.MakeIntRows(nRows, nCols)
 	input := execinfra.NewRepeatableRowSource(types, rows)
 
 	ctx := context.Background()

@@ -78,7 +78,7 @@ func TestSpanSetBatchBoundaries(t *testing.T) {
 			t.Errorf("ClearRange: unexpected error %v", err)
 		}
 		{
-			iter := batch.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
+			iter := batch.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
 			err := batch.ClearIterRange(iter, outsideKey.Key, outsideKey2.Key)
 			iter.Close()
 			if !isWriteSpanErr(err) {
@@ -101,7 +101,7 @@ func TestSpanSetBatchBoundaries(t *testing.T) {
 			t.Errorf("ClearRange: unexpected error %v", err)
 		}
 		{
-			iter := batch.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
+			iter := batch.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
 			err := batch.ClearIterRange(iter, insideKey2.Key, outsideKey4.Key)
 			iter.Close()
 			if !isWriteSpanErr(err) {
@@ -118,21 +118,19 @@ func TestSpanSetBatchBoundaries(t *testing.T) {
 
 	t.Run("reads inside range", func(t *testing.T) {
 		//lint:ignore SA1019 historical usage of deprecated batch.Get is OK
-		if value, err := batch.Get(insideKey); err != nil {
+		if value, err := batch.MVCCGet(insideKey); err != nil {
 			t.Errorf("failed to read inside the range: %+v", err)
 		} else if !bytes.Equal(value, []byte("value")) {
 			t.Errorf("failed to read previously written value, got %q", value)
 		}
-		//lint:ignore SA1019 historical usage of deprecated batch.GetProto is OK
-		if _, _, _, err := batch.GetProto(insideKey, nil); err != nil {
-			t.Errorf("GetProto: unexpected error %v", err)
+		//lint:ignore SA1019 historical usage of deprecated batch.MVCCGetProto is OK
+		if _, _, _, err := batch.MVCCGetProto(insideKey, nil); err != nil {
+			t.Errorf("MVCCGetProto: unexpected error %v", err)
 		}
-		if err := batch.Iterate(insideKey.Key, insideKey2.Key,
-			func(v storage.MVCCKeyValue) (bool, error) {
-				return false, nil
-			},
-		); err != nil {
-			t.Errorf("Iterate: unexpected error %v", err)
+		if err := batch.MVCCIterate(insideKey.Key, insideKey2.Key, storage.MVCCKeyAndIntentsIterKind, func(v storage.MVCCKeyValue) error {
+			return nil
+		}); err != nil {
+			t.Errorf("MVCCIterate: unexpected error %v", err)
 		}
 	})
 
@@ -143,45 +141,41 @@ func TestSpanSetBatchBoundaries(t *testing.T) {
 
 	t.Run("reads before range", func(t *testing.T) {
 		//lint:ignore SA1019 historical usage of deprecated batch.Get is OK
-		if _, err := batch.Get(outsideKey); !isReadSpanErr(err) {
+		if _, err := batch.MVCCGet(outsideKey); !isReadSpanErr(err) {
 			t.Errorf("Get: unexpected error %v", err)
 		}
-		//lint:ignore SA1019 historical usage of deprecated batch.GetProto is OK
-		if _, _, _, err := batch.GetProto(outsideKey, nil); !isReadSpanErr(err) {
-			t.Errorf("GetProto: unexpected error %v", err)
+		//lint:ignore SA1019 historical usage of deprecated batch.MVCCGetProto is OK
+		if _, _, _, err := batch.MVCCGetProto(outsideKey, nil); !isReadSpanErr(err) {
+			t.Errorf("MVCCGetProto: unexpected error %v", err)
 		}
-		if err := batch.Iterate(outsideKey.Key, insideKey2.Key,
-			func(v storage.MVCCKeyValue) (bool, error) {
-				return false, errors.Errorf("unexpected callback: %v", v)
-			},
-		); !isReadSpanErr(err) {
-			t.Errorf("Iterate: unexpected error %v", err)
+		if err := batch.MVCCIterate(outsideKey.Key, insideKey2.Key, storage.MVCCKeyAndIntentsIterKind, func(v storage.MVCCKeyValue) error {
+			return errors.Errorf("unexpected callback: %v", v)
+		}); !isReadSpanErr(err) {
+			t.Errorf("MVCCIterate: unexpected error %v", err)
 		}
 	})
 
 	t.Run("reads after range", func(t *testing.T) {
 		//lint:ignore SA1019 historical usage of deprecated batch.Get is OK
-		if _, err := batch.Get(outsideKey3); !isReadSpanErr(err) {
+		if _, err := batch.MVCCGet(outsideKey3); !isReadSpanErr(err) {
 			t.Errorf("Get: unexpected error %v", err)
 		}
-		//lint:ignore SA1019 historical usage of deprecated batch.GetProto is OK
-		if _, _, _, err := batch.GetProto(outsideKey3, nil); !isReadSpanErr(err) {
-			t.Errorf("GetProto: unexpected error %v", err)
+		//lint:ignore SA1019 historical usage of deprecated batch.MVCCGetProto is OK
+		if _, _, _, err := batch.MVCCGetProto(outsideKey3, nil); !isReadSpanErr(err) {
+			t.Errorf("MVCCGetProto: unexpected error %v", err)
 		}
-		if err := batch.Iterate(insideKey2.Key, outsideKey4.Key,
-			func(v storage.MVCCKeyValue) (bool, error) {
-				return false, errors.Errorf("unexpected callback: %v", v)
-			},
-		); !isReadSpanErr(err) {
-			t.Errorf("Iterate: unexpected error %v", err)
+		if err := batch.MVCCIterate(insideKey2.Key, outsideKey4.Key, storage.MVCCKeyAndIntentsIterKind, func(v storage.MVCCKeyValue) error {
+			return errors.Errorf("unexpected callback: %v", v)
+		}); !isReadSpanErr(err) {
+			t.Errorf("MVCCIterate: unexpected error %v", err)
 		}
 	})
 
 	t.Run("forward scans", func(t *testing.T) {
-		iter := batch.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
+		iter := batch.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
 		defer iter.Close()
 
-		// Iterators check boundaries on seek and next/prev
+		// MVCCIterators check boundaries on seek and next/prev
 		iter.SeekGE(outsideKey)
 		if _, err := iter.Valid(); !isReadSpanErr(err) {
 			t.Fatalf("Seek: unexpected error %v", err)
@@ -223,7 +217,7 @@ func TestSpanSetBatchBoundaries(t *testing.T) {
 	}
 
 	t.Run("reverse scans", func(t *testing.T) {
-		iter := spanset.NewIterator(eng.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax}), &ss)
+		iter := spanset.NewIterator(eng.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax}), &ss)
 		defer iter.Close()
 		iter.SeekLT(outsideKey4)
 		if _, err := iter.Valid(); !isReadSpanErr(err) {
@@ -331,7 +325,7 @@ func TestSpanSetBatchTimestamps(t *testing.T) {
 			t.Errorf("Clear: unexpected error %v", err)
 		}
 		{
-			iter := batch.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
+			iter := batch.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
 			err := batch.ClearIterRange(iter, wkey.Key, wkey.Key)
 			iter.Close()
 			if !isWriteSpanErr(err) {
@@ -349,7 +343,7 @@ func TestSpanSetBatchTimestamps(t *testing.T) {
 	// Reads.
 	for _, batch := range []storage.Batch{batchBefore, batchDuring} {
 		//lint:ignore SA1019 historical usage of deprecated batch.Get is OK
-		if res, err := batch.Get(rkey); err != nil {
+		if res, err := batch.MVCCGet(rkey); err != nil {
 			t.Errorf("failed to read inside the range: %+v", err)
 		} else if !bytes.Equal(res, value) {
 			t.Errorf("failed to read previously written value, got %q", res)
@@ -362,20 +356,18 @@ func TestSpanSetBatchTimestamps(t *testing.T) {
 
 	for _, batch := range []storage.Batch{batchAfter, batchNonMVCC} {
 		//lint:ignore SA1019 historical usage of deprecated batch.Get is OK
-		if _, err := batch.Get(rkey); !isReadSpanErr(err) {
+		if _, err := batch.MVCCGet(rkey); !isReadSpanErr(err) {
 			t.Errorf("Get: unexpected error %v", err)
 		}
 
-		//lint:ignore SA1019 historical usage of deprecated batch.GetProto is OK
-		if _, _, _, err := batch.GetProto(rkey, nil); !isReadSpanErr(err) {
-			t.Errorf("GetProto: unexpected error %v", err)
+		//lint:ignore SA1019 historical usage of deprecated batch.MVCCGetProto is OK
+		if _, _, _, err := batch.MVCCGetProto(rkey, nil); !isReadSpanErr(err) {
+			t.Errorf("MVCCGetProto: unexpected error %v", err)
 		}
-		if err := batch.Iterate(rkey.Key, rkey.Key,
-			func(v storage.MVCCKeyValue) (bool, error) {
-				return false, errors.Errorf("unexpected callback: %v", v)
-			},
-		); !isReadSpanErr(err) {
-			t.Errorf("Iterate: unexpected error %v", err)
+		if err := batch.MVCCIterate(rkey.Key, rkey.Key, storage.MVCCKeyAndIntentsIterKind, func(v storage.MVCCKeyValue) error {
+			return errors.Errorf("unexpected callback: %v", v)
+		}); !isReadSpanErr(err) {
+			t.Errorf("MVCCIterate: unexpected error %v", err)
 		}
 	}
 }
@@ -417,7 +409,7 @@ func TestSpanSetIteratorTimestamps(t *testing.T) {
 
 	func() {
 		// When accessing at t=1, we're able to read through latches declared at t=1 and t=2.
-		iter := batchAt1.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
+		iter := batchAt1.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
 		defer iter.Close()
 
 		iter.SeekGE(k1)
@@ -439,7 +431,7 @@ func TestSpanSetIteratorTimestamps(t *testing.T) {
 
 	{
 		// When accessing at t=2, we're only able to read through the latch declared at t=2.
-		iter := batchAt2.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
+		iter := batchAt2.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
 		defer iter.Close()
 
 		iter.SeekGE(k1)
@@ -459,7 +451,7 @@ func TestSpanSetIteratorTimestamps(t *testing.T) {
 	for _, batch := range []storage.Batch{batchAt3, batchNonMVCC} {
 		// When accessing at t=3, we're unable to read through any of the declared latches.
 		// Same is true when accessing without a timestamp.
-		iter := batch.NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
+		iter := batch.NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
 		defer iter.Close()
 
 		iter.SeekGE(k1)
@@ -510,7 +502,7 @@ func TestSpanSetNonMVCCBatch(t *testing.T) {
 	// Reads.
 	for _, batch := range []storage.Batch{batchNonMVCC, batchMVCC} {
 		//lint:ignore SA1019 historical usage of deprecated batch.Get is OK
-		if res, err := batch.Get(rkey); err != nil {
+		if res, err := batch.MVCCGet(rkey); err != nil {
 			t.Errorf("read disallowed through non-MVCC latch: %+v", err)
 		} else if !bytes.Equal(res, value) {
 			t.Errorf("failed to read previously written value, got %q", res)

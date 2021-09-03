@@ -14,6 +14,7 @@ package memo
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -169,18 +170,45 @@ func (m *Memo) CheckExpr(e opt.Expr) {
 		if t.Cols.SubsetOf(t.Input.Relational().OutputCols) {
 			panic(errors.AssertionFailedf("lookup join with no lookup columns"))
 		}
+		var requiredCols opt.ColSet
+		requiredCols.UnionWith(t.Relational().OutputCols)
+		requiredCols.UnionWith(t.ConstFilters.OuterCols(m))
+		requiredCols.UnionWith(t.On.OuterCols(m))
+		requiredCols.UnionWith(t.KeyCols.ToSet())
+		idx := m.Metadata().Table(t.Table).Index(t.Index)
+		for i := range t.KeyCols {
+			requiredCols.Add(t.Table.ColumnID(idx.Column(i).Ordinal()))
+		}
+		if !t.Cols.SubsetOf(requiredCols) {
+			panic(errors.AssertionFailedf("lookup join with columns that are not required"))
+		}
+		if t.IsSecondJoinInPairedJoiner {
+			ij, ok := t.Input.(*InvertedJoinExpr)
+			if !ok {
+				panic(errors.AssertionFailedf(
+					"lookup paired-join is paired with %T instead of inverted join", t.Input))
+			}
+			if !ij.IsFirstJoinInPairedJoiner {
+				panic(errors.AssertionFailedf(
+					"lookup paired-join is paired with inverted join that thinks it is unpaired"))
+			}
+		}
 
 	case *InsertExpr:
 		tab := m.Metadata().Table(t.Table)
-		m.checkColListLen(t.InsertCols, tab.DeletableColumnCount(), "InsertCols")
+		m.checkColListLen(t.InsertCols, tab.ColumnCount(), "InsertCols")
 		m.checkColListLen(t.FetchCols, 0, "FetchCols")
 		m.checkColListLen(t.UpdateCols, 0, "UpdateCols")
 
 		// Ensure that insert columns include all columns except for delete-only
 		// mutation columns (which do not need to be part of INSERT).
-		for i, n := 0, tab.WritableColumnCount(); i < n; i++ {
-			if t.InsertCols[i] == 0 {
+		for i, n := 0, tab.ColumnCount(); i < n; i++ {
+			kind := tab.Column(i).Kind()
+			if (kind == cat.Ordinary || kind == cat.WriteOnly) && t.InsertCols[i] == 0 {
 				panic(errors.AssertionFailedf("insert values not provided for all table columns"))
+			}
+			if (kind == cat.System || kind.IsVirtual()) && t.InsertCols[i] != 0 {
+				panic(errors.AssertionFailedf("system or virtual column found in insertion columns"))
 			}
 		}
 
@@ -189,13 +217,25 @@ func (m *Memo) CheckExpr(e opt.Expr) {
 	case *UpdateExpr:
 		tab := m.Metadata().Table(t.Table)
 		m.checkColListLen(t.InsertCols, 0, "InsertCols")
-		m.checkColListLen(t.FetchCols, tab.DeletableColumnCount(), "FetchCols")
-		m.checkColListLen(t.UpdateCols, tab.DeletableColumnCount(), "UpdateCols")
+		m.checkColListLen(t.FetchCols, tab.ColumnCount(), "FetchCols")
+		m.checkColListLen(t.UpdateCols, tab.ColumnCount(), "UpdateCols")
 		m.checkMutationExpr(t, &t.MutationPrivate)
 
 	case *ZigzagJoinExpr:
 		if len(t.LeftEqCols) != len(t.RightEqCols) {
 			panic(errors.AssertionFailedf("zigzag join with mismatching eq columns"))
+		}
+		meta := m.Metadata()
+		left, right := meta.Table(t.LeftTable), meta.Table(t.RightTable)
+		for i := 0; i < left.ColumnCount(); i++ {
+			if left.Column(i).Kind() == cat.System && t.Cols.Contains(t.LeftTable.ColumnID(i)) {
+				panic(errors.AssertionFailedf("zigzag join should not contain system column"))
+			}
+		}
+		for i := 0; i < right.ColumnCount(); i++ {
+			if right.Column(i).Kind() == cat.System && t.Cols.Contains(t.RightTable.ColumnID(i)) {
+				panic(errors.AssertionFailedf("zigzag join should not contain system column"))
+			}
 		}
 
 	case *AggDistinctExpr:
@@ -249,8 +289,10 @@ func (m *Memo) checkMutationExpr(rel RelExpr, private *MutationPrivate) {
 	// Output columns should never include mutation columns.
 	tab := m.Metadata().Table(private.Table)
 	var mutCols opt.ColSet
-	for i, n := tab.ColumnCount(), tab.DeletableColumnCount(); i < n; i++ {
-		mutCols.Add(private.Table.ColumnID(i))
+	for i, n := 0, tab.ColumnCount(); i < n; i++ {
+		if tab.Column(i).IsMutation() {
+			mutCols.Add(private.Table.ColumnID(i))
+		}
 	}
 	if rel.Relational().OutputCols.Intersects(mutCols) {
 		panic(errors.AssertionFailedf("output columns cannot include mutation columns"))
@@ -284,10 +326,10 @@ func checkFilters(filters FiltersExpr) {
 	for _, item := range filters {
 		if item.Condition.Op() == opt.RangeOp {
 			if !item.scalar.TightConstraints {
-				panic(errors.AssertionFailedf("Range operator should always have tight constraints"))
+				panic(errors.AssertionFailedf("range operator should always have tight constraints"))
 			}
 			if item.scalar.OuterCols.Len() != 1 {
-				panic(errors.AssertionFailedf("Range operator should have exactly one outer col"))
+				panic(errors.AssertionFailedf("range operator should have exactly one outer col"))
 			}
 		}
 	}
@@ -319,7 +361,11 @@ func checkOutputCols(e opt.Expr) {
 			continue
 		}
 
-		// The output columns of child expressions cannot overlap.
+		// The output columns of child expressions cannot overlap. The only
+		// exception is the first child of RecursiveCTE.
+		if e.Op() == opt.RecursiveCTEOp && i == 0 {
+			continue
+		}
 		cols := rel.Relational().OutputCols
 		if set.Intersects(cols) {
 			panic(errors.AssertionFailedf(

@@ -17,12 +17,14 @@ import (
 	"reflect"
 	"unsafe"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/errors"
@@ -408,7 +410,9 @@ func (h *hasher) HashTypedExpr(val tree.TypedExpr) {
 }
 
 func (h *hasher) HashStatement(val tree.Statement) {
-	h.HashUint64(uint64(reflect.ValueOf(val).Pointer()))
+	if val != nil {
+		h.HashUint64(uint64(reflect.ValueOf(val).Pointer()))
+	}
 }
 
 func (h *hasher) HashColumnID(val opt.ColumnID) {
@@ -517,8 +521,21 @@ func (h *hasher) HashJobCommand(val tree.JobCommand) {
 	h.HashInt(int(val))
 }
 
+func (h *hasher) HashScheduleCommand(val tree.ScheduleCommand) {
+	h.HashInt(int(val))
+}
+
 func (h *hasher) HashIndexOrdinal(val cat.IndexOrdinal) {
 	h.HashInt(val)
+}
+
+func (h *hasher) HashIndexOrdinals(val cat.IndexOrdinals) {
+	hash := h.hash
+	for _, ord := range val {
+		hash ^= internHash(ord)
+		hash *= prime64
+	}
+	h.hash = hash
 }
 
 func (h *hasher) HashViewDeps(val opt.ViewDeps) {
@@ -654,6 +671,11 @@ func (h *hasher) HashPointer(val unsafe.Pointer) {
 func (h *hasher) HashMaterializeClause(val tree.MaterializeClause) {
 	h.HashBool(val.Set)
 	h.HashBool(val.Materialize)
+}
+
+func (h *hasher) HashPersistence(val tree.Persistence) {
+	h.hash ^= internHash(val)
+	h.hash *= prime64
 }
 
 // ----------------------------------------------------------------------
@@ -877,8 +899,24 @@ func (h *hasher) IsJobCommandEqual(l, r tree.JobCommand) bool {
 	return l == r
 }
 
+func (h *hasher) IsScheduleCommandEqual(l, r tree.ScheduleCommand) bool {
+	return l == r
+}
+
 func (h *hasher) IsIndexOrdinalEqual(l, r cat.IndexOrdinal) bool {
 	return l == r
+}
+
+func (h *hasher) IsIndexOrdinalsEqual(l, r cat.IndexOrdinals) bool {
+	if len(l) != len(r) {
+		return false
+	}
+	for i := range l {
+		if l[i] != r[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *hasher) IsViewDepsEqual(l, r opt.ViewDeps) bool {
@@ -1044,6 +1082,10 @@ func (h *hasher) IsMaterializeClauseEqual(l, r tree.MaterializeClause) bool {
 	return l.Set == r.Set && l.Materialize == r.Materialize
 }
 
+func (h *hasher) IsPersistenceEqual(l, r tree.Persistence) bool {
+	return l == r
+}
+
 // encodeDatum turns the given datum into an encoded string of bytes. If two
 // datums are equivalent, then their encoded bytes will be identical.
 // Conversely, if two datums are not equivalent, then their encoded bytes will
@@ -1056,14 +1098,14 @@ func encodeDatum(b []byte, val tree.Datum) []byte {
 	// work, because the encoding does not uniquely represent some values which
 	// should not be considered equivalent by the interner (e.g. decimal values
 	// 1.0 and 1.00).
-	if !sqlbase.HasCompositeKeyEncoding(val.ResolvedType()) {
-		b, err = sqlbase.EncodeTableKey(b, val, encoding.Ascending)
+	if !colinfo.HasCompositeKeyEncoding(val.ResolvedType()) {
+		b, err = rowenc.EncodeTableKey(b, val, encoding.Ascending)
 		if err == nil {
 			return b
 		}
 	}
 
-	b, err = sqlbase.EncodeTableValue(b, sqlbase.ColumnID(encoding.NoColumnID), val, nil /* scratch */)
+	b, err = rowenc.EncodeTableValue(b, descpb.ColumnID(encoding.NoColumnID), val, nil /* scratch */)
 	if err != nil {
 		panic(err)
 	}

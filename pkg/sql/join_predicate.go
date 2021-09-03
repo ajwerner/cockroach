@@ -11,9 +11,11 @@
 package sql
 
 import (
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 )
@@ -27,7 +29,7 @@ type joinPredicate struct {
 	// Enforce this using NoCopy.
 	_ util.NoCopy
 
-	joinType sqlbase.JoinType
+	joinType descpb.JoinType
 
 	// numLeft/RightCols are the number of columns in the left and right
 	// operands.
@@ -56,9 +58,9 @@ type joinPredicate struct {
 	// equality columns).
 	onCond tree.TypedExpr
 
-	leftCols  sqlbase.ResultColumns
-	rightCols sqlbase.ResultColumns
-	cols      sqlbase.ResultColumns
+	leftCols  colinfo.ResultColumns
+	rightCols colinfo.ResultColumns
+	cols      colinfo.ResultColumns
 
 	// If set, the left equality columns form a key in the left input. Used as a
 	// hint for optimizing execution.
@@ -70,16 +72,16 @@ type joinPredicate struct {
 
 // getJoinResultColumns returns the result columns of a join.
 func getJoinResultColumns(
-	joinType sqlbase.JoinType, left, right sqlbase.ResultColumns,
-) sqlbase.ResultColumns {
+	joinType descpb.JoinType, left, right colinfo.ResultColumns,
+) colinfo.ResultColumns {
 	// For anti and semi joins, the right columns are omitted from the output (but
 	// they must be available internally for the ON condition evaluation).
-	omitRightColumns := joinType == sqlbase.LeftSemiJoin || joinType == sqlbase.LeftAntiJoin
+	omitRightColumns := joinType == descpb.LeftSemiJoin || joinType == descpb.LeftAntiJoin
 
 	// The structure of the join data source results is like this:
 	// - all the left columns,
 	// - then all the right columns (except for anti/semi join).
-	columns := make(sqlbase.ResultColumns, 0, len(left)+len(right))
+	columns := make(colinfo.ResultColumns, 0, len(left)+len(right))
 	columns = append(columns, left...)
 	if !omitRightColumns {
 		columns = append(columns, right...)
@@ -89,7 +91,7 @@ func getJoinResultColumns(
 
 // makePredicate constructs a joinPredicate object for joins. The equality
 // columns / on condition must be initialized separately.
-func makePredicate(joinType sqlbase.JoinType, left, right sqlbase.ResultColumns) *joinPredicate {
+func makePredicate(joinType descpb.JoinType, left, right colinfo.ResultColumns) *joinPredicate {
 	pred := &joinPredicate{
 		joinType:     joinType,
 		numLeftCols:  len(left),
@@ -138,7 +140,7 @@ func (p *joinPredicate) eval(ctx *tree.EvalContext, leftRow, rightRow tree.Datum
 		copy(p.curRow[:len(leftRow)], leftRow)
 		copy(p.curRow[len(leftRow):], rightRow)
 		ctx.PushIVarContainer(p.iVarHelper.Container())
-		pred, err := sqlbase.RunFilter(p.onCond, ctx)
+		pred, err := schemaexpr.RunFilter(p.onCond, ctx)
 		ctx.PopIVarContainer()
 		return pred, err
 	}

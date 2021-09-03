@@ -35,9 +35,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -560,10 +563,10 @@ func TestSystemConfigGossip(t *testing.T) {
 	defer s.Stopper().Stop(ctx)
 	ts := s.(*TestServer)
 
-	key := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, keys.MaxReservedDescID)
-	valAt := func(i int) *sqlbase.Descriptor {
-		return sqlbase.NewInitialDatabaseDescriptor(
-			sqlbase.ID(i), "foo",
+	key := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, keys.MaxReservedDescID)
+	valAt := func(i int) *descpb.Descriptor {
+		return dbdesc.NewInitial(
+			descpb.ID(i), "foo", security.AdminRoleName(),
 		).DescriptorProto()
 	}
 
@@ -580,7 +583,7 @@ func TestSystemConfigGossip(t *testing.T) {
 
 	// Write a system key with the transaction marked as having a Gossip trigger.
 	if err := kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		if err := txn.SetSystemConfigTrigger(); err != nil {
+		if err := txn.SetSystemConfigTrigger(true /* forSystemTenant */); err != nil {
 			return err
 		}
 		return txn.Put(ctx, key, valAt(2))
@@ -615,7 +618,7 @@ func TestSystemConfigGossip(t *testing.T) {
 		}
 
 		// Make sure the returned value is valAt(2).
-		var got sqlbase.Descriptor
+		var got descpb.Descriptor
 		if err := val.GetProto(&got); err != nil {
 			return err
 		}
@@ -655,11 +658,11 @@ func TestListenerFileCreation(t *testing.T) {
 	}
 
 	li := listenerInfo{
-		advertiseRPC: s.ServingRPCAddr(),
-		listenHTTP:   s.HTTPAddr(),
 		listenRPC:    s.RPCAddr(),
+		advertiseRPC: s.ServingRPCAddr(),
 		listenSQL:    s.SQLAddr(),
 		advertiseSQL: s.ServingSQLAddr(),
+		listenHTTP:   s.HTTPAddr(),
 	}
 	expectedFiles := li.Iter()
 
@@ -1038,7 +1041,7 @@ Binary built without web UI.
 			expected := fmt.Sprintf(
 				htmlTemplate,
 				fmt.Sprintf(
-					`{"ExperimentalUseLogin":false,"LoginEnabled":false,"LoggedInUser":null,"Tag":"%s","Version":"%s","NodeID":"%d"}`,
+					`{"ExperimentalUseLogin":false,"LoginEnabled":false,"LoggedInUser":null,"Tag":"%s","Version":"%s","NodeID":"%d","PasswordLoginEnabled":true,"OIDCLoginEnabled":false,"OIDCButtonText":""}`,
 					build.GetInfo().Tag,
 					build.VersionPrefix(),
 					1,
@@ -1073,7 +1076,7 @@ Binary built without web UI.
 			{
 				loggedInClient,
 				fmt.Sprintf(
-					`{"ExperimentalUseLogin":true,"LoginEnabled":true,"LoggedInUser":"authentic_user","Tag":"%s","Version":"%s","NodeID":"%d"}`,
+					`{"ExperimentalUseLogin":true,"LoginEnabled":true,"LoggedInUser":"authentic_user","Tag":"%s","Version":"%s","NodeID":"%d","PasswordLoginEnabled":true,"OIDCLoginEnabled":false,"OIDCButtonText":""}`,
 					build.GetInfo().Tag,
 					build.VersionPrefix(),
 					1,
@@ -1082,7 +1085,7 @@ Binary built without web UI.
 			{
 				loggedOutClient,
 				fmt.Sprintf(
-					`{"ExperimentalUseLogin":true,"LoginEnabled":true,"LoggedInUser":null,"Tag":"%s","Version":"%s","NodeID":"%d"}`,
+					`{"ExperimentalUseLogin":true,"LoginEnabled":true,"LoggedInUser":null,"Tag":"%s","Version":"%s","NodeID":"%d","PasswordLoginEnabled":true,"OIDCLoginEnabled":false,"OIDCButtonText":""}`,
 					build.GetInfo().Tag,
 					build.VersionPrefix(),
 					1,

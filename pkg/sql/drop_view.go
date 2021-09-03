@@ -15,9 +15,11 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -43,6 +45,9 @@ func (p *planner) DropView(ctx context.Context, n *tree.DropView) (planNode, err
 		if droppedDesc == nil {
 			// IfExists specified and the view did not exist.
 			continue
+		}
+		if err := checkViewMatchesMaterialized(droppedDesc, true /* requireView */, n.IsMaterialized); err != nil {
+			return nil, err
 		}
 
 		td = append(td, toDelete{tn, droppedDesc})
@@ -106,7 +111,7 @@ func (n *dropViewNode) startExec(params runParams) error {
 				Statement           string
 				User                string
 				CascadeDroppedViews []string
-			}{toDel.tn.FQString(), n.n.String(), params.SessionData().User, cascadeDroppedViews},
+			}{toDel.tn.FQString(), n.n.String(), params.p.User().Normalized(), cascadeDroppedViews},
 		); err != nil {
 			return err
 		}
@@ -118,7 +123,7 @@ func (*dropViewNode) Next(runParams) (bool, error) { return false, nil }
 func (*dropViewNode) Values() tree.Datums          { return tree.Datums{} }
 func (*dropViewNode) Close(context.Context)        {}
 
-func descInSlice(descID sqlbase.ID, td []toDelete) bool {
+func descInSlice(descID descpb.ID, td []toDelete) bool {
 	for _, toDel := range td {
 		if descID == toDel.desc.ID {
 			return true
@@ -129,8 +134,8 @@ func descInSlice(descID sqlbase.ID, td []toDelete) bool {
 
 func (p *planner) canRemoveDependentView(
 	ctx context.Context,
-	from *sqlbase.MutableTableDescriptor,
-	ref sqlbase.TableDescriptor_Reference,
+	from *tabledesc.Mutable,
+	ref descpb.TableDescriptor_Reference,
 	behavior tree.DropBehavior,
 ) error {
 	return p.canRemoveDependentViewGeneric(ctx, from.TypeName(), from.Name, from.ParentID, ref, behavior)
@@ -140,8 +145,8 @@ func (p *planner) canRemoveDependentViewGeneric(
 	ctx context.Context,
 	typeName string,
 	objName string,
-	parentID sqlbase.ID,
-	ref sqlbase.TableDescriptor_Reference,
+	parentID descpb.ID,
+	ref descpb.TableDescriptor_Reference,
 	behavior tree.DropBehavior,
 ) error {
 	viewDesc, err := p.getViewDescForCascade(ctx, typeName, objName, parentID, ref.ID, behavior)
@@ -164,7 +169,7 @@ func (p *planner) canRemoveDependentViewGeneric(
 // Returns the names of any additional views that were also dropped
 // due to `cascade` behavior.
 func (p *planner) removeDependentView(
-	ctx context.Context, tableDesc, viewDesc *sqlbase.MutableTableDescriptor, jobDesc string,
+	ctx context.Context, tableDesc, viewDesc *tabledesc.Mutable, jobDesc string,
 ) ([]string, error) {
 	// In the table whose index is being removed, filter out all back-references
 	// that refer to the view that's being removed.
@@ -178,7 +183,7 @@ func (p *planner) removeDependentView(
 // were also dropped due to `cascade` behavior.
 func (p *planner) dropViewImpl(
 	ctx context.Context,
-	viewDesc *sqlbase.MutableTableDescriptor,
+	viewDesc *tabledesc.Mutable,
 	queueJob bool,
 	jobDesc string,
 	behavior tree.DropBehavior,
@@ -187,7 +192,7 @@ func (p *planner) dropViewImpl(
 
 	// Remove back-references from the tables/views this view depends on.
 	for _, depID := range viewDesc.DependsOn {
-		dependencyDesc, err := p.Tables().GetMutableTableVersionByID(ctx, depID, p.txn)
+		dependencyDesc, err := p.Descriptors().GetMutableTableVersionByID(ctx, depID, p.txn)
 		if err != nil {
 			return cascadeDroppedViews,
 				errors.Errorf("error resolving dependency relation ID %d: %v", depID, err)
@@ -199,7 +204,7 @@ func (p *planner) dropViewImpl(
 		}
 		dependencyDesc.DependedOnBy = removeMatchingReferences(dependencyDesc.DependedOnBy, viewDesc.ID)
 		if err := p.writeSchemaChange(
-			ctx, dependencyDesc, sqlbase.InvalidMutationID,
+			ctx, dependencyDesc, descpb.InvalidMutationID,
 			fmt.Sprintf("removing references for view %s from table %s(%d)",
 				viewDesc.Name, dependencyDesc.Name, dependencyDesc.ID),
 		); err != nil {
@@ -225,6 +230,11 @@ func (p *planner) dropViewImpl(
 		}
 	}
 
+	// Remove any references to types that this view has.
+	if err := p.removeBackRefsFromAllTypesInTable(ctx, viewDesc); err != nil {
+		return cascadeDroppedViews, err
+	}
+
 	if err := p.initiateDropTable(ctx, viewDesc, queueJob, jobDesc, true /* drainName */); err != nil {
 		return cascadeDroppedViews, err
 	}
@@ -236,10 +246,10 @@ func (p *planner) getViewDescForCascade(
 	ctx context.Context,
 	typeName string,
 	objName string,
-	parentID, viewID sqlbase.ID,
+	parentID, viewID descpb.ID,
 	behavior tree.DropBehavior,
-) (*sqlbase.MutableTableDescriptor, error) {
-	viewDesc, err := p.Tables().GetMutableTableVersionByID(ctx, viewID, p.txn)
+) (*tabledesc.Mutable, error) {
+	viewDesc, err := p.Descriptors().GetMutableTableVersionByID(ctx, viewID, p.txn)
 	if err != nil {
 		log.Warningf(ctx, "unable to retrieve descriptor for view %d: %v", viewID, err)
 		return nil, errors.Wrapf(err, "error resolving dependent view ID %d", viewID)
@@ -248,15 +258,16 @@ func (p *planner) getViewDescForCascade(
 		viewName := viewDesc.Name
 		if viewDesc.ParentID != parentID {
 			var err error
-			viewName, err = p.getQualifiedTableName(ctx, viewDesc.TableDesc())
+			viewFQName, err := p.getQualifiedTableName(ctx, viewDesc)
 			if err != nil {
 				log.Warningf(ctx, "unable to retrieve qualified name of view %d: %v", viewID, err)
-				return nil, sqlbase.NewDependentObjectErrorf(
+				return nil, sqlerrors.NewDependentObjectErrorf(
 					"cannot drop %s %q because a view depends on it", typeName, objName)
 			}
+			viewName = viewFQName.FQString()
 		}
 		return nil, errors.WithHintf(
-			sqlbase.NewDependentObjectErrorf("cannot drop %s %q because view %q depends on it",
+			sqlerrors.NewDependentObjectErrorf("cannot drop %s %q because view %q depends on it",
 				typeName, objName, viewName),
 			"you can drop %s instead.", viewName)
 	}

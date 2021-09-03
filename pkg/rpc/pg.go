@@ -18,7 +18,9 @@ import (
 
 // LoadSecurityOptions extends a url.Values with SSL settings suitable for
 // the given server config.
-func (ctx *SecurityContext) LoadSecurityOptions(options url.Values, username string) error {
+func (ctx *SecurityContext) LoadSecurityOptions(
+	options url.Values, username security.SQLUsername,
+) error {
 	if ctx.config.Insecure {
 		options.Set("sslmode", "disable")
 		options.Del("sslrootcert")
@@ -26,7 +28,15 @@ func (ctx *SecurityContext) LoadSecurityOptions(options url.Values, username str
 		options.Del("sslkey")
 	} else {
 		sslMode := options.Get("sslmode")
-		if sslMode == "" || sslMode == "disable" {
+		if sslMode == "disable" {
+			// TLS explicitly disabled by client. Nothing to do here.
+			options.Del("sslrootcert")
+			options.Del("sslcert")
+			options.Del("sslkey")
+			return nil
+		}
+		// Default is to verify the server's identity.
+		if sslMode == "" {
 			options.Set("sslmode", "verify-full")
 		}
 
@@ -73,7 +83,8 @@ func (ctx *SecurityContext) LoadSecurityOptions(options url.Values, username str
 // config. There is no default database set.
 func (ctx *SecurityContext) PGURL(user *url.Userinfo) (*url.URL, error) {
 	options := url.Values{}
-	if err := ctx.LoadSecurityOptions(options, user.Username()); err != nil {
+	username, _ := security.MakeSQLUsernameFromUserInput(user.Username(), security.UsernameValidation)
+	if err := ctx.LoadSecurityOptions(options, username); err != nil {
 		return nil, err
 	}
 	return &url.URL{

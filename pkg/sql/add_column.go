@@ -11,11 +11,13 @@
 package sql
 
 import (
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/errors"
 )
 
@@ -24,7 +26,7 @@ func (p *planner) addColumnImpl(
 	params runParams,
 	n *alterTableNode,
 	tn *tree.TableName,
-	desc *sqlbase.MutableTableDescriptor,
+	desc *tabledesc.Mutable,
 	t *tree.AlterTableAddColumn,
 ) error {
 	d := t.ColumnDef
@@ -54,7 +56,7 @@ func (p *planner) addColumnImpl(
 			seqDbDesc,
 			n.tableDesc.GetParentSchemaID(),
 			seqName,
-			n.tableDesc.Temporary,
+			n.tableDesc.Persistence(),
 			seqOpts,
 			tree.AsStringWithFQNames(n.n, params.Ann()),
 		); err != nil {
@@ -62,12 +64,13 @@ func (p *planner) addColumnImpl(
 		}
 	}
 	d = newDef
-	incTelemetryForNewColumn(d)
 
-	col, idx, expr, err := sqlbase.MakeColumnDefDescs(params.ctx, d, &params.p.semaCtx, params.EvalContext())
+	col, idx, expr, err := tabledesc.MakeColumnDefDescs(params.ctx, d, &params.p.semaCtx, params.EvalContext())
 	if err != nil {
 		return err
 	}
+	incTelemetryForNewColumn(d, col)
+
 	// If the new column has a DEFAULT expression that uses a sequence, add references between
 	// its descriptor and this column descriptor.
 	if d.HasDefaultExpr() {
@@ -79,7 +82,7 @@ func (p *planner) addColumnImpl(
 		}
 		for _, changedSeqDesc := range changedSeqDescs {
 			if err := params.p.writeSchemaChange(
-				params.ctx, changedSeqDesc, sqlbase.InvalidMutationID, tree.AsStringWithFQNames(n.n, params.Ann()),
+				params.ctx, changedSeqDesc, descpb.InvalidMutationID, tree.AsStringWithFQNames(n.n, params.Ann()),
 			); err != nil {
 				return err
 			}
@@ -95,17 +98,17 @@ func (p *planner) addColumnImpl(
 			return err
 		}
 		if len(kvs) > 0 {
-			return sqlbase.NewNonNullViolationError(col.Name)
+			return sqlerrors.NewNonNullViolationError(col.Name)
 		}
 	}
 	_, err = n.tableDesc.FindActiveColumnByName(string(d.Name))
 	if m := n.tableDesc.FindColumnMutationByName(d.Name); m != nil {
 		switch m.Direction {
-		case sqlbase.DescriptorMutation_ADD:
+		case descpb.DescriptorMutation_ADD:
 			return pgerror.Newf(pgcode.DuplicateColumn,
 				"duplicate: column %q in the middle of being added, not yet public",
 				col.Name)
-		case sqlbase.DescriptorMutation_DROP:
+		case descpb.DescriptorMutation_DROP:
 			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
 				"column %q being dropped, try again later", col.Name)
 		default:
@@ -120,12 +123,12 @@ func (p *planner) addColumnImpl(
 		if t.IfNotExists {
 			return nil
 		}
-		return sqlbase.NewColumnAlreadyExistsError(string(d.Name), n.tableDesc.Name)
+		return sqlerrors.NewColumnAlreadyExistsError(string(d.Name), n.tableDesc.Name)
 	}
 
-	n.tableDesc.AddColumnMutation(col, sqlbase.DescriptorMutation_ADD)
+	n.tableDesc.AddColumnMutation(col, descpb.DescriptorMutation_ADD)
 	if idx != nil {
-		if err := n.tableDesc.AddIndexMutation(idx, sqlbase.DescriptorMutation_ADD); err != nil {
+		if err := n.tableDesc.AddIndexMutation(idx, descpb.DescriptorMutation_ADD); err != nil {
 			return err
 		}
 	}
@@ -139,7 +142,7 @@ func (p *planner) addColumnImpl(
 	}
 
 	if d.IsComputed() {
-		computedColValidator := schemaexpr.NewComputedColumnValidator(
+		computedColValidator := schemaexpr.MakeComputedColumnValidator(
 			params.ctx,
 			n.tableDesc,
 			&params.p.semaCtx,

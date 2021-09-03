@@ -22,13 +22,13 @@ import (
 
 func runAcceptanceMultitenant(ctx context.Context, t *test, c *cluster) {
 	c.Put(ctx, cockroach, "./cockroach")
+
 	c.Start(ctx, t, c.All())
 
 	_, err := c.Conn(ctx, 1).Exec(`SELECT crdb_internal.create_tenant(123)`)
 	require.NoError(t, err)
 
 	kvAddrs := c.ExternalAddr(ctx, c.All())
-
 	errCh := make(chan error)
 	go func() {
 		errCh <- c.RunE(ctx, c.Node(1),
@@ -37,6 +37,7 @@ func runAcceptanceMultitenant(ctx context.Context, t *test, c *cluster) {
 			// "--certs-dir", "certs",
 			"--insecure",
 			"--tenant-id", "123",
+			"--http-addr", "127.0.0.1:8081",
 			"--kv-addrs", strings.Join(kvAddrs, ","),
 			// Don't bind to external interfaces when running locally.
 			"--sql-addr", ifLocal("127.0.0.1", "0.0.0.0")+":36257",

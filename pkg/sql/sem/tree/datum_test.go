@@ -106,9 +106,10 @@ func TestDatumOrdering(t *testing.T) {
 		{`'0001-01-01':::date`, `'0001-12-31 BC'`, `'0001-01-02'`, `'-infinity'`, `'infinity'`},
 		{`'4000-01-01 BC':::date`, `'4001-12-31 BC'`, `'4000-01-02 BC'`, `'-infinity'`, `'infinity'`},
 		{`'2006-01-02 03:04:05.123123':::timestamp`,
-			`'2006-01-02 03:04:05.123122+00:00'`, `'2006-01-02 03:04:05.123124+00:00'`, `'-4713-11-24 00:00:00+00:00'`, `'294276-12-31 23:59:59.999999+00:00'`},
+			`'2006-01-02 03:04:05.123122'`, `'2006-01-02 03:04:05.123124'`, `'-4713-11-24 00:00:00'`, `'294276-12-31 23:59:59.999999'`},
 
 		// Geospatial types
+		{`'BOX(1 2,3 4)'::box2d`, noPrev, noNext, noMin, noMax},
 		{`'POINT(1.0 1.0)'::geometry`, noPrev, noNext, noMin, noMax},
 		{`'POINT(1.0 1.0)'::geography`, noPrev, noNext, noMin, noMax},
 
@@ -827,9 +828,7 @@ func TestDTimeTZ(t *testing.T) {
 
 	ctx := &tree.EvalContext{
 		SessionData: &sessiondata.SessionData{
-			DataConversion: sessiondata.DataConversionConfig{
-				Location: time.UTC,
-			},
+			Location: time.UTC,
 		},
 	}
 
@@ -1079,7 +1078,7 @@ func TestNewDefaultDatum(t *testing.T) {
 		{t: types.Decimal, expected: "0:::DECIMAL"},
 		{t: types.MakeDecimal(10, 5), expected: "0:::DECIMAL"},
 		{t: types.Date, expected: "'2000-01-01':::DATE"},
-		{t: types.Timestamp, expected: "'0001-01-01 00:00:00+00:00':::TIMESTAMP"},
+		{t: types.Timestamp, expected: "'0001-01-01 00:00:00':::TIMESTAMP"},
 		{t: types.Interval, expected: "'00:00:00':::INTERVAL"},
 		{t: types.String, expected: "'':::STRING"},
 		{t: types.MakeChar(3), expected: "'':::STRING"},
@@ -1126,4 +1125,30 @@ var _ tree.ParseTimeContext = testParseTimeContext{}
 
 func (t testParseTimeContext) GetRelativeParseTime() time.Time {
 	return time.Time(t)
+}
+
+func TestGeospatialSize(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	testCases := []struct {
+		wkt      string
+		expected uintptr
+	}{
+		{"SRID=4004;POINT EMPTY", 73},
+		{"SRID=4326;LINESTRING(0 0, 10 0)", 125},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.wkt, func(t *testing.T) {
+			t.Run("geometry", func(t *testing.T) {
+				g, err := tree.ParseDGeometry(tc.wkt)
+				require.NoError(t, err)
+				require.Equal(t, tc.expected, g.Size())
+			})
+			t.Run("geography", func(t *testing.T) {
+				g, err := tree.ParseDGeography(tc.wkt)
+				require.NoError(t, err)
+				require.Equal(t, tc.expected, g.Size())
+			})
+		})
+	}
 }

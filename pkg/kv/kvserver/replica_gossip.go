@@ -55,8 +55,8 @@ func (r *Replica) gossipFirstRange(ctx context.Context) {
 // shouldGossip returns true if this replica should be gossiping. Gossip is
 // inherently inconsistent and asynchronous, we're using the lease as a way to
 // ensure that only one node gossips at a time.
-func (r *Replica) shouldGossip() bool {
-	return r.OwnsValidLease(r.store.Clock().Now())
+func (r *Replica) shouldGossip(ctx context.Context) bool {
+	return r.OwnsValidLease(ctx, r.store.Clock().Now())
 }
 
 // MaybeGossipSystemConfig scans the entire SystemConfig span and gossips it.
@@ -86,7 +86,7 @@ func (r *Replica) MaybeGossipSystemConfig(ctx context.Context) error {
 			"not gossiping system config because the replica doesn't contain the system config's start key")
 		return nil
 	}
-	if !r.shouldGossip() {
+	if !r.shouldGossip(ctx) {
 		log.VEventf(ctx, 2, "not gossiping system config because the replica doesn't hold the lease")
 		return nil
 	}
@@ -143,7 +143,7 @@ func (r *Replica) MaybeGossipNodeLiveness(ctx context.Context, span roachpb.Span
 		return nil
 	}
 
-	if !r.ContainsKeyRange(span.Key, span.EndKey) || !r.shouldGossip() {
+	if !r.ContainsKeyRange(span.Key, span.EndKey) || !r.shouldGossip(ctx) {
 		return nil
 	}
 
@@ -287,7 +287,7 @@ func (r *Replica) maybeGossipFirstRange(ctx context.Context) *roachpb.Error {
 	// Gossip the cluster ID from all replicas of the first range; there
 	// is no expiration on the cluster ID.
 	if log.V(1) {
-		log.Infof(ctx, "gossiping cluster id %q from store %d, r%d", r.store.ClusterID(),
+		log.Infof(ctx, "gossiping cluster ID %q from store %d, r%d", r.store.ClusterID(),
 			r.store.StoreID(), r.RangeID)
 	}
 	if err := r.store.Gossip().AddClusterID(r.store.ClusterID()); err != nil {

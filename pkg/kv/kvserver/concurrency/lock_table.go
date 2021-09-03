@@ -133,8 +133,13 @@ type lockTableImpl struct {
 	// enabledMu is held in read-mode when determining whether the lockTable
 	// is enabled and when acting on that information (e.g. adding new locks).
 	// It is held in write-mode when enabling or disabling the lockTable.
-	enabled   bool
-	enabledMu syncutil.RWMutex
+	//
+	// enabledSeq holds the lease sequence for which the lockTable is enabled
+	// under. Discovered locks from prior lease sequences are ignored, as they
+	// may no longer be accurate.
+	enabled    bool
+	enabledMu  syncutil.RWMutex
+	enabledSeq roachpb.LeaseSequence
 
 	// A sequence number is assigned to each request seen by the lockTable. This
 	// is to preserve fairness despite the design choice of allowing
@@ -1188,8 +1193,7 @@ func (l *lockState) acquireLock(
 		// Already held.
 		beforeTxn, beforeTs := l.getLockHolder()
 		if txn.ID != beforeTxn.ID {
-			return errors.Errorf("caller violated contract: " +
-				"existing lock cannot be acquired by different transaction")
+			return errors.AssertionFailedf("existing lock cannot be acquired by different transaction")
 		}
 		seqs := l.holder.holder[durability].seqs
 		if l.holder.holder[durability].txn != nil && l.holder.holder[durability].txn.Epoch < txn.Epoch {
@@ -1318,8 +1322,7 @@ func (l *lockState) discoveredLock(
 
 	if l.holder.locked {
 		if !l.isLockedBy(txn.ID) {
-			return errors.Errorf("caller violated contract: " +
-				"discovered lock by different transaction than existing lock")
+			return errors.AssertionFailedf("discovered lock by different transaction than existing lock")
 		}
 	} else {
 		l.holder.locked = true
@@ -1355,7 +1358,7 @@ func (l *lockState) discoveredLock(
 		// the first place. Bugs here would cause infinite loops where the same
 		// lock is repeatedly re-discovered.
 		if g.readTS.Less(ts) {
-			return errors.Errorf("caller violated contract: discovered non-conflicting lock")
+			return errors.AssertionFailedf("discovered non-conflicting lock")
 		}
 
 	case spanset.SpanReadWrite:
@@ -1843,13 +1846,24 @@ func (t *lockTableImpl) Dequeue(guard lockTableGuard) {
 
 // AddDiscoveredLock implements the lockTable interface.
 func (t *lockTableImpl) AddDiscoveredLock(
-	intent *roachpb.Intent, guard lockTableGuard,
+	intent *roachpb.Intent, seq roachpb.LeaseSequence, guard lockTableGuard,
 ) (added bool, _ error) {
 	t.enabledMu.RLock()
 	defer t.enabledMu.RUnlock()
 	if !t.enabled {
 		// If not enabled, don't track any locks.
 		return false, nil
+	}
+	if seq < t.enabledSeq {
+		// If the lease sequence is too low, this discovered lock may no longer
+		// be accurate, so we ignore it. However, we still return true so that
+		// the request immediately retries, this time under a newer lease.
+		return true, nil
+	} else if seq > t.enabledSeq {
+		// The enableSeq is set synchronously with the application of a new
+		// lease, so it should not be possible for a request to evaluate at a
+		// higher lease sequence than the current value of enabledSeq.
+		return false, errors.AssertionFailedf("unexpected lease sequence: %d > %d", seq, t.enabledSeq)
 	}
 	g := guard.(*lockTableGuardImpl)
 	key := intent.Key
@@ -1888,7 +1902,7 @@ func (t *lockTableImpl) AcquireLock(
 		return nil
 	}
 	if strength != lock.Exclusive {
-		return errors.Errorf("caller violated contract: lock strength not Exclusive")
+		return errors.AssertionFailedf("lock strength not Exclusive")
 	}
 	ss := spanset.SpanGlobal
 	if keys.IsLocal(key) {
@@ -1997,7 +2011,7 @@ func findAccessInSpans(
 			return sa, ss, nil
 		}
 	}
-	return 0, 0, errors.Errorf("caller violated contract: could not find access in spans")
+	return 0, 0, errors.AssertionFailedf("could not find access in spans")
 }
 
 // Tries to GC locks that were previously known to have become empty.
@@ -2089,17 +2103,18 @@ func stepToNextSpan(g *lockTableGuardImpl) *spanset.Span {
 }
 
 // Enable implements the lockTable interface.
-func (t *lockTableImpl) Enable() {
+func (t *lockTableImpl) Enable(seq roachpb.LeaseSequence) {
 	// Avoid disrupting other requests if the lockTable is already enabled.
 	// NOTE: This may be a premature optimization, but it can't hurt.
 	t.enabledMu.RLock()
-	enabled := t.enabled
+	enabled, enabledSeq := t.enabled, t.enabledSeq
 	t.enabledMu.RUnlock()
-	if enabled {
+	if enabled && enabledSeq == seq {
 		return
 	}
 	t.enabledMu.Lock()
 	t.enabled = true
+	t.enabledSeq = seq
 	t.enabledMu.Unlock()
 }
 

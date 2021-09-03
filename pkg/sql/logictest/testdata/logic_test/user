@@ -1,12 +1,12 @@
-# LogicTest: local
+# LogicTest: local 3node-tenant
 
 query TTT colnames
 SHOW USERS
 ----
-username  options     member_of
-admin     CREATEROLE  {}
-root      CREATEROLE  {admin}
-testuser  ·           {}
+username  options  member_of
+admin     ·        {}
+root      ·        {admin}
+testuser  ·        {}
 
 statement ok
 CREATE USER user1
@@ -14,11 +14,11 @@ CREATE USER user1
 query TTT colnames
 SHOW USERS
 ----
-username  options     member_of
-admin     CREATEROLE  {}
-root      CREATEROLE  {admin}
-testuser  ·           {}
-user1     ·           {}
+username  options  member_of
+admin     ·        {}
+root      ·        {admin}
+testuser  ·        {}
+user1     ·        {}
 
 statement error pgcode 42710 a role/user named admin already exists
 CREATE USER admin
@@ -50,10 +50,10 @@ CREATE USER uSEr2 WITH PASSWORD 'cockroach'
 statement ok
 CREATE USER user3 WITH PASSWORD '蟑螂'
 
-statement error pq: username "foo☂" invalid
+statement error pq: "foo☂": username is invalid
 CREATE USER foo☂
 
-statement error pq: username "-foo" invalid
+statement error pq: "-foo": username is invalid
 CREATE USER "-foo"
 
 statement error at or near "-": syntax error
@@ -79,16 +79,16 @@ EXECUTE chpw('blix', 'blah')
 query TTT colnames
 SHOW USERS
 ----
-username  options     member_of
-admin     CREATEROLE  {}
-foo       ·           {}
-foo-bar   ·           {}
-root      CREATEROLE  {admin}
-testuser  ·           {}
-user1     ·           {}
-user2     ·           {}
-user3     ·           {}
-ομηρος    ·           {}
+username  options  member_of
+admin     ·        {}
+foo       ·        {}
+foo-bar   ·        {}
+root      ·        {admin}
+testuser  ·        {}
+user1     ·        {}
+user2     ·        {}
+user3     ·        {}
+ομηρος    ·        {}
 
 statement error no username specified
 CREATE USER ""
@@ -143,19 +143,43 @@ GRANT SELECT ON system.role_options to testuser
 user testuser
 
 statement ok
-CREATE USER user4 CREATEROLE
+CREATE ROLE user4 CREATEROLE
 
 statement ok
-ALTER USER user4 NOLOGIN
+CREATE USER user5 NOLOGIN
 
 query TTT
 SELECT * FROM system.role_options
 ----
-admin     CREATEROLE  NULL
-root      CREATEROLE  NULL
 testuser  CREATEROLE  NULL
 user4     CREATEROLE  NULL
 user4     NOLOGIN     NULL
+user5     NOLOGIN     NULL
 
 statement ok
-DROP USER user4
+DROP ROLE user4
+
+statement ok
+DROP ROLE user5
+
+subtest min_password_length
+
+user root
+
+statement ok
+SET CLUSTER SETTING server.user_login.min_password_length = 12
+
+statement error password too short
+CREATE USER baduser WITH PASSWORD 'abc'
+
+statement error password too short
+ALTER USER testuser WITH PASSWORD 'abc'
+
+statement ok
+CREATE USER userlongpassword WITH PASSWORD '012345678901'
+
+statement ok
+ALTER USER userlongpassword WITH PASSWORD '987654321021'
+
+statement ok
+DROP USER userlongpassword

@@ -17,7 +17,7 @@
 # The Insert operator is capable of inserting values into computed columns and
 # mutation columns, which are not writable (or even visible in the case of
 # mutation columns) by SQL users.
-[Relational, Mutation]
+[Relational, Mutation, WithBinding]
 define Insert {
     Input RelExpr
     Checks FKChecksExpr
@@ -141,6 +141,11 @@ define MutationPrivate {
     # overwrites an existing row.
     CanaryCol ColumnID
 
+    # Arbiters is used only with the Insert and Upsert operators. It identifies
+    # the unique indexes used to detect conflicts for UPSERT and INSERT ON
+    # CONFLICT statements.
+    Arbiters IndexOrdinals
+
     # ReturnCols are the set of columns returned by the mutation operator when
     # the RETURNING clause has been specified. By default, the return columns
     # include all columns in the table, including hidden columns, but not
@@ -174,7 +179,7 @@ define MutationPrivate {
 #
 # The Update operator will also update any computed columns, including mutation
 # columns that are computed.
-[Relational, Mutation]
+[Relational, Mutation, WithBinding]
 define Update {
     Input RelExpr
     Checks FKChecksExpr
@@ -197,7 +202,7 @@ define Update {
 #
 # The Update operator will also insert/update any computed columns, including
 # mutation columns that are computed.
-[Relational, Mutation]
+[Relational, Mutation, WithBinding]
 define Upsert {
     Input RelExpr
     Checks FKChecksExpr
@@ -209,7 +214,7 @@ define Upsert {
 #
 #   DELETE FROM abc WHERE a>0 ORDER BY b LIMIT 10
 #
-[Relational, Mutation]
+[Relational, Mutation, WithBinding]
 define Delete {
     Input RelExpr
     Checks FKChecksExpr

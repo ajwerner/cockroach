@@ -37,11 +37,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/server"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/ts"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
@@ -253,7 +257,7 @@ func TestStoreRangeSplitAtTablePrefix(t *testing.T) {
 		t.Fatalf("%q: split unexpected error: %s", key, pErr)
 	}
 
-	var desc sqlbase.TableDescriptor
+	var desc descpb.TableDescriptor
 	descBytes, err := protoutil.Marshal(&desc)
 	if err != nil {
 		t.Fatal(err)
@@ -261,11 +265,11 @@ func TestStoreRangeSplitAtTablePrefix(t *testing.T) {
 
 	// Update SystemConfig to trigger gossip.
 	if err := store.DB().Txn(context.Background(), func(ctx context.Context, txn *kv.Txn) error {
-		if err := txn.SetSystemConfigTrigger(); err != nil {
+		if err := txn.SetSystemConfigTrigger(true /* forSystemTenant */); err != nil {
 			return err
 		}
 		// We don't care about the values, just the keys.
-		k := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, sqlbase.ID(keys.MinUserDescID))
+		k := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, descpb.ID(keys.MinUserDescID))
 		return txn.Put(ctx, k, &desc)
 	}); err != nil {
 		t.Fatal(err)
@@ -405,7 +409,7 @@ func TestStoreRangeSplitIntents(t *testing.T) {
 	// Verify the transaction record is gone.
 	start := storage.MakeMVCCMetadataKey(keys.MakeRangeKeyPrefix(roachpb.RKeyMin))
 	end := storage.MakeMVCCMetadataKey(keys.MakeRangeKeyPrefix(roachpb.RKeyMax))
-	iter := store.Engine().NewIterator(storage.IterOptions{UpperBound: roachpb.KeyMax})
+	iter := store.Engine().NewMVCCIterator(storage.MVCCKeyAndIntentsIterKind, storage.IterOptions{UpperBound: roachpb.KeyMax})
 
 	defer iter.Close()
 	for iter.SeekGE(start); ; iter.Next() {
@@ -775,7 +779,7 @@ func TestStoreRangeSplitStats(t *testing.T) {
 		ValCount:    msLeft.ValCount + msRight.ValCount,
 		IntentCount: msLeft.IntentCount + msRight.IntentCount,
 	}
-	ms.SysBytes, ms.SysCount = 0, 0
+	ms.SysBytes, ms.SysCount, ms.AbortSpanBytes = 0, 0, 0
 	ms.LastUpdateNanos = 0
 	if expMS != ms {
 		t.Errorf("expected left plus right ranges to equal original, but\n %+v\n+\n %+v\n!=\n %+v", msLeft, msRight, ms)
@@ -1293,7 +1297,7 @@ func TestStoreRangeSystemSplits(t *testing.T) {
 
 	userTableMax := keys.MinUserDescID + 4
 	var exceptions map[int]struct{}
-	schema := sqlbase.MakeMetadataSchema(
+	schema := bootstrap.MakeMetadataSchema(
 		keys.SystemSQLCodec, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef(),
 	)
 	// Write table descriptors for the tables in the metadata schema as well as
@@ -1302,7 +1306,7 @@ func TestStoreRangeSystemSplits(t *testing.T) {
 	//   - the write triggers a SystemConfig update and gossip
 	// We should end up with splits at each user table prefix.
 	if err := store.DB().Txn(context.Background(), func(ctx context.Context, txn *kv.Txn) error {
-		if err := txn.SetSystemConfigTrigger(); err != nil {
+		if err := txn.SetSystemConfigTrigger(true /* forSystemTenant */); err != nil {
 			return err
 		}
 		descTablePrefix := keys.SystemSQLCodec.TablePrefix(keys.DescriptorTableID)
@@ -1317,8 +1321,10 @@ func TestStoreRangeSystemSplits(t *testing.T) {
 		}
 		for i := keys.MinUserDescID; i <= userTableMax; i++ {
 			// We don't care about the value, just the key.
-			key := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, sqlbase.ID(i))
-			if err := txn.Put(ctx, key, (&sqlbase.TableDescriptor{}).DescriptorProto()); err != nil {
+			id := descpb.ID(i)
+			key := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, id)
+			desc := tabledesc.NewImmutable(descpb.TableDescriptor{ID: id})
+			if err := txn.Put(ctx, key, desc.DescriptorProto()); err != nil {
 				return err
 			}
 		}
@@ -1379,13 +1385,15 @@ func TestStoreRangeSystemSplits(t *testing.T) {
 	userTableMax += 3
 	exceptions = map[int]struct{}{userTableMax - 1: {}, userTableMax - 2: {}}
 	if err := store.DB().Txn(context.Background(), func(ctx context.Context, txn *kv.Txn) error {
-		if err := txn.SetSystemConfigTrigger(); err != nil {
+		if err := txn.SetSystemConfigTrigger(true /* forSystemTenant */); err != nil {
 			return err
 		}
 		// This time, only write the last table descriptor. Splits only occur for
 		// the descriptor we add. We don't care about the value, just the key.
-		k := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, sqlbase.ID(userTableMax))
-		return txn.Put(ctx, k, (&sqlbase.TableDescriptor{}).DescriptorProto())
+		id := descpb.ID(userTableMax)
+		k := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, id)
+		desc := tabledesc.NewImmutable(descpb.TableDescriptor{ID: id})
+		return txn.Put(ctx, k, desc.DescriptorProto())
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1955,7 +1963,7 @@ func TestStoreRangeSplitRaceUninitializedRHS(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	// Skipping as part of test-infra-team flaky test cleanup.
-	t.Skip("https://github.com/cockroachdb/cockroach/issues/50809")
+	skip.WithIssue(t, 50809)
 
 	mtc := &multiTestContext{}
 	storeCfg := kvserver.TestStoreConfig(nil)
@@ -2639,7 +2647,7 @@ func TestStoreCapacityAfterSplit(t *testing.T) {
 			cfg:                    &cfg},
 		stopper)
 
-	cap, err := s.Capacity(false /* useCached */)
+	cap, err := s.Capacity(context.Background(), false /* useCached */)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2666,7 +2674,7 @@ func TestStoreCapacityAfterSplit(t *testing.T) {
 		t.Fatal(pErr)
 	}
 
-	cap, err = s.Capacity(false /* useCached */)
+	cap, err = s.Capacity(context.Background(), false /* useCached */)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2704,7 +2712,7 @@ func TestStoreCapacityAfterSplit(t *testing.T) {
 		t.Fatal(pErr)
 	}
 
-	cap, err = s.Capacity(false /* useCached */)
+	cap, err = s.Capacity(context.Background(), false /* useCached */)
 	if err != nil {
 		t.Fatal(err)
 	}

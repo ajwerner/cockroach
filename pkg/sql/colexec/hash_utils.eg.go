@@ -11,7 +11,6 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"reflect"
 	"unsafe"
@@ -19,9 +18,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
+	"github.com/cockroachdb/cockroach/pkg/sql/colexec/execgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
+)
+
+// Workaround for bazel auto-generated code. goimports does not automatically
+// pick up the right packages when run within the bazel sandbox.
+var (
+	_ = typeconv.DatumVecCanonicalTypeFamily
+	_ coldataext.Datum
 )
 
 // rehash takes an element of a key (tuple representing a row of equality
@@ -34,11 +42,11 @@ func rehash(
 	nKeys int,
 	sel []int,
 	cancelChecker CancelChecker,
-	overloadHelper overloadHelper,
-	datumAlloc *sqlbase.DatumAlloc,
+	overloadHelper execgen.OverloadHelper,
+	datumAlloc *rowenc.DatumAlloc,
 ) {
 	// In order to inline the templated code of overloads, we need to have a
-	// "_overloadHelper" local variable of type "overloadHelper".
+	// "_overloadHelper" local variable of type "execgen.OverloadHelper".
 	_overloadHelper := overloadHelper
 	switch col.CanonicalTypeFamily() {
 	case types.BoolFamily:
@@ -53,7 +61,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						if nulls.NullAt(selIdx) {
 							continue
@@ -69,13 +76,13 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						if nulls.NullAt(selIdx) {
 							continue
@@ -91,6 +98,7 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -99,7 +107,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -112,13 +119,13 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -131,6 +138,7 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			}
 		}
@@ -146,7 +154,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						if nulls.NullAt(selIdx) {
 							continue
@@ -159,13 +166,13 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						if nulls.NullAt(selIdx) {
 							continue
@@ -178,6 +185,7 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -186,7 +194,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -196,13 +203,13 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -212,6 +219,7 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			}
 		}
@@ -227,7 +235,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						if nulls.NullAt(selIdx) {
 							continue
@@ -237,7 +244,7 @@ func rehash(
 
 						// In order for equal decimals to hash to the same value we need to
 						// remove the trailing zeroes if there are any.
-						tmpDec := &_overloadHelper.tmpDec1
+						tmpDec := &_overloadHelper.TmpDec1
 						tmpDec.Reduce(&v)
 						b := []byte(tmpDec.String())
 						sh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
@@ -245,13 +252,13 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						if nulls.NullAt(selIdx) {
 							continue
@@ -261,7 +268,7 @@ func rehash(
 
 						// In order for equal decimals to hash to the same value we need to
 						// remove the trailing zeroes if there are any.
-						tmpDec := &_overloadHelper.tmpDec1
+						tmpDec := &_overloadHelper.TmpDec1
 						tmpDec.Reduce(&v)
 						b := []byte(tmpDec.String())
 						sh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
@@ -269,6 +276,7 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -277,14 +285,13 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
 
 						// In order for equal decimals to hash to the same value we need to
 						// remove the trailing zeroes if there are any.
-						tmpDec := &_overloadHelper.tmpDec1
+						tmpDec := &_overloadHelper.TmpDec1
 						tmpDec.Reduce(&v)
 						b := []byte(tmpDec.String())
 						sh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
@@ -292,20 +299,20 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
 
 						// In order for equal decimals to hash to the same value we need to
 						// remove the trailing zeroes if there are any.
-						tmpDec := &_overloadHelper.tmpDec1
+						tmpDec := &_overloadHelper.TmpDec1
 						tmpDec.Reduce(&v)
 						b := []byte(tmpDec.String())
 						sh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
@@ -313,6 +320,7 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			}
 		}
@@ -327,7 +335,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						if nulls.NullAt(selIdx) {
 							continue
@@ -341,13 +348,13 @@ func rehash(
 						p = memhash64(noescape(unsafe.Pointer(&asInt64)), p)
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						if nulls.NullAt(selIdx) {
 							continue
@@ -361,6 +368,7 @@ func rehash(
 						p = memhash64(noescape(unsafe.Pointer(&asInt64)), p)
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -369,7 +377,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -380,13 +387,13 @@ func rehash(
 						p = memhash64(noescape(unsafe.Pointer(&asInt64)), p)
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -397,6 +404,7 @@ func rehash(
 						p = memhash64(noescape(unsafe.Pointer(&asInt64)), p)
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			}
 		case 32:
@@ -408,7 +416,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						if nulls.NullAt(selIdx) {
 							continue
@@ -422,13 +429,13 @@ func rehash(
 						p = memhash64(noescape(unsafe.Pointer(&asInt64)), p)
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						if nulls.NullAt(selIdx) {
 							continue
@@ -442,6 +449,7 @@ func rehash(
 						p = memhash64(noescape(unsafe.Pointer(&asInt64)), p)
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -450,7 +458,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -461,13 +468,13 @@ func rehash(
 						p = memhash64(noescape(unsafe.Pointer(&asInt64)), p)
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -478,6 +485,7 @@ func rehash(
 						p = memhash64(noescape(unsafe.Pointer(&asInt64)), p)
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			}
 		case -1:
@@ -490,7 +498,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						if nulls.NullAt(selIdx) {
 							continue
@@ -504,13 +511,13 @@ func rehash(
 						p = memhash64(noescape(unsafe.Pointer(&asInt64)), p)
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						if nulls.NullAt(selIdx) {
 							continue
@@ -524,6 +531,7 @@ func rehash(
 						p = memhash64(noescape(unsafe.Pointer(&asInt64)), p)
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -532,7 +540,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -543,13 +550,13 @@ func rehash(
 						p = memhash64(noescape(unsafe.Pointer(&asInt64)), p)
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -560,6 +567,7 @@ func rehash(
 						p = memhash64(noescape(unsafe.Pointer(&asInt64)), p)
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			}
 		}
@@ -575,7 +583,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						if nulls.NullAt(selIdx) {
 							continue
@@ -591,13 +598,13 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						if nulls.NullAt(selIdx) {
 							continue
@@ -613,6 +620,7 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -621,7 +629,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -634,13 +641,13 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -653,6 +660,7 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			}
 		}
@@ -668,7 +676,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						if nulls.NullAt(selIdx) {
 							continue
@@ -681,13 +688,13 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						if nulls.NullAt(selIdx) {
 							continue
@@ -700,6 +707,7 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -708,7 +716,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -718,13 +725,13 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -734,6 +741,7 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			}
 		}
@@ -749,7 +757,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						if nulls.NullAt(selIdx) {
 							continue
@@ -764,13 +771,13 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						if nulls.NullAt(selIdx) {
 							continue
@@ -785,6 +792,7 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -793,7 +801,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -805,13 +812,13 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -823,6 +830,7 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			}
 		}
@@ -838,7 +846,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						if nulls.NullAt(selIdx) {
 							continue
@@ -851,13 +858,13 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						if nulls.NullAt(selIdx) {
 							continue
@@ -870,6 +877,7 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			} else {
 				if sel != nil {
@@ -878,7 +886,6 @@ func rehash(
 					_ = sel[nKeys-1]
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = sel[i]
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -888,13 +895,13 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				} else {
 					// Early bounds checks.
 					_ = buckets[nKeys-1]
 					_ = keys.Get(nKeys - 1)
 					var selIdx int
 					for i := 0; i < nKeys; i++ {
-						cancelChecker.check(ctx)
 						selIdx = i
 						v := keys.Get(selIdx)
 						p := uintptr(buckets[i])
@@ -904,10 +911,11 @@ func rehash(
 
 						buckets[i] = uint64(p)
 					}
+					cancelChecker.checkEveryCall(ctx)
 				}
 			}
 		}
 	default:
-		colexecerror.InternalError(fmt.Sprintf("unhandled type %s", col.Type()))
+		colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", col.Type()))
 	}
 }

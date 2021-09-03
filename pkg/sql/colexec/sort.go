@@ -12,7 +12,6 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
@@ -127,15 +126,13 @@ func newAllSpooler(
 
 func (p *allSpooler) init() {
 	p.input.Init()
-	p.bufferedTuples = newAppendOnlyBufferedBatch(
-		p.allocator, p.inputTypes, 0, /* initialSize */
-	)
-	p.windowedBatch = p.allocator.NewMemBatchWithSize(p.inputTypes, 0 /* size */)
+	p.bufferedTuples = newAppendOnlyBufferedBatch(p.allocator, p.inputTypes, nil /* colsToStore */)
+	p.windowedBatch = p.allocator.NewMemBatchWithFixedCapacity(p.inputTypes, 0 /* size */)
 }
 
 func (p *allSpooler) spool(ctx context.Context) {
 	if p.spooled {
-		colexecerror.InternalError("spool() is called for the second time")
+		colexecerror.InternalError(errors.AssertionFailedf("spool() is called for the second time"))
 	}
 	p.spooled = true
 	for batch := p.input.Next(ctx); batch.Length() != 0; batch = p.input.Next(ctx) {
@@ -147,7 +144,7 @@ func (p *allSpooler) spool(ctx context.Context) {
 
 func (p *allSpooler) getValues(i int) coldata.Vec {
 	if !p.spooled {
-		colexecerror.InternalError("getValues() is called before spool()")
+		colexecerror.InternalError(errors.AssertionFailedf("getValues() is called before spool()"))
 	}
 	return p.bufferedTuples.ColVec(i)
 }
@@ -158,7 +155,7 @@ func (p *allSpooler) getNumTuples() int {
 
 func (p *allSpooler) getPartitionsCol() []bool {
 	if !p.spooled {
-		colexecerror.InternalError("getPartitionsCol() is called before spool()")
+		colexecerror.InternalError(errors.AssertionFailedf("getPartitionsCol() is called before spool()"))
 	}
 	return nil
 }
@@ -251,52 +248,59 @@ const (
 	// sortEmitting is the third state of the operator, indicating that each call
 	// to Next will return another batch of the sorted data.
 	sortEmitting
+	// sortDone is the final state of the operator, where it always returns a
+	// zero batch.
+	sortDone
 )
 
 func (p *sortOp) Next(ctx context.Context) coldata.Batch {
-	switch p.state {
-	case sortSpooling:
-		p.input.spool(ctx)
-		p.state = sortSorting
-		fallthrough
-	case sortSorting:
-		p.sort(ctx)
-		p.state = sortEmitting
-		fallthrough
-	case sortEmitting:
-		newEmitted := p.emitted + coldata.BatchSize()
-		if newEmitted > p.input.getNumTuples() {
-			newEmitted = p.input.getNumTuples()
-		}
-		if newEmitted == p.emitted {
-			return coldata.ZeroBatch
-		}
-
-		p.resetOutput()
-		for j := 0; j < len(p.inputTypes); j++ {
-			// At this point, we have already fully sorted the input. It is ok to do
-			// this Copy outside of the allocator - the work has been done, but
-			// theoretically it is possible to hit the limit here (mainly with
-			// variable-sized types like Bytes). Nonetheless, for performance reasons
-			// it would be sad to fallback to disk at this point.
-			p.output.ColVec(j).Copy(
-				coldata.CopySliceArgs{
-					SliceArgs: coldata.SliceArgs{
-						Sel:         p.order,
-						Src:         p.input.getValues(j),
-						SrcStartIdx: p.emitted,
-						SrcEndIdx:   newEmitted,
+	for {
+		switch p.state {
+		case sortSpooling:
+			p.input.spool(ctx)
+			p.state = sortSorting
+		case sortSorting:
+			p.sort(ctx)
+			p.state = sortEmitting
+		case sortEmitting:
+			toEmit := p.input.getNumTuples() - p.emitted
+			if toEmit == 0 {
+				p.state = sortDone
+				continue
+			}
+			if toEmit > coldata.BatchSize() {
+				toEmit = coldata.BatchSize()
+			}
+			p.output, _ = p.allocator.ResetMaybeReallocate(p.inputTypes, p.output, toEmit)
+			newEmitted := p.emitted + toEmit
+			for j := 0; j < len(p.inputTypes); j++ {
+				// At this point, we have already fully sorted the input. It is ok to do
+				// this Copy outside of the allocator - the work has been done, but
+				// theoretically it is possible to hit the limit here (mainly with
+				// variable-sized types like Bytes). Nonetheless, for performance reasons
+				// it would be sad to fallback to disk at this point.
+				p.output.ColVec(j).Copy(
+					coldata.CopySliceArgs{
+						SliceArgs: coldata.SliceArgs{
+							Sel:         p.order,
+							Src:         p.input.getValues(j),
+							SrcStartIdx: p.emitted,
+							SrcEndIdx:   newEmitted,
+						},
 					},
-				},
-			)
+				)
+			}
+			p.output.SetLength(toEmit)
+			p.emitted = newEmitted
+			return p.output
+		case sortDone:
+			return coldata.ZeroBatch
+		default:
+			colexecerror.InternalError(errors.AssertionFailedf("invalid sort state %v", p.state))
+			// This code is unreachable, but the compiler cannot infer that.
+			return nil
 		}
-		p.output.SetLength(newEmitted - p.emitted)
-		p.emitted = newEmitted
-		return p.output
 	}
-	colexecerror.InternalError(fmt.Sprintf("invalid sort state %v", p.state))
-	// This code is unreachable, but the compiler cannot infer that.
-	return nil
 }
 
 // sort sorts the spooled tuples, so it must be called after spool() has been
@@ -396,14 +400,6 @@ func (p *sortOp) sort(ctx context.Context) {
 	}
 }
 
-func (p *sortOp) resetOutput() {
-	if p.output == nil {
-		p.output = p.allocator.NewMemBatch(p.inputTypes)
-	} else {
-		p.output.ResetInternalBatch()
-	}
-}
-
 func (p *sortOp) reset(ctx context.Context) {
 	if r, ok := p.input.(resetter); ok {
 		r.reset(ctx)
@@ -421,7 +417,7 @@ func (p *sortOp) Child(nth int, verbose bool) execinfra.OpNode {
 	if nth == 0 {
 		return p.input
 	}
-	colexecerror.InternalError(fmt.Sprintf("invalid index %d", nth))
+	colexecerror.InternalError(errors.AssertionFailedf("invalid index %d", nth))
 	// This code is unreachable, but the compiler cannot infer that.
 	return nil
 }

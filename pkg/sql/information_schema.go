@@ -15,18 +15,25 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
-	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/docs"
 	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/sql/vtable"
 	"github.com/cockroachdb/errors"
@@ -104,6 +111,7 @@ var informationSchema = virtualSchema{
 		"transforms",
 		"triggered_update_columns",
 		"triggers",
+		"type_privileges",
 		"udt_privileges",
 		"usage_privileges",
 		"user_defined_types",
@@ -114,28 +122,30 @@ var informationSchema = virtualSchema{
 		"view_table_usage",
 		"views",
 	),
-	tableDefs: map[sqlbase.ID]virtualSchemaDef{
-		sqlbase.InformationSchemaAdministrableRoleAuthorizationsID: informationSchemaAdministrableRoleAuthorizations,
-		sqlbase.InformationSchemaApplicableRolesID:                 informationSchemaApplicableRoles,
-		sqlbase.InformationSchemaCheckConstraints:                  informationSchemaCheckConstraints,
-		sqlbase.InformationSchemaColumnPrivilegesID:                informationSchemaColumnPrivileges,
-		sqlbase.InformationSchemaColumnsTableID:                    informationSchemaColumnsTable,
-		sqlbase.InformationSchemaConstraintColumnUsageTableID:      informationSchemaConstraintColumnUsageTable,
-		sqlbase.InformationSchemaEnabledRolesID:                    informationSchemaEnabledRoles,
-		sqlbase.InformationSchemaKeyColumnUsageTableID:             informationSchemaKeyColumnUsageTable,
-		sqlbase.InformationSchemaParametersTableID:                 informationSchemaParametersTable,
-		sqlbase.InformationSchemaReferentialConstraintsTableID:     informationSchemaReferentialConstraintsTable,
-		sqlbase.InformationSchemaRoleTableGrantsID:                 informationSchemaRoleTableGrants,
-		sqlbase.InformationSchemaRoutineTableID:                    informationSchemaRoutineTable,
-		sqlbase.InformationSchemaSchemataTableID:                   informationSchemaSchemataTable,
-		sqlbase.InformationSchemaSchemataTablePrivilegesID:         informationSchemaSchemataTablePrivileges,
-		sqlbase.InformationSchemaSequencesID:                       informationSchemaSequences,
-		sqlbase.InformationSchemaStatisticsTableID:                 informationSchemaStatisticsTable,
-		sqlbase.InformationSchemaTableConstraintTableID:            informationSchemaTableConstraintTable,
-		sqlbase.InformationSchemaTablePrivilegesID:                 informationSchemaTablePrivileges,
-		sqlbase.InformationSchemaTablesTableID:                     informationSchemaTablesTable,
-		sqlbase.InformationSchemaViewsTableID:                      informationSchemaViewsTable,
-		sqlbase.InformationSchemaUserPrivilegesID:                  informationSchemaUserPrivileges,
+	tableDefs: map[descpb.ID]virtualSchemaDef{
+		catconstants.InformationSchemaAdministrableRoleAuthorizationsID: informationSchemaAdministrableRoleAuthorizations,
+		catconstants.InformationSchemaApplicableRolesID:                 informationSchemaApplicableRoles,
+		catconstants.InformationSchemaCheckConstraints:                  informationSchemaCheckConstraints,
+		catconstants.InformationSchemaColumnPrivilegesID:                informationSchemaColumnPrivileges,
+		catconstants.InformationSchemaColumnsTableID:                    informationSchemaColumnsTable,
+		catconstants.InformationSchemaColumnUDTUsageID:                  informationSchemaColumnUDTUsage,
+		catconstants.InformationSchemaConstraintColumnUsageTableID:      informationSchemaConstraintColumnUsageTable,
+		catconstants.InformationSchemaTypePrivilegesID:                  informationSchemaTypePrivilegesTable,
+		catconstants.InformationSchemaEnabledRolesID:                    informationSchemaEnabledRoles,
+		catconstants.InformationSchemaKeyColumnUsageTableID:             informationSchemaKeyColumnUsageTable,
+		catconstants.InformationSchemaParametersTableID:                 informationSchemaParametersTable,
+		catconstants.InformationSchemaReferentialConstraintsTableID:     informationSchemaReferentialConstraintsTable,
+		catconstants.InformationSchemaRoleTableGrantsID:                 informationSchemaRoleTableGrants,
+		catconstants.InformationSchemaRoutineTableID:                    informationSchemaRoutineTable,
+		catconstants.InformationSchemaSchemataTableID:                   informationSchemaSchemataTable,
+		catconstants.InformationSchemaSchemataTablePrivilegesID:         informationSchemaSchemataTablePrivileges,
+		catconstants.InformationSchemaSequencesID:                       informationSchemaSequences,
+		catconstants.InformationSchemaStatisticsTableID:                 informationSchemaStatisticsTable,
+		catconstants.InformationSchemaTableConstraintTableID:            informationSchemaTableConstraintTable,
+		catconstants.InformationSchemaTablePrivilegesID:                 informationSchemaTablePrivileges,
+		catconstants.InformationSchemaTablesTableID:                     informationSchemaTablesTable,
+		catconstants.InformationSchemaViewsTableID:                      informationSchemaViewsTable,
+		catconstants.InformationSchemaUserPrivilegesID:                  informationSchemaUserPrivileges,
 	},
 	tableValidator:             validateInformationSchemaTable,
 	validWithNoDatabaseContext: true,
@@ -181,7 +191,7 @@ func dIntFnOrNull(fn func() (int32, bool)) tree.Datum {
 	return tree.DNull
 }
 
-func validateInformationSchemaTable(table *sqlbase.TableDescriptor) error {
+func validateInformationSchemaTable(table *descpb.TableDescriptor) error {
 	// Make sure no tables have boolean columns.
 	for i := range table.Columns {
 		if table.Columns[i].Type.Family() == types.BoolFamily {
@@ -194,17 +204,17 @@ func validateInformationSchemaTable(table *sqlbase.TableDescriptor) error {
 
 var informationSchemaAdministrableRoleAuthorizations = virtualSchemaTable{
 	comment: `roles for which the current user has admin option
-` + base.DocsURL("information-schema.html#administrable_role_authorizations") + `
+` + docs.URL("information-schema.html#administrable_role_authorizations") + `
 https://www.postgresql.org/docs/9.5/infoschema-administrable-role-authorizations.html`,
 	schema: vtable.InformationSchemaAdministrableRoleAuthorizations,
-	populate: func(ctx context.Context, p *planner, _ *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
-		currentUser := p.SessionData().User
+	populate: func(ctx context.Context, p *planner, _ *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
+		currentUser := p.SessionData().User()
 		memberMap, err := p.MemberOfWithAdminOption(ctx, currentUser)
 		if err != nil {
 			return err
 		}
 
-		grantee := tree.NewDString(currentUser)
+		grantee := tree.NewDString(currentUser.Normalized())
 		for roleName, isAdmin := range memberMap {
 			if !isAdmin {
 				// We only show memberships with the admin option.
@@ -212,9 +222,9 @@ https://www.postgresql.org/docs/9.5/infoschema-administrable-role-authorizations
 			}
 
 			if err := addRow(
-				grantee,                   // grantee: always the current user
-				tree.NewDString(roleName), // role_name
-				yesString,                 // is_grantable: always YES
+				grantee,                                // grantee: always the current user
+				tree.NewDString(roleName.Normalized()), // role_name
+				yesString,                              // is_grantable: always YES
 			); err != nil {
 				return err
 			}
@@ -226,23 +236,23 @@ https://www.postgresql.org/docs/9.5/infoschema-administrable-role-authorizations
 
 var informationSchemaApplicableRoles = virtualSchemaTable{
 	comment: `roles available to the current user
-` + base.DocsURL("information-schema.html#applicable_roles") + `
+` + docs.URL("information-schema.html#applicable_roles") + `
 https://www.postgresql.org/docs/9.5/infoschema-applicable-roles.html`,
 	schema: vtable.InformationSchemaApplicableRoles,
-	populate: func(ctx context.Context, p *planner, _ *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
-		currentUser := p.SessionData().User
+	populate: func(ctx context.Context, p *planner, _ *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
+		currentUser := p.SessionData().User()
 		memberMap, err := p.MemberOfWithAdminOption(ctx, currentUser)
 		if err != nil {
 			return err
 		}
 
-		grantee := tree.NewDString(currentUser)
+		grantee := tree.NewDString(currentUser.Normalized())
 
 		for roleName, isAdmin := range memberMap {
 			if err := addRow(
-				grantee,                   // grantee: always the current user
-				tree.NewDString(roleName), // role_name
-				yesOrNoDatum(isAdmin),     // is_grantable
+				grantee,                                // grantee: always the current user
+				tree.NewDString(roleName.Normalized()), // role_name
+				yesOrNoDatum(isAdmin),                  // is_grantable
 			); err != nil {
 				return err
 			}
@@ -254,15 +264,15 @@ https://www.postgresql.org/docs/9.5/infoschema-applicable-roles.html`,
 
 var informationSchemaCheckConstraints = virtualSchemaTable{
 	comment: `check constraints
-` + base.DocsURL("information-schema.html#check_constraints") + `
+` + docs.URL("information-schema.html#check_constraints") + `
 https://www.postgresql.org/docs/9.5/infoschema-check-constraints.html`,
 	schema: vtable.InformationSchemaCheckConstraints,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
 		return forEachTableDescWithTableLookup(ctx, p, dbContext, hideVirtual /* no constraints in virtual tables */, func(
-			db *sqlbase.ImmutableDatabaseDescriptor,
+			db *dbdesc.Immutable,
 			scName string,
-			table *sqlbase.ImmutableTableDescriptor,
+			table catalog.TableDescriptor,
 			tableLookup tableLookupFn,
 		) error {
 			conInfo, err := table.GetConstraintInfoWithLookup(tableLookup.getTableByID)
@@ -273,7 +283,7 @@ https://www.postgresql.org/docs/9.5/infoschema-check-constraints.html`,
 			scNameStr := tree.NewDString(scName)
 			for conName, con := range conInfo {
 				// Only Check constraints are included.
-				if con.Kind != sqlbase.ConstraintTypeCheck {
+				if con.Kind != descpb.ConstraintTypeCheck {
 					continue
 				}
 				conNameStr := tree.NewDString(conName)
@@ -295,7 +305,7 @@ https://www.postgresql.org/docs/9.5/infoschema-check-constraints.html`,
 			// Cockroach doesn't track these constraints as check constraints,
 			// but we can pull them off of the table's column descriptors.
 			colNum := 0
-			return forEachColumnInTable(table, func(column *sqlbase.ColumnDescriptor) error {
+			return table.ForeachPublicColumn(func(column *descpb.ColumnDescriptor) error {
 				colNum++
 				// Only visible, non-nullable columns are included.
 				if column.Hidden || column.Nullable {
@@ -305,7 +315,7 @@ https://www.postgresql.org/docs/9.5/infoschema-check-constraints.html`,
 				// uses the format <namespace_oid>_<table_oid>_<col_idx>_not_null.
 				// We might as well do the same.
 				conNameStr := tree.NewDString(fmt.Sprintf(
-					"%s_%s_%d_not_null", h.NamespaceOid(db, scName), tableOid(table.ID), colNum,
+					"%s_%s_%d_not_null", h.NamespaceOid(db.GetID(), scName), tableOid(table.GetID()), colNum,
 				))
 				chkExprStr := tree.NewDString(fmt.Sprintf(
 					"%s IS NOT NULL", column.Name,
@@ -323,30 +333,31 @@ https://www.postgresql.org/docs/9.5/infoschema-check-constraints.html`,
 
 var informationSchemaColumnPrivileges = virtualSchemaTable{
 	comment: `column privilege grants (incomplete)
-` + base.DocsURL("information-schema.html#column_privileges") + `
+` + docs.URL("information-schema.html#column_privileges") + `
 https://www.postgresql.org/docs/9.5/infoschema-column-privileges.html`,
 	schema: vtable.InformationSchemaColumnPrivileges,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return forEachTableDesc(ctx, p, dbContext, virtualMany, func(
-			db *sqlbase.ImmutableDatabaseDescriptor, scName string, table *sqlbase.ImmutableTableDescriptor,
+			db *dbdesc.Immutable, scName string, table catalog.TableDescriptor,
 		) error {
 			dbNameStr := tree.NewDString(db.GetName())
 			scNameStr := tree.NewDString(scName)
 			columndata := privilege.List{privilege.SELECT, privilege.INSERT, privilege.UPDATE} // privileges for column level granularity
-			for _, u := range table.Privileges.Users {
+			for _, u := range table.GetPrivileges().Users {
 				for _, priv := range columndata {
 					if priv.Mask()&u.Privileges != 0 {
-						for i := range table.Columns {
-							cd := &table.Columns[i]
+						columns := table.GetPublicColumns()
+						for i := range columns {
+							cd := &columns[i]
 							if err := addRow(
-								tree.DNull,                     // grantor
-								tree.NewDString(u.User),        // grantee
-								dbNameStr,                      // table_catalog
-								scNameStr,                      // table_schema
-								tree.NewDString(table.Name),    // table_name
-								tree.NewDString(cd.Name),       // column_name
-								tree.NewDString(priv.String()), // privilege_type
-								tree.DNull,                     // is_grantable
+								tree.DNull,                             // grantor
+								tree.NewDString(u.User().Normalized()), // grantee
+								dbNameStr,                              // table_catalog
+								scNameStr,                              // table_schema
+								tree.NewDString(table.GetName()),       // table_name
+								tree.NewDString(cd.Name),               // column_name
+								tree.NewDString(priv.String()),         // privilege_type
+								tree.DNull,                             // is_grantable
 							); err != nil {
 								return err
 							}
@@ -361,16 +372,16 @@ https://www.postgresql.org/docs/9.5/infoschema-column-privileges.html`,
 
 var informationSchemaColumnsTable = virtualSchemaTable{
 	comment: `table and view columns (incomplete)
-` + base.DocsURL("information-schema.html#columns") + `
+` + docs.URL("information-schema.html#columns") + `
 https://www.postgresql.org/docs/9.5/infoschema-columns.html`,
 	schema: vtable.InformationSchemaColumns,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return forEachTableDesc(ctx, p, dbContext, virtualMany, func(
-			db *sqlbase.ImmutableDatabaseDescriptor, scName string, table *sqlbase.ImmutableTableDescriptor,
+			db *dbdesc.Immutable, scName string, table catalog.TableDescriptor,
 		) error {
 			dbNameStr := tree.NewDString(db.GetName())
 			scNameStr := tree.NewDString(scName)
-			return forEachColumnInTable(table, func(column *sqlbase.ColumnDescriptor) error {
+			return table.ForeachPublicColumn(func(column *descpb.ColumnDescriptor) error {
 				collationCatalog := tree.DNull
 				collationSchema := tree.DNull
 				collationName := tree.DNull
@@ -381,26 +392,26 @@ https://www.postgresql.org/docs/9.5/infoschema-columns.html`,
 				}
 				colDefault := tree.DNull
 				if column.DefaultExpr != nil {
-					colExpr, err := schemaexpr.DeserializeTableDescExpr(ctx, &p.semaCtx, table, *column.DefaultExpr)
+					colExpr, err := schemaexpr.FormatExprForDisplay(ctx, table, *column.DefaultExpr, &p.semaCtx, tree.FmtParsable)
 					if err != nil {
 						return err
 					}
-					colDefault = tree.NewDString(tree.SerializeForDisplay(colExpr))
+					colDefault = tree.NewDString(colExpr)
 				}
 				colComputed := emptyString
 				if column.ComputeExpr != nil {
-					colExpr, err := schemaexpr.DeserializeTableDescExpr(ctx, &p.semaCtx, table, *column.ComputeExpr)
+					colExpr, err := schemaexpr.FormatExprForDisplay(ctx, table, *column.ComputeExpr, &p.semaCtx, tree.FmtSimple)
 					if err != nil {
 						return err
 					}
-					colComputed = tree.NewDString(tree.AsString(colExpr))
+					colComputed = tree.NewDString(colExpr)
 				}
 				return addRow(
-					dbNameStr,                    // table_catalog
-					scNameStr,                    // table_schema
-					tree.NewDString(table.Name),  // table_name
-					tree.NewDString(column.Name), // column_name
-					tree.NewDInt(tree.DInt(column.GetLogicalColumnID())), // ordinal_position
+					dbNameStr,                        // table_catalog
+					scNameStr,                        // table_schema
+					tree.NewDString(table.GetName()), // table_name
+					tree.NewDString(column.Name),     // column_name
+					tree.NewDInt(tree.DInt(column.GetPGAttributeNum())), // ordinal_position
 					colDefault,                    // column_default
 					yesOrNoDatum(column.Nullable), // is_nullable
 					tree.NewDString(column.Type.InformationSchemaName()), // data_type
@@ -451,16 +462,46 @@ https://www.postgresql.org/docs/9.5/infoschema-columns.html`,
 	},
 }
 
+var informationSchemaColumnUDTUsage = virtualSchemaTable{
+	comment: `columns with user defined types
+` + docs.URL("information-schema.html#column_udt_usage") + `
+https://www.postgresql.org/docs/current/infoschema-column-udt-usage.html`,
+	schema: vtable.InformationSchemaColumnUDTUsage,
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
+		return forEachTableDesc(ctx, p, dbContext, hideVirtual,
+			func(db *dbdesc.Immutable, scName string, table catalog.TableDescriptor) error {
+				dbNameStr := tree.NewDString(db.GetName())
+				scNameStr := tree.NewDString(scName)
+				tbNameStr := tree.NewDString(table.GetName())
+				return table.ForeachPublicColumn(func(col *descpb.ColumnDescriptor) error {
+					if !col.Type.UserDefined() {
+						return nil
+					}
+					return addRow(
+						tree.NewDString(col.Type.TypeMeta.Name.Catalog), // UDT_CATALOG
+						tree.NewDString(col.Type.TypeMeta.Name.Schema),  // UDT_SCHEMA
+						tree.NewDString(col.Type.TypeMeta.Name.Name),    // UDT_NAME
+						dbNameStr,                 // TABLE_CATALOG
+						scNameStr,                 // TABLE_SCHEMA
+						tbNameStr,                 // TABLE_NAME
+						tree.NewDString(col.Name), // COLUMN_NAME
+					)
+				})
+			},
+		)
+	},
+}
+
 var informationSchemaEnabledRoles = virtualSchemaTable{
 	comment: `roles for the current user
-` + base.DocsURL("information-schema.html#enabled_roles") + `
+` + docs.URL("information-schema.html#enabled_roles") + `
 https://www.postgresql.org/docs/9.5/infoschema-enabled-roles.html`,
 	schema: `
 CREATE TABLE information_schema.enabled_roles (
 	ROLE_NAME STRING NOT NULL
 )`,
-	populate: func(ctx context.Context, p *planner, _ *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
-		currentUser := p.SessionData().User
+	populate: func(ctx context.Context, p *planner, _ *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
+		currentUser := p.SessionData().User()
 		memberMap, err := p.MemberOfWithAdminOption(ctx, currentUser)
 		if err != nil {
 			return err
@@ -468,14 +509,14 @@ CREATE TABLE information_schema.enabled_roles (
 
 		// The current user is always listed.
 		if err := addRow(
-			tree.NewDString(currentUser), // role_name: the current user
+			tree.NewDString(currentUser.Normalized()), // role_name: the current user
 		); err != nil {
 			return err
 		}
 
 		for roleName := range memberMap {
 			if err := addRow(
-				tree.NewDString(roleName), // role_name
+				tree.NewDString(roleName.Normalized()), // role_name
 			); err != nil {
 				return err
 			}
@@ -572,9 +613,17 @@ func numericScale(colType *types.T) tree.Datum {
 	})
 }
 
+// datetimePrecision returns the declared or implicit precision of Time,
+// Timestamp or Interval data types. Returns false if the data type is not
+// a Time, Timestamp or Interval.
 func datetimePrecision(colType *types.T) tree.Datum {
-	// We currently do not support a datetime precision.
-	return tree.DNull
+	return dIntFnOrNull(func() (int32, bool) {
+		switch colType.Family() {
+		case types.TimeFamily, types.TimeTZFamily, types.TimestampFamily, types.TimestampTZFamily, types.IntervalFamily:
+			return colType.Precision(), true
+		}
+		return 0, false
+	})
 }
 
 var informationSchemaConstraintColumnUsageTable = virtualSchemaTable{
@@ -590,11 +639,11 @@ CREATE TABLE information_schema.constraint_column_usage (
 	CONSTRAINT_SCHEMA  STRING NOT NULL,
 	CONSTRAINT_NAME    STRING NOT NULL
 )`,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return forEachTableDescWithTableLookup(ctx, p, dbContext, hideVirtual /* no constraints in virtual tables */, func(
-			db *sqlbase.ImmutableDatabaseDescriptor,
+			db *dbdesc.Immutable,
 			scName string,
-			table *sqlbase.ImmutableTableDescriptor,
+			table catalog.TableDescriptor,
 			tableLookup tableLookupFn,
 		) error {
 			conInfo, err := table.GetConstraintInfoWithLookup(tableLookup.getTableByID)
@@ -605,20 +654,20 @@ CREATE TABLE information_schema.constraint_column_usage (
 			dbNameStr := tree.NewDString(db.GetName())
 
 			for conName, con := range conInfo {
-				conTable := table.TableDesc()
+				conTable := table
 				conCols := con.Columns
 				conNameStr := tree.NewDString(conName)
-				if con.Kind == sqlbase.ConstraintTypeFK {
+				if con.Kind == descpb.ConstraintTypeFK {
 					// For foreign key constraint, constraint_column_usage
 					// identifies the table/columns that the foreign key
 					// references.
-					conTable = con.ReferencedTable
+					conTable = tabledesc.NewImmutable(*con.ReferencedTable)
 					conCols, err = conTable.NamesForColumnIDs(con.FK.ReferencedColumnIDs)
 					if err != nil {
 						return err
 					}
 				}
-				tableNameStr := tree.NewDString(conTable.Name)
+				tableNameStr := tree.NewDString(conTable.GetName())
 				for _, col := range conCols {
 					if err := addRow(
 						dbNameStr,            // table_catalog
@@ -641,7 +690,7 @@ CREATE TABLE information_schema.constraint_column_usage (
 // MySQL:    https://dev.mysql.com/doc/refman/5.7/en/key-column-usage-table.html
 var informationSchemaKeyColumnUsageTable = virtualSchemaTable{
 	comment: `column usage by indexes and key constraints
-` + base.DocsURL("information-schema.html#key_column_usage") + `
+` + docs.URL("information-schema.html#key_column_usage") + `
 https://www.postgresql.org/docs/9.5/infoschema-key-column-usage.html`,
 	schema: `
 CREATE TABLE information_schema.key_column_usage (
@@ -655,11 +704,11 @@ CREATE TABLE information_schema.key_column_usage (
 	ORDINAL_POSITION   INT NOT NULL,
 	POSITION_IN_UNIQUE_CONSTRAINT INT
 )`,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return forEachTableDescWithTableLookup(ctx, p, dbContext, hideVirtual /* no constraints in virtual tables */, func(
-			db *sqlbase.ImmutableDatabaseDescriptor,
+			db *dbdesc.Immutable,
 			scName string,
-			table *sqlbase.ImmutableTableDescriptor,
+			table catalog.TableDescriptor,
 			tableLookup tableLookupFn,
 		) error {
 			conInfo, err := table.GetConstraintInfoWithLookup(tableLookup.getTableByID)
@@ -668,13 +717,13 @@ CREATE TABLE information_schema.key_column_usage (
 			}
 			dbNameStr := tree.NewDString(db.GetName())
 			scNameStr := tree.NewDString(scName)
-			tbNameStr := tree.NewDString(table.Name)
+			tbNameStr := tree.NewDString(table.GetName())
 			for conName, con := range conInfo {
 				// Only Primary Key, Foreign Key, and Unique constraints are included.
 				switch con.Kind {
-				case sqlbase.ConstraintTypePK:
-				case sqlbase.ConstraintTypeFK:
-				case sqlbase.ConstraintTypeUnique:
+				case descpb.ConstraintTypePK:
+				case descpb.ConstraintTypeFK:
+				case descpb.ConstraintTypeUnique:
 				default:
 					continue
 				}
@@ -684,7 +733,7 @@ CREATE TABLE information_schema.key_column_usage (
 				for pos, col := range con.Columns {
 					ordinalPos := tree.NewDInt(tree.DInt(pos + 1))
 					uniquePos := tree.DNull
-					if con.Kind == sqlbase.ConstraintTypeFK {
+					if con.Kind == descpb.ConstraintTypeFK {
 						uniquePos = ordinalPos
 					}
 					if err := addRow(
@@ -747,7 +796,7 @@ CREATE TABLE information_schema.parameters (
 	DTD_IDENTIFIER STRING,
 	PARAMETER_DEFAULT STRING
 )`,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return nil
 	},
 }
@@ -757,10 +806,10 @@ var (
 	matchOptionPartial = tree.NewDString("PARTIAL")
 	matchOptionNone    = tree.NewDString("NONE")
 
-	matchOptionMap = map[sqlbase.ForeignKeyReference_Match]tree.Datum{
-		sqlbase.ForeignKeyReference_SIMPLE:  matchOptionNone,
-		sqlbase.ForeignKeyReference_FULL:    matchOptionFull,
-		sqlbase.ForeignKeyReference_PARTIAL: matchOptionPartial,
+	matchOptionMap = map[descpb.ForeignKeyReference_Match]tree.Datum{
+		descpb.ForeignKeyReference_SIMPLE:  matchOptionNone,
+		descpb.ForeignKeyReference_FULL:    matchOptionFull,
+		descpb.ForeignKeyReference_PARTIAL: matchOptionPartial,
 	}
 
 	refConstraintRuleNoAction   = tree.NewDString("NO ACTION")
@@ -770,17 +819,17 @@ var (
 	refConstraintRuleCascade    = tree.NewDString("CASCADE")
 )
 
-func dStringForFKAction(action sqlbase.ForeignKeyReference_Action) tree.Datum {
+func dStringForFKAction(action descpb.ForeignKeyReference_Action) tree.Datum {
 	switch action {
-	case sqlbase.ForeignKeyReference_NO_ACTION:
+	case descpb.ForeignKeyReference_NO_ACTION:
 		return refConstraintRuleNoAction
-	case sqlbase.ForeignKeyReference_RESTRICT:
+	case descpb.ForeignKeyReference_RESTRICT:
 		return refConstraintRuleRestrict
-	case sqlbase.ForeignKeyReference_SET_NULL:
+	case descpb.ForeignKeyReference_SET_NULL:
 		return refConstraintRuleSetNull
-	case sqlbase.ForeignKeyReference_SET_DEFAULT:
+	case descpb.ForeignKeyReference_SET_DEFAULT:
 		return refConstraintRuleSetDefault
-	case sqlbase.ForeignKeyReference_CASCADE:
+	case descpb.ForeignKeyReference_CASCADE:
 		return refConstraintRuleCascade
 	}
 	panic(errors.Errorf("unexpected ForeignKeyReference_Action: %v", action))
@@ -789,7 +838,7 @@ func dStringForFKAction(action sqlbase.ForeignKeyReference_Action) tree.Datum {
 // MySQL:    https://dev.mysql.com/doc/refman/5.7/en/referential-constraints-table.html
 var informationSchemaReferentialConstraintsTable = virtualSchemaTable{
 	comment: `foreign key constraints
-` + base.DocsURL("information-schema.html#referential_constraints") + `
+` + docs.URL("information-schema.html#referential_constraints") + `
 https://www.postgresql.org/docs/9.5/infoschema-referential-constraints.html`,
 	schema: `
 CREATE TABLE information_schema.referential_constraints (
@@ -805,18 +854,17 @@ CREATE TABLE information_schema.referential_constraints (
 	TABLE_NAME                STRING NOT NULL,
 	REFERENCED_TABLE_NAME     STRING NOT NULL
 )`,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return forEachTableDescWithTableLookup(ctx, p, dbContext, hideVirtual /* no constraints in virtual tables */, func(
-			db *sqlbase.ImmutableDatabaseDescriptor,
+			db *dbdesc.Immutable,
 			scName string,
-			table *sqlbase.ImmutableTableDescriptor,
+			table catalog.TableDescriptor,
 			tableLookup tableLookupFn,
 		) error {
 			dbNameStr := tree.NewDString(db.GetName())
 			scNameStr := tree.NewDString(scName)
-			tbNameStr := tree.NewDString(table.Name)
-			for i := range table.OutboundFKs {
-				fk := &table.OutboundFKs[i]
+			tbNameStr := tree.NewDString(table.GetName())
+			return table.ForeachOutboundFK(func(fk *descpb.ForeignKeyConstraint) error {
 				refTable, err := tableLookup.getTableByID(fk.ReferencedTableID)
 				if err != nil {
 					return err
@@ -825,11 +873,11 @@ CREATE TABLE information_schema.referential_constraints (
 				if r, ok := matchOptionMap[fk.Match]; ok {
 					matchType = r
 				}
-				referencedIdx, err := sqlbase.FindFKReferencedIndex(refTable, fk.ReferencedColumnIDs)
+				referencedIdx, err := tabledesc.FindFKReferencedIndex(refTable, fk.ReferencedColumnIDs)
 				if err != nil {
 					return err
 				}
-				if err := addRow(
+				return addRow(
 					dbNameStr,                           // constraint_catalog
 					scNameStr,                           // constraint_schema
 					tree.NewDString(fk.Name),            // constraint_name
@@ -840,12 +888,9 @@ CREATE TABLE information_schema.referential_constraints (
 					dStringForFKAction(fk.OnUpdate),     // update_rule
 					dStringForFKAction(fk.OnDelete),     // delete_rule
 					tbNameStr,                           // table_name
-					tree.NewDString(refTable.Name),      // referenced_table_name
-				); err != nil {
-					return err
-				}
-			}
-			return nil
+					tree.NewDString(refTable.GetName()), // referenced_table_name
+				)
+			})
 		})
 	},
 }
@@ -854,7 +899,7 @@ CREATE TABLE information_schema.referential_constraints (
 // MySQL:    missing
 var informationSchemaRoleTableGrants = virtualSchemaTable{
 	comment: `privileges granted on table or views (incomplete; see also information_schema.table_privileges; may contain excess users or roles)
-` + base.DocsURL("information-schema.html#role_table_grants") + `
+` + docs.URL("information-schema.html#role_table_grants") + `
 https://www.postgresql.org/docs/9.5/infoschema-role-table-grants.html`,
 	schema: `
 CREATE TABLE information_schema.role_table_grants (
@@ -961,7 +1006,7 @@ CREATE TABLE information_schema.routines (
 	RESULT_CAST_MAXIMUM_CARDINALITY INT,
 	RESULT_CAST_DTD_IDENTIFIER STRING
 )`,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return nil
 	},
 }
@@ -969,19 +1014,90 @@ CREATE TABLE information_schema.routines (
 // MySQL:    https://dev.mysql.com/doc/refman/5.7/en/schemata-table.html
 var informationSchemaSchemataTable = virtualSchemaTable{
 	comment: `database schemas (may contain schemata without permission)
-` + base.DocsURL("information-schema.html#schemata") + `
+` + docs.URL("information-schema.html#schemata") + `
 https://www.postgresql.org/docs/9.5/infoschema-schemata.html`,
 	schema: vtable.InformationSchemaSchemata,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return forEachDatabaseDesc(ctx, p, dbContext, true, /* requiresPrivileges */
-			func(db *sqlbase.ImmutableDatabaseDescriptor) error {
-				return forEachSchemaName(ctx, p, db, func(sc string) error {
+			func(db *dbdesc.Immutable) error {
+				return forEachSchema(ctx, p, db, func(sc catalog.ResolvedSchema) error {
 					return addRow(
 						tree.NewDString(db.GetName()), // catalog_name
-						tree.NewDString(sc),           // schema_name
+						tree.NewDString(sc.Name),      // schema_name
 						tree.DNull,                    // default_character_set_name
 						tree.DNull,                    // sql_path
+						yesOrNoDatum(sc.Kind == catalog.SchemaUserDefined), // crdb_is_user_defined
 					)
+				})
+			})
+	},
+}
+
+// Custom; PostgreSQL has data_type_privileges, which only shows one row per type,
+// which may result in confusing semantics for the user compared to this table
+// which has one row for each grantee.
+var informationSchemaTypePrivilegesTable = virtualSchemaTable{
+	comment: `type privileges (incomplete; may contain excess users or roles)
+` + docs.URL("information-schema.html#type_privileges"),
+	schema: `
+CREATE TABLE information_schema.type_privileges (
+	GRANTEE         STRING NOT NULL,
+	TYPE_CATALOG    STRING NOT NULL,
+	TYPE_SCHEMA     STRING NOT NULL,
+	TYPE_NAME       STRING NOT NULL,
+	PRIVILEGE_TYPE  STRING NOT NULL
+)`,
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
+		return forEachDatabaseDesc(ctx, p, dbContext, true, /* requiresPrivileges */
+			func(db *dbdesc.Immutable) error {
+				dbNameStr := tree.NewDString(db.GetName())
+				pgCatalogStr := tree.NewDString("pg_catalog")
+
+				// Generate one for each existing type.
+				for _, typ := range types.OidToType {
+					for _, it := range []struct {
+						grantee   *tree.DString
+						privilege *tree.DString
+					}{
+						{tree.NewDString(security.RootUser), tree.NewDString(privilege.ALL.String())},
+						{tree.NewDString(security.AdminRole), tree.NewDString(privilege.ALL.String())},
+						{tree.NewDString(security.PublicRole), tree.NewDString(privilege.USAGE.String())},
+					} {
+						typeNameStr := tree.NewDString(typ.Name())
+						if err := addRow(
+							it.grantee,
+							dbNameStr,
+							pgCatalogStr,
+							typeNameStr,
+							it.privilege,
+						); err != nil {
+							return err
+						}
+					}
+				}
+
+				// And for all user defined types.
+				return forEachTypeDesc(ctx, p, db, func(db *dbdesc.Immutable, sc string, typeDesc *typedesc.Immutable) error {
+					scNameStr := tree.NewDString(sc)
+					typeNameStr := tree.NewDString(typeDesc.Name)
+					// TODO(knz): This should filter for the current user, see
+					// https://github.com/cockroachdb/cockroach/issues/35572
+					privs := typeDesc.TypeDescriptor.GetPrivileges().Show(privilege.Type)
+					for _, u := range privs {
+						userNameStr := tree.NewDString(u.User.Normalized())
+						for _, priv := range u.Privileges {
+							if err := addRow(
+								userNameStr,           // grantee
+								dbNameStr,             // type_catalog
+								scNameStr,             // type_schema
+								typeNameStr,           // type_name
+								tree.NewDString(priv), // privilege_type
+							); err != nil {
+								return err
+							}
+						}
+					}
+					return nil
 				})
 			})
 	},
@@ -990,7 +1106,7 @@ https://www.postgresql.org/docs/9.5/infoschema-schemata.html`,
 // MySQL:    https://dev.mysql.com/doc/refman/5.7/en/schema-privileges-table.html
 var informationSchemaSchemataTablePrivileges = virtualSchemaTable{
 	comment: `schema privileges (incomplete; may contain excess users or roles)
-` + base.DocsURL("information-schema.html#schema_privileges"),
+` + docs.URL("information-schema.html#schema_privileges"),
 	schema: `
 CREATE TABLE information_schema.schema_privileges (
 	GRANTEE         STRING NOT NULL,
@@ -999,17 +1115,24 @@ CREATE TABLE information_schema.schema_privileges (
 	PRIVILEGE_TYPE  STRING NOT NULL,
 	IS_GRANTABLE    STRING
 )`,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return forEachDatabaseDesc(ctx, p, dbContext, true, /* requiresPrivileges */
-			func(db *sqlbase.ImmutableDatabaseDescriptor) error {
-				return forEachSchemaName(ctx, p, db, func(scName string) error {
-					privs := db.Privileges.Show()
+			func(db *dbdesc.Immutable) error {
+				return forEachSchema(ctx, p, db, func(sc catalog.ResolvedSchema) error {
+					var privs []descpb.UserPrivilegeString
+					if sc.Kind == catalog.SchemaUserDefined {
+						// User defined schemas have their own privileges.
+						privs = sc.Desc.GetPrivileges().Show(privilege.Schema)
+					} else {
+						// Other schemas inherit from the parent database.
+						privs = db.Privileges.Show(privilege.Schema)
+					}
 					dbNameStr := tree.NewDString(db.GetName())
-					scNameStr := tree.NewDString(scName)
+					scNameStr := tree.NewDString(sc.Name)
 					// TODO(knz): This should filter for the current user, see
 					// https://github.com/cockroachdb/cockroach/issues/35572
 					for _, u := range privs {
-						userNameStr := tree.NewDString(u.User)
+						userNameStr := tree.NewDString(u.User.Normalized())
 						for _, priv := range u.Privileges {
 							if err := addRow(
 								userNameStr,           // grantee
@@ -1030,15 +1153,15 @@ CREATE TABLE information_schema.schema_privileges (
 
 var (
 	indexDirectionNA   = tree.NewDString("N/A")
-	indexDirectionAsc  = tree.NewDString(sqlbase.IndexDescriptor_ASC.String())
-	indexDirectionDesc = tree.NewDString(sqlbase.IndexDescriptor_DESC.String())
+	indexDirectionAsc  = tree.NewDString(descpb.IndexDescriptor_ASC.String())
+	indexDirectionDesc = tree.NewDString(descpb.IndexDescriptor_DESC.String())
 )
 
-func dStringForIndexDirection(dir sqlbase.IndexDescriptor_Direction) tree.Datum {
+func dStringForIndexDirection(dir descpb.IndexDescriptor_Direction) tree.Datum {
 	switch dir {
-	case sqlbase.IndexDescriptor_ASC:
+	case descpb.IndexDescriptor_ASC:
 		return indexDirectionAsc
-	case sqlbase.IndexDescriptor_DESC:
+	case descpb.IndexDescriptor_DESC:
 		return indexDirectionDesc
 	}
 	panic("unreachable")
@@ -1046,7 +1169,7 @@ func dStringForIndexDirection(dir sqlbase.IndexDescriptor_Direction) tree.Datum 
 
 var informationSchemaSequences = virtualSchemaTable{
 	comment: `sequences
-` + base.DocsURL("information-schema.html#sequences") + `
+` + docs.URL("information-schema.html#sequences") + `
 https://www.postgresql.org/docs/9.5/infoschema-sequences.html`,
 	schema: `
 CREATE TABLE information_schema.sequences (
@@ -1063,9 +1186,9 @@ CREATE TABLE information_schema.sequences (
     INCREMENT                STRING NOT NULL,
     CYCLE_OPTION             STRING NOT NULL
 )`,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return forEachTableDesc(ctx, p, dbContext, hideVirtual, /* no sequences in virtual schemas */
-			func(db *sqlbase.ImmutableDatabaseDescriptor, scName string, table *sqlbase.ImmutableTableDescriptor) error {
+			func(db *dbdesc.Immutable, scName string, table catalog.TableDescriptor) error {
 				if !table.IsSequence() {
 					return nil
 				}
@@ -1077,10 +1200,10 @@ CREATE TABLE information_schema.sequences (
 					tree.NewDInt(64),                 // numeric precision
 					tree.NewDInt(2),                  // numeric precision radix
 					tree.NewDInt(0),                  // numeric scale
-					tree.NewDString(strconv.FormatInt(table.SequenceOpts.Start, 10)),     // start value
-					tree.NewDString(strconv.FormatInt(table.SequenceOpts.MinValue, 10)),  // min value
-					tree.NewDString(strconv.FormatInt(table.SequenceOpts.MaxValue, 10)),  // max value
-					tree.NewDString(strconv.FormatInt(table.SequenceOpts.Increment, 10)), // increment
+					tree.NewDString(strconv.FormatInt(table.GetSequenceOpts().Start, 10)),     // start value
+					tree.NewDString(strconv.FormatInt(table.GetSequenceOpts().MinValue, 10)),  // min value
+					tree.NewDString(strconv.FormatInt(table.GetSequenceOpts().MaxValue, 10)),  // max value
+					tree.NewDString(strconv.FormatInt(table.GetSequenceOpts().Increment, 10)), // increment
 					noString, // cycle
 				)
 			})
@@ -1091,7 +1214,7 @@ CREATE TABLE information_schema.sequences (
 // MySQL:    https://dev.mysql.com/doc/refman/5.7/en/statistics-table.html
 var informationSchemaStatisticsTable = virtualSchemaTable{
 	comment: `index metadata and statistics (incomplete)
-` + base.DocsURL("information-schema.html#statistics"),
+` + docs.URL("information-schema.html#statistics"),
 	schema: `
 CREATE TABLE information_schema.statistics (
 	TABLE_CATALOG STRING NOT NULL,
@@ -1108,14 +1231,14 @@ CREATE TABLE information_schema.statistics (
 	STORING       STRING NOT NULL,
 	IMPLICIT      STRING NOT NULL
 )`,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return forEachTableDesc(ctx, p, dbContext, hideVirtual, /* virtual tables have no indexes */
-			func(db *sqlbase.ImmutableDatabaseDescriptor, scName string, table *sqlbase.ImmutableTableDescriptor) error {
+			func(db *dbdesc.Immutable, scName string, table catalog.TableDescriptor) error {
 				dbNameStr := tree.NewDString(db.GetName())
 				scNameStr := tree.NewDString(scName)
 				tbNameStr := tree.NewDString(table.GetName())
 
-				appendRow := func(index *sqlbase.IndexDescriptor, colName string, sequence int,
+				appendRow := func(index *descpb.IndexDescriptor, colName string, sequence int,
 					direction tree.Datum, isStored, isImplicit bool,
 				) error {
 					return addRow(
@@ -1135,7 +1258,7 @@ CREATE TABLE information_schema.statistics (
 					)
 				}
 
-				return forEachIndexInTable(table, func(index *sqlbase.IndexDescriptor) error {
+				return table.ForeachIndex(catalog.IndexOpts{}, func(index *descpb.IndexDescriptor, _ bool) error {
 					// Columns in the primary key that aren't in index.ColumnNames or
 					// index.StoreColumnNames are implicit columns in the index.
 					var implicitCols map[string]struct{}
@@ -1150,7 +1273,7 @@ CREATE TABLE information_schema.statistics (
 					}
 					if hasImplicitCols {
 						implicitCols = make(map[string]struct{})
-						for _, col := range table.PrimaryIndex.ColumnNames {
+						for _, col := range table.GetPrimaryIndex().ColumnNames {
 							implicitCols[col] = struct{}{}
 						}
 					}
@@ -1191,7 +1314,7 @@ CREATE TABLE information_schema.statistics (
 // MySQL:    https://dev.mysql.com/doc/refman/5.7/en/table-constraints-table.html
 var informationSchemaTableConstraintTable = virtualSchemaTable{
 	comment: `table constraints
-` + base.DocsURL("information-schema.html#table_constraints") + `
+` + docs.URL("information-schema.html#table_constraints") + `
 https://www.postgresql.org/docs/9.5/infoschema-table-constraints.html`,
 	schema: `
 CREATE TABLE information_schema.table_constraints (
@@ -1205,13 +1328,13 @@ CREATE TABLE information_schema.table_constraints (
 	IS_DEFERRABLE      STRING NOT NULL,
 	INITIALLY_DEFERRED STRING NOT NULL
 )`,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		h := makeOidHasher()
 		return forEachTableDescWithTableLookup(ctx, p, dbContext, hideVirtual, /* virtual tables have no constraints */
 			func(
-				db *sqlbase.ImmutableDatabaseDescriptor,
+				db *dbdesc.Immutable,
 				scName string,
-				table *sqlbase.ImmutableTableDescriptor,
+				table catalog.TableDescriptor,
 				tableLookup tableLookupFn,
 			) error {
 				conInfo, err := table.GetConstraintInfoWithLookup(tableLookup.getTableByID)
@@ -1221,7 +1344,7 @@ CREATE TABLE information_schema.table_constraints (
 
 				dbNameStr := tree.NewDString(db.GetName())
 				scNameStr := tree.NewDString(scName)
-				tbNameStr := tree.NewDString(table.Name)
+				tbNameStr := tree.NewDString(table.GetName())
 
 				for conName, c := range conInfo {
 					if err := addRow(
@@ -1244,11 +1367,11 @@ CREATE TABLE information_schema.table_constraints (
 				// Cockroach doesn't track these constraints as check constraints,
 				// but we can pull them off of the table's column descriptors.
 				colNum := 0
-				return forEachColumnInTable(table, func(col *sqlbase.ColumnDescriptor) error {
+				return table.ForeachPublicColumn(func(col *descpb.ColumnDescriptor) error {
 					colNum++
 					// NOT NULL column constraints are implemented as a CHECK in postgres.
 					conNameStr := tree.NewDString(fmt.Sprintf(
-						"%s_%s_%d_not_null", h.NamespaceOid(db, scName), tableOid(table.ID), colNum,
+						"%s_%s_%d_not_null", h.NamespaceOid(db.GetID(), scName), tableOid(table.GetID()), colNum,
 					))
 					if !col.Nullable {
 						if err := addRow(
@@ -1283,13 +1406,13 @@ CREATE TABLE information_schema.user_privileges (
 	PRIVILEGE_TYPE STRING NOT NULL,
 	IS_GRANTABLE   STRING
 )`,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return forEachDatabaseDesc(ctx, p, dbContext, true, /* requiresPrivileges */
-			func(dbDesc *sqlbase.ImmutableDatabaseDescriptor) error {
+			func(dbDesc *dbdesc.Immutable) error {
 				dbNameStr := tree.NewDString(dbDesc.GetName())
-				for _, u := range []string{security.RootUser, sqlbase.AdminRole} {
+				for _, u := range []string{security.RootUser, security.AdminRole} {
 					grantee := tree.NewDString(u)
-					for _, p := range privilege.List(privilege.ByValue[:]).SortedNames() {
+					for _, p := range privilege.DBTablePrivileges.SortedNames() {
 						if err := addRow(
 							grantee,            // grantee
 							dbNameStr,          // table_catalog
@@ -1308,7 +1431,7 @@ CREATE TABLE information_schema.user_privileges (
 // MySQL:    https://dev.mysql.com/doc/refman/5.7/en/table-privileges-table.html
 var informationSchemaTablePrivileges = virtualSchemaTable{
 	comment: `privileges granted on table or views (incomplete; may contain excess users or roles)
-` + base.DocsURL("information-schema.html#table_privileges") + `
+` + docs.URL("information-schema.html#table_privileges") + `
 https://www.postgresql.org/docs/9.5/infoschema-table-privileges.html`,
 	schema: `
 CREATE TABLE information_schema.table_privileges (
@@ -1326,29 +1449,26 @@ CREATE TABLE information_schema.table_privileges (
 
 // populateTablePrivileges is used to populate both table_privileges and role_table_grants.
 func populateTablePrivileges(
-	ctx context.Context,
-	p *planner,
-	dbContext *sqlbase.ImmutableDatabaseDescriptor,
-	addRow func(...tree.Datum) error,
+	ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error,
 ) error {
 	return forEachTableDesc(ctx, p, dbContext, virtualMany,
-		func(db *sqlbase.ImmutableDatabaseDescriptor, scName string, table *sqlbase.ImmutableTableDescriptor) error {
+		func(db *dbdesc.Immutable, scName string, table catalog.TableDescriptor) error {
 			dbNameStr := tree.NewDString(db.GetName())
 			scNameStr := tree.NewDString(scName)
-			tbNameStr := tree.NewDString(table.Name)
+			tbNameStr := tree.NewDString(table.GetName())
 			// TODO(knz): This should filter for the current user, see
 			// https://github.com/cockroachdb/cockroach/issues/35572
-			for _, u := range table.Privileges.Show() {
+			for _, u := range table.GetPrivileges().Show(privilege.Table) {
 				for _, priv := range u.Privileges {
 					if err := addRow(
-						tree.DNull,                     // grantor
-						tree.NewDString(u.User),        // grantee
-						dbNameStr,                      // table_catalog
-						scNameStr,                      // table_schema
-						tbNameStr,                      // table_name
-						tree.NewDString(priv),          // privilege_type
-						tree.DNull,                     // is_grantable
-						yesOrNoDatum(priv == "SELECT"), // with_hierarchy
+						tree.DNull,                           // grantor
+						tree.NewDString(u.User.Normalized()), // grantee
+						dbNameStr,                            // table_catalog
+						scNameStr,                            // table_schema
+						tbNameStr,                            // table_name
+						tree.NewDString(priv),                // privilege_type
+						tree.DNull,                           // is_grantable
+						yesOrNoDatum(priv == "SELECT"),       // with_hierarchy
 					); err != nil {
 						return err
 					}
@@ -1367,39 +1487,22 @@ var (
 
 var informationSchemaTablesTable = virtualSchemaTable{
 	comment: `tables and views
-` + base.DocsURL("information-schema.html#tables") + `
+` + docs.URL("information-schema.html#tables") + `
 https://www.postgresql.org/docs/9.5/infoschema-tables.html`,
 	schema: vtable.InformationSchemaTables,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return forEachTableDesc(ctx, p, dbContext, virtualMany, addTablesTableRow(addRow))
-	},
-	indexes: []virtualIndex{
-		{
-			populate: func(ctx context.Context, constraint tree.Datum, p *planner, db *sqlbase.ImmutableDatabaseDescriptor,
-				addRow func(...tree.Datum) error) (bool, error) {
-				// This index is on the TABLE_NAME column.
-				name := tree.MustBeDString(constraint)
-				flags := tree.ObjectLookupFlags{}
-				flags.DesiredTableDescKind = tree.ResolveAnyTableKind
-				desc, err := resolver.ResolveExistingTableObject(ctx, p, tree.NewUnqualifiedTableName(tree.Name(name)), flags)
-				if err != nil || desc == nil {
-					return false, err
-				}
-				schemaName, err := resolver.ResolveSchemaNameByID(ctx, p.txn, p.ExecCfg().Codec, db.GetID(), desc.GetParentSchemaID())
-				if err != nil {
-					return false, err
-				}
-				return true, addTablesTableRow(addRow)(db, schemaName, desc)
-			},
-		},
 	},
 }
 
 func addTablesTableRow(
 	addRow func(...tree.Datum) error,
-) func(db *sqlbase.ImmutableDatabaseDescriptor, scName string,
-	table *sqlbase.ImmutableTableDescriptor) error {
-	return func(db *sqlbase.ImmutableDatabaseDescriptor, scName string, table *sqlbase.ImmutableTableDescriptor) error {
+) func(
+	db *dbdesc.Immutable,
+	scName string,
+	table catalog.TableDescriptor,
+) error {
+	return func(db *dbdesc.Immutable, scName string, table catalog.TableDescriptor) error {
 		if table.IsSequence() {
 			return nil
 		}
@@ -1411,19 +1514,19 @@ func addTablesTableRow(
 		} else if table.IsView() {
 			tableType = tableTypeView
 			insertable = noString
-		} else if table.Temporary {
+		} else if table.IsTemporary() {
 			tableType = tableTypeTemporary
 		}
 		dbNameStr := tree.NewDString(db.GetName())
 		scNameStr := tree.NewDString(scName)
-		tbNameStr := tree.NewDString(table.Name)
+		tbNameStr := tree.NewDString(table.GetName())
 		return addRow(
-			dbNameStr,                              // table_catalog
-			scNameStr,                              // table_schema
-			tbNameStr,                              // table_name
-			tableType,                              // table_type
-			insertable,                             // is_insertable_into
-			tree.NewDInt(tree.DInt(table.Version)), // version
+			dbNameStr,  // table_catalog
+			scNameStr,  // table_schema
+			tbNameStr,  // table_name
+			tableType,  // table_type
+			insertable, // is_insertable_into
+			tree.NewDInt(tree.DInt(table.GetVersion())), // version
 		)
 	}
 }
@@ -1432,7 +1535,7 @@ func addTablesTableRow(
 // MySQL:    https://dev.mysql.com/doc/refman/5.7/en/views-table.html
 var informationSchemaViewsTable = virtualSchemaTable{
 	comment: `views (incomplete)
-` + base.DocsURL("information-schema.html#views") + `
+` + docs.URL("information-schema.html#views") + `
 https://www.postgresql.org/docs/9.5/infoschema-views.html`,
 	schema: `
 CREATE TABLE information_schema.views (
@@ -1447,9 +1550,9 @@ CREATE TABLE information_schema.views (
     IS_TRIGGER_DELETABLE       STRING NOT NULL,
     IS_TRIGGER_INSERTABLE_INTO STRING NOT NULL
 )`,
-	populate: func(ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor, addRow func(...tree.Datum) error) error {
+	populate: func(ctx context.Context, p *planner, dbContext *dbdesc.Immutable, addRow func(...tree.Datum) error) error {
 		return forEachTableDesc(ctx, p, dbContext, hideVirtual, /* virtual schemas have no views */
-			func(db *sqlbase.ImmutableDatabaseDescriptor, scName string, table *sqlbase.ImmutableTableDescriptor) error {
+			func(db *dbdesc.Immutable, scName string, table catalog.TableDescriptor) error {
 				if !table.IsView() {
 					return nil
 				}
@@ -1462,43 +1565,88 @@ CREATE TABLE information_schema.views (
 				// TODO(a-robinson): Insert column aliases into view query once we
 				// have a semantic query representation to work with (#10083).
 				return addRow(
-					tree.NewDString(db.GetName()),    // table_catalog
-					tree.NewDString(scName),          // table_schema
-					tree.NewDString(table.Name),      // table_name
-					tree.NewDString(table.ViewQuery), // view_definition
-					tree.DNull,                       // check_option
-					noString,                         // is_updatable
-					noString,                         // is_insertable_into
-					noString,                         // is_trigger_updatable
-					noString,                         // is_trigger_deletable
-					noString,                         // is_trigger_insertable_into
+					tree.NewDString(db.GetName()),         // table_catalog
+					tree.NewDString(scName),               // table_schema
+					tree.NewDString(table.GetName()),      // table_name
+					tree.NewDString(table.GetViewQuery()), // view_definition
+					tree.DNull,                            // check_option
+					noString,                              // is_updatable
+					noString,                              // is_insertable_into
+					noString,                              // is_trigger_updatable
+					noString,                              // is_trigger_deletable
+					noString,                              // is_trigger_insertable_into
 				)
 			})
 	},
 }
 
-// forEachSchemaName iterates over the physical and virtual schemas.
-func forEachSchemaName(
-	ctx context.Context, p *planner, db *sqlbase.ImmutableDatabaseDescriptor, fn func(string) error,
+// forEachSchema iterates over the physical and virtual schemas.
+func forEachSchema(
+	ctx context.Context, p *planner, db *dbdesc.Immutable, fn func(sc catalog.ResolvedSchema) error,
 ) error {
-	schemaNames, err := getSchemaNames(ctx, p, db)
+	schemaNames, err := getSchemaNames(ctx, p, db, false /* allowMissingDesc */)
 	if err != nil {
 		return err
 	}
+
 	vtableEntries := p.getVirtualTabler().getEntries()
-	scNames := make([]string, 0, len(schemaNames)+len(vtableEntries))
-	for _, name := range schemaNames {
-		scNames = append(scNames, name)
+	schemas := make([]catalog.ResolvedSchema, 0, len(schemaNames)+len(vtableEntries))
+	var userDefinedSchemaIDs []descpb.ID
+	for id, name := range schemaNames {
+		switch {
+		case strings.HasPrefix(name, sessiondata.PgTempSchemaName):
+			schemas = append(schemas, catalog.ResolvedSchema{
+				Name: name,
+				ID:   id,
+				Kind: catalog.SchemaTemporary,
+			})
+		case name == tree.PublicSchema:
+			schemas = append(schemas, catalog.ResolvedSchema{
+				Name: name,
+				ID:   id,
+				Kind: catalog.SchemaPublic,
+			})
+		default:
+			// The default case is a user defined schema. Collect the ID to get the
+			// descriptor later.
+			userDefinedSchemaIDs = append(userDefinedSchemaIDs, id)
+		}
 	}
+
+	userDefinedSchemas, err := catalogkv.GetSchemaDescriptorsFromIDs(ctx, p.txn, p.ExecCfg().Codec, userDefinedSchemaIDs)
+	if err != nil {
+		return err
+	}
+	for i := range userDefinedSchemas {
+		desc := userDefinedSchemas[i]
+		if !userCanSeeDescriptor(ctx, p, desc, false /* allowAdding */) {
+			continue
+		}
+		schemas = append(schemas, catalog.ResolvedSchema{
+			Name: desc.GetName(),
+			ID:   desc.GetID(),
+			Kind: catalog.SchemaUserDefined,
+			Desc: desc,
+		})
+	}
+
 	for _, schema := range vtableEntries {
-		scNames = append(scNames, schema.desc.GetName())
+		schemas = append(schemas, catalog.ResolvedSchema{
+			Name: schema.desc.Name,
+			Kind: catalog.SchemaVirtual,
+		})
 	}
-	sort.Strings(scNames)
-	for _, sc := range scNames {
+
+	sort.Slice(schemas, func(i int, j int) bool {
+		return schemas[i].Name < schemas[j].Name
+	})
+
+	for _, sc := range schemas {
 		if err := fn(sc); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -1509,13 +1657,15 @@ func forEachSchemaName(
 func forEachDatabaseDesc(
 	ctx context.Context,
 	p *planner,
-	dbContext *sqlbase.ImmutableDatabaseDescriptor,
+	dbContext *dbdesc.Immutable,
 	requiresPrivileges bool,
-	fn func(*sqlbase.ImmutableDatabaseDescriptor) error,
+	fn func(*dbdesc.Immutable) error,
 ) error {
-	var dbDescs []*sqlbase.ImmutableDatabaseDescriptor
+	var dbDescs []*dbdesc.Immutable
 	if dbContext == nil {
-		allDbDescs, err := p.Tables().GetAllDatabaseDescriptors(ctx, p.txn)
+		allDbDescs, err := p.Descriptors().GetAllDatabaseDescriptors(
+			ctx, p.txn, false, /* allowMissingDesc */
+		)
 		if err != nil {
 			return err
 		}
@@ -1523,8 +1673,13 @@ func forEachDatabaseDesc(
 	} else {
 		// We can't just use dbContext here because we need to fetch the descriptor
 		// with privileges from kv.
-		fetchedDbDesc, err := catalogkv.GetDatabaseDescriptorsFromIDs(ctx, p.txn, p.ExecCfg().Codec, []sqlbase.ID{dbContext.GetID()})
+		fetchedDbDesc, err := catalogkv.GetDatabaseDescriptorsFromIDs(
+			ctx, p.txn, p.ExecCfg().Codec, []descpb.ID{dbContext.GetID()}, false, /* allowMissingDesc */
+		)
 		if err != nil {
+			if errors.Is(err, catalog.ErrDescriptorNotFound) {
+				return pgerror.Newf(pgcode.UndefinedDatabase, "database %s does not exist", dbContext.GetName())
+			}
 			return err
 		}
 		dbDescs = fetchedDbDesc
@@ -1532,7 +1687,7 @@ func forEachDatabaseDesc(
 
 	// Ignore databases that the user cannot see.
 	for _, dbDesc := range dbDescs {
-		if !requiresPrivileges || userCanSeeDatabase(ctx, p, dbDesc) {
+		if !requiresPrivileges || userCanSeeDescriptor(ctx, p, dbDesc, false /* allowAdding */) {
 			if err := fn(dbDesc); err != nil {
 				return err
 			}
@@ -1548,18 +1703,19 @@ func forEachDatabaseDesc(
 func forEachTypeDesc(
 	ctx context.Context,
 	p *planner,
-	dbContext *sqlbase.ImmutableDatabaseDescriptor,
-	fn func(db *sqlbase.ImmutableDatabaseDescriptor, sc string, typ *sqlbase.ImmutableTypeDescriptor) error,
+	dbContext *dbdesc.Immutable,
+	fn func(db *dbdesc.Immutable, sc string, typ *typedesc.Immutable) error,
 ) error {
-	descs, err := p.Tables().GetAllDescriptors(ctx, p.txn)
+	descs, err := p.Descriptors().GetAllDescriptors(ctx, p.txn, true /* validate */)
 	if err != nil {
 		return err
 	}
-	schemaNames, err := getSchemaNames(ctx, p, dbContext)
+	schemaNames, err := getSchemaNames(ctx, p, dbContext, false /* allowMissingDesc */)
 	if err != nil {
 		return err
 	}
-	lCtx := newInternalLookupCtx(descs, dbContext)
+	lCtx := newInternalLookupCtx(ctx, descs, dbContext,
+		catalogkv.NewOneLevelUncachedDescGetter(p.txn, p.execCfg.Codec))
 	for _, id := range lCtx.typIDs {
 		typ := lCtx.typDescs[id]
 		dbDesc, parentExists := lCtx.dbDescs[typ.ParentID]
@@ -1569,6 +1725,9 @@ func forEachTypeDesc(
 		scName, ok := schemaNames[typ.GetParentSchemaID()]
 		if !ok {
 			return errors.AssertionFailedf("schema id %d not found", typ.GetParentSchemaID())
+		}
+		if !userCanSeeDescriptor(ctx, p, typ, false /* allowAdding */) {
+			continue
 		}
 		if err := fn(dbDesc, scName, typ); err != nil {
 			return err
@@ -1592,15 +1751,14 @@ func forEachTypeDesc(
 func forEachTableDesc(
 	ctx context.Context,
 	p *planner,
-	dbContext *sqlbase.ImmutableDatabaseDescriptor,
+	dbContext *dbdesc.Immutable,
 	virtualOpts virtualOpts,
-	// TODO(ajwerner): Introduce TableDescriptorInterface.
-	fn func(*sqlbase.ImmutableDatabaseDescriptor, string, *sqlbase.ImmutableTableDescriptor) error,
+	fn func(*dbdesc.Immutable, string, catalog.TableDescriptor) error,
 ) error {
 	return forEachTableDescWithTableLookup(ctx, p, dbContext, virtualOpts, func(
-		db *sqlbase.ImmutableDatabaseDescriptor,
+		db *dbdesc.Immutable,
 		scName string,
-		table *sqlbase.ImmutableTableDescriptor,
+		table catalog.TableDescriptor,
 		_ tableLookupFn,
 	) error {
 		return fn(db, scName, table)
@@ -1623,16 +1781,16 @@ const (
 func forEachTableDescAll(
 	ctx context.Context,
 	p *planner,
-	dbContext *sqlbase.ImmutableDatabaseDescriptor,
+	dbContext *dbdesc.Immutable,
 	virtualOpts virtualOpts,
-	fn func(*sqlbase.ImmutableDatabaseDescriptor, string, *sqlbase.ImmutableTableDescriptor) error,
+	fn func(*dbdesc.Immutable, string, catalog.TableDescriptor) error,
 ) error {
 	return forEachTableDescAllWithTableLookup(ctx,
-		p, dbContext, virtualOpts,
+		p, dbContext, virtualOpts, true, /* validate */
 		func(
-			db *sqlbase.ImmutableDatabaseDescriptor,
+			db *dbdesc.Immutable,
 			scName string,
-			table *sqlbase.ImmutableTableDescriptor,
+			table catalog.TableDescriptor,
 			_ tableLookupFn,
 		) error {
 			return fn(db, scName, table)
@@ -1640,16 +1798,19 @@ func forEachTableDescAll(
 }
 
 // forEachTableDescAllWithTableLookup is like forEachTableDescAll, but it also
-// provides a tableLookupFn like forEachTableDescWithTableLookup.
+// provides a tableLookupFn like forEachTableDescWithTableLookup. If validate is
+// set to false descriptors will not be validated for existence or consistency
+// hence fn should be able to handle nil-s.
 func forEachTableDescAllWithTableLookup(
 	ctx context.Context,
 	p *planner,
-	dbContext *sqlbase.ImmutableDatabaseDescriptor,
+	dbContext *dbdesc.Immutable,
 	virtualOpts virtualOpts,
-	fn func(*sqlbase.ImmutableDatabaseDescriptor, string, *sqlbase.ImmutableTableDescriptor, tableLookupFn) error,
+	validate bool,
+	fn func(*dbdesc.Immutable, string, catalog.TableDescriptor, tableLookupFn) error,
 ) error {
 	return forEachTableDescWithTableLookupInternal(ctx,
-		p, dbContext, virtualOpts, true /* allowAdding */, fn)
+		p, dbContext, virtualOpts, true /* allowAdding */, validate, fn)
 }
 
 // forEachTableDescWithTableLookup acts like forEachTableDesc, except it also provides a
@@ -1664,26 +1825,34 @@ func forEachTableDescAllWithTableLookup(
 func forEachTableDescWithTableLookup(
 	ctx context.Context,
 	p *planner,
-	dbContext *sqlbase.ImmutableDatabaseDescriptor,
+	dbContext *dbdesc.Immutable,
 	virtualOpts virtualOpts,
-	fn func(*sqlbase.ImmutableDatabaseDescriptor, string, *sqlbase.ImmutableTableDescriptor, tableLookupFn) error,
+	fn func(*dbdesc.Immutable, string, catalog.TableDescriptor, tableLookupFn) error,
 ) error {
-	return forEachTableDescWithTableLookupInternal(ctx, p, dbContext, virtualOpts, false /* allowAdding */, fn)
+	return forEachTableDescWithTableLookupInternal(
+		ctx, p, dbContext, virtualOpts, false /* allowAdding */, true, fn,
+	)
 }
 
 func getSchemaNames(
-	ctx context.Context, p *planner, dbContext *sqlbase.ImmutableDatabaseDescriptor,
-) (map[sqlbase.ID]string, error) {
+	ctx context.Context, p *planner, dbContext *dbdesc.Immutable, allowMissingDesc bool,
+) (map[descpb.ID]string, error) {
 	if dbContext != nil {
-		return p.Tables().GetSchemasForDatabase(ctx, p.txn, dbContext.GetID())
+		return p.Descriptors().GetSchemasForDatabase(ctx, p.txn, dbContext.GetID())
 	}
-	ret := make(map[sqlbase.ID]string)
-	dbs, err := p.Tables().GetAllDatabaseDescriptors(ctx, p.txn)
+	ret := make(map[descpb.ID]string)
+	dbs, err := p.Descriptors().GetAllDatabaseDescriptors(ctx, p.txn, allowMissingDesc)
 	if err != nil {
 		return nil, err
 	}
 	for _, db := range dbs {
-		schemas, err := p.Tables().GetSchemasForDatabase(ctx, p.txn, db.GetID())
+		if db == nil {
+			if allowMissingDesc {
+				continue
+			}
+			return nil, catalog.ErrDescriptorNotFound
+		}
+		schemas, err := p.Descriptors().GetSchemasForDatabase(ctx, p.txn, db.GetID())
 		if err != nil {
 			return nil, err
 		}
@@ -1699,31 +1868,35 @@ func getSchemaNames(
 //
 // The allowAdding argument if true includes newly added tables that
 // are not yet public.
+// The validate argument if false turns off checking if the descriptor ids exist
+// and if they are valid.
 func forEachTableDescWithTableLookupInternal(
 	ctx context.Context,
 	p *planner,
-	dbContext *sqlbase.ImmutableDatabaseDescriptor,
+	dbContext *dbdesc.Immutable,
 	virtualOpts virtualOpts,
 	allowAdding bool,
-	fn func(*sqlbase.ImmutableDatabaseDescriptor, string, *ImmutableTableDescriptor, tableLookupFn) error,
+	validate bool,
+	fn func(*dbdesc.Immutable, string, catalog.TableDescriptor, tableLookupFn) error,
 ) error {
-	descs, err := p.Tables().GetAllDescriptors(ctx, p.txn)
+	descs, err := p.Descriptors().GetAllDescriptors(ctx, p.txn, validate)
 	if err != nil {
 		return err
 	}
-	lCtx := newInternalLookupCtx(descs, dbContext)
+	lCtx := newInternalLookupCtx(ctx, descs, dbContext,
+		catalogkv.NewOneLevelUncachedDescGetter(p.txn, p.execCfg.Codec))
 
 	if virtualOpts == virtualMany || virtualOpts == virtualOnce {
 		// Virtual descriptors first.
 		vt := p.getVirtualTabler()
 		vEntries := vt.getEntries()
 		vSchemaNames := vt.getSchemaNames()
-		iterate := func(dbDesc *sqlbase.ImmutableDatabaseDescriptor) error {
+		iterate := func(dbDesc *dbdesc.Immutable) error {
 			for _, virtSchemaName := range vSchemaNames {
 				e := vEntries[virtSchemaName]
 				for _, tName := range e.orderedDefNames {
 					te := e.defs[tName]
-					if err := fn(dbDesc, virtSchemaName, sqlbase.NewImmutableTableDescriptor(*te.desc), lCtx); err != nil {
+					if err := fn(dbDesc, virtSchemaName, te.desc, lCtx); err != nil {
 						return err
 					}
 				}
@@ -1747,7 +1920,7 @@ func forEachTableDescWithTableLookupInternal(
 	}
 
 	// Generate all schema names, and keep a mapping.
-	schemaNames, err := getSchemaNames(ctx, p, dbContext)
+	schemaNames, err := getSchemaNames(ctx, p, dbContext, !validate)
 	if err != nil {
 		return err
 	}
@@ -1755,63 +1928,19 @@ func forEachTableDescWithTableLookupInternal(
 	// Physical descriptors next.
 	for _, tbID := range lCtx.tbIDs {
 		table := lCtx.tbDescs[tbID]
-		tableDesc := table.TableDesc()
-		dbDesc, parentExists := lCtx.dbDescs[tableDesc.GetParentID()]
-		if tableDesc.Dropped() || !userCanSeeTable(ctx, p, table, allowAdding) || !parentExists {
+		if table.Dropped() || !userCanSeeDescriptor(ctx, p, table, allowAdding) {
 			continue
 		}
-		scName, ok := schemaNames[tableDesc.GetParentSchemaID()]
-		if !ok {
-			return errors.AssertionFailedf("schema id %d not found", tableDesc.GetParentSchemaID())
+		var scName string
+		dbDesc, parentExists := lCtx.dbDescs[table.GetParentID()]
+		if parentExists {
+			var ok bool
+			scName, ok = schemaNames[table.GetParentSchemaID()]
+			if !ok && validate {
+				return errors.AssertionFailedf("schema id %d not found", table.GetParentSchemaID())
+			}
 		}
 		if err := fn(dbDesc, scName, table, lCtx); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func forEachIndexInTable(
-	table *sqlbase.ImmutableTableDescriptor, fn func(*sqlbase.IndexDescriptor) error,
-) error {
-	if table.IsPhysicalTable() {
-		if err := fn(&table.PrimaryIndex); err != nil {
-			return err
-		}
-	}
-	for i := range table.Indexes {
-		if err := fn(&table.Indexes[i]); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func forEachColumnInTable(
-	table *sqlbase.ImmutableTableDescriptor, fn func(*sqlbase.ColumnDescriptor) error,
-) error {
-	// Table descriptors already hold columns in-order.
-	for i := range table.Columns {
-		if err := fn(&table.Columns[i]); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func forEachColumnInIndex(
-	table *sqlbase.ImmutableTableDescriptor,
-	index *sqlbase.IndexDescriptor,
-	fn func(*sqlbase.ColumnDescriptor) error,
-) error {
-	colMap := make(map[sqlbase.ColumnID]*sqlbase.ColumnDescriptor, len(table.Columns))
-	for i := range table.Columns {
-		id := table.Columns[i].ID
-		colMap[id] = &table.Columns[i]
-	}
-	for _, columnID := range index.ColumnIDs {
-		column := colMap[columnID]
-		if err := fn(column); err != nil {
 			return err
 		}
 	}
@@ -1821,7 +1950,7 @@ func forEachColumnInIndex(
 func forEachRole(
 	ctx context.Context,
 	p *planner,
-	fn func(username string, isRole bool, noLogin bool, rolValidUntil *time.Time) error,
+	fn func(username security.SQLUsername, isRole bool, noLogin bool, rolValidUntil *time.Time) error,
 ) error {
 	query := `
 SELECT
@@ -1852,7 +1981,7 @@ FROM
 	}
 
 	for _, row := range rows {
-		username := tree.MustBeDString(row[0])
+		usernameS := tree.MustBeDString(row[0])
 		isRole, ok := row[1].(*tree.DBool)
 		if !ok {
 			return errors.Errorf("isRole should be a boolean value, found %s instead", row[1].ResolvedType())
@@ -1867,8 +1996,9 @@ FROM
 		} else if row[3] != tree.DNull {
 			return errors.Errorf("rolValidUntil should be a timestamp or null value, found %s instead", row[3].ResolvedType())
 		}
-
-		if err := fn(string(username), bool(*isRole), bool(*noLogin), rolValidUntil); err != nil {
+		// system tables already contain normalized usernames.
+		username := security.MakeSQLUsernameFromPreNormalizedString(string(usernameS))
+		if err := fn(username, bool(*isRole), bool(*noLogin), rolValidUntil); err != nil {
 			return err
 		}
 	}
@@ -1877,7 +2007,7 @@ FROM
 }
 
 func forEachRoleMembership(
-	ctx context.Context, p *planner, fn func(role, member string, isAdmin bool) error,
+	ctx context.Context, p *planner, fn func(role, member security.SQLUsername, isAdmin bool) error,
 ) error {
 	query := `SELECT "role", "member", "isAdmin" FROM system.role_members`
 	rows, err := p.ExtendedEvalContext().ExecCfg.InternalExecutor.Query(
@@ -1892,26 +2022,23 @@ func forEachRoleMembership(
 		memberName := tree.MustBeDString(row[1])
 		isAdmin := row[2].(*tree.DBool)
 
-		if err := fn(string(roleName), string(memberName), bool(*isAdmin)); err != nil {
+		// The names in the system tables are already normalized.
+		if err := fn(
+			security.MakeSQLUsernameFromPreNormalizedString(string(roleName)),
+			security.MakeSQLUsernameFromPreNormalizedString(string(memberName)),
+			bool(*isAdmin)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func userCanSeeDatabase(
-	ctx context.Context, p *planner, db *sqlbase.ImmutableDatabaseDescriptor,
+func userCanSeeDescriptor(
+	ctx context.Context, p *planner, desc catalog.Descriptor, allowAdding bool,
 ) bool {
-	return p.CheckAnyPrivilege(ctx, db) == nil
+	return descriptorIsVisible(desc, allowAdding) && p.CheckAnyPrivilege(ctx, desc) == nil
 }
 
-func userCanSeeTable(
-	ctx context.Context, p *planner, table sqlbase.DescriptorInterface, allowAdding bool,
-) bool {
-	return tableIsVisible(table.TableDesc(), allowAdding) && p.CheckAnyPrivilege(ctx, table) == nil
-}
-
-func tableIsVisible(table *TableDescriptor, allowAdding bool) bool {
-	return table.State == sqlbase.TableDescriptor_PUBLIC ||
-		(allowAdding && table.State == sqlbase.TableDescriptor_ADD)
+func descriptorIsVisible(desc catalog.Descriptor, allowAdding bool) bool {
+	return desc.Public() || (allowAdding && desc.Adding())
 }

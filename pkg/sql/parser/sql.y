@@ -30,11 +30,15 @@ import (
     "go/constant"
 
     "github.com/cockroachdb/cockroach/pkg/geo/geopb"
+    "github.com/cockroachdb/cockroach/pkg/roachpb"
+    "github.com/cockroachdb/cockroach/pkg/security"
     "github.com/cockroachdb/cockroach/pkg/sql/lex"
     "github.com/cockroachdb/cockroach/pkg/sql/privilege"
     "github.com/cockroachdb/cockroach/pkg/sql/roleoption"
     "github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
     "github.com/cockroachdb/cockroach/pkg/sql/types"
+    "github.com/cockroachdb/errors"
+    "github.com/lib/pq/oid"
 )
 
 // MaxUint is the maximum value of an uint.
@@ -138,6 +142,12 @@ func (u *sqlSymUnion) strPtr() *string {
 func (u *sqlSymUnion) strs() []string {
     return u.val.([]string)
 }
+func (u *sqlSymUnion) user() security.SQLUsername {
+    return u.val.(security.SQLUsername)
+}
+func (u *sqlSymUnion) users() []security.SQLUsername {
+    return u.val.([]security.SQLUsername)
+}
 func (u *sqlSymUnion) newTableIndexName() *tree.TableIndexName {
     tn := u.val.(tree.TableIndexName)
     return &tn
@@ -153,6 +163,9 @@ func (u *sqlSymUnion) shardedIndexDef() *tree.ShardedIndexDef {
 }
 func (u *sqlSymUnion) nameList() tree.NameList {
     return u.val.(tree.NameList)
+}
+func (u *sqlSymUnion) enumValueList() tree.EnumValueList {
+    return u.val.(tree.EnumValueList)
 }
 func (u *sqlSymUnion) unresolvedName() *tree.UnresolvedName {
     return u.val.(*tree.UnresolvedName)
@@ -247,8 +260,8 @@ func (u *sqlSymUnion) storageParams() []tree.StorageParam {
     }
     return nil
 }
-func (u *sqlSymUnion) persistenceType() bool {
- return u.val.(bool)
+func (u *sqlSymUnion) persistence() tree.Persistence {
+ return u.val.(tree.Persistence)
 }
 func (u *sqlSymUnion) colType() *types.T {
     if colType, ok := u.val.(*types.T); ok && colType != nil {
@@ -412,6 +425,9 @@ func (u *sqlSymUnion) userPriority() tree.UserPriority {
 func (u *sqlSymUnion) readWriteMode() tree.ReadWriteMode {
     return u.val.(tree.ReadWriteMode)
 }
+func (u *sqlSymUnion) deferrableMode() tree.DeferrableMode {
+    return u.val.(tree.DeferrableMode)
+}
 func (u *sqlSymUnion) idxElem() tree.IndexElem {
     return u.val.(tree.IndexElem)
 }
@@ -481,6 +497,12 @@ func (u *sqlSymUnion) kvOptions() []tree.KVOption {
 func (u *sqlSymUnion) backupOptions() *tree.BackupOptions {
   return u.val.(*tree.BackupOptions)
 }
+func (u *sqlSymUnion) copyOptions() *tree.CopyOptions {
+  return u.val.(*tree.CopyOptions)
+}
+func (u *sqlSymUnion) restoreOptions() *tree.RestoreOptions {
+  return u.val.(*tree.RestoreOptions)
+}
 func (u *sqlSymUnion) transactionModes() tree.TransactionModes {
     return u.val.(tree.TransactionModes)
 }
@@ -508,11 +530,11 @@ func (u *sqlSymUnion) resolvableFuncRefFromName() tree.ResolvableFunctionReferen
 func (u *sqlSymUnion) rowsFromExpr() *tree.RowsFromExpr {
     return u.val.(*tree.RowsFromExpr)
 }
-func (u *sqlSymUnion) partitionedBackup() tree.PartitionedBackup {
-    return u.val.(tree.PartitionedBackup)
+func (u *sqlSymUnion) stringOrPlaceholderOptList() tree.StringOrPlaceholderOptList {
+    return u.val.(tree.StringOrPlaceholderOptList)
 }
-func (u *sqlSymUnion) partitionedBackups() []tree.PartitionedBackup {
-    return u.val.([]tree.PartitionedBackup)
+func (u *sqlSymUnion) listOfStringOrPlaceholderOptList() []tree.StringOrPlaceholderOptList {
+    return u.val.([]tree.StringOrPlaceholderOptList)
 }
 func (u *sqlSymUnion) fullBackupClause() *tree.FullBackupClause {
     return u.val.(*tree.FullBackupClause)
@@ -531,6 +553,27 @@ func (u *sqlSymUnion) typeReferences() []tree.ResolvableTypeReference {
 }
 func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacement {
     return u.val.(*tree.AlterTypeAddValuePlacement)
+}
+func (u *sqlSymUnion) scheduleState() tree.ScheduleState {
+  return u.val.(tree.ScheduleState)
+}
+func (u *sqlSymUnion) executorType() tree.ScheduledJobExecutorType {
+  return u.val.(tree.ScheduledJobExecutorType)
+}
+func (u *sqlSymUnion) refreshDataOption() tree.RefreshDataOption {
+  return u.val.(tree.RefreshDataOption)
+}
+func (u *sqlSymUnion) regionAffinity() tree.RegionalAffinity {
+  return u.val.(tree.RegionalAffinity)
+}
+func (u *sqlSymUnion) survive() tree.Survive {
+  return u.val.(tree.Survive)
+}
+func (u *sqlSymUnion) objectNamePrefix() tree.ObjectNamePrefix {
+	return u.val.(tree.ObjectNamePrefix)
+}
+func (u *sqlSymUnion) objectNamePrefixList() tree.ObjectNamePrefixList {
+    return u.val.(tree.ObjectNamePrefixList)
 }
 %}
 
@@ -551,38 +594,40 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 // below; search this file for "Keyword category lists".
 
 // Ordinary key words in alphabetical order.
-%token <str> ABORT ACTION ADD ADMIN AFTER AGGREGATE
+%token <str> ABORT ACCESS ACTION ADD ADMIN AFFINITY AFTER AGGREGATE
 %token <str> ALL ALTER ALWAYS ANALYSE ANALYZE AND AND_AND ANY ANNOTATE_TYPE ARRAY AS ASC
-%token <str> ASYMMETRIC AT ATTRIBUTE AUTHORIZATION AUTOMATIC
+%token <str> ASYMMETRIC AT ATTRIBUTE AUTHORIZATION AUTOMATIC AVAILABILITY
 
-%token <str> BACKUP BEFORE BEGIN BETWEEN BIGINT BIGSERIAL BIT
+%token <str> BACKUP BACKUPS BEFORE BEGIN BETWEEN BIGINT BIGSERIAL BINARY BIT
 %token <str> BUCKET_COUNT
-%token <str> BOOLEAN BOTH BUNDLE BY
+%token <str> BOOLEAN BOTH BOX2D BUNDLE BY
 
-%token <str> CACHE CANCEL CASCADE CASE CAST CBRT CHANGEFEED CHAR
+%token <str> CACHE CANCEL CANCELQUERY CASCADE CASE CAST CBRT CHANGEFEED CHAR
 %token <str> CHARACTER CHARACTERISTICS CHECK CLOSE
 %token <str> CLUSTER COALESCE COLLATE COLLATION COLUMN COLUMNS COMMENT COMMENTS COMMIT
 %token <str> COMMITTED COMPACT COMPLETE CONCAT CONCURRENTLY CONFIGURATION CONFIGURATIONS CONFIGURE
-%token <str> CONFLICT CONSTRAINT CONSTRAINTS CONTAINS CONVERSION COPY COVERING CREATE CREATEROLE
+%token <str> CONFLICT CONNECTION CONSTRAINT CONSTRAINTS CONTAINS CONTROLCHANGEFEED CONTROLJOB
+%token <str> CONVERSION CONVERT COPY COVERING CREATE CREATEDB CREATELOGIN CREATEROLE
 %token <str> CROSS CUBE CURRENT CURRENT_CATALOG CURRENT_DATE CURRENT_SCHEMA
 %token <str> CURRENT_ROLE CURRENT_TIME CURRENT_TIMESTAMP
 %token <str> CURRENT_USER CYCLE
 
 %token <str> DATA DATABASE DATABASES DATE DAY DEC DECIMAL DEFAULT DEFAULTS
-%token <str> DEALLOCATE DECLARE DEFERRABLE DEFERRED DELETE DESC DETACHED
+%token <str> DEALLOCATE DECLARE DEFERRABLE DEFERRED DELETE DESC DESTINATION DETACHED
 %token <str> DISCARD DISTINCT DO DOMAIN DOUBLE DROP
 
-%token <str> ELSE ENCODING ENCRYPTION_PASSPHRASE END ENUM ESCAPE EXCEPT EXCLUDE EXCLUDING
+%token <str> ELSE ENCODING ENCRYPTION_PASSPHRASE END ENUM ENUMS ESCAPE EXCEPT EXCLUDE EXCLUDING
 %token <str> EXISTS EXECUTE EXECUTION EXPERIMENTAL
 %token <str> EXPERIMENTAL_FINGERPRINTS EXPERIMENTAL_REPLICA
 %token <str> EXPERIMENTAL_AUDIT
 %token <str> EXPIRATION EXPLAIN EXPORT EXTENSION EXTRACT EXTRACT_DURATION
 
-%token <str> FALSE FAMILY FETCH FETCHVAL FETCHTEXT FETCHVAL_PATH FETCHTEXT_PATH
+%token <str> FAILURE FALSE FAMILY FETCH FETCHVAL FETCHTEXT FETCHVAL_PATH FETCHTEXT_PATH
 %token <str> FILES FILTER
 %token <str> FIRST FLOAT FLOAT4 FLOAT8 FLOORDIV FOLLOWING FOR FORCE_INDEX FOREIGN FROM FULL FUNCTION
 
-%token <str> GENERATED GEOGRAPHY GEOMETRY GEOMETRYCOLLECTION
+%token <str> GENERATED GEOGRAPHY GEOMETRY GEOMETRYM GEOMETRYZ GEOMETRYZM
+%token <str> GEOMETRYCOLLECTION GEOMETRYCOLLECTIONM GEOMETRYCOLLECTIONZ GEOMETRYCOLLECTIONZM
 %token <str> GLOBAL GRANT GRANTS GREATEST GROUP GROUPING GROUPS
 
 %token <str> HAVING HASH HIGH HISTOGRAM HOUR
@@ -590,55 +635,62 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %token <str> IDENTITY
 %token <str> IF IFERROR IFNULL IGNORE_FOREIGN_KEYS ILIKE IMMEDIATE IMPORT IN INCLUDE INCLUDING INCREMENT INCREMENTAL
 %token <str> INET INET_CONTAINED_BY_OR_EQUALS
-%token <str> INET_CONTAINS_OR_EQUALS INDEX INDEXES INJECT INTERLEAVE INITIALLY
+%token <str> INET_CONTAINS_OR_EQUALS INDEX INDEXES INHERITS INJECT INTERLEAVE INITIALLY
 %token <str> INNER INSERT INT INTEGER
-%token <str> INTERSECT INTERVAL INTO INVERTED IS ISERROR ISNULL ISOLATION
+%token <str> INTERSECT INTERVAL INTO INTO_DB INVERTED IS ISERROR ISNULL ISOLATION
 
 %token <str> JOB JOBS JOIN JSON JSONB JSON_SOME_EXISTS JSON_ALL_EXISTS
 
-%token <str> KEY KEYS KV
+%token <str> KEY KEYS KMS KV
 
-%token <str> LANGUAGE LAST LATERAL LC_CTYPE LC_COLLATE
-%token <str> LEADING LEASE LEAST LEFT LESS LEVEL LIKE LIMIT LINESTRING LIST LOCAL
-%token <str> LOCALTIME LOCALTIMESTAMP LOCKED LOGIN LOOKUP LOW LSHIFT
+%token <str> LANGUAGE LAST LATERAL LATEST LC_CTYPE LC_COLLATE
+%token <str> LEADING LEASE LEAST LEFT LESS LEVEL LIKE LIMIT
+%token <str> LINESTRING LINESTRINGM LINESTRINGZ LINESTRINGZM
+%token <str> LIST LOCAL LOCALITY LOCALTIME LOCALTIMESTAMP LOCKED LOGIN LOOKUP LOW LSHIFT
 
-%token <str> MATCH MATERIALIZED MERGE MINVALUE MAXVALUE MINUTE MONTH
-%token <str> MULTILINESTRING MULTIPOINT MULTIPOLYGON
+%token <str> MATCH MATERIALIZED MERGE MINVALUE MAXVALUE METHOD MINUTE MODIFYCLUSTERSETTING MONTH
+%token <str> MULTILINESTRING MULTILINESTRINGM MULTILINESTRINGZ MULTILINESTRINGZM
+%token <str> MULTIPOINT MULTIPOINTM MULTIPOINTZ MULTIPOINTZM
+%token <str> MULTIPOLYGON MULTIPOLYGONM MULTIPOLYGONZ MULTIPOLYGONZM
 
-%token <str> NAN NAME NAMES NATURAL NEVER NEXT NO NOCREATEROLE NOLOGIN NO_INDEX_JOIN
-%token <str> NONE NORMAL NOT NOTHING NOTNULL NOWAIT NULL NULLIF NULLS NUMERIC
+%token <str> NAN NAME NAMES NATURAL NEVER NEXT NO NOCANCELQUERY NOCONTROLCHANGEFEED NOCONTROLJOB
+%token <str> NOCREATEDB NOCREATELOGIN NOCREATEROLE NOLOGIN NOMODIFYCLUSTERSETTING NO_INDEX_JOIN
+%token <str> NONE NORMAL NOT NOTHING NOTNULL NOVIEWACTIVITY NOWAIT NULL NULLIF NULLS NUMERIC
 
 %token <str> OF OFF OFFSET OID OIDS OIDVECTOR ON ONLY OPT OPTION OPTIONS OR
 %token <str> ORDER ORDINALITY OTHERS OUT OUTER OVER OVERLAPS OVERLAY OWNED OWNER OPERATOR
 
-%token <str> PARENT PARTIAL PARTITION PARTITIONS PASSWORD PAUSE PHYSICAL PLACING
-%token <str> PLAN PLANS POINT POLYGON POSITION PRECEDING PRECISION PREPARE PRESERVE PRIMARY PRIORITY
+%token <str> PARENT PARTIAL PARTITION PARTITIONS PASSWORD PAUSE PAUSED PHYSICAL PLACING
+%token <str> PLAN PLANS POINT POINTM POINTZ POINTZM POLYGON POLYGONM POLYGONZ POLYGONZM
+%token <str> POSITION PRECEDING PRECISION PREPARE PRESERVE PRIMARY PRIORITY PRIVILEGES
 %token <str> PROCEDURAL PUBLIC PUBLICATION
 
 %token <str> QUERIES QUERY
 
-%token <str> RANGE RANGES READ REAL RECURSIVE RECURRING REF REFERENCES
-%token <str> REGCLASS REGPROC REGPROCEDURE REGNAMESPACE REGTYPE REINDEX
+%token <str> RANGE RANGES READ REAL REASSIGN RECURSIVE RECURRING REF REFERENCES REFRESH
+%token <str> REGCLASS REGION REGIONAL REGIONS REGPROC REGPROCEDURE REGNAMESPACE REGTYPE REINDEX
 %token <str> REMOVE_PATH RENAME REPEATABLE REPLACE
 %token <str> RELEASE RESET RESTORE RESTRICT RESUME RETURNING RETRY REVISION_HISTORY REVOKE RIGHT
-%token <str> ROLE ROLES ROLLBACK ROLLUP ROW ROWS RSHIFT RULE
+%token <str> ROLE ROLES ROLLBACK ROLLUP ROW ROWS RSHIFT RULE RUNNING
 
-%token <str> SAVEPOINT SCATTER SCHEDULE SCHEMA SCHEMAS SCRUB SEARCH SECOND SELECT SEQUENCE SEQUENCES
-%token <str> SERIALIZABLE SERVER SESSION SESSIONS SESSION_USER SET SETTING SETTINGS
-%token <str> SHARE SHOW SIMILAR SIMPLE SKIP SMALLINT SMALLSERIAL SNAPSHOT SOME SPLIT SQL
+%token <str> SAVEPOINT SCATTER SCHEDULE SCHEDULES SCHEMA SCHEMAS SCRUB SEARCH SECOND SELECT SEQUENCE SEQUENCES
+%token <str> SERIALIZABLE SERVER SESSION SESSIONS SESSION_USER SET SETS SETTING SETTINGS
+%token <str> SHARE SHOW SIMILAR SIMPLE SKIP SKIP_MISSING_FOREIGN_KEYS
+%token <str> SKIP_MISSING_SEQUENCES SKIP_MISSING_SEQUENCE_OWNERS SKIP_MISSING_VIEWS SMALLINT SMALLSERIAL SNAPSHOT SOME SPLIT SQL
 
 %token <str> START STATISTICS STATUS STDIN STRICT STRING STORAGE STORE STORED STORING SUBSTRING
-%token <str> SYMMETRIC SYNTAX SYSTEM SQRT SUBSCRIPTION
+%token <str> SURVIVE SYMMETRIC SYNTAX SYSTEM SQRT SUBSCRIPTION
 
-%token <str> TABLE TABLES TEMP TEMPLATE TEMPORARY TESTING_RELOCATE EXPERIMENTAL_RELOCATE TEXT THEN
-%token <str> TIES TIME TIMETZ TIMESTAMP TIMESTAMPTZ TO THROTTLING TRAILING TRACE TRANSACTION TREAT TRIGGER TRIM TRUE
-%token <str> TRUNCATE TRUSTED TYPE
+%token <str> TABLE TABLES TABLESPACE TEMP TEMPLATE TEMPORARY TENANT TESTING_RELOCATE EXPERIMENTAL_RELOCATE TEXT THEN
+%token <str> TIES TIME TIMETZ TIMESTAMP TIMESTAMPTZ TO THROTTLING TRAILING TRACE
+%token <str> TRANSACTION TRANSACTIONS TREAT TRIGGER TRIM TRUE
+%token <str> TRUNCATE TRUSTED TYPE TYPES
 %token <str> TRACING
 
 %token <str> UNBOUNDED UNCOMMITTED UNION UNIQUE UNKNOWN UNLOGGED UNSPLIT
 %token <str> UPDATE UPSERT UNTIL USE USER USERS USING UUID
 
-%token <str> VALID VALIDATE VALUE VALUES VARBIT VARCHAR VARIADIC VIEW VARYING VIRTUAL
+%token <str> VALID VALIDATE VALUE VALUES VARBIT VARCHAR VARIADIC VIEW VARYING VIEWACTIVITY VIRTUAL
 
 %token <str> WHEN WHERE WINDOW WITH WITHIN WITHOUT WORK WRITE
 
@@ -656,7 +708,7 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 // needed to make the grammar LALR(1). GENERATED_ALWAYS is needed to support
 // the Postgres syntax for computed columns along with our family related
 // extensions (CREATE FAMILY/CREATE FAMILY family_name).
-%token NOT_LA WITH_LA AS_LA GENERATED_ALWAYS
+%token NOT_LA NULLS_LA WITH_LA AS_LA GENERATED_ALWAYS
 
 %union {
   id    int32
@@ -679,6 +731,7 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <tree.Statement> alter_partition_stmt
 %type <tree.Statement> alter_role_stmt
 %type <tree.Statement> alter_type_stmt
+%type <tree.Statement> alter_schema_stmt
 
 // ALTER RANGE
 %type <tree.Statement> alter_zone_range_stmt
@@ -692,13 +745,20 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <tree.Statement> alter_relocate_stmt
 %type <tree.Statement> alter_relocate_lease_stmt
 %type <tree.Statement> alter_zone_table_stmt
+%type <tree.Statement> alter_table_set_schema_stmt
+%type <tree.Statement> alter_table_regional_affinity_stmt
 
 // ALTER PARTITION
 %type <tree.Statement> alter_zone_partition_stmt
 
 // ALTER DATABASE
 %type <tree.Statement> alter_rename_database_stmt
+%type <tree.Statement> alter_database_to_schema_stmt
+%type <tree.Statement> alter_database_add_region_stmt
+%type <tree.Statement> alter_database_drop_region_stmt
+%type <tree.Statement> alter_database_survive_stmt
 %type <tree.Statement> alter_zone_database_stmt
+%type <tree.Statement> alter_database_owner
 
 // ALTER INDEX
 %type <tree.Statement> alter_oneindex_stmt
@@ -712,10 +772,12 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 
 // ALTER VIEW
 %type <tree.Statement> alter_rename_view_stmt
+%type <tree.Statement> alter_view_set_schema_stmt
 
 // ALTER SEQUENCE
 %type <tree.Statement> alter_rename_sequence_stmt
 %type <tree.Statement> alter_sequence_options_stmt
+%type <tree.Statement> alter_sequence_set_schema_stmt
 
 %type <tree.Statement> backup_stmt
 %type <tree.Statement> begin_stmt
@@ -741,6 +803,7 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <tree.Statement> create_changefeed_stmt
 %type <tree.Statement> create_ddl_stmt
 %type <tree.Statement> create_database_stmt
+%type <tree.Statement> create_extension_stmt
 %type <tree.Statement> create_index_stmt
 %type <tree.Statement> create_role_stmt
 %type <tree.Statement> create_schedule_for_backup_stmt
@@ -764,6 +827,7 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <tree.Statement> drop_database_stmt
 %type <tree.Statement> drop_index_stmt
 %type <tree.Statement> drop_role_stmt
+%type <tree.Statement> drop_schema_stmt
 %type <tree.Statement> drop_table_stmt
 %type <tree.Statement> drop_type_stmt
 %type <tree.Statement> drop_view_stmt
@@ -780,14 +844,19 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <tree.Statement> grant_stmt
 %type <tree.Statement> insert_stmt
 %type <tree.Statement> import_stmt
-%type <tree.Statement> pause_stmt
+%type <tree.Statement> pause_stmt pause_jobs_stmt pause_schedules_stmt
+%type <*tree.Select>   for_schedules_clause
+%type <tree.Statement> reassign_owned_by_stmt
+%type <tree.Statement> drop_owned_by_stmt
 %type <tree.Statement> release_stmt
 %type <tree.Statement> reset_stmt reset_session_stmt reset_csetting_stmt
-%type <tree.Statement> resume_stmt
+%type <tree.Statement> resume_stmt resume_jobs_stmt resume_schedules_stmt
+%type <tree.Statement> drop_schedule_stmt
 %type <tree.Statement> restore_stmt
-%type <tree.PartitionedBackup> partitioned_backup
-%type <[]tree.PartitionedBackup> partitioned_backup_list
+%type <tree.StringOrPlaceholderOptList> string_or_placeholder_opt_list
+%type <[]tree.StringOrPlaceholderOptList> list_of_string_or_placeholder_opt_list
 %type <tree.Statement> revoke_stmt
+%type <tree.Statement> refresh_stmt
 %type <*tree.Select> select_stmt
 %type <tree.Statement> abort_stmt
 %type <tree.Statement> rollback_stmt
@@ -809,6 +878,7 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <tree.Statement> show_create_stmt
 %type <tree.Statement> show_csettings_stmt
 %type <tree.Statement> show_databases_stmt
+%type <tree.Statement> show_enums_stmt
 %type <tree.Statement> show_fingerprints_stmt
 %type <tree.Statement> show_grants_stmt
 %type <tree.Statement> show_histogram_stmt
@@ -818,6 +888,8 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <tree.Statement> show_queries_stmt
 %type <tree.Statement> show_ranges_stmt
 %type <tree.Statement> show_range_for_row_stmt
+%type <tree.Statement> show_locality_stmt
+%type <tree.Statement> show_regions_stmt
 %type <tree.Statement> show_roles_stmt
 %type <tree.Statement> show_schemas_stmt
 %type <tree.Statement> show_sequences_stmt
@@ -830,8 +902,11 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <tree.Statement> show_tables_stmt
 %type <tree.Statement> show_trace_stmt
 %type <tree.Statement> show_transaction_stmt
+%type <tree.Statement> show_transactions_stmt
+%type <tree.Statement> show_types_stmt
 %type <tree.Statement> show_users_stmt
 %type <tree.Statement> show_zone_stmt
+%type <tree.Statement> show_schedules_stmt
 
 %type <str> session_var
 %type <*string> comment_text
@@ -850,9 +925,11 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <tree.KVOption> kv_option
 %type <[]tree.KVOption> kv_option_list opt_with_options var_set_list opt_with_schedule_options
 %type <*tree.BackupOptions> opt_with_backup_options backup_options backup_options_list
+%type <*tree.RestoreOptions> opt_with_restore_options restore_options restore_options_list
+%type <*tree.CopyOptions> opt_with_copy_options copy_options copy_options_list
 %type <str> import_format
 %type <tree.StorageParam> storage_parameter
-%type <[]tree.StorageParam> storage_parameter_list opt_table_with
+%type <[]tree.StorageParam> storage_parameter_list opt_table_with opt_with_storage_parameter_list
 
 %type <*tree.Select> select_no_parens
 %type <tree.SelectStatement> select_clause select_with_parens simple_select values_clause table_clause simple_select_clause
@@ -877,17 +954,24 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <tree.ValidationBehavior> opt_validate_behavior
 
 %type <str> opt_template_clause opt_encoding_clause opt_lc_collate_clause opt_lc_ctype_clause
+%type <tree.NameList> opt_regions_list
+%type <str> region_name
+%type <tree.NameList> region_name_list
+%type <tree.Survive> survive_clause opt_survive_clause
+%type <tree.RegionalAffinity> regional_affinity
+%type <int32> opt_connection_limit
 
 %type <tree.IsolationLevel> transaction_iso_level
 %type <tree.UserPriority> transaction_user_priority
 %type <tree.ReadWriteMode> transaction_read_mode
+%type <tree.DeferrableMode> transaction_deferrable_mode
 
 %type <str> name opt_name opt_name_parens
 %type <str> privilege savepoint_name
 %type <tree.KVOption> role_option password_clause valid_until_clause
 %type <tree.Operator> subquery_op
 %type <*tree.UnresolvedName> func_name func_name_no_crdb_extra
-%type <str> opt_collate
+%type <str> opt_class opt_collate
 
 %type <str> cursor_name database_name index_name opt_index_name column_name insert_column_item statistics_name window_name
 %type <str> family_name opt_family_name table_alias_name constraint_name target_name zone_name partition_name collation_name
@@ -895,6 +979,8 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <*tree.UnresolvedObjectName> table_name standalone_index_name sequence_name type_name view_name db_object_name simple_db_object_name complex_db_object_name
 %type <[]*tree.UnresolvedObjectName> type_name_list
 %type <str> schema_name
+%type <tree.ObjectNamePrefix>  qualifiable_schema_name opt_schema_name
+%type <tree.ObjectNamePrefixList> schema_name_list
 %type <*tree.UnresolvedName> table_pattern complex_table_pattern
 %type <*tree.UnresolvedName> column_path prefixed_column_path column_path_with_star
 %type <tree.TableExpr> insert_target create_stats_target analyze_target
@@ -914,11 +1000,13 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <*tree.InterleaveDef> opt_interleave
 %type <*tree.PartitionBy> opt_partition_by partition_by
 %type <str> partition opt_partition
+%type <str> opt_create_table_inherits
 %type <tree.ListPartition> list_partition
 %type <[]tree.ListPartition> list_partitions
 %type <tree.RangePartition> range_partition
 %type <[]tree.RangePartition> range_partitions
 %type <empty> opt_all_clause
+%type <empty> opt_privileges_clause
 %type <bool> distinct_clause
 %type <tree.DistinctOn> distinct_on_clause
 %type <tree.NameList> opt_column_list insert_column_list opt_stats_columns
@@ -939,10 +1027,13 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <*tree.UpdateExpr> set_clause multiple_set_clause
 %type <tree.ArraySubscripts> array_subscripts
 %type <tree.GroupBy> group_clause
+%type <tree.Exprs> group_by_list
+%type <tree.Expr> group_by_item
 %type <*tree.Limit> select_limit opt_select_limit
 %type <tree.TableNames> relation_expr_list
 %type <tree.ReturningClause> returning_clause
 %type <empty> opt_using_clause
+%type <tree.RefreshDataOption> opt_clear_data
 
 %type <[]tree.SequenceOption> sequence_option_list opt_sequence_option_list
 %type <tree.SequenceOption> sequence_option_elem
@@ -963,8 +1054,8 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <types.IntervalTypeMetadata> opt_interval_qualifier interval_qualifier interval_second
 %type <tree.Expr> overlay_placing
 
-%type <bool> opt_unique opt_concurrently opt_cluster
-%type <bool> opt_using_gin_btree
+%type <bool> opt_unique opt_concurrently opt_cluster opt_without_index
+%type <bool> opt_index_access_method
 
 %type <*tree.Limit> limit_clause offset_clause opt_limit_clause
 %type <tree.Expr> select_fetch_first_value
@@ -972,7 +1063,7 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <empty> first_or_next
 
 %type <tree.Statement> insert_rest
-%type <tree.NameList> opt_conf_expr opt_col_def_list
+%type <tree.NameList> opt_col_def_list
 %type <*tree.OnConflict> on_conflict
 
 %type <tree.Statement> begin_transaction
@@ -1005,13 +1096,14 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <tree.AliasClause> alias_clause opt_alias_clause
 %type <bool> opt_ordinality opt_compact
 %type <*tree.Order> sortby
-%type <tree.IndexElem> index_elem create_as_param
+%type <tree.IndexElem> index_elem index_elem_options create_as_param
 %type <tree.TableExpr> table_ref numeric_table_ref func_table
 %type <tree.Exprs> rowsfrom_list
 %type <tree.Expr> rowsfrom_item
 %type <tree.TableExpr> joined_table
 %type <*tree.UnresolvedObjectName> relation_expr
 %type <tree.TableExpr> table_expr_opt_alias_idx table_name_opt_idx
+%type <bool> opt_only opt_descendant
 %type <tree.SelectExpr> target_elem
 %type <*tree.UpdateExpr> single_set_clause
 %type <tree.AsOfClause> as_of_clause opt_as_of_clause
@@ -1046,9 +1138,15 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 %type <str> unrestricted_name type_function_name type_function_name_no_crdb_extra
 %type <str> non_reserved_word
 %type <str> non_reserved_word_or_sconst
+%type <security.SQLUsername> username_or_sconst
+// TODO(solon): The type for role_spec needs to be updated to fix
+// https://github.com/cockroachdb/cockroach/issues/54696
+%type <security.SQLUsername> role_spec
+%type <[]security.SQLUsername> role_spec_list
 %type <tree.Expr> zone_value
 %type <tree.Expr> string_or_placeholder
 %type <tree.Expr> string_or_placeholder_list
+%type <str> region_or_regions
 
 %type <str> unreserved_keyword type_func_name_keyword type_func_name_no_crdb_extra_keyword type_func_name_crdb_extra_keyword
 %type <str> col_name_keyword reserved_keyword cockroachdb_extra_reserved_keyword extra_var_value
@@ -1087,7 +1185,7 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 
 %type <[]tree.ColumnID> opt_tableref_col_list tableref_col_list
 
-%type <tree.TargetList> targets targets_roles changefeed_targets
+%type <tree.TargetList> targets targets_roles target_types changefeed_targets
 %type <*tree.TargetList> opt_on_targets_roles opt_backup_targets
 %type <tree.NameList> for_grantee_clause
 %type <privilege.List> privileges
@@ -1100,12 +1198,14 @@ func (u *sqlSymUnion) alterTypeAddValuePlacement() *tree.AlterTypeAddValuePlacem
 
 %type <tree.Expr> opt_alter_column_using
 
-%type <bool> opt_temp
-%type <bool> opt_temp_create_table
+%type <tree.Persistence> opt_temp
+%type <tree.Persistence> opt_persistence_temp_table
 %type <bool> role_or_group_or_user
 
 %type <tree.Expr>  cron_expr opt_description sconst_or_placeholder
 %type <*tree.FullBackupClause> opt_full_backup_clause
+%type <tree.ScheduleState> schedule_state
+%type <tree.ScheduledJobExecutorType> opt_schedule_executor_type
 
 // Precedence: lowest to highest
 %nonassoc  VALUES              // see value_clause
@@ -1182,20 +1282,23 @@ stmt_block:
 
 stmt:
   HELPTOKEN { return helpWith(sqllex, "") }
-| preparable_stmt   // help texts in sub-rule
-| analyze_stmt      // EXTEND WITH HELP: ANALYZE
+| preparable_stmt           // help texts in sub-rule
+| analyze_stmt              // EXTEND WITH HELP: ANALYZE
 | copy_from_stmt
 | comment_stmt
-| execute_stmt      // EXTEND WITH HELP: EXECUTE
-| deallocate_stmt   // EXTEND WITH HELP: DEALLOCATE
-| discard_stmt      // EXTEND WITH HELP: DISCARD
-| grant_stmt        // EXTEND WITH HELP: GRANT
-| prepare_stmt      // EXTEND WITH HELP: PREPARE
-| revoke_stmt       // EXTEND WITH HELP: REVOKE
-| savepoint_stmt    // EXTEND WITH HELP: SAVEPOINT
-| release_stmt      // EXTEND WITH HELP: RELEASE
-| nonpreparable_set_stmt // help texts in sub-rule
-| transaction_stmt  // help texts in sub-rule
+| execute_stmt              // EXTEND WITH HELP: EXECUTE
+| deallocate_stmt           // EXTEND WITH HELP: DEALLOCATE
+| discard_stmt              // EXTEND WITH HELP: DISCARD
+| grant_stmt                // EXTEND WITH HELP: GRANT
+| prepare_stmt              // EXTEND WITH HELP: PREPARE
+| revoke_stmt               // EXTEND WITH HELP: REVOKE
+| savepoint_stmt            // EXTEND WITH HELP: SAVEPOINT
+| reassign_owned_by_stmt    // EXTEND WITH HELP: REASSIGN OWNED BY
+| drop_owned_by_stmt        // EXTEND WITH HELP: DROP OWNED BY
+| release_stmt              // EXTEND WITH HELP: RELEASE
+| refresh_stmt              // EXTEND WITH HELP: REFRESH
+| nonpreparable_set_stmt    // help texts in sub-rule
+| transaction_stmt          // help texts in sub-rule
 | close_cursor_stmt
 | declare_cursor_stmt
 | reindex_stmt
@@ -1220,6 +1323,7 @@ alter_ddl_stmt:
 | alter_database_stmt  // EXTEND WITH HELP: ALTER DATABASE
 | alter_range_stmt     // EXTEND WITH HELP: ALTER RANGE
 | alter_partition_stmt // EXTEND WITH HELP: ALTER PARTITION
+| alter_schema_stmt    // EXTEND WITH HELP: ALTER SCHEMA
 | alter_type_stmt      // EXTEND WITH HELP: ALTER TYPE
 
 // %Help: ALTER TABLE - change the definition of a table
@@ -1249,9 +1353,11 @@ alter_ddl_stmt:
 //   ALTER TABLE ... PARTITION BY LIST ( <name...> ) ( <listspec> )
 //   ALTER TABLE ... PARTITION BY NOTHING
 //   ALTER TABLE ... CONFIGURE ZONE <zoneconfig>
+//   ALTER TABLE ... SET SCHEMA <newschemaname>
+//   ALTER TABLE ... SET [REGIONAL AFFINITY [TO | AT] ... | LOCALITY [REGIONAL BY [TABLE IN <region> | ROW] | GLOBAL]]
 //
 // Column qualifiers:
-//   [CONSTRAINT <constraintname>] {NULL | NOT NULL | UNIQUE | PRIMARY KEY | CHECK (<expr>) | DEFAULT <expr>}
+//   [CONSTRAINT <constraintname>] {NULL | NOT NULL | UNIQUE [WITHOUT INDEX] | PRIMARY KEY | CHECK (<expr>) | DEFAULT <expr>}
 //   FAMILY <familyname>, CREATE [IF NOT EXISTS] FAMILY [<familyname>]
 //   REFERENCES <tablename> [( <colnames...> )]
 //   COLLATE <collationname>
@@ -1272,6 +1378,8 @@ alter_table_stmt:
 | alter_scatter_stmt
 | alter_zone_table_stmt
 | alter_rename_table_stmt
+| alter_table_set_schema_stmt
+| alter_table_regional_affinity_stmt
 // ALTER TABLE has its error help token here because the ALTER TABLE
 // prefix is spread over multiple non-terminals.
 | ALTER TABLE error     // SHOW HELP: ALTER TABLE
@@ -1305,10 +1413,12 @@ alter_partition_stmt:
 // %Help: ALTER VIEW - change the definition of a view
 // %Category: DDL
 // %Text:
-// ALTER VIEW [IF EXISTS] <name> RENAME TO <newname>
+// ALTER [MATERIALIZED] VIEW [IF EXISTS] <name> RENAME TO <newname>
+// ALTER [MATERIALIZED] VIEW [IF EXISTS] <name> SET SCHEMA <newschemaname>
 // %SeeAlso: WEBDOCS/alter-view.html
 alter_view_stmt:
   alter_rename_view_stmt
+| alter_view_set_schema_stmt
 // ALTER VIEW has its error help token here because the ALTER VIEW
 // prefix is spread over multiple non-terminals.
 | ALTER VIEW error // SHOW HELP: ALTER VIEW
@@ -1323,9 +1433,11 @@ alter_view_stmt:
 //   [START <start>]
 //   [[NO] CYCLE]
 // ALTER SEQUENCE [IF EXISTS] <name> RENAME TO <newname>
+// ALTER SEQUENCE [IF EXISTS] <name> SET SCHEMA <newschemaname>
 alter_sequence_stmt:
   alter_rename_sequence_stmt
 | alter_sequence_options_stmt
+| alter_sequence_set_schema_stmt
 | ALTER SEQUENCE error // SHOW HELP: ALTER SEQUENCE
 
 alter_sequence_options_stmt:
@@ -1342,13 +1454,60 @@ alter_sequence_options_stmt:
 // %Category: DDL
 // %Text:
 // ALTER DATABASE <name> RENAME TO <newname>
+// ALTER DATABASE <name> OWNER TO <newowner>
+// ALTER DATABASE <name> CONVERT TO SCHEMA WITH PARENT <name>
+// ALTER DATABASE <name> ADD REGIONS <regions>
+// ALTER DATABASE <name> DROP REGIONS <regions>
+// ALTER DATABASE <name> SURVIVE <failure type>
 // %SeeAlso: WEBDOCS/alter-database.html
 alter_database_stmt:
   alter_rename_database_stmt
-|  alter_zone_database_stmt
+| alter_zone_database_stmt
+| alter_database_owner
+| alter_database_to_schema_stmt
+| alter_database_add_region_stmt
+| alter_database_drop_region_stmt
+| alter_database_survive_stmt
 // ALTER DATABASE has its error help token here because the ALTER DATABASE
 // prefix is spread over multiple non-terminals.
 | ALTER DATABASE error // SHOW HELP: ALTER DATABASE
+
+alter_database_owner:
+  ALTER DATABASE database_name OWNER TO role_spec
+  {
+    $$.val = &tree.AlterDatabaseOwner{Name: tree.Name($3), Owner: $6.user()}
+  }
+
+alter_database_add_region_stmt:
+  ALTER DATABASE database_name ADD region_or_regions name_list
+  {
+    $$.val = &tree.AlterDatabaseAddRegion{
+      Name: tree.Name($3),
+      Regions: $6.nameList(),
+    }
+  }
+
+alter_database_drop_region_stmt:
+  ALTER DATABASE database_name DROP region_or_regions name_list
+  {
+    $$.val = &tree.AlterDatabaseDropRegion{
+      Name: tree.Name($3),
+      Regions: $6.nameList(),
+    }
+  }
+
+alter_database_survive_stmt:
+  ALTER DATABASE database_name survive_clause
+  {
+    $$.val = &tree.AlterDatabaseSurvive{
+      Name: tree.Name($3),
+      Survive: $4.survive(),
+    }
+  }
+
+region_or_regions:
+  REGION
+| REGIONS
 
 // %Help: ALTER RANGE - change the parameters of a range
 // %Category: DDL
@@ -1767,6 +1926,18 @@ alter_table_cmd:
   }
   // ALTER TABLE <name> ALTER CONSTRAINT ...
 | ALTER CONSTRAINT constraint_name error { return unimplementedWithIssueDetail(sqllex, 31632, "alter constraint") }
+  // ALTER TABLE <name> INHERITS ....
+| INHERITS error
+  {
+    /* SKIP DOC */
+    return unimplementedWithIssueDetail(sqllex, 22456, "alter table inherits")
+  }
+  // ALTER TABLE <name> NO INHERITS ....
+| NO INHERITS error
+  {
+    /* SKIP DOC */
+    return unimplementedWithIssueDetail(sqllex, 22456, "alter table no inherits")
+  }
   // ALTER TABLE <name> VALIDATE CONSTRAINT ...
   // ALTER TABLE <name> ALTER PRIMARY KEY USING INDEX <name>
 | ALTER PRIMARY KEY USING COLUMNS '(' index_params ')' opt_hash_sharded opt_interleave
@@ -1819,6 +1990,13 @@ alter_table_cmd:
     /* SKIP DOC */
     $$.val = &tree.AlterTableInjectStats{
       Stats: $3.expr(),
+    }
+  }
+  // ALTER TABLE <name> OWNER TO <newowner>
+| OWNER TO role_spec
+  {
+    $$.val = &tree.AlterTableOwner{
+      Owner: $3.user(),
     }
   }
 
@@ -1914,7 +2092,7 @@ alter_type_stmt:
     $$.val = &tree.AlterType{
       Type: $3.unresolvedObjectName(),
       Cmd: &tree.AlterTypeAddValue{
-        NewVal: $6,
+        NewVal: tree.EnumValue($6),
         IfNotExists: false,
         Placement: $7.alterTypeAddValuePlacement(),
       },
@@ -1925,7 +2103,7 @@ alter_type_stmt:
     $$.val = &tree.AlterType{
       Type: $3.unresolvedObjectName(),
       Cmd: &tree.AlterTypeAddValue{
-        NewVal: $9,
+        NewVal: tree.EnumValue($9),
         IfNotExists: true,
         Placement: $10.alterTypeAddValuePlacement(),
       },
@@ -1936,17 +2114,17 @@ alter_type_stmt:
     $$.val = &tree.AlterType{
       Type: $3.unresolvedObjectName(),
       Cmd: &tree.AlterTypeRenameValue{
-        OldVal: $6,
-        NewVal: $8,
+        OldVal: tree.EnumValue($6),
+        NewVal: tree.EnumValue($8),
       },
     }
   }
-| ALTER TYPE type_name RENAME TO type_name
+| ALTER TYPE type_name RENAME TO name
   {
     $$.val = &tree.AlterType{
       Type: $3.unresolvedObjectName(),
       Cmd: &tree.AlterTypeRename{
-        NewName: $6.unresolvedObjectName(),
+        NewName: tree.Name($6),
       },
     }
   }
@@ -1955,13 +2133,18 @@ alter_type_stmt:
     $$.val = &tree.AlterType{
       Type: $3.unresolvedObjectName(),
       Cmd: &tree.AlterTypeSetSchema{
-        Schema: $6,
+        Schema: tree.Name($6),
       },
     }
   }
 | ALTER TYPE type_name OWNER TO role_spec
   {
-    return unimplementedWithIssueDetail(sqllex, 48700, "ALTER TYPE OWNER TO")
+    $$.val = &tree.AlterType{
+      Type: $3.unresolvedObjectName(),
+      Cmd: &tree.AlterTypeOwner{
+        Owner: $6.user(),
+      },
+    }
   }
 | ALTER TYPE type_name RENAME ATTRIBUTE column_name TO column_name opt_drop_behavior
   {
@@ -1978,14 +2161,14 @@ opt_add_val_placement:
   {
     $$.val = &tree.AlterTypeAddValuePlacement{
        Before: true,
-       ExistingVal: $2,
+       ExistingVal: tree.EnumValue($2),
     }
   }
 | AFTER SCONST
   {
     $$.val = &tree.AlterTypeAddValuePlacement{
        Before: false,
-       ExistingVal: $2,
+       ExistingVal: tree.EnumValue($2),
     }
   }
 | /* EMPTY */
@@ -1993,10 +2176,45 @@ opt_add_val_placement:
     $$.val = (*tree.AlterTypeAddValuePlacement)(nil)
   }
 
+role_spec_list:
+  role_spec
+  {
+    $$.val = []security.SQLUsername{$1.user()}
+  }
+| role_spec_list ',' role_spec
+  {
+    $$.val = append($1.users(), $3.user())
+  }
+
 role_spec:
-  non_reserved_word_or_sconst
+  username_or_sconst { $$.val = $1.user() }
 | CURRENT_USER
+  {
+   // This is incorrect, see https://github.com/cockroachdb/cockroach/issues/54696
+   $$.val = security.MakeSQLUsernameFromPreNormalizedString($1)
+  }
 | SESSION_USER
+  {
+   // This is incorrect, see https://github.com/cockroachdb/cockroach/issues/54696
+     $$.val = security.MakeSQLUsernameFromPreNormalizedString($1)
+  }
+
+username_or_sconst:
+  non_reserved_word
+  {
+    // Username was entered as a SQL keyword, or as a SQL identifier
+    // already subject to case normalization and NFC reduction.
+    // (or is it? In fact, there is a bug here: https://github.com/cockroachdb/cockroach/issues/55396
+    // which needs to be fixed to make this fully correct.)
+    $$.val = security.MakeSQLUsernameFromPreNormalizedString($1)
+  }
+| SCONST
+  {
+    // We use UsernameValidation because username_or_sconst and role_spec
+    // are only used for usernames of existing accounts, not when
+    // creating new users or roles.	
+    $$.val, _ = security.MakeSQLUsernameFromUserInput($1, security.UsernameValidation)
+  }
 
 alter_attribute_action_list:
   alter_attribute_action
@@ -2008,6 +2226,35 @@ alter_attribute_action:
 | DROP ATTRIBUTE IF EXISTS column_name opt_drop_behavior
 | ALTER ATTRIBUTE column_name TYPE type_name opt_collate opt_drop_behavior
 | ALTER ATTRIBUTE column_name SET DATA TYPE type_name opt_collate opt_drop_behavior
+
+// %Help: REFRESH - recalculate a materialized view
+// %Category: Misc
+// %Text:
+// REFRESH MATERIALIZED VIEW [CONCURRENTLY] view_name [WITH [NO] DATA]
+refresh_stmt:
+  REFRESH MATERIALIZED VIEW opt_concurrently view_name opt_clear_data
+  {
+    $$.val = &tree.RefreshMaterializedView{
+      Name: $5.unresolvedObjectName(),
+      Concurrently: $4.bool(),
+      RefreshDataOption: $6.refreshDataOption(),
+    }
+  }
+| REFRESH error // SHOW HELP: REFRESH
+
+opt_clear_data:
+  WITH DATA
+  {
+    $$.val = tree.RefreshDataWithData
+  }
+| WITH NO DATA
+  {
+    $$.val = tree.RefreshDataClear
+  }
+| /* EMPTY */
+  {
+    $$.val = tree.RefreshDataDefault
+  }
 
 // %Help: BACKUP - back up data to external storage
 // %Category: CCL
@@ -2028,28 +2275,53 @@ alter_attribute_action:
 // Options:
 //    revision_history: enable revision history
 //    encryption_passphrase="secret": encrypt backups
-//    detached: execute backup job asynchronously, without waiting for its completion.
+//    kms="[kms_provider]://[kms_host]/[master_key_identifier]?[parameters]" : encrypt backups using KMS
+//    detached: execute backup job asynchronously, without waiting for its completion
 //
 // %SeeAlso: RESTORE, WEBDOCS/backup.html
 backup_stmt:
-  BACKUP opt_backup_targets TO partitioned_backup opt_as_of_clause opt_incremental opt_with_backup_options
+  BACKUP opt_backup_targets INTO sconst_or_placeholder IN string_or_placeholder_opt_list opt_as_of_clause opt_with_backup_options
   {
-    backup := &tree.Backup{
-      To:              $4.partitionedBackup(),
+    $$.val = &tree.Backup{
+      Targets: $2.targetListPtr(),
+      To: $6.stringOrPlaceholderOptList(),
+      Nested: true,
+      AppendToLatest: false,
+      Subdir: $4.expr(),
+      AsOf: $7.asOfClause(),
+      Options: *$8.backupOptions(),
+    }
+  }
+| BACKUP opt_backup_targets INTO string_or_placeholder_opt_list opt_as_of_clause opt_with_backup_options
+  {
+    $$.val = &tree.Backup{
+      Targets: $2.targetListPtr(),
+      To: $4.stringOrPlaceholderOptList(),
+      Nested: true,
+      AsOf: $5.asOfClause(),
+      Options: *$6.backupOptions(),
+    }
+  }
+| BACKUP opt_backup_targets INTO LATEST IN string_or_placeholder_opt_list opt_as_of_clause opt_with_backup_options
+  {
+    $$.val = &tree.Backup{
+      Targets: $2.targetListPtr(),
+      To: $6.stringOrPlaceholderOptList(),
+      Nested: true,
+      AppendToLatest: true,
+      AsOf: $7.asOfClause(),
+      Options: *$8.backupOptions(),
+    }
+  }
+| BACKUP opt_backup_targets TO string_or_placeholder_opt_list opt_as_of_clause opt_incremental opt_with_backup_options
+  {
+    $$.val = &tree.Backup{
+      Targets: $2.targetListPtr(),
+      To: $4.stringOrPlaceholderOptList(),
       IncrementalFrom: $6.exprs(),
-      AsOf:            $5.asOfClause(),
-      Options:         *$7.backupOptions(),
+      AsOf: $5.asOfClause(),
+      Options: *$7.backupOptions(),
     }
-
-    tl := $2.targetListPtr()
-    if tl == nil {
-      backup.DescriptorCoverage = tree.AllDescriptors
-    } else {
-      backup.DescriptorCoverage = tree.RequestedDescriptors
-      backup.Targets = *tl
-    }
-
-    $$.val = backup
   }
 | BACKUP error // SHOW HELP: BACKUP
 
@@ -2106,7 +2378,10 @@ backup_options:
   {
     $$.val = &tree.BackupOptions{Detached: true}
   }
-
+| KMS '=' string_or_placeholder_opt_list
+	{
+    $$.val = &tree.BackupOptions{EncryptionKMSURI: $3.stringOrPlaceholderOptList()}
+	}
 // %Help: CREATE SCHEDULE FOR BACKUP - backup data periodically
 // %Category: CCL
 // %Text:
@@ -2144,12 +2419,6 @@ backup_options:
 //     "@daily": run daily, at midnight
 //   See https://en.wikipedia.org/wiki/Cron
 //
-//   RECURRING NEVER indicates that the schedule is non recurring.
-//   If, in addition to 'NEVER', the 'first_run' schedule option is specified,
-//   then the schedule will execute once at that time (that is: it's a one-off execution).
-//   If the 'first_run' is not specified, then the created scheduled will be in 'PAUSED' state,
-//   and will need to be unpaused before it can execute.
-//
 // FULL BACKUP <crontab|ALWAYS>:
 //   The optional FULL BACKUP '<cron expr>' clause specifies when we'll start a new full backup,
 //   which becomes the "current" backup when complete.
@@ -2161,7 +2430,7 @@ backup_options:
 //      * RECURRING <= 1 day:  we default to FULL BACKUP '@weekly';
 //      * Otherwise: we default to FULL BACKUP ALWAYS.
 //
-// EXPERIMENTAL SCHEDULE OPTIONS:
+//  SCHEDULE OPTIONS:
 //   The schedule can be modified by specifying the following options (which are considered
 //   to be experimental at this time):
 //   * first_run=TIMESTAMPTZ:
@@ -2179,18 +2448,22 @@ backup_options:
 //     * skip: skip this execution, reschedule it based on RECURRING (or change_capture_period)
 //       expression.
 //     * wait: wait for the previous execution to complete.  This is the default.
+//   * ignore_existing_backups
+//     If backups were already created in the destination in which a new schedule references,
+//     this flag must be passed in to acknowledge that the new schedule may be backing up different
+//     objects.
 //
 // %SeeAlso: BACKUP
 create_schedule_for_backup_stmt:
-  CREATE SCHEDULE /*$3=*/opt_description FOR BACKUP /*$6=*/opt_backup_targets TO
-  /*$8=*/partitioned_backup /*$9=*/opt_with_backup_options
+  CREATE SCHEDULE /*$3=*/opt_description FOR BACKUP /*$6=*/opt_backup_targets INTO
+  /*$8=*/string_or_placeholder_opt_list /*$9=*/opt_with_backup_options
   /*$10=*/cron_expr /*$11=*/opt_full_backup_clause /*$12=*/opt_with_schedule_options
   {
     $$.val = &tree.ScheduledBackup{
-      ScheduleName:     $3.expr(),
+      ScheduleLabel:    $3.expr(),
       Recurrence:       $10.expr(),
       FullBackup:       $11.fullBackupClause(),
-      To:               $8.partitionedBackup(),
+      To:               $8.stringOrPlaceholderOptList(),
       Targets:          $6.targetListPtr(),
       BackupOptions:    *($9.backupOptions()),
       ScheduleOptions:  $12.kvOptions(),
@@ -2220,11 +2493,7 @@ sconst_or_placeholder:
   }
 
 cron_expr:
-  RECURRING NEVER
-  {
-    $$.val = nil
-  }
-| RECURRING sconst_or_placeholder
+  RECURRING sconst_or_placeholder
   // Can't use string_or_placeholder here due to conflict on NEVER branch above
   // (is NEVER a keyword or a variable?).
   {
@@ -2248,13 +2517,13 @@ opt_full_backup_clause:
   }
 
 opt_with_schedule_options:
-  WITH EXPERIMENTAL SCHEDULE OPTIONS kv_option_list
+  WITH SCHEDULE OPTIONS kv_option_list
+  {
+    $$.val = $4.kvOptions()
+  }
+| WITH SCHEDULE OPTIONS '(' kv_option_list ')'
   {
     $$.val = $5.kvOptions()
-  }
-| WITH EXPERIMENTAL SCHEDULE OPTIONS '(' kv_option_list ')'
-  {
-    $$.val = $6.kvOptions()
   }
 | /* EMPTY */
   {
@@ -2277,39 +2546,127 @@ opt_with_schedule_options:
 //    "[scheme]://[host]/[path to backup]?[parameters]"
 //
 // Options:
-//    INTO_DB
-//    SKIP_MISSING_FOREIGN_KEYS
-//
+//    into_db: specify target database
+//    skip_missing_foreign_keys: remove foreign key constraints before restoring
+//    skip_missing_sequences: ignore sequence dependencies
+//    skip_missing_views: skip restoring views because of dependencies that cannot be restored
+//    skip_missing_sequence_owners: remove sequence-table ownership dependencies before restoring
+//    encryption_passphrase=passphrase: decrypt BACKUP with specified passphrase
+//    kms="[kms_provider]://[kms_host]/[master_key_identifier]?[parameters]" : decrypt backups using KMS
+//    detached: execute restore job asynchronously, without waiting for its completion
 // %SeeAlso: BACKUP, WEBDOCS/restore.html
 restore_stmt:
-  RESTORE FROM partitioned_backup_list opt_as_of_clause opt_with_options
+  RESTORE FROM list_of_string_or_placeholder_opt_list opt_as_of_clause opt_with_restore_options
   {
-    $$.val = &tree.Restore{DescriptorCoverage: tree.AllDescriptors, From: $3.partitionedBackups(), AsOf: $4.asOfClause(), Options: $5.kvOptions()}
+    $$.val = &tree.Restore{
+    DescriptorCoverage: tree.AllDescriptors,
+    From: $3.listOfStringOrPlaceholderOptList(),
+    AsOf: $4.asOfClause(),
+    Options: *($5.restoreOptions()),
+    }
   }
-| RESTORE targets FROM partitioned_backup_list opt_as_of_clause opt_with_options
+| RESTORE targets FROM list_of_string_or_placeholder_opt_list opt_as_of_clause opt_with_restore_options
   {
-    $$.val = &tree.Restore{Targets: $2.targetList(), From: $4.partitionedBackups(), AsOf: $5.asOfClause(), Options: $6.kvOptions()}
+    $$.val = &tree.Restore{
+    Targets: $2.targetList(),
+    From: $4.listOfStringOrPlaceholderOptList(),
+    AsOf: $5.asOfClause(),
+    Options: *($6.restoreOptions()),
+    }
+  }
+| RESTORE targets FROM string_or_placeholder IN list_of_string_or_placeholder_opt_list opt_as_of_clause opt_with_restore_options
+  {
+    $$.val = &tree.Restore{
+      Targets: $2.targetList(),
+      Subdir: $4.expr(),
+      From: $6.listOfStringOrPlaceholderOptList(),
+      AsOf: $7.asOfClause(),
+      Options: *($8.restoreOptions()),
+    }
   }
 | RESTORE error // SHOW HELP: RESTORE
 
-partitioned_backup:
+string_or_placeholder_opt_list:
   string_or_placeholder
   {
-    $$.val = tree.PartitionedBackup{$1.expr()}
+    $$.val = tree.StringOrPlaceholderOptList{$1.expr()}
   }
 | '(' string_or_placeholder_list ')'
   {
-    $$.val = tree.PartitionedBackup($2.exprs())
+    $$.val = tree.StringOrPlaceholderOptList($2.exprs())
   }
 
-partitioned_backup_list:
-  partitioned_backup
+list_of_string_or_placeholder_opt_list:
+  string_or_placeholder_opt_list
   {
-    $$.val = []tree.PartitionedBackup{$1.partitionedBackup()}
+    $$.val = []tree.StringOrPlaceholderOptList{$1.stringOrPlaceholderOptList()}
   }
-| partitioned_backup_list ',' partitioned_backup
+| list_of_string_or_placeholder_opt_list ',' string_or_placeholder_opt_list
   {
-    $$.val = append($1.partitionedBackups(), $3.partitionedBackup())
+    $$.val = append($1.listOfStringOrPlaceholderOptList(), $3.stringOrPlaceholderOptList())
+  }
+
+// Optional restore options.
+opt_with_restore_options:
+  WITH restore_options_list
+  {
+    $$.val = $2.restoreOptions()
+  }
+| WITH OPTIONS '(' restore_options_list ')'
+  {
+    $$.val = $4.restoreOptions()
+  }
+| /* EMPTY */
+  {
+    $$.val = &tree.RestoreOptions{}
+  }
+
+restore_options_list:
+  // Require at least one option
+  restore_options
+  {
+    $$.val = $1.restoreOptions()
+  }
+| restore_options_list ',' restore_options
+  {
+    if err := $1.restoreOptions().CombineWith($3.restoreOptions()); err != nil {
+      return setErr(sqllex, err)
+    }
+  }
+
+// List of valid restore options.
+restore_options:
+  ENCRYPTION_PASSPHRASE '=' string_or_placeholder
+  {
+    $$.val = &tree.RestoreOptions{EncryptionPassphrase: $3.expr()}
+  }
+| KMS '=' string_or_placeholder_opt_list
+	{
+    $$.val = &tree.RestoreOptions{DecryptionKMSURI: $3.stringOrPlaceholderOptList()}
+	}
+| INTO_DB '=' string_or_placeholder
+  {
+    $$.val = &tree.RestoreOptions{IntoDB: $3.expr()}
+  }
+| SKIP_MISSING_FOREIGN_KEYS
+  {
+    $$.val = &tree.RestoreOptions{SkipMissingFKs: true}
+  }
+| SKIP_MISSING_SEQUENCES
+  {
+    $$.val = &tree.RestoreOptions{SkipMissingSequences: true}
+  }
+| SKIP_MISSING_SEQUENCE_OWNERS
+  {
+    $$.val = &tree.RestoreOptions{SkipMissingSequenceOwners: true}
+  }
+| SKIP_MISSING_VIEWS
+  {
+    $$.val = &tree.RestoreOptions{SkipMissingViews: true}
+  }
+| DETACHED
+  {
+    $$.val = &tree.RestoreOptions{Detached: true}
   }
 
 import_format:
@@ -2485,16 +2842,58 @@ opt_with_options:
     $$.val = nil
   }
 
+// The COPY grammar in postgres has 3 different versions, all of which are supported by postgres:
+// 1) The "really old" syntax from v7.2 and prior
+// 2) Pre 9.0 using hard-wired, space-separated options
+// 3) The current and preferred options using comma-separated generic identifiers instead of keywords.
+// We currently support only the #2 format.
+// See the comment for CopyStmt in https://github.com/postgres/postgres/blob/master/src/backend/parser/gram.y.
 copy_from_stmt:
-  COPY table_name opt_column_list FROM STDIN opt_with_options
+  COPY table_name opt_column_list FROM STDIN opt_with_copy_options opt_where_clause
   {
+    /* FORCE DOC */
     name := $2.unresolvedObjectName().ToTableName()
+    if $7.expr() != nil {
+      return unimplementedWithIssue(sqllex, 54580)
+    }
     $$.val = &tree.CopyFrom{
        Table: name,
        Columns: $3.nameList(),
        Stdin: true,
-       Options: $6.kvOptions(),
+       Options: *$6.copyOptions(),
     }
+  }
+
+opt_with_copy_options:
+  opt_with copy_options_list
+  {
+    $$.val = $2.copyOptions()
+  }
+| /* EMPTY */
+  {
+    $$.val = &tree.CopyOptions{}
+  }
+
+copy_options_list:
+  copy_options
+  {
+    $$.val = $1.copyOptions()
+  }
+| copy_options_list copy_options
+  {
+    if err := $1.copyOptions().CombineWith($2.copyOptions()); err != nil {
+      return setErr(sqllex, err)
+    }
+  }
+
+copy_options:
+  DESTINATION '=' string_or_placeholder
+  {
+    $$.val = &tree.CopyOptions{Destination: $3.expr()}
+  }
+| BINARY
+  {
+    $$.val = &tree.CopyOptions{CopyFormat: tree.CopyFormatBinary}
   }
 
 // %Help: CANCEL
@@ -2526,6 +2925,10 @@ cancel_jobs_stmt:
 | CANCEL JOBS select_stmt
   {
     $$.val = &tree.ControlJobs{Jobs: $3.slct(), Command: tree.CancelJob}
+  }
+| CANCEL JOBS for_schedules_clause
+  {
+    $$.val = &tree.ControlJobsForSchedules{Schedules: $3.slct(), Command: tree.CancelJob}
   }
 | CANCEL JOBS error // SHOW HELP: CANCEL JOBS
 
@@ -2645,34 +3048,47 @@ comment_text:
 // %Text:
 // CREATE DATABASE, CREATE TABLE, CREATE INDEX, CREATE TABLE AS,
 // CREATE USER, CREATE VIEW, CREATE SEQUENCE, CREATE STATISTICS,
-// CREATE ROLE, CREATE TYPE
+// CREATE ROLE, CREATE TYPE, CREATE EXTENSION
 create_stmt:
   create_role_stmt     // EXTEND WITH HELP: CREATE ROLE
 | create_ddl_stmt      // help texts in sub-rule
 | create_stats_stmt    // EXTEND WITH HELP: CREATE STATISTICS
 | create_schedule_for_backup_stmt   // EXTEND WITH HELP: CREATE SCHEDULE FOR BACKUP
+| create_extension_stmt // EXTEND WITH HELP: CREATE EXTENSION
 | create_unsupported   {}
 | CREATE error         // SHOW HELP: CREATE
 
+// %Help: CREATE EXTENSION
+// %Category: Cfg
+// %Text: CREATE EXTENSION [IF NOT EXISTS] name
+create_extension_stmt:
+  CREATE EXTENSION IF NOT EXISTS name
+  {
+    $$.val = &tree.CreateExtension{IfNotExists: true, Name: $6}
+  }
+| CREATE EXTENSION name {
+    $$.val = &tree.CreateExtension{Name: $3}
+  }
+| CREATE EXTENSION error // SHOW HELP: CREATE EXTENSION
+
 create_unsupported:
-  CREATE AGGREGATE error { return unimplemented(sqllex, "create aggregate") }
+  CREATE ACCESS METHOD error { return unimplemented(sqllex, "create access method") }
+| CREATE AGGREGATE error { return unimplemented(sqllex, "create aggregate") }
 | CREATE CAST error { return unimplemented(sqllex, "create cast") }
 | CREATE CONSTRAINT TRIGGER error { return unimplementedWithIssueDetail(sqllex, 28296, "create constraint") }
 | CREATE CONVERSION error { return unimplemented(sqllex, "create conversion") }
 | CREATE DEFAULT CONVERSION error { return unimplemented(sqllex, "create def conv") }
-| CREATE EXTENSION IF NOT EXISTS name error { return unimplemented(sqllex, "create extension " + $6) }
-| CREATE EXTENSION name error { return unimplemented(sqllex, "create extension " + $3) }
 | CREATE FOREIGN TABLE error { return unimplemented(sqllex, "create foreign table") }
 | CREATE FOREIGN DATA error { return unimplemented(sqllex, "create fdw") }
 | CREATE FUNCTION error { return unimplementedWithIssueDetail(sqllex, 17511, "create function") }
 | CREATE OR REPLACE FUNCTION error { return unimplementedWithIssueDetail(sqllex, 17511, "create function") }
 | CREATE opt_or_replace opt_trusted opt_procedural LANGUAGE name error { return unimplementedWithIssueDetail(sqllex, 17511, "create language " + $6) }
-| CREATE MATERIALIZED VIEW error { return unimplementedWithIssue(sqllex, 41649) }
 | CREATE OPERATOR error { return unimplemented(sqllex, "create operator") }
 | CREATE PUBLICATION error { return unimplemented(sqllex, "create publication") }
 | CREATE opt_or_replace RULE error { return unimplemented(sqllex, "create rule") }
 | CREATE SERVER error { return unimplemented(sqllex, "create server") }
 | CREATE SUBSCRIPTION error { return unimplemented(sqllex, "create subscription") }
+| CREATE TABLESPACE error { return unimplementedWithIssueDetail(sqllex, 54113, "create tablespace") }
 | CREATE TEXT error { return unimplementedWithIssueDetail(sqllex, 7821, "create text") }
 | CREATE TRIGGER error { return unimplementedWithIssueDetail(sqllex, 28296, "create") }
 
@@ -2689,7 +3105,8 @@ opt_procedural:
 | /* EMPTY */ {}
 
 drop_unsupported:
-  DROP AGGREGATE error { return unimplemented(sqllex, "drop aggregate") }
+  DROP ACCESS METHOD error { return unimplemented(sqllex, "drop access method") }
+| DROP AGGREGATE error { return unimplemented(sqllex, "drop aggregate") }
 | DROP CAST error { return unimplemented(sqllex, "drop cast") }
 | DROP COLLATION error { return unimplemented(sqllex, "drop collation") }
 | DROP CONVERSION error { return unimplemented(sqllex, "drop conversion") }
@@ -2703,7 +3120,6 @@ drop_unsupported:
 | DROP OPERATOR error { return unimplemented(sqllex, "drop operator") }
 | DROP PUBLICATION error { return unimplemented(sqllex, "drop publication") }
 | DROP RULE error { return unimplemented(sqllex, "drop rule") }
-| DROP SCHEMA error { return unimplementedWithIssueDetail(sqllex, 26443, "drop") }
 | DROP SERVER error { return unimplemented(sqllex, "drop server") }
 | DROP SUBSCRIPTION error { return unimplemented(sqllex, "drop subscription") }
 | DROP TEXT error { return unimplementedWithIssueDetail(sqllex, 7821, "drop text") }
@@ -2717,7 +3133,7 @@ create_ddl_stmt:
 | create_table_stmt    // EXTEND WITH HELP: CREATE TABLE
 | create_table_as_stmt // EXTEND WITH HELP: CREATE TABLE
 // Error case for both CREATE TABLE and CREATE TABLE ... AS in one
-| CREATE opt_temp_create_table TABLE error   // SHOW HELP: CREATE TABLE
+| CREATE opt_persistence_temp_table TABLE error   // SHOW HELP: CREATE TABLE
 | create_type_stmt     // EXTEND WITH HELP: CREATE TYPE
 | create_view_stmt     // EXTEND WITH HELP: CREATE VIEW
 | create_sequence_stmt // EXTEND WITH HELP: CREATE SEQUENCE
@@ -2915,6 +3331,7 @@ discard_stmt:
 drop_stmt:
   drop_ddl_stmt      // help texts in sub-rule
 | drop_role_stmt     // EXTEND WITH HELP: DROP ROLE
+| drop_schedule_stmt // EXTEND WITH HELP: DROP SCHEDULES
 | drop_unsupported   {}
 | DROP error         // SHOW HELP: DROP
 
@@ -2924,11 +3341,12 @@ drop_ddl_stmt:
 | drop_table_stmt    // EXTEND WITH HELP: DROP TABLE
 | drop_view_stmt     // EXTEND WITH HELP: DROP VIEW
 | drop_sequence_stmt // EXTEND WITH HELP: DROP SEQUENCE
+| drop_schema_stmt   // EXTEND WITH HELP: DROP SCHEMA
 | drop_type_stmt     // EXTEND WITH HELP: DROP TYPE
 
 // %Help: DROP VIEW - remove a view
 // %Category: DDL
-// %Text: DROP VIEW [IF EXISTS] <tablename> [, ...] [CASCADE | RESTRICT]
+// %Text: DROP [MATERIALIZED] VIEW [IF EXISTS] <tablename> [, ...] [CASCADE | RESTRICT]
 // %SeeAlso: WEBDOCS/drop-index.html
 drop_view_stmt:
   DROP VIEW table_name_list opt_drop_behavior
@@ -2938,6 +3356,24 @@ drop_view_stmt:
 | DROP VIEW IF EXISTS table_name_list opt_drop_behavior
   {
     $$.val = &tree.DropView{Names: $5.tableNames(), IfExists: true, DropBehavior: $6.dropBehavior()}
+  }
+| DROP MATERIALIZED VIEW table_name_list opt_drop_behavior
+  {
+    $$.val = &tree.DropView{
+      Names: $4.tableNames(),
+      IfExists: false,
+      DropBehavior: $5.dropBehavior(),
+      IsMaterialized: true,
+    }
+  }
+| DROP MATERIALIZED VIEW IF EXISTS table_name_list opt_drop_behavior
+  {
+    $$.val = &tree.DropView{
+      Names: $6.tableNames(),
+      IfExists: true,
+      DropBehavior: $7.dropBehavior(),
+      IsMaterialized: true,
+    }
   }
 | DROP VIEW error // SHOW HELP: DROP VIEW
 
@@ -3041,6 +3477,11 @@ drop_type_stmt:
   }
 | DROP TYPE error // SHOW HELP: DROP TYPE
 
+target_types:
+  type_name_list
+  {
+    $$.val = tree.TargetList{Types: $1.unresolvedObjectNames()}
+  }
 
 type_name_list:
   type_name
@@ -3052,6 +3493,27 @@ type_name_list:
     $$.val = append($1.unresolvedObjectNames(), $3.unresolvedObjectName())
   }
 
+// %Help: DROP SCHEMA - remove a schema
+// %Category: DDL
+// %Text: DROP SCHEMA [IF EXISTS] <schema_name> [, ...] [CASCADE | RESTRICT]
+drop_schema_stmt:
+  DROP SCHEMA schema_name_list opt_drop_behavior
+  {
+    $$.val = &tree.DropSchema{
+      Names: $3.objectNamePrefixList(),
+      IfExists: false,
+      DropBehavior: $4.dropBehavior(),
+    }
+  }
+| DROP SCHEMA IF EXISTS schema_name_list opt_drop_behavior
+  {
+    $$.val = &tree.DropSchema{
+      Names: $5.objectNamePrefixList(),
+      IfExists: true,
+      DropBehavior: $6.dropBehavior(),
+    }
+  }
+| DROP SCHEMA error // SHOW HELP: DROP SCHEMA
 
 // %Help: DROP ROLE - remove a user
 // %Category: Priv
@@ -3181,22 +3643,22 @@ explain_stmt:
 | EXPLAIN '(' error // SHOW HELP: EXPLAIN
 
 preparable_stmt:
-  alter_stmt        // help texts in sub-rule
-| backup_stmt       // EXTEND WITH HELP: BACKUP
-| cancel_stmt       // help texts in sub-rule
-| create_stmt       // help texts in sub-rule
-| delete_stmt       // EXTEND WITH HELP: DELETE
-| drop_stmt         // help texts in sub-rule
-| explain_stmt      // EXTEND WITH HELP: EXPLAIN
-| import_stmt       // EXTEND WITH HELP: IMPORT
-| insert_stmt       // EXTEND WITH HELP: INSERT
-| pause_stmt        // EXTEND WITH HELP: PAUSE JOBS
-| reset_stmt        // help texts in sub-rule
-| restore_stmt      // EXTEND WITH HELP: RESTORE
-| resume_stmt       // EXTEND WITH HELP: RESUME JOBS
-| export_stmt       // EXTEND WITH HELP: EXPORT
-| scrub_stmt        // help texts in sub-rule
-| select_stmt       // help texts in sub-rule
+  alter_stmt     // help texts in sub-rule
+| backup_stmt    // EXTEND WITH HELP: BACKUP
+| cancel_stmt    // help texts in sub-rule
+| create_stmt    // help texts in sub-rule
+| delete_stmt    // EXTEND WITH HELP: DELETE
+| drop_stmt      // help texts in sub-rule
+| explain_stmt   // EXTEND WITH HELP: EXPLAIN
+| import_stmt    // EXTEND WITH HELP: IMPORT
+| insert_stmt    // EXTEND WITH HELP: INSERT
+| pause_stmt     // help texts in sub-rule
+| reset_stmt     // help texts in sub-rule
+| restore_stmt   // EXTEND WITH HELP: RESTORE
+| resume_stmt    // help texts in sub-rule
+| export_stmt    // EXTEND WITH HELP: EXPORT
+| scrub_stmt     // help texts in sub-rule
+| select_stmt    // help texts in sub-rule
   {
     $$.val = $1.slct()
   }
@@ -3324,16 +3786,18 @@ deallocate_stmt:
 // %Category: Priv
 // %Text:
 // Grant privileges:
-//   GRANT {ALL | <privileges...> } ON <targets...> TO <grantees...>
-// Grant role membership (CCL only):
+//   GRANT {ALL [PRIVILEGES] | <privileges...> } ON <targets...> TO <grantees...>
+// Grant role membership:
 //   GRANT <roles...> TO <grantees...> [WITH ADMIN OPTION]
 //
 // Privileges:
-//   CREATE, DROP, GRANT, SELECT, INSERT, DELETE, UPDATE
+//   CREATE, DROP, GRANT, SELECT, INSERT, DELETE, UPDATE, USAGE
 //
 // Targets:
 //   DATABASE <databasename> [, ...]
 //   [TABLE] [<databasename> .] { <tablename> | * } [, ...]
+//   TYPE <typename> [, <typename>]...
+//   SCHEMA [<databasename> .]<schemaname> [, [<databasename> .]<schemaname>]...
 //
 // %SeeAlso: REVOKE, WEBDOCS/grant.html
 grant_stmt:
@@ -3349,6 +3813,20 @@ grant_stmt:
   {
     $$.val = &tree.GrantRole{Roles: $2.nameList(), Members: $4.nameList(), AdminOption: true}
   }
+| GRANT privileges ON TYPE target_types TO name_list
+  {
+    $$.val = &tree.Grant{Privileges: $2.privilegeList(), Targets: $5.targetList(), Grantees: $7.nameList()}
+  }
+| GRANT privileges ON SCHEMA schema_name_list TO name_list
+  {
+    $$.val = &tree.Grant{
+      Privileges: $2.privilegeList(),
+      Targets: tree.TargetList{
+        Schemas: $5.objectNamePrefixList(),
+      },
+      Grantees: $7.nameList(),
+    }
+  }
 | GRANT error // SHOW HELP: GRANT
 
 // %Help: REVOKE - remove access privileges and role memberships
@@ -3356,15 +3834,17 @@ grant_stmt:
 // %Text:
 // Revoke privileges:
 //   REVOKE {ALL | <privileges...> } ON <targets...> FROM <grantees...>
-// Revoke role membership (CCL only):
+// Revoke role membership:
 //   REVOKE [ADMIN OPTION FOR] <roles...> FROM <grantees...>
 //
 // Privileges:
-//   CREATE, DROP, GRANT, SELECT, INSERT, DELETE, UPDATE
+//   CREATE, DROP, GRANT, SELECT, INSERT, DELETE, UPDATE, USAGE
 //
 // Targets:
 //   DATABASE <databasename> [, <databasename>]...
 //   [TABLE] [<databasename> .] { <tablename> | * } [, ...]
+//   TYPE <typename> [, <typename>]...
+//   SCHEMA [<databasename> .]<schemaname> [, [<databasename> .]<schemaname]...
 //
 // %SeeAlso: GRANT, WEBDOCS/revoke.html
 revoke_stmt:
@@ -3380,15 +3860,29 @@ revoke_stmt:
   {
     $$.val = &tree.RevokeRole{Roles: $5.nameList(), Members: $7.nameList(), AdminOption: true }
   }
+| REVOKE privileges ON TYPE target_types FROM name_list
+  {
+    $$.val = &tree.Revoke{Privileges: $2.privilegeList(), Targets: $5.targetList(), Grantees: $7.nameList()}
+  }
+| REVOKE privileges ON SCHEMA schema_name_list FROM name_list
+  {
+    $$.val = &tree.Revoke{
+      Privileges: $2.privilegeList(),
+      Targets: tree.TargetList{
+        Schemas: $5.objectNamePrefixList(),
+      },
+      Grantees: $7.nameList(),
+    }
+  }
 | REVOKE error // SHOW HELP: REVOKE
 
-// ALL is always by itself.
+// ALL can either be by itself, or with the optional PRIVILEGES keyword (which no-ops)
 privileges:
-  ALL
+  ALL opt_privileges_clause
   {
     $$.val = privilege.List{privilege.ALL}
   }
-  | privilege_list
+| privilege_list
   {
      privList, err := privilege.ListFromStrings($1.nameList().ToStrings())
      if err != nil {
@@ -3632,6 +4126,8 @@ set_session_stmt:
 // Transaction parameters:
 //    ISOLATION LEVEL { SNAPSHOT | SERIALIZABLE }
 //    PRIORITY { LOW | NORMAL | HIGH }
+//    AS OF SYSTEM TIME <expr>
+//    [NOT] DEFERRABLE
 //
 // %SeeAlso: SHOW TRANSACTION, SET SESSION,
 // WEBDOCS/set-transaction.html
@@ -3684,7 +4180,7 @@ set_rest_more:
     /* SKIP DOC */
     $$.val = &tree.SetSessionAuthorizationDefault{}
   }
-| SESSION AUTHORIZATION non_reserved_word_or_sconst
+| SESSION AUTHORIZATION username_or_sconst
   {
     return unimplementedWithIssue(sqllex, 40283)
   }
@@ -3829,11 +4325,12 @@ zone_value:
 // %Category: Group
 // %Text:
 // SHOW BACKUP, SHOW CLUSTER SETTING, SHOW COLUMNS, SHOW CONSTRAINTS,
-// SHOW CREATE, SHOW DATABASES, SHOW HISTOGRAM, SHOW INDEXES, SHOW
-// PARTITIONS, SHOW JOBS, SHOW QUERIES, SHOW RANGE, SHOW RANGES,
+// SHOW CREATE, SHOW DATABASES, SHOW ENUMS, SHOW HISTOGRAM, SHOW INDEXES, SHOW
+// PARTITIONS, SHOW JOBS, SHOW QUERIES, SHOW RANGE, SHOW RANGES, SHOW REGIONS,
 // SHOW ROLES, SHOW SCHEMAS, SHOW SEQUENCES, SHOW SESSION, SHOW SESSIONS,
-// SHOW STATISTICS, SHOW SYNTAX, SHOW TABLES, SHOW TRACE SHOW TRANSACTION, SHOW USERS,
-// SHOW LAST QUERY STATISTICS
+// SHOW STATISTICS, SHOW SYNTAX, SHOW TABLES, SHOW TRACE, SHOW TRANSACTION,
+// SHOW TRANSACTIONS, SHOW TYPES, SHOW USERS, SHOW LAST QUERY STATISTICS, SHOW SCHEDULES,
+// SHOW LOCALITY
 show_stmt:
   show_backup_stmt          // EXTEND WITH HELP: SHOW BACKUP
 | show_columns_stmt         // EXTEND WITH HELP: SHOW COLUMNS
@@ -3841,15 +4338,20 @@ show_stmt:
 | show_create_stmt          // EXTEND WITH HELP: SHOW CREATE
 | show_csettings_stmt       // EXTEND WITH HELP: SHOW CLUSTER SETTING
 | show_databases_stmt       // EXTEND WITH HELP: SHOW DATABASES
+| show_enums_stmt           // EXTEND WITH HELP: SHOW ENUMS
+| show_types_stmt           // EXTEND WITH HELP: SHOW TYPES
 | show_fingerprints_stmt
 | show_grants_stmt          // EXTEND WITH HELP: SHOW GRANTS
 | show_histogram_stmt       // EXTEND WITH HELP: SHOW HISTOGRAM
 | show_indexes_stmt         // EXTEND WITH HELP: SHOW INDEXES
 | show_partitions_stmt      // EXTEND WITH HELP: SHOW PARTITIONS
 | show_jobs_stmt            // EXTEND WITH HELP: SHOW JOBS
+| show_locality_stmt
+| show_schedules_stmt       // EXTEND WITH HELP: SHOW SCHEDULES
 | show_queries_stmt         // EXTEND WITH HELP: SHOW QUERIES
 | show_ranges_stmt          // EXTEND WITH HELP: SHOW RANGES
 | show_range_for_row_stmt
+| show_regions_stmt         // EXTEND WITH HELP: SHOW REGIONS
 | show_roles_stmt           // EXTEND WITH HELP: SHOW ROLES
 | show_savepoint_stmt       // EXTEND WITH HELP: SHOW SAVEPOINT
 | show_schemas_stmt         // EXTEND WITH HELP: SHOW SCHEMAS
@@ -3861,6 +4363,7 @@ show_stmt:
 | show_tables_stmt          // EXTEND WITH HELP: SHOW TABLES
 | show_trace_stmt           // EXTEND WITH HELP: SHOW TRACE
 | show_transaction_stmt     // EXTEND WITH HELP: SHOW TRANSACTION
+| show_transactions_stmt    // EXTEND WITH HELP: SHOW TRANSACTIONS
 | show_users_stmt           // EXTEND WITH HELP: SHOW USERS
 | show_zone_stmt
 | SHOW error                // SHOW HELP: SHOW
@@ -3885,6 +4388,11 @@ reindex_stmt:
   {
     /* SKIP DOC */
     return purposelyUnimplemented(sqllex, "reindex index", "CockroachDB does not require reindexing.")
+  }
+| REINDEX SCHEMA error
+  {
+    /* SKIP DOC */
+    return purposelyUnimplemented(sqllex, "reindex schema", "CockroachDB does not require reindexing.")
   }
 | REINDEX DATABASE error
   {
@@ -3967,12 +4475,27 @@ show_histogram_stmt:
 // %Text: SHOW BACKUP [SCHEMAS|FILES|RANGES] <location>
 // %SeeAlso: WEBDOCS/show-backup.html
 show_backup_stmt:
-  SHOW BACKUP string_or_placeholder opt_with_options
+  SHOW BACKUPS IN string_or_placeholder
+ {
+    $$.val = &tree.ShowBackup{
+      InCollection:    $4.expr(),
+    }
+  }
+| SHOW BACKUP string_or_placeholder opt_with_options
   {
     $$.val = &tree.ShowBackup{
       Details: tree.BackupDefaultDetails,
       Path:    $3.expr(),
       Options: $4.kvOptions(),
+    }
+  }
+| SHOW BACKUP string_or_placeholder IN string_or_placeholder opt_with_options
+  {
+    $$.val = &tree.ShowBackup{
+      Details: tree.BackupDefaultDetails,
+      Path:    $3.expr(),
+      InCollection: $5.expr(),
+      Options: $6.kvOptions(),
     }
   }
 | SHOW BACKUP SCHEMAS string_or_placeholder opt_with_options
@@ -4080,6 +4603,26 @@ show_databases_stmt:
   }
 | SHOW DATABASES error // SHOW HELP: SHOW DATABASES
 
+// %Help: SHOW ENUMS - list enums
+// %Category: Misc
+// %Text: SHOW ENUMS
+show_enums_stmt:
+  SHOW ENUMS
+  {
+    $$.val = &tree.ShowEnums{}
+  }
+| SHOW ENUMS error // SHOW HELP: SHOW ENUMS
+
+// %Help: SHOW TYPES - list user defined types
+// %Category: Misc
+// %Text: SHOW TYPES
+show_types_stmt:
+  SHOW TYPES
+  {
+    $$.val = &tree.ShowTypes{}
+  }
+| SHOW TYPES error // SHOW HELP: SHOW TYPES
+
 // %Help: SHOW GRANTS - list grants
 // %Category: Priv
 // %Text:
@@ -4177,7 +4720,8 @@ opt_cluster:
 // %Help: SHOW JOBS - list background jobs
 // %Category: Misc
 // %Text:
-// SHOW [AUTOMATIC] JOBS
+// SHOW [AUTOMATIC] JOBS [select clause]
+// SHOW JOBS FOR SCHEDULES [select clause]
 // SHOW JOB <jobid>
 // %SeeAlso: CANCEL JOBS, PAUSE JOBS, RESUME JOBS
 show_jobs_stmt:
@@ -4199,6 +4743,10 @@ show_jobs_stmt:
   {
     $$.val = &tree.ShowJobs{Jobs: $5.slct(), Block: true}
   }
+| SHOW JOBS for_schedules_clause
+  {
+    $$.val = &tree.ShowJobs{Schedules: $3.slct()}
+  }
 | SHOW JOBS select_stmt error // SHOW HELP: SHOW JOBS
 | SHOW JOB a_expr
   {
@@ -4218,6 +4766,58 @@ show_jobs_stmt:
     }
   }
 | SHOW JOB error // SHOW HELP: SHOW JOBS
+
+// %Help: SHOW SCHEDULES - list periodic schedules
+// %Category: Misc
+// %Text:
+// SHOW [RUNNING | PAUSED] SCHEDULES [FOR BACKUP]
+// SHOW SCHEDULE <schedule_id>
+// %SeeAlso: PAUSE SCHEDULES, RESUME SCHEDULES, DROP SCHEDULES
+show_schedules_stmt:
+  SHOW SCHEDULES opt_schedule_executor_type
+  {
+    $$.val = &tree.ShowSchedules{
+      WhichSchedules: tree.SpecifiedSchedules,
+      ExecutorType: $3.executorType(),
+    }
+  }
+| SHOW SCHEDULES opt_schedule_executor_type error // SHOW HELP: SHOW SCHEDULES
+| SHOW schedule_state SCHEDULES opt_schedule_executor_type
+  {
+    $$.val = &tree.ShowSchedules{
+      WhichSchedules: $2.scheduleState(),
+      ExecutorType: $4.executorType(),
+    }
+  }
+| SHOW schedule_state SCHEDULES opt_schedule_executor_type error // SHOW HELP: SHOW SCHEDULES
+| SHOW SCHEDULE a_expr
+  {
+    $$.val = &tree.ShowSchedules{
+      WhichSchedules: tree.SpecifiedSchedules,
+      ScheduleID:  $3.expr(),
+    }
+  }
+| SHOW SCHEDULE error  // SHOW HELP: SHOW SCHEDULES
+
+schedule_state:
+  RUNNING
+  {
+    $$.val = tree.ActiveSchedules
+  }
+| PAUSED
+  {
+    $$.val = tree.PausedSchedules
+  }
+
+opt_schedule_executor_type:
+  /* Empty */
+  {
+    $$.val = tree.InvalidExecutor
+  }
+| FOR BACKUP
+  {
+    $$.val = tree.ScheduledBackupExecutor
+  }
 
 // %Help: SHOW TRACE - display an execution trace
 // %Category: Misc
@@ -4292,6 +4892,21 @@ show_tables_stmt:
     $$.val = &tree.ShowTables{WithComment: $3.bool()}
   }
 | SHOW TABLES error // SHOW HELP: SHOW TABLES
+
+// %Help: SHOW TRANSACTIONS - list open client transactions across the cluster
+// %Category: Misc
+// %Text: SHOW [ALL] [CLUSTER | LOCAL] TRANSACTIONS
+show_transactions_stmt:
+  SHOW opt_cluster TRANSACTIONS
+  {
+    $$.val = &tree.ShowTransactions{Cluster: $2.bool()}
+  }
+| SHOW opt_cluster TRANSACTIONS error // SHOW HELP: SHOW TRANSACTIONS
+| SHOW ALL opt_cluster TRANSACTIONS
+  {
+    $$.val = &tree.ShowTransactions{All: true, Cluster: $3.bool()}
+  }
+| SHOW ALL opt_cluster TRANSACTIONS error // SHOW HELP: SHOW TRANSACTIONS
 
 with_comment:
   WITH COMMENT { $$.val = true }
@@ -4513,6 +5128,29 @@ show_ranges_stmt:
   }
 | SHOW RANGES error // SHOW HELP: SHOW RANGES
 
+// %Help: SHOW REGIONS - shows regions
+// %Category: DDL
+// %Text:
+// SHOW REGIONS
+// SHOW REGIONS FOR DATABASE <database>
+show_regions_stmt:
+  SHOW REGIONS
+  {
+    $$.val = &tree.ShowRegions{}
+  }
+| SHOW REGIONS FROM DATABASE database_name
+  {
+    $$.val = &tree.ShowRegions{
+      Database: tree.Name($5),
+    }
+  }
+
+show_locality_stmt:
+  SHOW LOCALITY
+  {
+    $$.val = &tree.ShowVar{Name: "locality"}
+  }
+
 show_fingerprints_stmt:
   SHOW EXPERIMENTAL_FINGERPRINTS FROM TABLE table_name
   {
@@ -4706,6 +5344,14 @@ targets:
   {
     $$.val = tree.TargetList{Tables: $2.tablePatterns()}
   }
+| TENANT iconst64
+  {
+    tenID := uint64($2.int64())
+    if tenID == 0 {
+      return setErr(sqllex, errors.New("invalid tenant ID"))
+    }
+    $$.val = tree.TargetList{Tenant: roachpb.MakeTenantID(tenID)}
+  }
 | DATABASE name_list
   {
     $$.val = tree.TargetList{Databases: $2.nameList()}
@@ -4719,6 +5365,14 @@ targets_roles:
   {
      $$.val = tree.TargetList{ForRoles: true, Roles: $2.nameList()}
   }
+| SCHEMA schema_name_list
+  {
+     $$.val = tree.TargetList{Schemas: $2.objectNamePrefixList()}
+  }
+| TYPE type_name_list
+  {
+    $$.val = tree.TargetList{Types: $2.unresolvedObjectNames()}
+  }
 | targets
 
 for_grantee_clause:
@@ -4731,13 +5385,38 @@ for_grantee_clause:
     $$.val = tree.NameList(nil)
   }
 
+
+// %Help: PAUSE
+// %Category: Misc
+// %Text:
+//
+// Pause various background tasks and activities.
+//
+// PAUSE JOBS, PAUSE SCHEDULES
+pause_stmt:
+  pause_jobs_stmt       // EXTEND WITH HELP: PAUSE JOBS
+| pause_schedules_stmt  // EXTEND WITH HELP: PAUSE SCHEDULES
+| PAUSE error           // SHOW HELP: PAUSE
+
+// %Help: RESUME
+// %Category: Misc
+// %Text:
+//
+// Resume various background tasks and activities.
+//
+// RESUME JOBS, RESUME SCHEDULES
+resume_stmt:
+  resume_jobs_stmt       // EXTEND WITH HELP: RESUME JOBS
+| resume_schedules_stmt  // EXTEND WITH HELP: RESUME SCHEDULES
+| RESUME error           // SHOW HELP: RESUME
+
 // %Help: PAUSE JOBS - pause background jobs
 // %Category: Misc
 // %Text:
 // PAUSE JOBS <selectclause>
 // PAUSE JOB <jobid>
 // %SeeAlso: SHOW JOBS, CANCEL JOBS, RESUME JOBS
-pause_stmt:
+pause_jobs_stmt:
   PAUSE JOB a_expr
   {
     $$.val = &tree.ControlJobs{
@@ -4747,31 +5426,119 @@ pause_stmt:
       Command: tree.PauseJob,
     }
   }
+| PAUSE JOB error // SHOW HELP: PAUSE JOBS
 | PAUSE JOBS select_stmt
   {
     $$.val = &tree.ControlJobs{Jobs: $3.slct(), Command: tree.PauseJob}
   }
-| PAUSE error // SHOW HELP: PAUSE JOBS
+| PAUSE JOBS for_schedules_clause
+  {
+    $$.val = &tree.ControlJobsForSchedules{Schedules: $3.slct(), Command: tree.PauseJob}
+  }
+| PAUSE JOBS error // SHOW HELP: PAUSE JOBS
+
+
+for_schedules_clause:
+  FOR SCHEDULES select_stmt
+  {
+    $$.val = $3.slct()
+  }
+| FOR SCHEDULE a_expr
+  {
+   $$.val = &tree.Select{
+     Select: &tree.ValuesClause{Rows: []tree.Exprs{tree.Exprs{$3.expr()}}},
+   }
+  }
+
+// %Help: PAUSE SCHEDULES - pause scheduled jobs
+// %Category: Misc
+// %Text:
+// PAUSE SCHEDULES <selectclause>
+//   select clause: select statement returning schedule id to pause.
+// PAUSE SCHEDULE <scheduleID>
+// %SeeAlso: RESUME SCHEDULES, SHOW JOBS, CANCEL JOBS
+pause_schedules_stmt:
+  PAUSE SCHEDULE a_expr
+  {
+    $$.val = &tree.ControlSchedules{
+      Schedules: &tree.Select{
+        Select: &tree.ValuesClause{Rows: []tree.Exprs{tree.Exprs{$3.expr()}}},
+      },
+      Command: tree.PauseSchedule,
+    }
+  }
+| PAUSE SCHEDULE error // SHOW HELP: PAUSE SCHEDULES
+| PAUSE SCHEDULES select_stmt
+  {
+    $$.val = &tree.ControlSchedules{
+      Schedules: $3.slct(),
+      Command: tree.PauseSchedule,
+    }
+  }
+| PAUSE SCHEDULES error // SHOW HELP: PAUSE SCHEDULES
 
 // %Help: CREATE SCHEMA - create a new schema
 // %Category: DDL
 // %Text:
-// CREATE SCHEMA [IF NOT EXISTS] <schemaname>
+// CREATE SCHEMA [IF NOT EXISTS] { [<databasename>.]<schemaname> | [[<databasename>.]<schemaname>] AUTHORIZATION <rolename> }
 create_schema_stmt:
-  CREATE SCHEMA schema_name
+  CREATE SCHEMA qualifiable_schema_name
   {
     $$.val = &tree.CreateSchema{
-      Schema: $3,
+      Schema: $3.objectNamePrefix(),
     }
   }
-| CREATE SCHEMA IF NOT EXISTS schema_name
+| CREATE SCHEMA IF NOT EXISTS qualifiable_schema_name
   {
     $$.val = &tree.CreateSchema{
-      Schema: $6,
+      Schema: $6.objectNamePrefix(),
       IfNotExists: true,
     }
   }
+| CREATE SCHEMA opt_schema_name AUTHORIZATION role_spec
+  {
+    $$.val = &tree.CreateSchema{
+      Schema: $3.objectNamePrefix(),
+      AuthRole: $5.user(),
+    }
+  }
+| CREATE SCHEMA IF NOT EXISTS opt_schema_name AUTHORIZATION role_spec
+  {
+    $$.val = &tree.CreateSchema{
+      Schema: $6.objectNamePrefix(),
+      IfNotExists: true,
+      AuthRole: $8.user(),
+    }
+  }
 | CREATE SCHEMA error // SHOW HELP: CREATE SCHEMA
+
+// %Help: ALTER SCHEMA - alter an existing schema
+// %Category: DDL
+// %Text:
+//
+// Commands:
+//   ALTER SCHEMA ... RENAME TO <newschemaname>
+//   ALTER SCHEMA ... OWNER TO {<newowner> | CURRENT_USER | SESSION_USER }
+alter_schema_stmt:
+  ALTER SCHEMA qualifiable_schema_name RENAME TO schema_name
+  {
+    $$.val = &tree.AlterSchema{
+      Schema: $3.objectNamePrefix(),
+      Cmd: &tree.AlterSchemaRename{
+        NewName: tree.Name($6),
+      },
+    }
+  }
+| ALTER SCHEMA qualifiable_schema_name OWNER TO role_spec
+  {
+    $$.val = &tree.AlterSchema{
+      Schema: $3.objectNamePrefix(),
+      Cmd: &tree.AlterSchemaOwner{
+        Owner: $6.user(),
+      },
+    }
+  }
+| ALTER SCHEMA error // SHOW HELP: ALTER SCHEMA
 
 // %Help: CREATE TABLE - create a new table
 // %Category: DDL
@@ -4789,11 +5556,11 @@ create_schema_stmt:
 // Table constraints:
 //    PRIMARY KEY ( <colnames...> ) [USING HASH WITH BUCKET_COUNT = <shard_buckets>]
 //    FOREIGN KEY ( <colnames...> ) REFERENCES <tablename> [( <colnames...> )] [ON DELETE {NO ACTION | RESTRICT}] [ON UPDATE {NO ACTION | RESTRICT}]
-//    UNIQUE ( <colnames... ) [{STORING | INCLUDE | COVERING} ( <colnames...> )] [<interleave>]
+//    UNIQUE [WITHOUT INDEX] ( <colnames... ) [{STORING | INCLUDE | COVERING} ( <colnames...> )] [<interleave>]
 //    CHECK ( <expr> )
 //
 // Column qualifiers:
-//   [CONSTRAINT <constraintname>] {NULL | NOT NULL | UNIQUE | PRIMARY KEY | CHECK (<expr>) | DEFAULT <expr>}
+//   [CONSTRAINT <constraintname>] {NULL | NOT NULL | UNIQUE [WITHOUT INDEX] | PRIMARY KEY | CHECK (<expr>) | DEFAULT <expr>}
 //   FAMILY <familyname>, CREATE [IF NOT EXISTS] FAMILY [<familyname>]
 //   REFERENCES <tablename> [( <colnames...> )] [ON DELETE {NO ACTION | RESTRICT}] [ON UPDATE {NO ACTION | RESTRICT}]
 //   COLLATE <collationname>
@@ -4809,85 +5576,93 @@ create_schema_stmt:
 // WEBDOCS/create-table.html
 // WEBDOCS/create-table-as.html
 create_table_stmt:
-  CREATE opt_temp_create_table TABLE table_name '(' opt_table_elem_list ')' opt_interleave opt_partition_by opt_table_with opt_create_table_on_commit
+  CREATE opt_persistence_temp_table TABLE table_name '(' opt_table_elem_list ')' opt_create_table_inherits opt_interleave opt_partition_by opt_table_with opt_create_table_on_commit
   {
     name := $4.unresolvedObjectName().ToTableName()
     $$.val = &tree.CreateTable{
       Table: name,
       IfNotExists: false,
-      Interleave: $8.interleave(),
+      Interleave: $9.interleave(),
       Defs: $6.tblDefs(),
       AsSource: nil,
-      PartitionBy: $9.partitionBy(),
-      Temporary: $2.persistenceType(),
-      StorageParams: $10.storageParams(),
-      OnCommit: $11.createTableOnCommitSetting(),
+      PartitionBy: $10.partitionBy(),
+      Persistence: $2.persistence(),
+      StorageParams: $11.storageParams(),
+      OnCommit: $12.createTableOnCommitSetting(),
     }
   }
-| CREATE opt_temp_create_table TABLE IF NOT EXISTS table_name '(' opt_table_elem_list ')' opt_interleave opt_partition_by opt_table_with opt_create_table_on_commit
+| CREATE opt_persistence_temp_table TABLE IF NOT EXISTS table_name '(' opt_table_elem_list ')' opt_create_table_inherits opt_interleave opt_partition_by opt_table_with opt_create_table_on_commit
   {
     name := $7.unresolvedObjectName().ToTableName()
     $$.val = &tree.CreateTable{
       Table: name,
       IfNotExists: true,
-      Interleave: $11.interleave(),
+      Interleave: $12.interleave(),
       Defs: $9.tblDefs(),
       AsSource: nil,
-      PartitionBy: $12.partitionBy(),
-      Temporary: $2.persistenceType(),
-      StorageParams: $13.storageParams(),
-      OnCommit: $14.createTableOnCommitSetting(),
+      PartitionBy: $13.partitionBy(),
+      Persistence: $2.persistence(),
+      StorageParams: $14.storageParams(),
+      OnCommit: $15.createTableOnCommitSetting(),
     }
   }
 
 opt_table_with:
-  /* EMPTY */
-  {
-    $$.val = nil
-  }
+  opt_with_storage_parameter_list
 | WITHOUT OIDS
   {
     /* SKIP DOC */
     /* this is also the default in CockroachDB */
     $$.val = nil
   }
-| WITH '(' storage_parameter_list ')'
-  {
-    /* SKIP DOC */
-    $$.val = $3.storageParams()
-  }
 | WITH OIDS error
   {
     return unimplemented(sqllex, "create table with oids")
   }
 
-opt_create_table_on_commit:
+opt_create_table_inherits:
   /* EMPTY */
+  {
+    $$ = ""
+  }
+| INHERITS error
+  {
+    /* SKIP DOC */
+    return unimplementedWithIssueDetail(sqllex, 22456, "create table inherits")
+  }
+
+opt_with_storage_parameter_list:
+  {
+    $$.val = nil
+  }
+| WITH '(' storage_parameter_list ')'
+  {
+    $$.val = $3.storageParams()
+  }
+
+opt_create_table_on_commit:
   {
     $$.val = tree.CreateTableOnCommitUnset
   }
 | ON COMMIT PRESERVE ROWS
   {
-    /* SKIP DOC */
     $$.val = tree.CreateTableOnCommitPreserveRows
   }
 | ON COMMIT DELETE ROWS error
   {
-    /* SKIP DOC */
     return unimplementedWithIssueDetail(sqllex, 46556, "delete rows")
   }
 | ON COMMIT DROP error
   {
-    /* SKIP DOC */
     return unimplementedWithIssueDetail(sqllex, 46556, "drop")
   }
 
 storage_parameter:
-  name '=' d_expr
+  name '=' var_value
   {
     $$.val = tree.StorageParam{Key: tree.Name($1), Value: $3.expr()}
   }
-|  SCONST '=' d_expr
+|  SCONST '=' var_value
   {
     $$.val = tree.StorageParam{Key: tree.Name($1), Value: $3.expr()}
   }
@@ -4903,7 +5678,7 @@ storage_parameter_list:
   }
 
 create_table_as_stmt:
-  CREATE opt_temp_create_table TABLE table_name create_as_opt_col_list opt_table_with AS select_stmt opt_create_as_data opt_create_table_on_commit
+  CREATE opt_persistence_temp_table TABLE table_name create_as_opt_col_list opt_table_with AS select_stmt opt_create_as_data opt_create_table_on_commit
   {
     name := $4.unresolvedObjectName().ToTableName()
     $$.val = &tree.CreateTable{
@@ -4914,9 +5689,10 @@ create_table_as_stmt:
       AsSource: $8.slct(),
       StorageParams: $6.storageParams(),
       OnCommit: $10.createTableOnCommitSetting(),
+      Persistence: $2.persistence(),
     }
   }
-| CREATE opt_temp_create_table TABLE IF NOT EXISTS table_name create_as_opt_col_list opt_table_with AS select_stmt opt_create_as_data opt_create_table_on_commit
+| CREATE opt_persistence_temp_table TABLE IF NOT EXISTS table_name create_as_opt_col_list opt_table_with AS select_stmt opt_create_as_data opt_create_table_on_commit
   {
     name := $7.unresolvedObjectName().ToTableName()
     $$.val = &tree.CreateTable{
@@ -4927,6 +5703,7 @@ create_table_as_stmt:
       AsSource: $11.slct(),
       StorageParams: $9.storageParams(),
       OnCommit: $13.createTableOnCommitSetting(),
+      Persistence: $2.persistence(),
     }
   }
 
@@ -4948,20 +5725,20 @@ opt_create_as_data:
  *
  * NOTE: PG only accepts GLOBAL/LOCAL keywords for temp tables -- not sequences
  * and views. These keywords are no-ops in PG. This behavior is replicated by
- * making the distinction between opt_temp and opt_temp_create_table.
+ * making the distinction between opt_temp and opt_persistence_temp_table.
  */
  opt_temp:
-  TEMPORARY         { $$.val = true }
-| TEMP              { $$.val = true }
-| /*EMPTY*/         { $$.val = false }
+  TEMPORARY         { $$.val = tree.PersistenceTemporary }
+| TEMP              { $$.val = tree.PersistenceTemporary }
+| /*EMPTY*/         { $$.val = tree.PersistencePermanent }
 
-opt_temp_create_table:
-   opt_temp
-|  LOCAL TEMPORARY   { $$.val = true }
-| LOCAL TEMP        { $$.val = true }
-| GLOBAL TEMPORARY  { $$.val = true }
-| GLOBAL TEMP       { $$.val = true }
-| UNLOGGED          { return unimplemented(sqllex, "create unlogged") }
+opt_persistence_temp_table:
+  opt_temp
+| LOCAL TEMPORARY   { $$.val = tree.PersistenceTemporary }
+| LOCAL TEMP        { $$.val = tree.PersistenceTemporary }
+| GLOBAL TEMPORARY  { $$.val = tree.PersistenceTemporary }
+| GLOBAL TEMP       { $$.val = tree.PersistenceTemporary }
+| UNLOGGED          { $$.val = tree.PersistenceUnlogged }
 
 opt_table_elem_list:
   table_elem_list
@@ -5215,9 +5992,11 @@ col_qualification_elem:
   {
     $$.val = tree.NullConstraint{}
   }
-| UNIQUE
+| UNIQUE opt_without_index
   {
-    $$.val = tree.UniqueConstraint{}
+    $$.val = tree.UniqueConstraint{
+      WithoutIndex: $2.bool(),
+    }
   }
 | PRIMARY KEY
   {
@@ -5262,6 +6041,16 @@ col_qualification_elem:
     return 1
  }
 
+opt_without_index:
+  WITHOUT INDEX
+  {
+    $$.val = true
+  }
+| /* EMPTY */
+  {
+    $$.val = false
+  }
+
 // GENERATED ALWAYS is a noise word for compatibility with Postgres.
 generated_as:
   AS {}
@@ -5269,39 +6058,42 @@ generated_as:
 
 
 index_def:
-  INDEX opt_index_name '(' index_params ')' opt_hash_sharded opt_storing opt_interleave opt_partition_by opt_where_clause
+  INDEX opt_index_name '(' index_params ')' opt_hash_sharded opt_storing opt_interleave opt_partition_by opt_with_storage_parameter_list opt_where_clause
   {
     $$.val = &tree.IndexTableDef{
-      Name:    tree.Name($2),
-      Columns: $4.idxElems(),
-      Sharded: $6.shardedIndexDef(),
-      Storing: $7.nameList(),
-      Interleave: $8.interleave(),
-      PartitionBy: $9.partitionBy(),
-      Predicate: $10.expr(),
+      Name:          tree.Name($2),
+      Columns:       $4.idxElems(),
+      Sharded:       $6.shardedIndexDef(),
+      Storing:       $7.nameList(),
+      Interleave:    $8.interleave(),
+      PartitionBy:   $9.partitionBy(),
+      StorageParams: $10.storageParams(),
+      Predicate:     $11.expr(),
     }
   }
-| UNIQUE INDEX opt_index_name '(' index_params ')' opt_hash_sharded opt_storing opt_interleave opt_partition_by opt_where_clause
+| UNIQUE INDEX opt_index_name '(' index_params ')' opt_hash_sharded opt_storing opt_interleave opt_partition_by opt_with_storage_parameter_list opt_where_clause
   {
     $$.val = &tree.UniqueConstraintTableDef{
       IndexTableDef: tree.IndexTableDef {
-        Name:    tree.Name($3),
-        Columns: $5.idxElems(),
-        Sharded: $7.shardedIndexDef(),
-        Storing: $8.nameList(),
-        Interleave: $9.interleave(),
-        PartitionBy: $10.partitionBy(),
-        Predicate: $11.expr(),
+        Name:          tree.Name($3),
+        Columns:       $5.idxElems(),
+        Sharded:       $7.shardedIndexDef(),
+        Storing:       $8.nameList(),
+        Interleave:    $9.interleave(),
+        PartitionBy:   $10.partitionBy(),
+        StorageParams: $11.storageParams(),
+        Predicate:     $12.expr(),
       },
     }
   }
-| INVERTED INDEX opt_name '(' index_params ')' opt_where_clause
+| INVERTED INDEX opt_name '(' index_params ')' opt_with_storage_parameter_list opt_where_clause
   {
     $$.val = &tree.IndexTableDef{
-      Name:    tree.Name($3),
-      Columns: $5.idxElems(),
-      Inverted: true,
-      Predicate: $7.expr(),
+      Name:          tree.Name($3),
+      Columns:       $5.idxElems(),
+      Inverted:      true,
+      StorageParams: $7.storageParams(),
+      Predicate:     $8.expr(),
     }
   }
 
@@ -5335,15 +6127,17 @@ constraint_elem:
       Expr: $3.expr(),
     }
   }
-| UNIQUE '(' index_params ')' opt_storing opt_interleave opt_partition_by opt_deferrable opt_where_clause
+| UNIQUE opt_without_index '(' index_params ')'
+    opt_storing opt_interleave opt_partition_by opt_deferrable opt_where_clause
   {
     $$.val = &tree.UniqueConstraintTableDef{
+      WithoutIndex: $2.bool(),
       IndexTableDef: tree.IndexTableDef{
-        Columns: $3.idxElems(),
-        Storing: $5.nameList(),
-        Interleave: $6.interleave(),
-        PartitionBy: $7.partitionBy(),
-        Predicate: $9.expr(),
+        Columns: $4.idxElems(),
+        Storing: $6.nameList(),
+        Interleave: $7.interleave(),
+        PartitionBy: $8.partitionBy(),
+        Predicate: $10.expr(),
       },
     }
   }
@@ -5643,7 +6437,7 @@ create_sequence_stmt:
     name := $4.unresolvedObjectName().ToTableName()
     $$.val = &tree.CreateSequence {
       Name: name,
-      Temporary: $2.persistenceType(),
+      Persistence: $2.persistence(),
       Options: $5.seqOpts(),
     }
   }
@@ -5652,7 +6446,7 @@ create_sequence_stmt:
     name := $7.unresolvedObjectName().ToTableName()
     $$.val = &tree.CreateSequence {
       Name: name, Options: $8.seqOpts(),
-      Temporary: $2.persistenceType(),
+      Persistence: $2.persistence(),
       IfNotExists: true,
     }
   }
@@ -5771,7 +6565,7 @@ role_or_group_or_user:
 
 // %Help: CREATE VIEW - create a new view
 // %Category: DDL
-// %Text: CREATE [TEMPORARY | TEMP] VIEW <viewname> [( <colnames...> )] AS <source>
+// %Text: CREATE [TEMPORARY | TEMP] [MATERIALIZED] VIEW [IF NOT EXISTS] <viewname> [( <colnames...> )] AS <source>
 // %SeeAlso: CREATE TABLE, SHOW CREATE, WEBDOCS/create-view.html
 create_view_stmt:
   CREATE opt_temp opt_view_recursive VIEW view_name opt_column_list AS select_stmt
@@ -5781,7 +6575,7 @@ create_view_stmt:
       Name: name,
       ColumnNames: $6.nameList(),
       AsSource: $8.slct(),
-      Temporary: $2.persistenceType(),
+      Persistence: $2.persistence(),
       IfNotExists: false,
       Replace: false,
     }
@@ -5795,7 +6589,7 @@ create_view_stmt:
       Name: name,
       ColumnNames: $8.nameList(),
       AsSource: $10.slct(),
-      Temporary: $4.persistenceType(),
+      Persistence: $4.persistence(),
       IfNotExists: false,
       Replace: true,
     }
@@ -5807,9 +6601,30 @@ create_view_stmt:
       Name: name,
       ColumnNames: $9.nameList(),
       AsSource: $11.slct(),
-      Temporary: $2.persistenceType(),
+      Persistence: $2.persistence(),
       IfNotExists: true,
       Replace: false,
+    }
+  }
+| CREATE MATERIALIZED VIEW view_name opt_column_list AS select_stmt
+  {
+    name := $4.unresolvedObjectName().ToTableName()
+    $$.val = &tree.CreateView{
+      Name: name,
+      ColumnNames: $5.nameList(),
+      AsSource: $7.slct(),
+      Materialized: true,
+    }
+  }
+| CREATE MATERIALIZED VIEW IF NOT EXISTS view_name opt_column_list AS select_stmt
+  {
+    name := $7.unresolvedObjectName().ToTableName()
+    $$.val = &tree.CreateView{
+      Name: name,
+      ColumnNames: $8.nameList(),
+      AsSource: $10.slct(),
+      Materialized: true,
+      IfNotExists: true,
     }
   }
 | CREATE opt_temp opt_view_recursive VIEW error // SHOW HELP: CREATE VIEW
@@ -5820,19 +6635,76 @@ role_option:
     $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
   }
 | NOCREATEROLE
-	{
-		$$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
-	}
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
 | LOGIN
-	{
-		$$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
-	}
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
 | NOLOGIN
-	{
-		$$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
-	}
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| CONTROLJOB
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| NOCONTROLJOB
+  {
+   $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| CONTROLCHANGEFEED
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| NOCONTROLCHANGEFEED
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| CREATEDB
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| NOCREATEDB
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| CREATELOGIN
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| NOCREATELOGIN
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| VIEWACTIVITY
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| NOVIEWACTIVITY
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| CANCELQUERY
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| NOCANCELQUERY
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| MODIFYCLUSTERSETTING
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
+| NOMODIFYCLUSTERSETTING
+  {
+    $$.val = tree.KVOption{Key: tree.Name($1), Value: nil}
+  }
 | password_clause
 | valid_until_clause
+
 
 role_options:
   role_option
@@ -5845,24 +6717,24 @@ role_options:
   }
 
 opt_role_options:
-	opt_with role_options
-	{
-		$$.val = $2.kvOptions()
-	}
+  opt_with role_options
+  {
+    $$.val = $2.kvOptions()
+  }
 | /* EMPTY */
-	{
-		$$.val = nil
-	}
+  {
+    $$.val = nil
+  }
 
 valid_until_clause:
   VALID UNTIL string_or_placeholder
   {
-		$$.val = tree.KVOption{Key: tree.Name(fmt.Sprintf("%s_%s",$1, $2)), Value: $3.expr()}
+    $$.val = tree.KVOption{Key: tree.Name(fmt.Sprintf("%s_%s",$1, $2)), Value: $3.expr()}
   }
 | VALID UNTIL NULL
   {
-		$$.val = tree.KVOption{Key: tree.Name(fmt.Sprintf("%s_%s",$1, $2)), Value: tree.DNull}
-	}
+    $$.val = tree.KVOption{Key: tree.Name(fmt.Sprintf("%s_%s",$1, $2)), Value: tree.DNull}
+  }
 
 opt_view_recursive:
   /* EMPTY */ { /* no error */ }
@@ -5879,7 +6751,7 @@ create_type_stmt:
     $$.val = &tree.CreateType{
       TypeName: $3.unresolvedObjectName(),
       Variety: tree.Enum,
-      EnumLabels: $7.strs(),
+      EnumLabels: $7.enumValueList(),
     }
   }
 | CREATE TYPE error // SHOW HELP: CREATE TYPE
@@ -5897,21 +6769,21 @@ create_type_stmt:
 opt_enum_val_list:
   enum_val_list
   {
-    $$.val = $1.strs()
+    $$.val = $1.enumValueList()
   }
 | /* EMPTY */
   {
-    $$.val = []string(nil)
+    $$.val = tree.EnumValueList(nil)
   }
 
 enum_val_list:
   SCONST
   {
-    $$.val = []string{$1}
+    $$.val = tree.EnumValueList{tree.EnumValue($1)}
   }
 | enum_val_list ',' SCONST
   {
-    $$.val = append($1.strs(), $3)
+    $$.val = append($1.enumValueList(), tree.EnumValue($3))
   }
 
 // %Help: CREATE INDEX - create a new index
@@ -5920,6 +6792,8 @@ enum_val_list:
 // CREATE [UNIQUE | INVERTED] INDEX [CONCURRENTLY] [IF NOT EXISTS] [<idxname>]
 //        ON <tablename> ( <colname> [ASC | DESC] [, ...] )
 //        [USING HASH WITH BUCKET_COUNT = <shard_buckets>] [STORING ( <colnames...> )] [<interleave>]
+//        [PARTITION BY <partition params>]
+//        [WITH <storage_parameter_list] [WHERE <where_conds...>]
 //
 // Interleave clause:
 //    INTERLEAVE IN PARENT <tablename> ( <colnames...> ) [CASCADE | RESTRICT]
@@ -5927,86 +6801,90 @@ enum_val_list:
 // %SeeAlso: CREATE TABLE, SHOW INDEXES, SHOW CREATE,
 // WEBDOCS/create-index.html
 create_index_stmt:
-  CREATE opt_unique INDEX opt_concurrently opt_index_name ON table_name opt_using_gin_btree '(' index_params ')' opt_hash_sharded opt_storing opt_interleave opt_partition_by opt_where_clause
+  CREATE opt_unique INDEX opt_concurrently opt_index_name ON table_name opt_index_access_method '(' index_params ')' opt_hash_sharded opt_storing opt_interleave opt_partition_by opt_with_storage_parameter_list opt_where_clause
   {
     table := $7.unresolvedObjectName().ToTableName()
     $$.val = &tree.CreateIndex{
-      Name:    tree.Name($5),
-      Table:   table,
-      Unique:  $2.bool(),
-      Columns: $10.idxElems(),
-      Sharded: $12.shardedIndexDef(),
-      Storing: $13.nameList(),
-      Interleave: $14.interleave(),
-      PartitionBy: $15.partitionBy(),
-      Predicate: $16.expr(),
-      Inverted: $8.bool(),
-      Concurrently: $4.bool(),
+      Name:          tree.Name($5),
+      Table:         table,
+      Unique:        $2.bool(),
+      Columns:       $10.idxElems(),
+      Sharded:       $12.shardedIndexDef(),
+      Storing:       $13.nameList(),
+      Interleave:    $14.interleave(),
+      PartitionBy:   $15.partitionBy(),
+      StorageParams: $16.storageParams(),
+      Predicate:     $17.expr(),
+      Inverted:      $8.bool(),
+      Concurrently:  $4.bool(),
     }
   }
-| CREATE opt_unique INDEX opt_concurrently IF NOT EXISTS index_name ON table_name opt_using_gin_btree '(' index_params ')' opt_hash_sharded opt_storing opt_interleave opt_partition_by opt_where_clause
+| CREATE opt_unique INDEX opt_concurrently IF NOT EXISTS index_name ON table_name opt_index_access_method '(' index_params ')' opt_hash_sharded opt_storing opt_interleave opt_partition_by opt_with_storage_parameter_list opt_where_clause
   {
     table := $10.unresolvedObjectName().ToTableName()
     $$.val = &tree.CreateIndex{
-      Name:        tree.Name($8),
-      Table:       table,
-      Unique:      $2.bool(),
-      IfNotExists: true,
-      Columns:     $13.idxElems(),
-      Sharded:     $15.shardedIndexDef(),
-      Storing:     $16.nameList(),
-      Interleave:  $17.interleave(),
-      PartitionBy: $18.partitionBy(),
-      Inverted:    $11.bool(),
-      Predicate:   $19.expr(),
-      Concurrently: $4.bool(),
+      Name:          tree.Name($8),
+      Table:         table,
+      Unique:        $2.bool(),
+      IfNotExists:   true,
+      Columns:       $13.idxElems(),
+      Sharded:       $15.shardedIndexDef(),
+      Storing:       $16.nameList(),
+      Interleave:    $17.interleave(),
+      PartitionBy:   $18.partitionBy(),
+      Inverted:      $11.bool(),
+      StorageParams: $19.storageParams(),
+      Predicate:     $20.expr(),
+      Concurrently:  $4.bool(),
     }
   }
-| CREATE opt_unique INVERTED INDEX opt_concurrently opt_index_name ON table_name '(' index_params ')' opt_storing opt_interleave opt_partition_by opt_where_clause
+| CREATE opt_unique INVERTED INDEX opt_concurrently opt_index_name ON table_name '(' index_params ')' opt_storing opt_interleave opt_partition_by opt_with_storage_parameter_list opt_where_clause
   {
     table := $8.unresolvedObjectName().ToTableName()
     $$.val = &tree.CreateIndex{
-      Name:       tree.Name($6),
-      Table:      table,
-      Unique:     $2.bool(),
-      Inverted:   true,
-      Columns:    $10.idxElems(),
-      Storing:     $12.nameList(),
-      Interleave:  $13.interleave(),
-      PartitionBy: $14.partitionBy(),
-      Predicate:   $15.expr(),
-      Concurrently: $5.bool(),
+      Name:          tree.Name($6),
+      Table:         table,
+      Unique:        $2.bool(),
+      Inverted:      true,
+      Columns:       $10.idxElems(),
+      Storing:       $12.nameList(),
+      Interleave:    $13.interleave(),
+      PartitionBy:   $14.partitionBy(),
+      StorageParams: $15.storageParams(),
+      Predicate:     $16.expr(),
+      Concurrently:  $5.bool(),
     }
   }
-| CREATE opt_unique INVERTED INDEX opt_concurrently IF NOT EXISTS index_name ON table_name '(' index_params ')' opt_storing opt_interleave opt_partition_by opt_where_clause
+| CREATE opt_unique INVERTED INDEX opt_concurrently IF NOT EXISTS index_name ON table_name '(' index_params ')' opt_storing opt_interleave opt_partition_by opt_with_storage_parameter_list opt_where_clause
   {
     table := $11.unresolvedObjectName().ToTableName()
     $$.val = &tree.CreateIndex{
-      Name:        tree.Name($9),
-      Table:       table,
-      Unique:      $2.bool(),
-      Inverted:    true,
-      IfNotExists: true,
-      Columns:     $13.idxElems(),
-      Storing:     $15.nameList(),
-      Interleave:  $16.interleave(),
-      PartitionBy: $17.partitionBy(),
-      Predicate:   $18.expr(),
-      Concurrently: $5.bool(),
+      Name:          tree.Name($9),
+      Table:         table,
+      Unique:        $2.bool(),
+      Inverted:      true,
+      IfNotExists:   true,
+      Columns:       $13.idxElems(),
+      Storing:       $15.nameList(),
+      Interleave:    $16.interleave(),
+      PartitionBy:   $17.partitionBy(),
+      StorageParams: $18.storageParams(),
+      Predicate:     $19.expr(),
+      Concurrently:  $5.bool(),
     }
   }
 | CREATE opt_unique INDEX error // SHOW HELP: CREATE INDEX
 
-opt_using_gin_btree:
+opt_index_access_method:
   USING name
   {
     /* FORCE DOC */
     switch $2 {
-      case "gin":
+      case "gin", "gist":
         $$.val = true
       case "btree":
         $$.val = false
-      case "hash", "gist", "spgist", "brin":
+      case "hash", "spgist", "brin":
         return unimplemented(sqllex, "index using " + $2)
       default:
         sqllex.Error("unrecognized access method: " + $2)
@@ -6052,12 +6930,38 @@ index_params:
 // expressions in parens. For backwards-compatibility reasons, we allow an
 // expression that is just a function call to be written without parens.
 index_elem:
-  a_expr opt_asc_desc opt_nulls_order
+  func_expr_windowless index_elem_options
+  {
+    e := $2.idxElem()
+    e.Expr = $1.expr()
+    $$.val = e
+  }
+| '(' a_expr ')' index_elem_options
+  {
+    e := $4.idxElem()
+    e.Expr = $2.expr()
+    $$.val = e
+  }
+| name index_elem_options
+  {
+    e := $2.idxElem()
+    e.Column = tree.Name($1)
+    $$.val = e
+  }
+
+index_elem_options:
+  opt_class opt_asc_desc opt_nulls_order
   {
     /* FORCE DOC */
-    e := $1.expr()
+    opClass := $1
     dir := $2.dir()
     nullsOrder := $3.nullsOrder()
+    if opClass != "" {
+      if opClass == "gin_trgm_ops" || opClass == "gist_trgm_ops" {
+        return unimplementedWithIssueDetail(sqllex, 41285, "index using " + opClass)
+      }
+      return unimplementedWithIssue(sqllex, 47420)
+    }
     // We currently only support the opposite of Postgres defaults.
     if nullsOrder != tree.DefaultNullsOrder {
       if dir == tree.Descending && nullsOrder == tree.NullsFirst {
@@ -6067,12 +6971,12 @@ index_elem:
         return unimplementedWithIssue(sqllex, 6224)
       }
     }
-    if colName, ok := e.(*tree.UnresolvedName); ok && colName.NumParts == 1 {
-      $$.val = tree.IndexElem{Column: tree.Name(colName.Parts[0]), Direction: dir, NullsOrder: nullsOrder}
-    } else {
-      return unimplementedWithIssueDetail(sqllex, 9682, fmt.Sprintf("%T", e))
-    }
+    $$.val = tree.IndexElem{Direction: dir, NullsOrder: nullsOrder}
   }
+
+opt_class:
+  name { $$ = $1 }
+| /* EMPTY */ { $$ = "" }
 
 opt_collate:
   COLLATE collation_name { $$ = $2 }
@@ -6090,6 +6994,12 @@ opt_asc_desc:
 | /* EMPTY */
   {
     $$.val = tree.DefaultDirection
+  }
+
+alter_database_to_schema_stmt:
+  ALTER DATABASE database_name CONVERT TO SCHEMA WITH PARENT database_name
+  {
+    $$.val = &tree.ReparentDatabase{Name: tree.Name($3), Parent: tree.Name($9)}
   }
 
 alter_rename_database_stmt:
@@ -6112,6 +7022,164 @@ alter_rename_table_stmt:
     $$.val = &tree.RenameTable{Name: name, NewName: newName, IfExists: true, IsView: false}
   }
 
+alter_table_set_schema_stmt:
+  ALTER TABLE relation_expr SET SCHEMA schema_name
+   {
+     $$.val = &tree.AlterTableSetSchema{
+       Name: $3.unresolvedObjectName(), Schema: tree.Name($6), IfExists: false,
+     }
+   }
+| ALTER TABLE IF EXISTS relation_expr SET SCHEMA schema_name
+  {
+    $$.val = &tree.AlterTableSetSchema{
+      Name: $5.unresolvedObjectName(), Schema: tree.Name($8), IfExists: true,
+    }
+  }
+
+alter_table_regional_affinity_stmt:
+  ALTER TABLE relation_expr SET regional_affinity
+  {
+    $$.val = &tree.AlterTableRegionalAffinity{
+      Name: $3.unresolvedObjectName(),
+      RegionalAffinity: $5.regionAffinity(),
+      IfExists: false,
+    }
+  }
+| ALTER TABLE IF NOT EXISTS relation_expr SET regional_affinity
+  {
+    $$.val = &tree.AlterTableRegionalAffinity{
+      Name: $6.unresolvedObjectName(),
+      RegionalAffinity: $8.regionAffinity(),
+      IfExists: true,
+    }
+  }
+
+regional_affinity:
+  LOCALITY GLOBAL
+  {
+    $$.val = tree.RegionalAffinity{
+      RegionalAffinityLevel: tree.RegionalAffinityLevelGlobal,
+    }
+  }
+| LOCALITY REGIONAL BY TABLE IN region_name
+  {
+    $$.val = tree.RegionalAffinity{
+      TableRegion: tree.Name($6),
+      RegionalAffinityLevel: tree.RegionalAffinityLevelTable,
+    }
+  }
+| LOCALITY REGIONAL BY ROW
+  {
+    $$.val = tree.RegionalAffinity{
+      RegionalAffinityLevel: tree.RegionalAffinityLevelRowLevel,
+    }
+  }
+| REGIONAL AFFINITY TO NONE
+  {
+    $$.val = tree.RegionalAffinity{
+      RegionalAffinityLevel: tree.RegionalAffinityLevelGlobal,
+    }
+  }
+| REGIONAL AFFINITY TO region_name
+  {
+    $$.val = tree.RegionalAffinity{
+      TableRegion: tree.Name($4),
+      RegionalAffinityLevel: tree.RegionalAffinityLevelTable,
+    }
+  }
+| REGIONAL AFFINITY AT ROW LEVEL
+  {
+    $$.val = tree.RegionalAffinity{
+      RegionalAffinityLevel: tree.RegionalAffinityLevelRowLevel,
+    }
+  }
+| REGIONAL AFFINITY NONE
+  {
+    $$.val = tree.RegionalAffinity{
+      RegionalAffinityLevel: tree.RegionalAffinityLevelGlobal,
+    }
+  }
+| REGIONAL AFFINITY region_name
+  {
+    $$.val = tree.RegionalAffinity{
+      TableRegion: tree.Name($3),
+      RegionalAffinityLevel: tree.RegionalAffinityLevelTable,
+    }
+  }
+| REGIONAL AFFINITY ROW LEVEL
+  {
+    $$.val = tree.RegionalAffinity{
+      RegionalAffinityLevel: tree.RegionalAffinityLevelRowLevel,
+    }
+  }
+| NO REGIONAL AFFINITY
+  {
+    $$.val = tree.RegionalAffinity{
+      RegionalAffinityLevel: tree.RegionalAffinityLevelGlobal,
+    }
+  }
+| TABLE LEVEL REGIONAL AFFINITY TO region_name
+  {
+    $$.val = tree.RegionalAffinity{
+      TableRegion: tree.Name($6),
+      RegionalAffinityLevel: tree.RegionalAffinityLevelTable,
+    }
+  }
+| ROW LEVEL REGIONAL AFFINITY
+  {
+    $$.val = tree.RegionalAffinity{
+      RegionalAffinityLevel: tree.RegionalAffinityLevelRowLevel,
+    }
+  }
+
+alter_view_set_schema_stmt:
+	ALTER VIEW relation_expr SET SCHEMA schema_name
+	 {
+		 $$.val = &tree.AlterTableSetSchema{
+			 Name: $3.unresolvedObjectName(), Schema: tree.Name($6), IfExists: false, IsView: true,
+		 }
+	 }
+| ALTER MATERIALIZED VIEW relation_expr SET SCHEMA schema_name
+	 {
+		 $$.val = &tree.AlterTableSetSchema{
+			 Name: $4.unresolvedObjectName(),
+			 Schema: tree.Name($7),
+			 IfExists: false,
+			 IsView: true,
+			 IsMaterialized: true,
+		 }
+	 }
+| ALTER VIEW IF EXISTS relation_expr SET SCHEMA schema_name
+	{
+		$$.val = &tree.AlterTableSetSchema{
+			Name: $5.unresolvedObjectName(), Schema: tree.Name($8), IfExists: true, IsView: true,
+		}
+	}
+| ALTER MATERIALIZED VIEW IF EXISTS relation_expr SET SCHEMA schema_name
+	{
+		$$.val = &tree.AlterTableSetSchema{
+			Name: $6.unresolvedObjectName(),
+			Schema: tree.Name($9),
+			IfExists: true,
+			IsView: true,
+			IsMaterialized: true,
+		}
+	}
+
+alter_sequence_set_schema_stmt:
+	ALTER SEQUENCE relation_expr SET SCHEMA schema_name
+	 {
+		 $$.val = &tree.AlterTableSetSchema{
+			 Name: $3.unresolvedObjectName(), Schema: tree.Name($6), IfExists: false, IsSequence: true,
+		 }
+	 }
+| ALTER SEQUENCE IF EXISTS relation_expr SET SCHEMA schema_name
+	{
+		$$.val = &tree.AlterTableSetSchema{
+			Name: $5.unresolvedObjectName(), Schema: tree.Name($8), IfExists: true, IsSequence: true,
+		}
+	}
+
 alter_rename_view_stmt:
   ALTER VIEW relation_expr RENAME TO view_name
   {
@@ -6119,11 +7187,35 @@ alter_rename_view_stmt:
     newName := $6.unresolvedObjectName()
     $$.val = &tree.RenameTable{Name: name, NewName: newName, IfExists: false, IsView: true}
   }
+| ALTER MATERIALIZED VIEW relation_expr RENAME TO view_name
+  {
+    name := $4.unresolvedObjectName()
+    newName := $7.unresolvedObjectName()
+    $$.val = &tree.RenameTable{
+      Name: name,
+      NewName: newName,
+      IfExists: false,
+      IsView: true,
+      IsMaterialized: true,
+    }
+  }
 | ALTER VIEW IF EXISTS relation_expr RENAME TO view_name
   {
     name := $5.unresolvedObjectName()
     newName := $8.unresolvedObjectName()
     $$.val = &tree.RenameTable{Name: name, NewName: newName, IfExists: true, IsView: true}
+  }
+| ALTER MATERIALIZED VIEW IF EXISTS relation_expr RENAME TO view_name
+  {
+    name := $6.unresolvedObjectName()
+    newName := $9.unresolvedObjectName()
+    $$.val = &tree.RenameTable{
+      Name: name,
+      NewName: newName,
+      IfExists: true,
+      IsView: true,
+      IsMaterialized: true,
+    }
   }
 
 alter_rename_sequence_stmt:
@@ -6175,7 +7267,7 @@ release_stmt:
 // RESUME JOBS <selectclause>
 // RESUME JOB <jobid>
 // %SeeAlso: SHOW JOBS, CANCEL JOBS, PAUSE JOBS
-resume_stmt:
+resume_jobs_stmt:
   RESUME JOB a_expr
   {
     $$.val = &tree.ControlJobs{
@@ -6185,11 +7277,74 @@ resume_stmt:
       Command: tree.ResumeJob,
     }
   }
+| RESUME JOB error // SHOW HELP: RESUME JOBS
 | RESUME JOBS select_stmt
   {
     $$.val = &tree.ControlJobs{Jobs: $3.slct(), Command: tree.ResumeJob}
   }
-| RESUME error // SHOW HELP: RESUME JOBS
+| RESUME JOBS for_schedules_clause
+  {
+    $$.val = &tree.ControlJobsForSchedules{Schedules: $3.slct(), Command: tree.ResumeJob}
+  }
+| RESUME JOBS error // SHOW HELP: RESUME JOBS
+
+// %Help: RESUME SCHEDULES - resume executing scheduled jobs
+// %Category: Misc
+// %Text:
+// RESUME SCHEDULES <selectclause>
+//  selectclause: select statement returning schedule IDs to resume.
+//
+// RESUME SCHEDULES <jobid>
+//
+// %SeeAlso: PAUSE SCHEDULES, SHOW JOBS, RESUME JOBS
+resume_schedules_stmt:
+  RESUME SCHEDULE a_expr
+  {
+    $$.val = &tree.ControlSchedules{
+      Schedules: &tree.Select{
+        Select: &tree.ValuesClause{Rows: []tree.Exprs{tree.Exprs{$3.expr()}}},
+      },
+      Command: tree.ResumeSchedule,
+    }
+  }
+| RESUME SCHEDULE error // SHOW HELP: RESUME SCHEDULES
+| RESUME SCHEDULES select_stmt
+  {
+    $$.val = &tree.ControlSchedules{
+      Schedules: $3.slct(),
+      Command: tree.ResumeSchedule,
+    }
+  }
+| RESUME SCHEDULES error // SHOW HELP: RESUME SCHEDULES
+
+// %Help: DROP SCHEDULES - destroy specified schedules
+// %Category: Misc
+// %Text:
+// DROP SCHEDULES <selectclause>
+//  selectclause: select statement returning schedule IDs to resume.
+//
+// DROP SCHEDULE <scheduleid>
+//
+// %SeeAlso: PAUSE SCHEDULES, SHOW JOBS, CANCEL JOBS
+drop_schedule_stmt:
+  DROP SCHEDULE a_expr
+  {
+    $$.val = &tree.ControlSchedules{
+      Schedules: &tree.Select{
+        Select: &tree.ValuesClause{Rows: []tree.Exprs{tree.Exprs{$3.expr()}}},
+      },
+      Command: tree.DropSchedule,
+    }
+  }
+| DROP SCHEDULE error // SHOW HELP: DROP SCHEDULES
+| DROP SCHEDULES select_stmt
+  {
+    $$.val = &tree.ControlSchedules{
+      Schedules: $3.slct(),
+      Command: tree.DropSchedule,
+    }
+  }
+| DROP SCHEDULES error // SHOW HELP: DROP SCHEDULES
 
 // %Help: SAVEPOINT - start a sub-transaction
 // %Category: Txn
@@ -6343,6 +7498,10 @@ transaction_mode:
   {
     $$.val = tree.TransactionModes{AsOf: $1.asOfClause()}
   }
+| transaction_deferrable_mode
+  {
+    $$.val = tree.TransactionModes{Deferrable: $1.deferrableMode()}
+  }
 
 transaction_user_priority:
   PRIORITY user_priority
@@ -6366,12 +7525,22 @@ transaction_read_mode:
     $$.val = tree.ReadWrite
   }
 
+transaction_deferrable_mode:
+  DEFERRABLE
+  {
+    $$.val = tree.Deferrable
+  }
+| NOT DEFERRABLE
+  {
+    $$.val = tree.NotDeferrable
+  }
+
 // %Help: CREATE DATABASE - create a new database
 // %Category: DDL
 // %Text: CREATE DATABASE [IF NOT EXISTS] <name>
 // %SeeAlso: WEBDOCS/create-database.html
 create_database_stmt:
-  CREATE DATABASE database_name opt_with opt_template_clause opt_encoding_clause opt_lc_collate_clause opt_lc_ctype_clause
+  CREATE DATABASE database_name opt_with opt_template_clause opt_encoding_clause opt_lc_collate_clause opt_lc_ctype_clause opt_connection_limit opt_regions_list opt_survive_clause
   {
     $$.val = &tree.CreateDatabase{
       Name: tree.Name($3),
@@ -6379,9 +7548,12 @@ create_database_stmt:
       Encoding: $6,
       Collate: $7,
       CType: $8,
+      ConnectionLimit: $9.int32(),
+      Regions: $10.nameList(),
+      Survive: $11.survive(),
     }
   }
-| CREATE DATABASE IF NOT EXISTS database_name opt_with opt_template_clause opt_encoding_clause opt_lc_collate_clause opt_lc_ctype_clause
+| CREATE DATABASE IF NOT EXISTS database_name opt_with opt_template_clause opt_encoding_clause opt_lc_collate_clause opt_lc_ctype_clause opt_connection_limit opt_regions_list opt_survive_clause
   {
     $$.val = &tree.CreateDatabase{
       IfNotExists: true,
@@ -6390,9 +7562,43 @@ create_database_stmt:
       Encoding: $9,
       Collate: $10,
       CType: $11,
+      ConnectionLimit: $12.int32(),
+      Regions: $13.nameList(),
+      Survive: $14.survive(),
     }
-   }
+  }
 | CREATE DATABASE error // SHOW HELP: CREATE DATABASE
+
+opt_regions_list:
+  region_or_regions opt_equal region_name_list
+  {
+    $$.val = $3.nameList()
+  }
+| /* EMPTY */
+  {
+    $$.val = tree.NameList(nil)
+  }
+
+survive_clause:
+  SURVIVE REGION FAILURE
+  {
+    $$.val = tree.SurviveRegionFailure
+  }
+| SURVIVE AVAILABILITY ZONE FAILURE
+  {
+    $$.val = tree.SurviveAvailabilityZoneFailure
+  }
+| SURVIVE DEFAULT
+  {
+    $$.val = tree.SurviveDefault
+  }
+
+opt_survive_clause:
+  survive_clause
+| /* EMPTY */
+  {
+    $$.val = tree.SurviveDefault
+  }
 
 opt_template_clause:
   TEMPLATE opt_equal non_reserved_word_or_sconst
@@ -6434,6 +7640,20 @@ opt_lc_ctype_clause:
     $$ = ""
   }
 
+opt_connection_limit:
+  CONNECTION LIMIT opt_equal signed_iconst
+  {
+    ret, err := $4.numVal().AsInt32()
+    if err != nil {
+      return setErr(sqllex, err)
+    }
+    $$.val = ret
+  }
+| /* EMPTY */
+  {
+    $$.val = int32(-1)
+  }
+
 opt_equal:
   '=' {}
 | /* EMPTY */ {}
@@ -6443,7 +7663,10 @@ opt_equal:
 // %Text:
 // INSERT INTO <tablename> [[AS] <name>] [( <colnames...> )]
 //        <selectclause>
-//        [ON CONFLICT [( <colnames...> )] {DO UPDATE SET ... [WHERE <expr>] | DO NOTHING}]
+//        [ON CONFLICT {
+//          [( <colnames...> )] [WHERE <arbiter_predicate>] DO NOTHING |
+//          ( <colnames...> ) [WHERE <index_predicate>] DO UPDATE SET ... [WHERE <expr>]
+//        }
 //        [RETURNING <exprs...>]
 // %SeeAlso: UPSERT, UPDATE, DELETE, WEBDOCS/insert.html
 insert_stmt:
@@ -6545,26 +7768,31 @@ insert_column_item:
 | column_name '.' error { return unimplementedWithIssue(sqllex, 27792) }
 
 on_conflict:
-  ON CONFLICT opt_conf_expr DO UPDATE SET set_clause_list opt_where_clause
+  ON CONFLICT DO NOTHING
   {
-    $$.val = &tree.OnConflict{Columns: $3.nameList(), Exprs: $7.updateExprs(), Where: tree.NewWhere(tree.AstWhere, $8.expr())}
+    $$.val = &tree.OnConflict{
+      Columns: tree.NameList(nil),
+      DoNothing: true,
+    }
   }
-| ON CONFLICT opt_conf_expr DO NOTHING
+| ON CONFLICT '(' name_list ')' opt_where_clause DO NOTHING
   {
-    $$.val = &tree.OnConflict{Columns: $3.nameList(), DoNothing: true}
+    $$.val = &tree.OnConflict{
+      Columns: $4.nameList(),
+      ArbiterPredicate: $6.expr(),
+      DoNothing: true,
+    }
   }
-
-opt_conf_expr:
-  '(' name_list ')'
+| ON CONFLICT '(' name_list ')' opt_where_clause DO UPDATE SET set_clause_list opt_where_clause
   {
-    $$.val = $2.nameList()
+    $$.val = &tree.OnConflict{
+      Columns: $4.nameList(),
+      ArbiterPredicate: $6.expr(),
+      Exprs: $10.updateExprs(),
+      Where: tree.NewWhere(tree.AstWhere, $11.expr()),
+    }
   }
-| '(' name_list ')' where_clause { return unimplementedWithIssue(sqllex, 32557) }
-| ON CONSTRAINT constraint_name { return unimplementedWithIssue(sqllex, 28161) }
-| /* EMPTY */
-  {
-    $$.val = tree.NameList(nil)
-  }
+| ON CONFLICT ON CONSTRAINT constraint_name { return unimplementedWithIssue(sqllex, 28161) }
 
 returning_clause:
   RETURNING target_list
@@ -6645,6 +7873,36 @@ multiple_set_clause:
   {
     $$.val = &tree.UpdateExpr{Tuple: true, Names: $2.nameList(), Expr: $5.expr()}
   }
+
+// %Help: REASSIGN OWNED BY - change ownership of all objects
+// %Category: Priv
+// %Text: REASSIGN OWNED BY {<name> | CURRENT_USER | SESSION_USER}[,...]
+// TO {<name> | CURRENT_USER | SESSION_USER}
+// %SeeAlso: DROP OWNED BY
+reassign_owned_by_stmt:
+  REASSIGN OWNED BY role_spec_list TO role_spec
+  {
+    $$.val = &tree.ReassignOwnedBy{
+      OldRoles: $4.users(),
+      NewRole: $6.user(),
+    }
+  }
+| REASSIGN OWNED BY error // SHOW HELP: REASSIGN OWNED BY
+
+// %Help: DROP OWNED BY - remove database objects owned by role(s).
+// %Category: Priv
+// %Text: DROP OWNED BY {<name> | CURRENT_USER | SESSION_USER}[,...]
+// [RESTRICT | CASCADE]
+// %SeeAlso: REASSIGN OWNED BY
+drop_owned_by_stmt:
+  DROP OWNED BY role_spec_list opt_drop_behavior
+  {
+    $$.val = &tree.DropOwnedBy{
+      Roles: $4.users(),
+      DropBehavior: $5.dropBehavior(),
+    }
+  }
+| DROP OWNED BY error // SHOW HELP: DROP OWNED BY
 
 // A complete SELECT statement looks like this.
 //
@@ -7046,6 +8304,10 @@ opt_all_clause:
   ALL {}
 | /* EMPTY */ {}
 
+opt_privileges_clause:
+  PRIVILEGES {}
+| /* EMPTY */ {}
+
 opt_sort_clause:
   sort_clause
   {
@@ -7122,11 +8384,11 @@ sortby:
   }
 
 opt_nulls_order:
-  NULLS FIRST
+  NULLS_LA FIRST
   {
     $$.val = tree.NullsFirst
   }
-| NULLS LAST
+| NULLS_LA LAST
   {
     $$.val = tree.NullsLast
   }
@@ -7249,7 +8511,7 @@ first_or_next:
 // Each item in the group_clause list is either an expression tree or a
 // GroupingSet node of some type.
 group_clause:
-  GROUP BY expr_list
+  GROUP BY group_by_list
   {
     $$.val = tree.GroupBy($3.exprs())
   }
@@ -7257,6 +8519,19 @@ group_clause:
   {
     $$.val = tree.GroupBy(nil)
   }
+
+group_by_list:
+  group_by_item { $$.val = tree.Exprs{$1.expr()} }
+| group_by_list ',' group_by_item { $$.val = append($1.exprs(), $3.expr()) }
+
+// Note the '(' is required as CUBE and ROLLUP rely on setting precedence
+// of CUBE and ROLLUP below that of '(', so that they shift in these rules
+// rather than reducing the conflicting unreserved_keyword rule.
+group_by_item:
+  a_expr { $$.val = $1.expr() }
+| ROLLUP '(' error { return unimplementedWithIssueDetail(sqllex, 46280, "rollup") }
+| CUBE '(' error { return unimplementedWithIssueDetail(sqllex, 46280, "cube") }
+| GROUPING SETS error { return unimplementedWithIssueDetail(sqllex, 46280, "grouping sets") }
 
 having_clause:
   HAVING a_expr
@@ -7761,13 +9036,33 @@ table_expr_opt_alias_idx:
   }
 
 table_name_opt_idx:
-  table_name opt_index_flags
+  opt_only table_name opt_index_flags opt_descendant
   {
-    name := $1.unresolvedObjectName().ToTableName()
+    name := $2.unresolvedObjectName().ToTableName()
     $$.val = &tree.AliasedTableExpr{
       Expr: &name,
-      IndexFlags: $2.indexFlags(),
+      IndexFlags: $3.indexFlags(),
     }
+  }
+
+opt_only:
+	ONLY
+  {
+    $$.val = true
+  }
+| /* EMPTY */
+  {
+    $$.val = false
+  }
+
+opt_descendant:
+	'*'
+  {
+    $$.val = true
+  }
+| /* EMPTY */
+  {
+    $$.val = false
   }
 
 where_clause:
@@ -7912,7 +9207,7 @@ simple_typename:
 | '@' iconst32
   {
     id := $2.int32()
-    $$.val = &tree.IDTypeReference{ID: uint32(id)}
+    $$.val = &tree.OIDTypeReference{OID: oid.Oid(id)}
   }
 | complex_type_name
   {
@@ -7927,17 +9222,42 @@ simple_typename:
 
 geo_shape_type:
   POINT { $$.val = geopb.ShapeType_Point }
+| POINTM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYM_type") } // { $$.val = geopb.ShapeType_PointM }
+| POINTZ error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZ_type") } // { $$.val = geopb.ShapeType_PointZ }
+| POINTZM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZM_type") } // { $$.val = geopb.ShapeType_PointZM }
 | LINESTRING { $$.val = geopb.ShapeType_LineString }
+| LINESTRINGM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYM_type") } // { $$.val = geopb.ShapeType_LineStringM }
+| LINESTRINGZ error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZ_type") } // { $$.val = geopb.ShapeType_LineStringZ }
+| LINESTRINGZM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZM_type") } // { $$.val = geopb.ShapeType_LineStringZM }
 | POLYGON { $$.val = geopb.ShapeType_Polygon }
-| GEOMETRYCOLLECTION { $$.val = geopb.ShapeType_GeometryCollection }
-| MULTIPOLYGON { $$.val = geopb.ShapeType_MultiPolygon }
-| MULTILINESTRING { $$.val = geopb.ShapeType_MultiLineString }
+| POLYGONM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYM_type") } // { $$.val = geopb.ShapeType_PolygonM }
+| POLYGONZ error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZ_type") } // { $$.val = geopb.ShapeType_PolygonZ }
+| POLYGONZM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZM_type") } // { $$.val = geopb.ShapeType_PolygonZM }
 | MULTIPOINT { $$.val = geopb.ShapeType_MultiPoint }
+| MULTIPOINTM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYM_type") } // { $$.val = geopb.ShapeType_MultiPointM }
+| MULTIPOINTZ error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZ_type") } // { $$.val = geopb.ShapeType_MultiPointZ }
+| MULTIPOINTZM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZM_type") } // { $$.val = geopb.ShapeType_MultiPointZM }
+| MULTILINESTRING { $$.val = geopb.ShapeType_MultiLineString }
+| MULTILINESTRINGM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYM_type") } // { $$.val = geopb.ShapeType_MultiLineStringM }
+| MULTILINESTRINGZ error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZ_type") } // { $$.val = geopb.ShapeType_MultiLineStringZ }
+| MULTILINESTRINGZM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZM_type") } // { $$.val = geopb.ShapeType_MultiLineStringZM }
+| MULTIPOLYGON { $$.val = geopb.ShapeType_MultiPolygon }
+| MULTIPOLYGONM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYM_type") } // { $$.val = geopb.ShapeType_MultiPolygonM }
+| MULTIPOLYGONZ error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZ_type") } // { $$.val = geopb.ShapeType_MultiPolygonZ }
+| MULTIPOLYGONZM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZM_type") } // { $$.val = geopb.ShapeType_MultiPolygonZM }
+| GEOMETRYCOLLECTION { $$.val = geopb.ShapeType_GeometryCollection }
+| GEOMETRYCOLLECTIONM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYM_type") } // { $$.val = geopb.ShapeType_GeometryCollectionM }
+| GEOMETRYCOLLECTIONZ error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZ_type") } // { $$.val = geopb.ShapeType_GeometryCollectionZ }
+| GEOMETRYCOLLECTIONZM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZM_type") } // { $$.val = geopb.ShapeType_GeometryCollectionZM }
 | GEOMETRY { $$.val = geopb.ShapeType_Geometry }
+| GEOMETRYM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYM_type") } // { $$.val = geopb.ShapeType_GeometryM }
+| GEOMETRYZ error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZ_type") } // { $$.val = geopb.ShapeType_GeometryZ }
+| GEOMETRYZM error { return unimplementedWithIssueDetail(sqllex, 53091, "XYZM_type") } // { $$.val = geopb.ShapeType_GeometryZM }
 
 const_geo:
   GEOGRAPHY { $$.val = types.Geography }
 | GEOMETRY  { $$.val = types.Geometry }
+| BOX2D     { $$.val = types.Box2D }
 | GEOMETRY '(' geo_shape_type ')'
   {
     $$.val = types.MakeGeometry($3.geoShapeType(), 0)
@@ -10274,7 +11594,42 @@ type_name:             db_object_name
 
 sequence_name:         db_object_name
 
+region_name:           name
+
+region_name_list:      name_list
+  {
+    $$.val = $1.nameList()
+  }
+
 schema_name:           name
+
+qualifiable_schema_name:
+	name
+	{
+		$$.val = tree.ObjectNamePrefix{SchemaName: tree.Name($1), ExplicitSchema: true}
+	}
+| name '.' name
+	{
+		$$.val = tree.ObjectNamePrefix{CatalogName: tree.Name($1), SchemaName: tree.Name($3), ExplicitCatalog: true, ExplicitSchema: true}
+	}
+
+schema_name_list:
+  qualifiable_schema_name
+  {
+    $$.val = tree.ObjectNamePrefixList{$1.objectNamePrefix()}
+  }
+| schema_name_list ',' qualifiable_schema_name
+  {
+    $$.val = append($1.objectNamePrefixList(), $3.objectNamePrefix())
+  }
+
+
+opt_schema_name:
+	qualifiable_schema_name
+| /* EMPTY */
+	{
+		$$.val = tree.ObjectNamePrefix{ExplicitSchema: false}
+	}
 
 table_name:            db_object_name
 
@@ -10480,8 +11835,10 @@ unrestricted_name:
 unreserved_keyword:
   ABORT
 | ACTION
+| ACCESS
 | ADD
 | ADMIN
+| AFFINITY
 | AFTER
 | AGGREGATE
 | ALTER
@@ -10489,15 +11846,18 @@ unreserved_keyword:
 | AT
 | ATTRIBUTE
 | AUTOMATIC
-| AUTHORIZATION
+| AVAILABILITY
 | BACKUP
+| BACKUPS
 | BEFORE
 | BEGIN
+| BINARY
 | BUCKET_COUNT
 | BUNDLE
 | BY
 | CACHE
 | CANCEL
+| CANCELQUERY
 | CASCADE
 | CHANGEFEED
 | CLOSE
@@ -10513,10 +11873,16 @@ unreserved_keyword:
 | CONFIGURATION
 | CONFIGURATIONS
 | CONFIGURE
+| CONNECTION
 | CONSTRAINTS
+| CONTROLCHANGEFEED
+| CONTROLJOB
 | CONVERSION
+| CONVERT
 | COPY
 | COVERING
+| CREATEDB
+| CREATELOGIN
 | CREATEROLE
 | CUBE
 | CURRENT
@@ -10530,6 +11896,7 @@ unreserved_keyword:
 | DELETE
 | DEFAULTS
 | DEFERRED
+| DESTINATION
 | DETACHED
 | DISCARD
 | DOMAIN
@@ -10538,6 +11905,7 @@ unreserved_keyword:
 | ENCODING
 | ENCRYPTION_PASSPHRASE
 | ENUM
+| ENUMS
 | ESCAPE
 | EXCLUDE
 | EXCLUDING
@@ -10552,6 +11920,7 @@ unreserved_keyword:
 | EXPLAIN
 | EXPORT
 | EXTENSION
+| FAILURE
 | FILES
 | FILTER
 | FIRST
@@ -10559,7 +11928,13 @@ unreserved_keyword:
 | FORCE_INDEX
 | FUNCTION
 | GENERATED
+| GEOMETRYM
+| GEOMETRYZ
+| GEOMETRYZM
 | GEOMETRYCOLLECTION
+| GEOMETRYCOLLECTIONM
+| GEOMETRYCOLLECTIONZ
+| GEOMETRYCOLLECTIONZM
 | GLOBAL
 | GRANTS
 | GROUPS
@@ -10575,9 +11950,11 @@ unreserved_keyword:
 | INCREMENT
 | INCREMENTAL
 | INDEXES
+| INHERITS
 | INJECT
 | INSERT
 | INTERLEAVE
+| INTO_DB
 | INVERTED
 | ISOLATION
 | JOB
@@ -10585,9 +11962,11 @@ unreserved_keyword:
 | JSON
 | KEY
 | KEYS
+| KMS
 | KV
 | LANGUAGE
 | LAST
+| LATEST
 | LC_COLLATE
 | LC_CTYPE
 | LEASE
@@ -10598,17 +11977,29 @@ unreserved_keyword:
 | LOCAL
 | LOCKED
 | LOGIN
+| LOCALITY
 | LOOKUP
 | LOW
 | MATCH
 | MATERIALIZED
 | MAXVALUE
 | MERGE
+| METHOD
 | MINUTE
 | MINVALUE
+| MODIFYCLUSTERSETTING
 | MULTILINESTRING
+| MULTILINESTRINGM
+| MULTILINESTRINGZ
+| MULTILINESTRINGZM
 | MULTIPOINT
+| MULTIPOINTM
+| MULTIPOINTZ
+| MULTIPOINTZM
 | MULTIPOLYGON
+| MULTIPOLYGONM
+| MULTIPOLYGONZ
+| MULTIPOLYGONZM
 | MONTH
 | NAMES
 | NAN
@@ -10617,8 +12008,15 @@ unreserved_keyword:
 | NO
 | NORMAL
 | NO_INDEX_JOIN
+| NOCREATEDB
+| NOCREATELOGIN
+| NOCANCELQUERY
 | NOCREATEROLE
+| NOCONTROLCHANGEFEED
+| NOCONTROLJOB
 | NOLOGIN
+| NOMODIFYCLUSTERSETTING
+| NOVIEWACTIVITY
 | NOWAIT
 | NULLS
 | IGNORE_FOREIGN_KEYS
@@ -10640,13 +12038,21 @@ unreserved_keyword:
 | PARTITIONS
 | PASSWORD
 | PAUSE
+| PAUSED
 | PHYSICAL
 | PLAN
 | PLANS
+| POINTM
+| POINTZ
+| POINTZM
+| POLYGONM
+| POLYGONZ
+| POLYGONZM
 | PRECEDING
 | PREPARE
 | PRESERVE
 | PRIORITY
+| PRIVILEGES
 | PUBLIC
 | PUBLICATION
 | QUERIES
@@ -10654,9 +12060,14 @@ unreserved_keyword:
 | RANGE
 | RANGES
 | READ
+| REASSIGN
 | RECURRING
 | RECURSIVE
 | REF
+| REFRESH
+| REGION
+| REGIONAL
+| REGIONS
 | REINDEX
 | RELEASE
 | RENAME
@@ -10675,7 +12086,9 @@ unreserved_keyword:
 | ROLLUP
 | ROWS
 | RULE
+| RUNNING
 | SCHEDULE
+| SCHEDULES
 | SETTING
 | SETTINGS
 | STATUS
@@ -10693,10 +12106,15 @@ unreserved_keyword:
 | SESSION
 | SESSIONS
 | SET
+| SETS
 | SHARE
 | SHOW
 | SIMPLE
 | SKIP
+| SKIP_MISSING_FOREIGN_KEYS
+| SKIP_MISSING_SEQUENCES
+| SKIP_MISSING_SEQUENCE_OWNERS
+| SKIP_MISSING_VIEWS
 | SNAPSHOT
 | SPLIT
 | SQL
@@ -10709,21 +12127,26 @@ unreserved_keyword:
 | STORING
 | STRICT
 | SUBSCRIPTION
+| SURVIVE
 | SYNTAX
 | SYSTEM
 | TABLES
+| TABLESPACE
 | TEMP
 | TEMPLATE
 | TEMPORARY
+| TENANT
 | TESTING_RELOCATE
 | TEXT
 | TIES
 | TRACE
 | TRANSACTION
+| TRANSACTIONS
 | TRIGGER
 | TRUNCATE
 | TRUSTED
 | TYPE
+| TYPES
 | THROTTLING
 | UNBOUNDED
 | UNCOMMITTED
@@ -10740,6 +12163,7 @@ unreserved_keyword:
 | VALUE
 | VARYING
 | VIEW
+| VIEWACTIVITY
 | WITHIN
 | WITHOUT
 | WRITE
@@ -10761,6 +12185,7 @@ col_name_keyword:
 | BIGINT
 | BIT
 | BOOLEAN
+| BOX2D
 | CHAR
 | CHARACTER
 | CHARACTERISTICS
@@ -10828,7 +12253,8 @@ type_func_name_keyword:
 //
 // See type_func_name_crdb_extra_keyword below.
 type_func_name_no_crdb_extra_keyword:
-  COLLATION
+  AUTHORIZATION
+| COLLATION
 | CROSS
 | FULL
 | INNER

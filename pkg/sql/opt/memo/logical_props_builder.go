@@ -13,6 +13,7 @@ package memo
 import (
 	"math"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/constraint"
@@ -63,6 +64,12 @@ func (b *logicalPropsBuilder) buildScanProps(scan *ScanExpr, rel *props.Relation
 	md := scan.Memo().Metadata()
 	hardLimit := scan.HardLimit.RowCount()
 
+	isPartialIndexScan := scan.UsesPartialIndex(md)
+	var pred FiltersExpr
+	if isPartialIndexScan {
+		pred = scan.PartialIndexPredicate(md)
+	}
+
 	// Side Effects
 	// ------------
 	// A Locking option is a side-effect (we don't want to elide this scan).
@@ -79,8 +86,14 @@ func (b *logicalPropsBuilder) buildScanProps(scan *ScanExpr, rel *props.Relation
 	// ----------------
 	// Initialize not-NULL columns from the table schema.
 	rel.NotNullCols = tableNotNullCols(md, scan.Table)
+	// Union not-NULL columns with not-NULL columns in the constraint.
 	if scan.Constraint != nil {
 		rel.NotNullCols.UnionWith(scan.Constraint.ExtractNotNullCols(b.evalCtx))
+	}
+	// Union not-NULL columns with not-NULL columns in the partial index
+	// predicate.
+	if isPartialIndexScan {
+		rel.NotNullCols.UnionWith(b.rejectNullCols(pred))
 	}
 	rel.NotNullCols.IntersectionWith(rel.OutputCols)
 
@@ -105,13 +118,37 @@ func (b *logicalPropsBuilder) buildScanProps(scan *ScanExpr, rel *props.Relation
 		if tabMeta := md.TableMeta(scan.Table); tabMeta.Constraints != nil {
 			b.addFiltersToFuncDep(*tabMeta.Constraints.(*FiltersExpr), &rel.FuncDeps)
 		}
+		if isPartialIndexScan {
+			b.addFiltersToFuncDep(pred, &rel.FuncDeps)
+
+			// Partial index keys are not added to the functional dependencies in
+			// MakeTableFuncDep, because they do not apply to the entire table. They are
+			// added here if the scan uses a partial index.
+			index := md.Table(scan.Table).Index(scan.Index)
+			var keyCols opt.ColSet
+			for col := 0; col < index.LaxKeyColumnCount(); col++ {
+				ord := index.Column(col).Ordinal()
+				keyCols.Add(scan.Table.ColumnID(ord))
+			}
+			allCols := keyCols.Union(rel.OutputCols)
+
+			// If index has a separate lax key, add a lax key FD. Otherwise, add a
+			// strict key. See the comment for cat.Index.LaxKeyColumnCount.
+			if index.LaxKeyColumnCount() < index.KeyColumnCount() {
+				// This case only occurs for a UNIQUE index having a NULL-able column.
+				rel.FuncDeps.AddLaxKey(keyCols, allCols)
+			} else {
+				rel.FuncDeps.AddStrictKey(keyCols, allCols)
+			}
+		}
 		rel.FuncDeps.MakeNotNull(rel.NotNullCols)
 		rel.FuncDeps.ProjectCols(rel.OutputCols)
 	}
 
 	// Cardinality
 	// -----------
-	// Restrict cardinality based on constraint, FDs, and hard limit.
+	// Restrict cardinality based on constraint, partial index predicate, FDs,
+	// and hard limit.
 	rel.Cardinality = props.AnyCardinality
 	if scan.Constraint != nil && scan.Constraint.IsContradiction() {
 		rel.Cardinality = props.ZeroCardinality
@@ -123,6 +160,9 @@ func (b *logicalPropsBuilder) buildScanProps(scan *ScanExpr, rel *props.Relation
 		}
 		if scan.Constraint != nil {
 			b.updateCardinalityFromConstraint(scan.Constraint, rel)
+		}
+		if isPartialIndexScan {
+			b.updateCardinalityFromFilters(pred, rel)
 		}
 	}
 
@@ -207,7 +247,15 @@ func (b *logicalPropsBuilder) buildSelectProps(sel *SelectExpr, rel *props.Relat
 	// -----------
 	// Select filter can filter any or all rows.
 	rel.Cardinality = inputProps.Cardinality.AsLowAs(0)
-	if sel.Filters.IsFalse() {
+	isContradiction := false
+	for i := range sel.Filters {
+		filterProps := sel.Filters[i].ScalarProps()
+		if filterProps.Constraints == constraint.Contradiction {
+			isContradiction = true
+			break
+		}
+	}
+	if isContradiction {
 		rel.Cardinality = props.ZeroCardinality
 	} else if rel.FuncDeps.HasMax1Row() {
 		rel.Cardinality = rel.Cardinality.Limit(1)
@@ -276,7 +324,7 @@ func (b *logicalPropsBuilder) buildInvertedFilterProps(
 	// Output Columns
 	// --------------
 	// Inherit output columns from input, but remove the inverted column.
-	rel.OutputCols = inputProps.OutputCols
+	rel.OutputCols = inputProps.OutputCols.Copy()
 	rel.OutputCols.Remove(invFilter.InvertedColumn)
 
 	// Not Null Columns
@@ -805,7 +853,8 @@ func (b *logicalPropsBuilder) buildWithProps(with *WithExpr, rel *props.Relation
 
 func (b *logicalPropsBuilder) buildWithScanProps(withScan *WithScanExpr, rel *props.Relational) {
 	BuildSharedProps(withScan, &rel.Shared)
-	bindingProps := withScan.BindingProps
+	boundExpr := b.mem.Metadata().WithBinding(withScan.With).(RelExpr)
+	bindingProps := boundExpr.Relational()
 
 	// Side Effects
 	// ------------
@@ -841,7 +890,7 @@ func (b *logicalPropsBuilder) buildWithScanProps(withScan *WithScanExpr, rel *pr
 	// Statistics
 	// ----------
 	if !b.disableStats {
-		b.sb.buildWithScan(withScan, rel)
+		b.sb.buildWithScan(withScan, rel, bindingProps)
 	}
 }
 
@@ -925,6 +974,12 @@ func (b *logicalPropsBuilder) buildAlterTableRelocateProps(
 }
 
 func (b *logicalPropsBuilder) buildControlJobsProps(ctl *ControlJobsExpr, rel *props.Relational) {
+	b.buildBasicProps(ctl, opt.ColList{}, rel)
+}
+
+func (b *logicalPropsBuilder) buildControlSchedulesProps(
+	ctl *ControlSchedulesExpr, rel *props.Relational,
+) {
 	b.buildBasicProps(ctl, opt.ColList{}, rel)
 }
 
@@ -1530,6 +1585,7 @@ func BuildSharedProps(e opt.Expr, shared *props.Shared) {
 // hasOuterCols returns true if the given expression has outer columns (i.e.
 // columns that are referenced by the expression but not bound by it).
 func hasOuterCols(e opt.Expr) bool {
+	// This is a slightly faster implementation of !getOuterCols(e).Empty().
 	switch t := e.(type) {
 	case *VariableExpr:
 		return true
@@ -1548,6 +1604,25 @@ func hasOuterCols(e opt.Expr) bool {
 	return false
 }
 
+// getOuterCols returns the outer columns of an expression (i.e.  columns that are
+// referenced by the expression but not bound by it).
+func getOuterCols(e opt.Expr) opt.ColSet {
+	switch t := e.(type) {
+	case *VariableExpr:
+		return opt.MakeColSet(t.Col)
+	case RelExpr:
+		return t.Relational().OuterCols
+	case ScalarPropsExpr:
+		return t.ScalarProps().Shared.OuterCols
+	}
+
+	var res opt.ColSet
+	for i, n := 0, e.ChildCount(); i < n; i++ {
+		res.UnionWith(getOuterCols(e.Child(i)))
+	}
+	return res
+}
+
 // MakeTableFuncDep returns the set of functional dependencies derived from the
 // given base table. The set is derived lazily and is cached in the metadata,
 // since it may be accessed multiple times during query optimization. For more
@@ -1562,8 +1637,15 @@ func MakeTableFuncDep(md *opt.Metadata, tabID opt.TableID) *props.FuncDepSet {
 	// Make now and annotate the metadata table with it for next time.
 	var allCols opt.ColSet
 	tab := md.Table(tabID)
-	for i := 0; i < tab.DeletableColumnCount(); i++ {
+	for i := 0; i < tab.ColumnCount(); i++ {
 		allCols.Add(tabID.ColumnID(i))
+	}
+	var excludeColumn opt.ColumnID
+	if tab.IsVirtualTable() {
+		// Don't advertise any functional dependencies for virtual table primary
+		// keys, since they are composed of a fake, unusable column.
+		dummyPKOrd := tab.Index(cat.PrimaryIndex).Column(0).Ordinal()
+		excludeColumn = tabID.ColumnID(dummyPKOrd)
 	}
 
 	fd = &props.FuncDepSet{}
@@ -1575,18 +1657,26 @@ func MakeTableFuncDep(md *opt.Metadata, tabID opt.TableID) *props.FuncDepSet {
 			// Skip inverted indexes for now.
 			continue
 		}
-		if tab.IsVirtualTable() && i == cat.PrimaryIndex {
-			// Don't advertise any functional dependencies for virtual table primary
-			// keys, since they are composed of a fake, unusable column.
+
+		if _, isPartial := index.Predicate(); isPartial {
+			// Partial indexes cannot be considered while building functional
+			// dependency keys for the table because their keys are only unique
+			// for a subset of the rows in the table.
 			continue
 		}
 
 		// If index has a separate lax key, add a lax key FD. Otherwise, add a
 		// strict key. See the comment for cat.Index.LaxKeyColumnCount.
 		for col := 0; col < index.LaxKeyColumnCount(); col++ {
-			ord := index.Column(col).Ordinal
+			ord := index.Column(col).Ordinal()
 			keyCols.Add(tabID.ColumnID(ord))
 		}
+
+		if excludeColumn != 0 && keyCols.Contains(excludeColumn) {
+			// See comment above where excludeColumn is set.
+			continue
+		}
+
 		if index.LaxKeyColumnCount() < index.KeyColumnCount() {
 			// This case only occurs for a UNIQUE index having a NULL-able column.
 			fd.AddLaxKey(keyCols, allCols)
@@ -1715,8 +1805,8 @@ func (b *logicalPropsBuilder) updateCardinalityFromConstraint(
 		return
 	}
 
-	count := c.CalculateMaxResults(b.evalCtx, cols, rel.NotNullCols)
-	if count != 0 && count < math.MaxUint32 {
+	count, ok := c.CalculateMaxResults(b.evalCtx, cols, rel.NotNullCols)
+	if ok && count < math.MaxUint32 {
 		rel.Cardinality = rel.Cardinality.Limit(uint32(count))
 	}
 }
@@ -1732,7 +1822,7 @@ func ensureLookupJoinInputProps(join *LookupJoinExpr, sb *statisticsBuilder) *pr
 		// Include the key columns in the output columns.
 		index := md.Table(join.Table).Index(join.Index)
 		for i := range join.KeyCols {
-			indexColID := join.Table.ColumnID(index.Column(i).Ordinal)
+			indexColID := join.Table.ColumnID(index.Column(i).Ordinal())
 			relational.OutputCols.Add(indexColID)
 		}
 
@@ -1812,16 +1902,17 @@ func ensureInputPropsForIndex(
 	}
 }
 
-// tableNotNullCols returns the set of not-NULL columns from the given table.
+// tableNotNullCols returns the set of not-NULL non-mutation columns from the given table.
 func tableNotNullCols(md *opt.Metadata, tabID opt.TableID) opt.ColSet {
 	cs := opt.ColSet{}
 	tab := md.Table(tabID)
 
 	// Only iterate over non-mutation columns, since even non-null mutation
 	// columns can be null during backfill.
-	for i := 0; i < tab.ColumnCount(); i++ {
+	for i, n := 0, tab.ColumnCount(); i < n; i++ {
+		col := tab.Column(i)
 		// Non-null mutation columns can be null during backfill.
-		if !tab.Column(i).IsNullable() {
+		if !col.IsMutation() && !col.IsNullable() {
 			cs.Add(tabID.ColumnID(i))
 		}
 	}
@@ -1872,7 +1963,7 @@ func (h *joinPropsHelper) init(b *logicalPropsBuilder, joinExpr RelExpr) {
 		md := join.Memo().Metadata()
 		index := md.Table(join.Table).Index(join.Index)
 		for i, colID := range join.KeyCols {
-			indexColID := join.Table.ColumnID(index.Column(i).Ordinal)
+			indexColID := join.Table.ColumnID(index.Column(i).Ordinal())
 			h.filterNotNullCols.Add(colID)
 			h.filterNotNullCols.Add(indexColID)
 			h.filtersFD.AddEquivalency(colID, indexColID)
@@ -2100,17 +2191,18 @@ func (h *joinPropsHelper) cardinality() props.Cardinality {
 		}
 	}
 
-	// Outer joins return minimum number of rows, depending on type.
+	// Adjust cardinality to account for outer joins as well as join multiplicity.
+	joinWithMult, isJoinWithMult := h.join.(joinWithMultiplicity)
 	switch h.joinType {
 	case opt.InnerJoinOp, opt.InnerJoinApplyOp:
-		if joinWithMult, isJoinWithMult := h.join.(joinWithMultiplicity); isJoinWithMult {
+		if isJoinWithMult {
 			multiplicity := joinWithMult.getMultiplicity()
-			if multiplicity.JoinDoesNotDuplicateLeftRows() && innerJoinCard.Max > left.Max {
+			if multiplicity.JoinDoesNotDuplicateLeftRows(h.joinType) && innerJoinCard.Max > left.Max {
 				// If left rows aren't duplicated, the max join cardinality is at most the
 				// max left cardinality.
 				innerJoinCard.Max = left.Max
 			}
-			if multiplicity.JoinDoesNotDuplicateRightRows() && innerJoinCard.Max > right.Max {
+			if multiplicity.JoinDoesNotDuplicateRightRows(h.joinType) && innerJoinCard.Max > right.Max {
 				// If right rows aren't duplicated, the max join cardinality is at most
 				// the max right cardinality.
 				innerJoinCard.Max = right.Max
@@ -2119,11 +2211,11 @@ func (h *joinPropsHelper) cardinality() props.Cardinality {
 		return innerJoinCard
 
 	case opt.LeftJoinOp, opt.LeftJoinApplyOp:
-		if joinWithMult, isJoinWithMult := h.join.(joinWithMultiplicity); isJoinWithMult {
+		if isJoinWithMult {
 			// If left rows aren't duplicated, the max join cardinality is at most the
 			// max left cardinality.
 			multiplicity := joinWithMult.getMultiplicity()
-			if multiplicity.JoinDoesNotDuplicateLeftRows() && innerJoinCard.Max > left.Max {
+			if multiplicity.JoinDoesNotDuplicateLeftRows(h.joinType) && innerJoinCard.Max > left.Max {
 				innerJoinCard.Max = left.Max
 			}
 		}
@@ -2148,10 +2240,10 @@ func (h *joinPropsHelper) cardinality() props.Cardinality {
 		// anything). We use Add here because it handles overflow.
 		c.Max = left.Add(right).Max
 
-		if joinWithMult, isJoinWithMult := h.join.(joinWithMultiplicity); isJoinWithMult {
+		if isJoinWithMult {
 			multiplicity := joinWithMult.getMultiplicity()
-			if multiplicity.JoinDoesNotDuplicateLeftRows() &&
-				multiplicity.JoinDoesNotDuplicateRightRows() && innerJoinCard.Max > c.Max {
+			if multiplicity.JoinDoesNotDuplicateLeftRows(h.joinType) &&
+				multiplicity.JoinDoesNotDuplicateRightRows(h.joinType) && innerJoinCard.Max > c.Max {
 				// If neither left rows nor right rows are duplicated, the join max
 				// cardinality is at most the sum of the left and right maxes.
 				innerJoinCard.Max = c.Max
@@ -2166,4 +2258,140 @@ func (h *joinPropsHelper) cardinality() props.Cardinality {
 
 func (b *logicalPropsBuilder) buildFakeRelProps(fake *FakeRelExpr, rel *props.Relational) {
 	*rel = *fake.Props
+}
+
+// WithUses returns the WithUsesMap for the given expression.
+func WithUses(r opt.Expr) props.WithUsesMap {
+	switch e := r.(type) {
+	case RelExpr:
+		relProps := e.Relational()
+
+		// Lazily calculate and store the WithUses value.
+		if !relProps.IsAvailable(props.WithUses) {
+			relProps.Shared.Rule.WithUses = deriveWithUses(r)
+			relProps.SetAvailable(props.WithUses)
+		}
+		return relProps.Shared.Rule.WithUses
+
+	case ScalarPropsExpr:
+		scalarProps := e.ScalarProps()
+
+		// Lazily calculate and store the WithUses value.
+		if !scalarProps.IsAvailable(props.WithUses) {
+			scalarProps.Shared.Rule.WithUses = deriveWithUses(r)
+			scalarProps.SetAvailable(props.WithUses)
+		}
+		return scalarProps.Shared.Rule.WithUses
+
+	default:
+		return deriveWithUses(r)
+	}
+}
+
+// deriveWithUses collects information about WithScans in the expression.
+func deriveWithUses(r opt.Expr) props.WithUsesMap {
+	// We don't allow the information to escape the scope of the WITH itself, so
+	// we exclude that ID from the results.
+	var excludedID opt.WithID
+
+	switch e := r.(type) {
+	case *WithScanExpr:
+		info := props.WithUseInfo{
+			Count:    1,
+			UsedCols: e.InCols.ToSet(),
+		}
+		return props.WithUsesMap{e.With: info}
+
+	case *WithExpr:
+		excludedID = e.ID
+
+	default:
+		if opt.IsMutationOp(e) {
+			// Note: this can still be 0.
+			excludedID = e.Private().(*MutationPrivate).WithID
+		}
+	}
+
+	var result props.WithUsesMap
+	for i, n := 0, r.ChildCount(); i < n; i++ {
+		childUses := WithUses(r.Child(i))
+		for id, info := range childUses {
+			if id == excludedID {
+				continue
+			}
+			if result == nil {
+				result = make(props.WithUsesMap, len(childUses))
+			}
+			existing := result[id]
+			existing.Count += info.Count
+			existing.UsedCols.UnionWith(info.UsedCols)
+			result[id] = existing
+		}
+	}
+	return result
+}
+
+// CanBeCompositeSensitive returns true if a scalar expression could return
+// logically different results because of non-logical differences in outer
+// columns with composite type.
+//
+// Composite values are values that contain more information than the logical
+// value (i.e. the key encoding). Examples are decimals (1.0 = 1.00) and
+// collated strings ('foo' COLLATE en_u_ks_level1 = 'FOO' COLLATE
+// en_u_ks_level1).
+//
+// An example of a composite-sensitive expression is `d::string`, where d is a
+// DECIMAL.
+//
+// This property is used to determine when a scalar expression can be copied,
+// with outer column variable references changed to refer to other columns that
+// are known to be equal to the original columns.
+func CanBeCompositeSensitive(md *opt.Metadata, e opt.Expr) bool {
+	outerCols := getOuterCols(e)
+	var compositeOuterCols opt.ColSet
+	outerCols.ForEach(func(col opt.ColumnID) {
+		if colinfo.HasCompositeKeyEncoding(md.ColumnMeta(col).Type) {
+			compositeOuterCols.Add(col)
+		}
+	})
+	if compositeOuterCols.Empty() {
+		// Fast path: none of the outer columns are composite.
+		return false
+	}
+
+	var canBeSensitive func(e opt.Expr) bool
+	canBeSensitive = func(e opt.Expr) bool {
+		if _, ok := e.(RelExpr); ok {
+			// Not a purely scalar expression.
+			return true
+		}
+		if !getOuterCols(e).Intersects(compositeOuterCols) {
+			// None of the outer columns of this sub-expression are composite.
+			return false
+		}
+		// Check the inputs to the operator. Together, the following conditions are
+		// sufficient to prove that this expression is not sensitive:
+		//  1. None of the inputs are sensitive to composite outer columns.
+		//     Otherwise, the operator can receive different inputs for logically
+		//     equal outer values and thus produce different outputs.
+		//  2. The operator is marked as being always insensitive, or none of the
+		//     input data types are composite.
+		checkTypes := !opt.IsCompositeInsensitiveOp(e)
+		for i, n := 0, e.ChildCount(); i < n; i++ {
+			if canBeSensitive(e.Child(i)) {
+				// Condition 1 not satisfied.
+				return true
+			}
+			if checkTypes {
+				// Note that the canBeSensitive() call above always returns true for
+				// relational expressions, so we are sure that the child is scalar.
+				if child := e.Child(i).(opt.ScalarExpr); colinfo.HasCompositeKeyEncoding(child.DataType()) {
+					// Condition 2 not satisfied.
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return canBeSensitive(e)
 }

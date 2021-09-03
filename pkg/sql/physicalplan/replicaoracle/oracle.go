@@ -17,13 +17,12 @@ import (
 	"math"
 	"math/rand"
 
-	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/errors"
 )
 
@@ -41,10 +40,9 @@ var (
 
 // Config is used to construct an OracleFactory.
 type Config struct {
-	NodeDesc roachpb.NodeDescriptor
-	Settings *cluster.Settings
-	// TODO(nvanbenschoten): replace with NodeDescStore once #49997 merges.
-	Gossip     gossip.DeprecatedOracleGossip
+	NodeDescs  kvcoord.NodeDescStore
+	NodeDesc   roachpb.NodeDescriptor // current node
+	Settings   *cluster.Settings
 	RPCContext *rpc.Context
 }
 
@@ -60,7 +58,7 @@ type Oracle interface {
 	// already handled by each node for the current SQL query. The state is not
 	// updated with the result of this method; the caller is in charge of that.
 	//
-	// When the range's leaseholder is known, lease info is passed in; the lease
+	// When the range's leaseholder is known, leaseHolder is passed in; leaseHolder
 	// is nil otherwise. Implementors are free to use it, or ignore it if they
 	// don't care about the leaseholder (e.g. when we're planning for follower
 	// reads).
@@ -68,7 +66,7 @@ type Oracle interface {
 	// A RangeUnavailableError can be returned if there's no information in gossip
 	// about any of the nodes that might be tried.
 	ChoosePreferredReplica(
-		context.Context, *roachpb.RangeDescriptor, *roachpb.Lease, QueryState,
+		ctx context.Context, rng *roachpb.RangeDescriptor, leaseholder *roachpb.ReplicaDescriptor, qState QueryState,
 	) (roachpb.ReplicaDescriptor, error)
 }
 
@@ -127,7 +125,7 @@ type randomOracle struct {
 var _ OracleFactory = &randomOracle{}
 
 func newRandomOracleFactory(cfg Config) OracleFactory {
-	return &randomOracle{nodeDescs: cfg.Gossip}
+	return &randomOracle{nodeDescs: cfg.NodeDescs}
 }
 
 func (o *randomOracle) Oracle(_ *kv.Txn) Oracle {
@@ -135,7 +133,7 @@ func (o *randomOracle) Oracle(_ *kv.Txn) Oracle {
 }
 
 func (o *randomOracle) ChoosePreferredReplica(
-	ctx context.Context, desc *roachpb.RangeDescriptor, _ *roachpb.Lease, _ QueryState,
+	ctx context.Context, desc *roachpb.RangeDescriptor, _ *roachpb.ReplicaDescriptor, _ QueryState,
 ) (roachpb.ReplicaDescriptor, error) {
 	replicas, err := replicaSliceOrErr(ctx, o.nodeDescs, desc)
 	if err != nil {
@@ -145,18 +143,18 @@ func (o *randomOracle) ChoosePreferredReplica(
 }
 
 type closestOracle struct {
-	latencyFunc kvcoord.LatencyFunc
-	nodeDescs   kvcoord.NodeDescStore
+	nodeDescs kvcoord.NodeDescStore
 	// nodeDesc is the descriptor of the current node. It will be used to give
 	// preference to the current node and others "close" to it.
-	nodeDesc roachpb.NodeDescriptor
+	nodeDesc    roachpb.NodeDescriptor
+	latencyFunc kvcoord.LatencyFunc
 }
 
 func newClosestOracleFactory(cfg Config) OracleFactory {
 	return &closestOracle{
-		latencyFunc: latencyFunc(cfg.RPCContext),
-		nodeDescs:   cfg.Gossip,
+		nodeDescs:   cfg.NodeDescs,
 		nodeDesc:    cfg.NodeDesc,
+		latencyFunc: latencyFunc(cfg.RPCContext),
 	}
 }
 
@@ -165,7 +163,7 @@ func (o *closestOracle) Oracle(_ *kv.Txn) Oracle {
 }
 
 func (o *closestOracle) ChoosePreferredReplica(
-	ctx context.Context, desc *roachpb.RangeDescriptor, _ *roachpb.Lease, _ QueryState,
+	ctx context.Context, desc *roachpb.RangeDescriptor, _ *roachpb.ReplicaDescriptor, _ QueryState,
 ) (roachpb.ReplicaDescriptor, error) {
 	replicas, err := replicaSliceOrErr(ctx, o.nodeDescs, desc)
 	if err != nil {
@@ -192,18 +190,17 @@ const maxPreferredRangesPerLeaseHolder = 10
 // Finally, it tries not to overload any node.
 type binPackingOracle struct {
 	maxPreferredRangesPerLeaseHolder int
-	// TODO(nvanbenschoten): replace with NodeDescStore once #49997 merges.
-	gossip      gossip.DeprecatedOracleGossip
-	latencyFunc kvcoord.LatencyFunc
+	nodeDescs                        kvcoord.NodeDescStore
 	// nodeDesc is the descriptor of the current node. It will be used to give
 	// preference to the current node and others "close" to it.
-	nodeDesc roachpb.NodeDescriptor
+	nodeDesc    roachpb.NodeDescriptor
+	latencyFunc kvcoord.LatencyFunc
 }
 
 func newBinPackingOracleFactory(cfg Config) OracleFactory {
 	return &binPackingOracle{
 		maxPreferredRangesPerLeaseHolder: maxPreferredRangesPerLeaseHolder,
-		gossip:                           cfg.Gossip,
+		nodeDescs:                        cfg.NodeDescs,
 		nodeDesc:                         cfg.NodeDesc,
 		latencyFunc:                      latencyFunc(cfg.RPCContext),
 	}
@@ -216,14 +213,17 @@ func (o *binPackingOracle) Oracle(_ *kv.Txn) Oracle {
 }
 
 func (o *binPackingOracle) ChoosePreferredReplica(
-	ctx context.Context, desc *roachpb.RangeDescriptor, lease *roachpb.Lease, queryState QueryState,
+	ctx context.Context,
+	desc *roachpb.RangeDescriptor,
+	leaseholder *roachpb.ReplicaDescriptor,
+	queryState QueryState,
 ) (roachpb.ReplicaDescriptor, error) {
 	// If we know the leaseholder, we choose it.
-	if lease != nil {
-		return lease.Replica, nil
+	if leaseholder != nil {
+		return *leaseholder, nil
 	}
 
-	replicas, err := replicaSliceOrErr(ctx, o.gossip, desc)
+	replicas, err := replicaSliceOrErr(ctx, o.nodeDescs, desc)
 	if err != nil {
 		return roachpb.ReplicaDescriptor{}, err
 	}
@@ -257,7 +257,7 @@ func replicaSliceOrErr(
 ) (kvcoord.ReplicaSlice, error) {
 	replicas, err := kvcoord.NewReplicaSlice(ctx, nodeDescs, desc, nil /* leaseholder */)
 	if err != nil {
-		return kvcoord.ReplicaSlice{}, sqlbase.NewRangeUnavailableError(desc.RangeID, err)
+		return kvcoord.ReplicaSlice{}, sqlerrors.NewRangeUnavailableError(desc.RangeID, err)
 	}
 	return replicas, nil
 }

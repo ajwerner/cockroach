@@ -35,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -138,7 +139,7 @@ func (t *parallelTest) run(dir string) {
 	}
 
 	if spec.SkipReason != "" {
-		t.Skip(spec.SkipReason)
+		skip.IgnoreLint(t, spec.SkipReason)
 	}
 
 	log.Infof(t.ctx, "Running test %s", dir)
@@ -182,7 +183,7 @@ func (t *parallelTest) setup(spec *parTestSpec) {
 		log.Infof(t.ctx, "Cluster Size: %d", spec.ClusterSize)
 	}
 
-	t.cluster = serverutils.StartTestCluster(t, spec.ClusterSize, base.TestClusterArgs{})
+	t.cluster = serverutils.StartNewTestCluster(t, spec.ClusterSize, base.TestClusterArgs{})
 
 	for i := 0; i < t.cluster.NumServers(); i++ {
 		server := t.cluster.Server(i)

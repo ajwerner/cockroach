@@ -32,17 +32,16 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/errors"
-	"github.com/pmezard/go-difflib/difflib"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -74,6 +73,7 @@ table_name NOT IN (
 	'index_columns',
 	'table_columns',
 	'table_indexes',
+	'table_row_statistics',
 	'ranges',
 	'ranges_no_leases',
 	'predefined_comments',
@@ -121,7 +121,7 @@ func TestZip(t *testing.T) {
 	})
 	defer c.cleanup()
 
-	out, err := c.RunWithCapture("debug zip " + os.DevNull)
+	out, err := c.RunWithCapture("debug zip --cpu-profile-duration=1s " + os.DevNull)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ create table defaultdb."pg_catalog.pg_class"(x int);
 create table defaultdb."../system"(x int);
 `})
 
-	out, err := c.RunWithCapture("debug zip " + os.DevNull)
+	out, err := c.RunWithCapture("debug zip --cpu-profile-duration=0 " + os.DevNull)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,16 +183,13 @@ create table defaultdb."../system"(x int);
 // need the SSL certs dir to run a CLI test securely.
 func TestUnavailableZip(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	skip.WithIssue(t, 53306, "flaky test")
 	defer log.Scope(t).Close(t)
 
-	if testing.Short() {
-		t.Skip("short flag")
-	}
-	if util.RaceEnabled {
-		// Race builds make the servers so slow that they report spurious
-		// unavailability.
-		t.Skip("not running under race")
-	}
+	skip.UnderShort(t)
+	// Race builds make the servers so slow that they report spurious
+	// unavailability.
+	skip.UnderRace(t)
 
 	// unavailableCh is used by the replica command filter
 	// to conditionally block requests and simulate unavailability.
@@ -234,11 +231,11 @@ func TestUnavailableZip(t *testing.T) {
 		t:          t,
 		TestServer: tc.Server(0).(*server.TestServer),
 	}
+	defer func(prevStderr *os.File) { stderr = prevStderr }(stderr)
 	stderr = os.Stdout
-	defer func() { stderr = log.OrigStderr }()
 
 	// Keep the timeout short so that the test doesn't take forever.
-	out, err := c.RunWithCapture("debug zip " + os.DevNull + " --timeout=.5s")
+	out, err := c.RunWithCapture("debug zip --cpu-profile-duration=0 " + os.DevNull + " --timeout=.5s")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,16 +281,12 @@ func eraseNonDeterministicZipOutput(out string) string {
 // need the SSL certs dir to run a CLI test securely.
 func TestPartialZip(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
+	defer log.ScopeWithoutShowLogs(t).Close(t)
 
-	if testing.Short() {
-		t.Skip("short flag")
-	}
-	if util.RaceEnabled {
-		// We want a low timeout so that the test doesn't take forever;
-		// however low timeouts make race runs flaky with false positives.
-		t.Skip("not running under race")
-	}
+	// We want a low timeout so that the test doesn't take forever;
+	// however low timeouts make race runs flaky with false positives.
+	skip.UnderShort(t)
+	skip.UnderRace(t)
 
 	ctx := context.Background()
 
@@ -310,15 +303,16 @@ func TestPartialZip(t *testing.T) {
 		t:          t,
 		TestServer: tc.Server(0).(*server.TestServer),
 	}
+	defer func(prevStderr *os.File) { stderr = prevStderr }(stderr)
 	stderr = os.Stdout
-	defer func() { stderr = log.OrigStderr }()
 
-	out, err := c.RunWithCapture("debug zip " + os.DevNull)
+	out, err := c.RunWithCapture("debug zip --cpu-profile-duration=0s " + os.DevNull)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Strip any non-deterministic messages.
+	t.Log(out)
 	out = eraseNonDeterministicZipOutput(out)
 
 	datadriven.RunTest(t, "testdata/zip/partial1",
@@ -327,7 +321,7 @@ func TestPartialZip(t *testing.T) {
 		})
 
 	// Now do it again and exclude the down node explicitly.
-	out, err = c.RunWithCapture("debug zip " + os.DevNull + " --exclude-nodes=2")
+	out, err = c.RunWithCapture("debug zip " + os.DevNull + " --exclude-nodes=2 --cpu-profile-duration=0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,29 +350,26 @@ func TestPartialZip(t *testing.T) {
 	s := tc.Server(0)
 	kvserver.TimeUntilStoreDead.Override(&s.ClusterSettings().SV, kvserver.TestTimeUntilStoreDead)
 
+	// This last case may take a little while to converge. To make this work with datadriven and at the same
+	// time retain the ability to use the `-rewrite` flag, we use a retry loop within that already checks the
+	// output ahead of time and retries for some time if necessary.
 	datadriven.RunTest(t, "testdata/zip/partial2",
 		func(t *testing.T, td *datadriven.TestData) string {
-
-			testutils.SucceedsSoon(t, func() error {
-				out, err = c.RunWithCapture("debug zip " + os.DevNull)
+			f := func() string {
+				out, err := c.RunWithCapture("debug zip --cpu-profile-duration=0 " + os.DevNull)
 				if err != nil {
 					t.Fatal(err)
 				}
 
 				// Strip any non-deterministic messages.
-				out = eraseNonDeterministicZipOutput(out)
+				return eraseNonDeterministicZipOutput(out)
+			}
 
+			var out string
+			_ = testutils.SucceedsSoonError(func() error {
+				out = f()
 				if out != td.Expected {
-					diff, _ := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
-						A:        difflib.SplitLines(td.Expected),
-						B:        difflib.SplitLines(out),
-						FromFile: "Expected",
-						FromDate: "",
-						ToFile:   "Actual",
-						ToDate:   "",
-						Context:  1,
-					})
-					return errors.Newf("Diff:\n%s", diff)
+					return errors.New("output did not match (yet)")
 				}
 				return nil
 			})
@@ -468,7 +459,7 @@ func TestToHex(t *testing.T) {
 	// Create a job to have non-empty system.jobs table.
 	c.RunWithArgs([]string{"sql", "-e", "CREATE STATISTICS foo FROM system.namespace"})
 
-	_, err := c.RunWithCapture("debug zip " + dir + "/debug.zip")
+	_, err := c.RunWithCapture("debug zip --cpu-profile-duration=0 " + dir + "/debug.zip")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +483,7 @@ func TestToHex(t *testing.T) {
 			{idx: -1, msg: &jobspb.Progress{}},
 		},
 		"debug/system.descriptor.txt": {
-			{idx: 2, msg: &sqlbase.Descriptor{}},
+			{idx: 2, msg: &descpb.Descriptor{}},
 		},
 	}
 

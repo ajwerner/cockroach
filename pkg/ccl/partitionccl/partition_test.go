@@ -29,16 +29,18 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -93,7 +95,7 @@ type partitioningTest struct {
 		createStmt string
 
 		// tableDesc is the TableDescriptor created by `createStmt`.
-		tableDesc *sqlbase.MutableTableDescriptor
+		tableDesc *tabledesc.Mutable
 
 		// zoneConfigStmt contains SQL that effects the zone configs described
 		// by `configs`.
@@ -132,12 +134,12 @@ func (pt *partitioningTest) parse() error {
 		st := cluster.MakeTestingClusterSettings()
 		const parentID, tableID = keys.MinUserDescID, keys.MinUserDescID + 1
 		mutDesc, err := importccl.MakeSimpleTableDescriptor(
-			ctx, &semaCtx, st, createTable, parentID, tableID, importccl.NoFKs, hlc.UnixNano())
+			ctx, &semaCtx, st, createTable, parentID, keys.PublicSchemaID, tableID, importccl.NoFKs, hlc.UnixNano())
 		if err != nil {
 			return err
 		}
 		pt.parsed.tableDesc = mutDesc
-		if err := pt.parsed.tableDesc.ValidateTable(); err != nil {
+		if err := pt.parsed.tableDesc.ValidateTable(ctx); err != nil {
 			return err
 		}
 	}
@@ -869,9 +871,9 @@ func allPartitioningTests(rng *rand.Rand) []partitioningTest {
 			// Not indexable.
 			continue
 		case types.CollatedStringFamily:
-			typ = types.MakeCollatedString(types.String, *sqlbase.RandCollationLocale(rng))
+			typ = types.MakeCollatedString(types.String, *rowenc.RandCollationLocale(rng))
 		}
-		datum := sqlbase.RandDatum(rng, typ, false /* nullOk */)
+		datum := rowenc.RandDatum(rng, typ, false /* nullOk */)
 		if datum == tree.DNull {
 			// DNull is returned by RandDatum for types.UNKNOWN or if the
 			// column type is unimplemented in RandDatum. In either case, the
@@ -1176,16 +1178,12 @@ func TestInitialPartitioning(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	// Skipping as part of test-infra-team flaky test cleanup.
-	t.Skip("https://github.com/cockroachdb/cockroach/issues/49909")
+	skip.WithIssue(t, 49909)
 
 	// This test configures many sub-tests and is too slow to run under nightly
 	// race stress.
-	if testutils.NightlyStress() && util.RaceEnabled {
-		t.Skip("too big for nightly stress race")
-	}
-	if testing.Short() {
-		t.Skip("short")
-	}
+	skip.UnderStressRace(t)
+	skip.UnderShort(t)
 
 	rng, _ := randutil.NewPseudoRand()
 	testCases := allPartitioningTests(rng)
@@ -1268,7 +1266,7 @@ func TestSelectPartitionExprs(t *testing.T) {
 			for _, p := range strings.Split(test.partitions, `,`) {
 				partNames = append(partNames, tree.Name(p))
 			}
-			expr, err := selectPartitionExprs(evalCtx, testData.parsed.tableDesc.TableDesc(), partNames)
+			expr, err := selectPartitionExprs(evalCtx, testData.parsed.tableDesc, partNames)
 			if err != nil {
 				t.Fatalf("%+v", err)
 			}
@@ -1279,7 +1277,7 @@ func TestSelectPartitionExprs(t *testing.T) {
 	}
 	t.Run("error", func(t *testing.T) {
 		partNames := tree.NameList{`p33p44`, `nope`}
-		_, err := selectPartitionExprs(evalCtx, testData.parsed.tableDesc.TableDesc(), partNames)
+		_, err := selectPartitionExprs(evalCtx, testData.parsed.tableDesc, partNames)
 		if !testutils.IsError(err, `unknown partition`) {
 			t.Errorf(`expected "unknown partition" error got: %+v`, err)
 		}
@@ -1291,13 +1289,11 @@ func TestRepartitioning(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	// Skipping as part of test-infra-team flaky test cleanup.
-	t.Skip("https://github.com/cockroachdb/cockroach/issues/49112")
+	skip.WithIssue(t, 49112)
 
 	// This test configures many sub-tests and is too slow to run under nightly
 	// race stress.
-	if testutils.NightlyStress() && util.RaceEnabled {
-		t.Skip()
-	}
+	skip.UnderStressRace(t)
 
 	rng, _ := randutil.NewPseudoRand()
 	testCases, err := allRepartitioningTests(allPartitioningTests(rng))
@@ -1345,7 +1341,7 @@ func TestRepartitioning(t *testing.T) {
 					repartition.WriteString(`PARTITION BY NOTHING`)
 				} else {
 					if err := sql.ShowCreatePartitioning(
-						&sqlbase.DatumAlloc{}, keys.SystemSQLCodec, test.new.parsed.tableDesc, testIndex,
+						&rowenc.DatumAlloc{}, keys.SystemSQLCodec, test.new.parsed.tableDesc, testIndex,
 						&testIndex.Partitioning, &repartition, 0 /* indent */, 0, /* colOffset */
 					); err != nil {
 						t.Fatalf("%+v", err)
@@ -1416,7 +1412,7 @@ ALTER TABLE t ALTER PRIMARY KEY USING COLUMNS (y)
 	}
 
 	// Get the zone config corresponding to the table.
-	table := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "t")
+	table := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "t")
 	kv, err := kvDB.Get(ctx, config.MakeZoneKey(config.SystemTenantObjectID(table.ID)))
 	if err != nil {
 		t.Fatal(err)

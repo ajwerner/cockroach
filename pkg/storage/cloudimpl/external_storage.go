@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/blobs"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -35,16 +36,20 @@ import (
 )
 
 const (
-	// S3AccessKeyParam is the query parameter for access_key in an S3 URI.
-	S3AccessKeyParam = "AWS_ACCESS_KEY_ID"
-	// S3SecretParam is the query parameter for the 'secret' in an S3 URI.
-	S3SecretParam = "AWS_SECRET_ACCESS_KEY"
-	// S3TempTokenParam is the query parameter for session_token in an S3 URI.
-	S3TempTokenParam = "AWS_SESSION_TOKEN"
-	// S3EndpointParam is the query parameter for the 'endpoint' in an S3 URI.
-	S3EndpointParam = "AWS_ENDPOINT"
+	// AWSAccessKeyParam is the query parameter for access_key in an AWS URI.
+	AWSAccessKeyParam = "AWS_ACCESS_KEY_ID"
+	// AWSSecretParam is the query parameter for the 'secret' in an AWS URI.
+	AWSSecretParam = "AWS_SECRET_ACCESS_KEY"
+	// AWSTempTokenParam is the query parameter for session_token in an AWS URI.
+	AWSTempTokenParam = "AWS_SESSION_TOKEN"
+	// AWSEndpointParam is the query parameter for the 'endpoint' in an AWS URI.
+	AWSEndpointParam = "AWS_ENDPOINT"
+
 	// S3RegionParam is the query parameter for the 'endpoint' in an S3 URI.
 	S3RegionParam = "AWS_REGION"
+
+	// KMSRegionParam is the query parameter for the 'region' in every KMS URI.
+	KMSRegionParam = "REGION"
 
 	// AzureAccountNameParam is the query parameter for account_name in an azure URI.
 	AzureAccountNameParam = "AZURE_ACCOUNT_NAME"
@@ -94,8 +99,8 @@ const (
 
 // See SanitizeExternalStorageURI.
 var redactedQueryParams = map[string]struct{}{
-	S3SecretParam:        {},
-	S3TempTokenParam:     {},
+	AWSSecretParam:       {},
+	AWSTempTokenParam:    {},
 	AzureAccountKeyParam: {},
 	CredentialsParam:     {},
 }
@@ -109,7 +114,9 @@ var ErrListingUnsupported = errors.New("listing is not supported")
 var ErrFileDoesNotExist = errors.New("external_storage: file doesn't exist")
 
 // ExternalStorageConfFromURI generates an ExternalStorage config from a URI string.
-func ExternalStorageConfFromURI(path, user string) (roachpb.ExternalStorage, error) {
+func ExternalStorageConfFromURI(
+	path string, user security.SQLUsername,
+) (roachpb.ExternalStorage, error) {
 	conf := roachpb.ExternalStorage{}
 	uri, err := url.Parse(path)
 	if err != nil {
@@ -121,10 +128,10 @@ func ExternalStorageConfFromURI(path, user string) (roachpb.ExternalStorage, err
 		conf.S3Config = &roachpb.ExternalStorage_S3{
 			Bucket:    uri.Host,
 			Prefix:    uri.Path,
-			AccessKey: uri.Query().Get(S3AccessKeyParam),
-			Secret:    uri.Query().Get(S3SecretParam),
-			TempToken: uri.Query().Get(S3TempTokenParam),
-			Endpoint:  uri.Query().Get(S3EndpointParam),
+			AccessKey: uri.Query().Get(AWSAccessKeyParam),
+			Secret:    uri.Query().Get(AWSSecretParam),
+			TempToken: uri.Query().Get(AWSTempTokenParam),
+			Endpoint:  uri.Query().Get(AWSEndpointParam),
 			Region:    uri.Query().Get(S3RegionParam),
 			Auth:      uri.Query().Get(AuthParam),
 			/* NB: additions here should also update s3QueryParams() serializer */
@@ -171,8 +178,9 @@ func ExternalStorageConfFromURI(path, user string) (roachpb.ExternalStorage, err
 	case "nodelocal":
 		if uri.Host == "" {
 			return conf, errors.Errorf(
-				"host component of nodelocal URI must be a node ID (" +
-					"use 'self' to specify each node should access its own local filesystem)",
+				"host component of nodelocal URI must be a node ID ("+
+					"use 'self' to specify each node should access its own local filesystem): %s",
+				path,
 			)
 		} else if uri.Host == "self" {
 			uri.Host = "0"
@@ -192,20 +200,28 @@ func ExternalStorageConfFromURI(path, user string) (roachpb.ExternalStorage, err
 		}
 	case "userfile":
 		qualifiedTableName := uri.Host
-		if qualifiedTableName == "" {
-			return conf, errors.Errorf("host component of userfile URI must be a qualified table name")
-		}
-
-		if user == "" {
+		if user.Undefined() {
 			return conf, errors.Errorf("user creating the FileTable ExternalStorage must be specified")
 		}
 
+		// If the import statement does not specify a qualified table name then use
+		// the default to attempt to locate the file(s).
+		if qualifiedTableName == "" {
+			composedTableName := security.MakeSQLUsernameFromPreNormalizedString(
+				DefaultQualifiedNamePrefix + user.Normalized())
+			qualifiedTableName = DefaultQualifiedNamespace +
+				// Escape special identifiers as needed.
+				composedTableName.SQLIdentifier()
+		}
+
 		conf.Provider = roachpb.ExternalStorageProvider_FileTable
-		conf.FileTableConfig.User = user
+		conf.FileTableConfig.User = user.Normalized()
 		conf.FileTableConfig.QualifiedTableName = qualifiedTableName
 		conf.FileTableConfig.Path = uri.Path
 	default:
-		return conf, errors.Errorf("unsupported storage scheme: %q", uri.Scheme)
+		// TODO(adityamaru): Link dedicated ExternalStorage scheme docs once ready.
+		return conf, errors.Errorf("unsupported storage scheme: %q - refer to docs to find supported"+
+			" storage schemes", uri.Scheme)
 	}
 	return conf, nil
 }
@@ -217,7 +233,7 @@ func ExternalStorageFromURI(
 	externalConfig base.ExternalIODirConfig,
 	settings *cluster.Settings,
 	blobClientFactory blobs.BlobClientFactory,
-	user string,
+	user security.SQLUsername,
 	ie *sql.InternalExecutor,
 	kvDB *kv.DB,
 ) (cloud.ExternalStorage, error) {
@@ -275,13 +291,13 @@ func MakeExternalStorage(
 	switch dest.Provider {
 	case roachpb.ExternalStorageProvider_LocalFile:
 		telemetry.Count("external-io.nodelocal")
-		return makeLocalStorage(ctx, dest.LocalFile, settings, blobClientFactory)
+		return makeLocalStorage(ctx, dest.LocalFile, settings, blobClientFactory, conf)
 	case roachpb.ExternalStorageProvider_Http:
 		if conf.DisableHTTP {
 			return nil, errors.New("external http access disabled")
 		}
 		telemetry.Count("external-io.http")
-		return MakeHTTPStorage(dest.HttpPath.BaseUri, settings)
+		return MakeHTTPStorage(dest.HttpPath.BaseUri, settings, conf)
 	case roachpb.ExternalStorageProvider_S3:
 		telemetry.Count("external-io.s3")
 		return MakeS3Storage(ctx, conf, dest.S3Config, settings)
@@ -290,13 +306,13 @@ func MakeExternalStorage(
 		return makeGCSStorage(ctx, conf, dest.GoogleCloudConfig, settings)
 	case roachpb.ExternalStorageProvider_Azure:
 		telemetry.Count("external-io.azure")
-		return makeAzureStorage(dest.AzureConfig, settings)
+		return makeAzureStorage(dest.AzureConfig, settings, conf)
 	case roachpb.ExternalStorageProvider_Workload:
 		telemetry.Count("external-io.workload")
-		return makeWorkloadStorage(dest.WorkloadConfig)
+		return makeWorkloadStorage(dest.WorkloadConfig, settings, conf)
 	case roachpb.ExternalStorageProvider_FileTable:
 		telemetry.Count("external-io.filetable")
-		return makeFileTableStorage(ctx, dest.FileTableConfig, ie, kvDB)
+		return makeFileTableStorage(ctx, dest.FileTableConfig, ie, kvDB, settings, conf)
 	}
 	return nil, errors.Errorf("unsupported external destination type: %s", dest.Provider.String())
 }
@@ -317,6 +333,51 @@ func URINeedsGlobExpansion(uri string) bool {
 	}
 
 	return containsGlob(parsedURI.Path)
+}
+
+// AccessIsWithExplicitAuth checks if the provided ExternalStorage URI has
+// explicit authentication i.e does not rely on implicit machine credentials to
+// access the resource.
+// The following scenarios are considered implicit access:
+//
+// - implicit AUTH: access will use the node's machine account and only a
+// super user should have the authority to use these credentials.
+//
+// - HTTP/HTTPS/Custom endpoint: requests are made by the server, in the
+// server's network, potentially behind a firewall and only a super user should
+// be able to do this.
+//
+// - nodelocal: this is the node's shared filesystem and so only a super user
+// should be able to interact with it.
+func AccessIsWithExplicitAuth(path string) (bool, string, error) {
+	uri, err := url.Parse(path)
+	if err != nil {
+		return false, "", err
+	}
+	hasExplicitAuth := false
+	switch uri.Scheme {
+	case "s3":
+		auth := uri.Query().Get(AuthParam)
+		hasExplicitAuth = auth == AuthParamSpecified
+
+		// If a custom endpoint has been specified in the S3 URI then this is no
+		// longer an explicit AUTH.
+		hasExplicitAuth = hasExplicitAuth && uri.Query().Get(AWSEndpointParam) == ""
+	case "gs":
+		auth := uri.Query().Get(AuthParam)
+		hasExplicitAuth = auth == AuthParamSpecified
+	case "azure":
+		// Azure does not support implicit authentication i.e. all credentials have
+		// to be specified as part of the URI.
+		hasExplicitAuth = true
+	case "http", "https", "nodelocal":
+		hasExplicitAuth = false
+	case "experimental-workload", "workload", "userfile":
+		hasExplicitAuth = true
+	default:
+		return hasExplicitAuth, "", nil
+	}
+	return hasExplicitAuth, uri.Scheme, nil
 }
 
 func containsGlob(str string) bool {

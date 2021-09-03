@@ -188,6 +188,10 @@ type UserDefinedTypeMetadata struct {
 	// Name is the resolved name of this type.
 	Name *UserDefinedTypeName
 
+	// Version is the descriptor version of the descriptor used to construct
+	// this version of the type metadata.
+	Version uint32
+
 	// enumData is non-nil iff the metadata is for an ENUM type.
 	EnumData *EnumMetadata
 }
@@ -200,6 +204,9 @@ type EnumMetadata struct {
 	// LogicalRepresentations is a slice of the string logical
 	// representations of enum members.
 	LogicalRepresentations []string
+	// IsMemberReadOnly holds whether the enum member at index i is
+	// read only or not.
+	IsMemberReadOnly []bool
 	// TODO (rohany): For small enums, having a map would be slower
 	//  than just an array. Investigate at what point the tradeoff
 	//  should occur, if at all.
@@ -219,18 +226,10 @@ func (e *EnumMetadata) debugString() string {
 // private. Rather than expose private members of higher level packages,
 // we define a separate type here to be safe.
 type UserDefinedTypeName struct {
-	Catalog string
-	Schema  string
-	Name    string
-}
-
-// MakeUserDefinedTypeName creates a user defined type name.
-func MakeUserDefinedTypeName(catalog, schema, name string) *UserDefinedTypeName {
-	return &UserDefinedTypeName{
-		Catalog: catalog,
-		Schema:  schema,
-		Name:    name,
-	}
+	Catalog        string
+	ExplicitSchema bool
+	Schema         string
+	Name           string
 }
 
 // Basename returns the unqualified name.
@@ -243,8 +242,10 @@ func (u UserDefinedTypeName) FQName() string {
 	var sb strings.Builder
 	// Note that cross-database type references are disabled, so we only
 	// format the qualified name with the schema.
-	sb.WriteString(u.Schema)
-	sb.WriteString(".")
+	if u.ExplicitSchema {
+		sb.WriteString(u.Schema)
+		sb.WriteString(".")
+	}
 	sb.WriteString(u.Name)
 	return sb.String()
 }
@@ -433,6 +434,15 @@ var (
 		},
 	}
 
+	// Box2D is the type of a geospatial box2d object.
+	Box2D = &T{
+		InternalType: InternalType{
+			Family: Box2DFamily,
+			Oid:    oidext.T_box2d,
+			Locale: &emptyLocale,
+		},
+	}
+
 	// Scalar contains all types that meet this criteria:
 	//
 	//   1. Scalar type (no ArrayFamily or TupleFamily types).
@@ -441,6 +451,7 @@ var (
 	//
 	Scalar = []*T{
 		Bool,
+		Box2D,
 		Int,
 		Float,
 		Decimal,
@@ -513,6 +524,46 @@ var (
 	// DecimalArray is the type of an array value having Decimal-typed elements.
 	DecimalArray = &T{InternalType: InternalType{
 		Family: ArrayFamily, ArrayContents: Decimal, Oid: oid.T__numeric, Locale: &emptyLocale}}
+
+	// BoolArray is the type of an array value having Bool-typed elements.
+	BoolArray = &T{InternalType: InternalType{
+		Family: ArrayFamily, ArrayContents: Bool, Oid: oid.T__bool, Locale: &emptyLocale}}
+
+	// UUIDArray is the type of an array value having UUID-typed elements.
+	UUIDArray = &T{InternalType: InternalType{
+		Family: ArrayFamily, ArrayContents: Uuid, Oid: oid.T__uuid, Locale: &emptyLocale}}
+
+	// TimeArray is the type of an array value having Date-typed elements.
+	DateArray = &T{InternalType: InternalType{
+		Family: ArrayFamily, ArrayContents: Date, Oid: oid.T__date, Locale: &emptyLocale}}
+
+	// TimeArray is the type of an array value having Time-typed elements.
+	TimeArray = &T{InternalType: InternalType{
+		Family: ArrayFamily, ArrayContents: Time, Oid: oid.T__time, Locale: &emptyLocale}}
+
+	// TimeTZArray is the type of an array value having TimeTZ-typed elements.
+	TimeTZArray = &T{InternalType: InternalType{
+		Family: ArrayFamily, ArrayContents: TimeTZ, Oid: oid.T__timetz, Locale: &emptyLocale}}
+
+	// TimestampArray is the type of an array value having Timestamp-typed elements.
+	TimestampArray = &T{InternalType: InternalType{
+		Family: ArrayFamily, ArrayContents: Timestamp, Oid: oid.T__timestamp, Locale: &emptyLocale}}
+
+	// TimestampTZArray is the type of an array value having TimestampTZ-typed elements.
+	TimestampTZArray = &T{InternalType: InternalType{
+		Family: ArrayFamily, ArrayContents: TimestampTZ, Oid: oid.T__timestamptz, Locale: &emptyLocale}}
+
+	// IntervalArray is the type of an array value having Interval-typed elements.
+	IntervalArray = &T{InternalType: InternalType{
+		Family: ArrayFamily, ArrayContents: Interval, Oid: oid.T__interval, Locale: &emptyLocale}}
+
+	// INetArray is the type of an array value having INet-typed elements.
+	INetArray = &T{InternalType: InternalType{
+		Family: ArrayFamily, ArrayContents: INet, Oid: oid.T__inet, Locale: &emptyLocale}}
+
+	// VarBitArray is the type of an array value having VarBit-typed elements.
+	VarBitArray = &T{InternalType: InternalType{
+		Family: ArrayFamily, ArrayContents: VarBit, Oid: oid.T__varbit, Locale: &emptyLocale}}
 
 	// Int2Vector is a type-alias for an array of Int2 values with a different
 	// OID (T_int2vector instead of T__int2). It is a special VECTOR type used
@@ -991,14 +1042,13 @@ func MakeTimestampTZ(precision int32) *T {
 
 // MakeEnum constructs a new instance of an EnumFamily type with the given
 // stable type ID. Note that it does not hydrate cached fields on the type.
-func MakeEnum(typeID, arrayTypeID uint32) *T {
+func MakeEnum(typeOID, arrayTypeOID oid.Oid) *T {
 	return &T{InternalType: InternalType{
 		Family: EnumFamily,
-		Oid:    StableTypeIDToOID(typeID),
+		Oid:    typeOID,
 		Locale: &emptyLocale,
 		UDTMetadata: &PersistentUserDefinedTypeMetadata{
-			StableTypeID:      typeID,
-			StableArrayTypeID: arrayTypeID,
+			ArrayTypeOID: arrayTypeOID,
 		},
 	}}
 }
@@ -1012,13 +1062,6 @@ func MakeArray(typ *T) *T {
 		ArrayContents: typ,
 		Locale:        &emptyLocale,
 	}}
-	if typ.UserDefined() {
-		// If the element type is user defined, then the array type is user
-		// defined as well, with a stable ID equal to the element's array type ID.
-		arr.InternalType.UDTMetadata = &PersistentUserDefinedTypeMetadata{
-			StableTypeID: typ.StableArrayTypeID(),
-		}
-	}
 	return arr
 }
 
@@ -1138,12 +1181,16 @@ func (t *T) Precision() int32 {
 // TypeModifier returns the type modifier of the type. This corresponds to the
 // pg_attribute.atttypmod column. atttypmod records type-specific data supplied
 // at table creation time (for example, the maximum length of a varchar column).
+// Array types have the same type modifier as the contents of the array.
 // The value will be -1 for types that do not need atttypmod.
 func (t *T) TypeModifier() int32 {
 	typeModifier := int32(-1)
+	if t.Family() == ArrayFamily {
+		return t.ArrayContents().TypeModifier()
+	}
 	if width := t.Width(); width != 0 {
 		switch t.Family() {
-		case StringFamily:
+		case StringFamily, CollatedStringFamily:
 			// Postgres adds 4 to the attypmod for bounded string types, the
 			// var header size.
 			typeModifier = width + 4
@@ -1185,22 +1232,41 @@ func (t *T) TupleLabels() []string {
 	return t.InternalType.TupleLabels
 }
 
-// StableTypeID returns the stable ID of the TypeDescriptor that backs this
-// type. This function only returns non-zero data for user defined types.
-func (t *T) StableTypeID() uint32 {
-	return t.InternalType.UDTMetadata.StableTypeID
+// UserDefinedArrayOID returns the OID of the array type that corresponds to
+// this user defined type. This function only can only be called on user
+// defined types and returns non-zero data only for user defined types that
+// aren't arrays.
+func (t *T) UserDefinedArrayOID() oid.Oid {
+	if t.InternalType.UDTMetadata == nil {
+		return 0
+	}
+	return t.InternalType.UDTMetadata.ArrayTypeOID
 }
 
-// StableArrayTypeID returns the stable ID of the TypeDescriptor that backs
-// the implicit array type for the type. This function only returns non-zero
-// data for user defined types that aren't array types.
-func (t *T) StableArrayTypeID() uint32 {
-	return t.InternalType.UDTMetadata.StableArrayTypeID
+// RemapUserDefinedTypeOIDs is used to remap OIDs stored within a types.T
+// that is a user defined type. The newArrayOID argument is ignored if the
+// input type is an Array type. It mutates the input types.T and should only
+// be used when type is known to not be shared. If the input oid values are
+// 0 then the RemapUserDefinedTypeOIDs has no effect.
+func RemapUserDefinedTypeOIDs(t *T, newOID, newArrayOID oid.Oid) {
+	if newOID != 0 {
+		t.InternalType.Oid = newOID
+	}
+	if t.Family() != ArrayFamily && newArrayOID != 0 {
+		t.InternalType.UDTMetadata.ArrayTypeOID = newArrayOID
+	}
 }
 
 // UserDefined returns whether or not t is a user defined type.
 func (t *T) UserDefined() bool {
-	return t.InternalType.UDTMetadata != nil
+	return IsOIDUserDefinedType(t.Oid())
+}
+
+// IsOIDUserDefinedType returns whether or not o corresponds to a user
+// defined type.
+func IsOIDUserDefinedType(o oid.Oid) bool {
+	// Types with OIDs larger than the predefined max are user defined.
+	return o > oidext.CockroachPredefinedOIDMax
 }
 
 var familyNames = map[Family]string{
@@ -1208,6 +1274,7 @@ var familyNames = map[Family]string{
 	ArrayFamily:          "array",
 	BitFamily:            "bit",
 	BoolFamily:           "bool",
+	Box2DFamily:          "box2d",
 	BytesFamily:          "bytes",
 	CollatedStringFamily: "collatedstring",
 	DateFamily:           "date",
@@ -1415,6 +1482,8 @@ func (t *T) SQLStandardNameWithTypmod(haveTypmod bool, typmod int) string {
 		return buf.String()
 	case BoolFamily:
 		return "boolean"
+	case Box2DFamily:
+		return "box2d"
 	case BytesFamily:
 		return "bytea"
 	case DateFamily:
@@ -1547,7 +1616,7 @@ func (t *T) SQLStandardNameWithTypmod(haveTypmod bool, typmod int) string {
 	case UuidFamily:
 		return "uuid"
 	case EnumFamily:
-		return t.TypeMeta.Name.FQName()
+		return t.TypeMeta.Name.Basename()
 	default:
 		panic(errors.AssertionFailedf("unexpected Family: %v", errors.Safe(t.Family())))
 	}
@@ -1720,7 +1789,7 @@ func (t *T) Equivalent(other *T) bool {
 		if t.Oid() == oid.T_anyenum || other.Oid() == oid.T_anyenum {
 			return true
 		}
-		if t.StableTypeID() != other.StableTypeID() {
+		if t.Oid() != other.Oid() {
 			return false
 		}
 	}
@@ -1869,10 +1938,7 @@ func (t *InternalType) Identical(other *InternalType) bool {
 		}
 	}
 	if t.UDTMetadata != nil && other.UDTMetadata != nil {
-		if t.UDTMetadata.StableTypeID != other.UDTMetadata.StableTypeID {
-			return false
-		}
-		if t.UDTMetadata.StableArrayTypeID != other.UDTMetadata.StableArrayTypeID {
+		if t.UDTMetadata.ArrayTypeOID != other.UDTMetadata.ArrayTypeOID {
 			return false
 		}
 	} else if t.UDTMetadata != nil {
@@ -2290,6 +2356,16 @@ func (t *T) IsAmbiguous() bool {
 	return false
 }
 
+// IsNumeric returns true iff this type is an integer, float, or decimal.
+func (t *T) IsNumeric() bool {
+	switch t.Family() {
+	case IntFamily, FloatFamily, DecimalFamily:
+		return true
+	default:
+		return false
+	}
+}
+
 // EnumGetIdxOfPhysical returns the index within the TypeMeta's slice of
 // enum physical representations that matches the input byte slice.
 func (t *T) EnumGetIdxOfPhysical(phys []byte) (int, error) {
@@ -2452,19 +2528,11 @@ func (t *T) stringTypeSQL() string {
 	return typName
 }
 
-// StableTypeIDToOID converts a stable descriptor ID into a type OID.
-func StableTypeIDToOID(id uint32) oid.Oid {
-	return oid.Oid(id) + oidext.CockroachPredefinedOIDMax
+// IsHydrated returns true if this is a user-defined type and the TypeMeta
+// is hydrated.
+func (t *T) IsHydrated() bool {
+	return t.UserDefined() && t.TypeMeta != (UserDefinedTypeMetadata{})
 }
-
-// UserDefinedTypeOIDToID converts a user defined type OID into a stable
-// descriptor ID.
-func UserDefinedTypeOIDToID(oid oid.Oid) uint32 {
-	return uint32(oid) - oidext.CockroachPredefinedOIDMax
-}
-
-// Silence unused warnings.
-var _ = UserDefinedTypeOIDToID
 
 var typNameLiterals map[string]*T
 
@@ -2567,6 +2635,7 @@ var postgresPredefinedTypeIssues = map[string]int{
 	"box":           21286,
 	"cidr":          18846,
 	"circle":        21286,
+	"jsonpath":      22513,
 	"line":          21286,
 	"lseg":          21286,
 	"macaddr":       -1,

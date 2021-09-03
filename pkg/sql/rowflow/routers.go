@@ -27,15 +27,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 type router interface {
@@ -92,7 +91,7 @@ type routerOutput struct {
 		// container if we don't need to buffer many rows. The buffer is a circular
 		// FIFO queue, with rowBufLen elements and the left-most (oldest) element at
 		// rowBufLeft.
-		rowBuf                [routerRowBufSize]sqlbase.EncDatumRow
+		rowBuf                [routerRowBufSize]rowenc.EncDatumRow
 		rowBufLeft, rowBufLen uint32
 
 		// The "level 2" rowContainer is used when we need to buffer more rows than
@@ -108,6 +107,13 @@ type routerOutput struct {
 
 	// memoryMonitor and diskMonitor are mu.rowContainer's monitors.
 	memoryMonitor, diskMonitor *mon.BytesMonitor
+
+	rowAlloc         rowenc.EncDatumRowAlloc
+	rowBufToPushFrom [routerRowBufSize]rowenc.EncDatumRow
+	// rowBufToPushFromMon and rowBufToPushFromAcc are the memory accounting
+	// infrastructure of rowBufToPushFrom.
+	rowBufToPushFromMon *mon.BytesMonitor
+	rowBufToPushFromAcc *mon.BoundAccount
 }
 
 func (ro *routerOutput) addMetadataLocked(meta *execinfrapb.ProducerMetadata) {
@@ -118,7 +124,7 @@ func (ro *routerOutput) addMetadataLocked(meta *execinfrapb.ProducerMetadata) {
 
 // addRowLocked adds a row to rowBuf (potentially evicting the oldest row into
 // rowContainer).
-func (ro *routerOutput) addRowLocked(ctx context.Context, row sqlbase.EncDatumRow) error {
+func (ro *routerOutput) addRowLocked(ctx context.Context, row rowenc.EncDatumRow) error {
 	if ro.mu.streamStatus != execinfra.NeedMoreRows {
 		// The consumer doesn't want more rows; drop the row.
 		return nil
@@ -138,16 +144,30 @@ func (ro *routerOutput) addRowLocked(ctx context.Context, row sqlbase.EncDatumRo
 	return nil
 }
 
-func (ro *routerOutput) popRowsLocked(
-	ctx context.Context, rowBuf []sqlbase.EncDatumRow,
-) ([]sqlbase.EncDatumRow, error) {
+func (ro *routerOutput) popRowsLocked(ctx context.Context) ([]rowenc.EncDatumRow, error) {
 	n := 0
+	// addToRowBufToPushFrom adds row to nth position in rowBufToPushFrom. row
+	// *must* be safe from further modifications.
+	addToRowBufToPushFrom := func(row rowenc.EncDatumRow) error {
+		// We're reusing the same rowBufToPushFrom slice, so we can only
+		// release the memory under the "old" row once we overwrite it in
+		// rowBufToPushFrom which we're about to do for rowBufToPushFrom[n].
+		prevSize := uintptr(0)
+		if ro.rowBufToPushFrom[n] != nil {
+			prevSize = ro.rowBufToPushFrom[n].Size()
+		}
+		if err := ro.rowBufToPushFromAcc.Grow(ctx, int64(row.Size()-prevSize)); err != nil {
+			return err
+		}
+		ro.rowBufToPushFrom[n] = row
+		return nil
+	}
 	// First try to get rows from the row container.
 	if ro.mu.rowContainer.Len() > 0 {
 		if err := func() error {
 			i := ro.mu.rowContainer.NewFinalIterator(ctx)
 			defer i.Close()
-			for i.Rewind(); n < len(rowBuf); i.Next() {
+			for i.Rewind(); n < len(ro.rowBufToPushFrom); i.Next() {
 				if ok, err := i.Valid(); err != nil {
 					return err
 				} else if !ok {
@@ -157,9 +177,9 @@ func (ro *routerOutput) popRowsLocked(
 				if err != nil {
 					return err
 				}
-				// TODO(radu): use an EncDatumRowAlloc?
-				rowBuf[n] = make(sqlbase.EncDatumRow, len(row))
-				copy(rowBuf[n], row)
+				if err = addToRowBufToPushFrom(ro.rowAlloc.CopyRow(row)); err != nil {
+					return err
+				}
 				n++
 			}
 			return nil
@@ -169,12 +189,14 @@ func (ro *routerOutput) popRowsLocked(
 	}
 
 	// If the row container is empty, get more rows from the row buffer.
-	for ; n < len(rowBuf) && ro.mu.rowBufLen > 0; n++ {
-		rowBuf[n] = ro.mu.rowBuf[ro.mu.rowBufLeft]
+	for ; n < len(ro.rowBufToPushFrom) && ro.mu.rowBufLen > 0; n++ {
+		if err := addToRowBufToPushFrom(ro.mu.rowBuf[ro.mu.rowBufLeft]); err != nil {
+			return nil, err
+		}
 		ro.mu.rowBufLeft = (ro.mu.rowBufLeft + 1) % routerRowBufSize
 		ro.mu.rowBufLen--
 	}
-	return rowBuf[:n], nil
+	return ro.rowBufToPushFrom[:n], nil
 }
 
 // See the comment for routerBase.semaphoreCount.
@@ -238,7 +260,7 @@ func (rb *routerBase) setupStreams(
 // init must be called after setupStreams but before Start.
 func (rb *routerBase) init(ctx context.Context, flowCtx *execinfra.FlowCtx, types []*types.T) {
 	// Check if we're recording stats.
-	if s := opentracing.SpanFromContext(ctx); s != nil && tracing.IsRecording(s) {
+	if s := tracing.SpanFromContext(ctx); s != nil && tracing.IsRecording(s) {
 		rb.statsCollectionEnabled = true
 	}
 
@@ -255,6 +277,14 @@ func (rb *routerBase) init(ctx context.Context, flowCtx *execinfra.FlowCtx, type
 			ctx, flowCtx.Cfg.DiskMonitor,
 			fmt.Sprintf("router-disk-%d", rb.outputs[i].streamID),
 		)
+		// Note that the monitor is an unlimited one since we don't know how
+		// to fallback to disk if a memory budget error is encountered when
+		// we're popping rows from the row container into the row buffer.
+		rb.outputs[i].rowBufToPushFromMon = execinfra.NewMonitor(
+			ctx, evalCtx.Mon, fmt.Sprintf("router-unlimited-%d", rb.outputs[i].streamID),
+		)
+		memAcc := rb.outputs[i].rowBufToPushFromMon.MakeBoundAccount()
+		rb.outputs[i].rowBufToPushFromAcc = &memAcc
 
 		rb.outputs[i].mu.rowContainer.Init(
 			nil, /* ordering */
@@ -263,7 +293,6 @@ func (rb *routerBase) init(ctx context.Context, flowCtx *execinfra.FlowCtx, type
 			flowCtx.Cfg.TempStorage,
 			rb.outputs[i].memoryMonitor,
 			rb.outputs[i].diskMonitor,
-			0, /* rowCapacity */
 		)
 
 		// Initialize any outboxes.
@@ -278,14 +307,13 @@ func (rb *routerBase) Start(ctx context.Context, wg *sync.WaitGroup, ctxCancel c
 	wg.Add(len(rb.outputs))
 	for i := range rb.outputs {
 		go func(ctx context.Context, rb *routerBase, ro *routerOutput, wg *sync.WaitGroup) {
-			var span opentracing.Span
+			var span *tracing.Span
 			if rb.statsCollectionEnabled {
 				ctx, span = execinfra.ProcessorSpan(ctx, "router output")
 				span.SetTag(execinfrapb.StreamIDTagKey, ro.streamID)
 			}
 
 			drain := false
-			rowBuf := make([]sqlbase.EncDatumRow, routerRowBufSize)
 			streamStatus := execinfra.NeedMoreRows
 			ro.mu.Lock()
 			for {
@@ -314,8 +342,10 @@ func (rb *routerBase) Start(ctx context.Context, wg *sync.WaitGroup, ctxCancel c
 				if !drain {
 					// Send any rows that have been buffered. We grab multiple rows at a
 					// time to reduce contention.
-					if rows, err := ro.popRowsLocked(ctx, rowBuf); err != nil {
+					if rows, err := ro.popRowsLocked(ctx); err != nil {
+						ro.mu.Unlock()
 						rb.fwdMetadata(&execinfrapb.ProducerMetadata{Err: err})
+						ro.mu.Lock()
 						atomic.StoreUint32(&rb.aggregatedStatus, uint32(execinfra.DrainRequested))
 						drain = true
 						continue
@@ -344,10 +374,12 @@ func (rb *routerBase) Start(ctx context.Context, wg *sync.WaitGroup, ctxCancel c
 						tracing.SetSpanStats(span, &ro.stats)
 						tracing.FinishSpan(span)
 						if trace := execinfra.GetTraceData(ctx); trace != nil {
+							ro.mu.Unlock()
 							rb.semaphore <- struct{}{}
 							status := ro.stream.Push(nil, &execinfrapb.ProducerMetadata{TraceData: trace})
 							rb.updateStreamState(&streamStatus, status)
 							<-rb.semaphore
+							ro.mu.Lock()
 						}
 					}
 					ro.stream.ProducerDone()
@@ -360,8 +392,10 @@ func (rb *routerBase) Start(ctx context.Context, wg *sync.WaitGroup, ctxCancel c
 			ro.mu.rowContainer.Close(ctx)
 			ro.mu.Unlock()
 
+			ro.rowBufToPushFromAcc.Close(ctx)
 			ro.memoryMonitor.Stop(ctx)
 			ro.diskMonitor.Stop(ctx)
+			ro.rowBufToPushFromMon.Stop(ctx)
 
 			wg.Done()
 		}(ctx, rb, &rb.outputs[i], wg)
@@ -405,32 +439,64 @@ func (rb *routerBase) updateStreamState(
 	}
 }
 
-// fwdMetadata forwards a metadata record to the first stream that's still
-// accepting data.
+// fwdMetadata forwards a metadata record to streams that are still accepting
+// data. Note that if the metadata record contains an error, it is propagated
+// to all non-closed streams whereas all other types of metadata are propagated
+// only to the first non-closed stream.
+// Note: fwdMetadata should be called without holding the lock.
 func (rb *routerBase) fwdMetadata(meta *execinfrapb.ProducerMetadata) {
 	if meta == nil {
 		log.Fatalf(context.TODO(), "asked to fwd empty metadata")
 	}
 
 	rb.semaphore <- struct{}{}
+	defer func() {
+		<-rb.semaphore
+	}()
+	if metaErr := meta.Err; metaErr != nil {
+		// Forward the error to all non-closed streams.
+		if rb.fwdErrMetadata(metaErr) {
+			return
+		}
+	} else {
+		// Forward the metadata to the first non-closed stream.
+		for i := range rb.outputs {
+			ro := &rb.outputs[i]
+			ro.mu.Lock()
+			if ro.mu.streamStatus != execinfra.ConsumerClosed {
+				ro.addMetadataLocked(meta)
+				ro.mu.Unlock()
+				ro.mu.cond.Signal()
+				return
+			}
+			ro.mu.Unlock()
+		}
+	}
+	// If we got here it means that we couldn't even forward metadata anywhere;
+	// all streams are closed.
+	atomic.StoreUint32(&rb.aggregatedStatus, uint32(execinfra.ConsumerClosed))
+}
 
+// fwdErrMetadata forwards err to all non-closed streams and returns a boolean
+// indicating whether it was sent on at least one stream. Note that this method
+// assumes that rb.semaphore has been acquired and leaves it up to the caller
+// to release it.
+func (rb *routerBase) fwdErrMetadata(err error) bool {
+	forwarded := false
 	for i := range rb.outputs {
 		ro := &rb.outputs[i]
 		ro.mu.Lock()
 		if ro.mu.streamStatus != execinfra.ConsumerClosed {
+			meta := &execinfrapb.ProducerMetadata{Err: err}
 			ro.addMetadataLocked(meta)
 			ro.mu.Unlock()
 			ro.mu.cond.Signal()
-			<-rb.semaphore
-			return
+			forwarded = true
+		} else {
+			ro.mu.Unlock()
 		}
-		ro.mu.Unlock()
 	}
-
-	<-rb.semaphore
-	// If we got here it means that we couldn't even forward metadata anywhere;
-	// all streams are closed.
-	atomic.StoreUint32(&rb.aggregatedStatus, uint32(execinfra.ConsumerClosed))
+	return forwarded
 }
 
 func (rb *routerBase) shouldUseSemaphore() bool {
@@ -451,7 +517,7 @@ type hashRouter struct {
 
 	hashCols []uint32
 	buffer   []byte
-	alloc    sqlbase.DatumAlloc
+	alloc    rowenc.DatumAlloc
 }
 
 // rangeRouter is a router that assumes the keyColumn'th column of incoming
@@ -462,7 +528,7 @@ type hashRouter struct {
 type rangeRouter struct {
 	routerBase
 
-	alloc sqlbase.DatumAlloc
+	alloc rowenc.DatumAlloc
 	// b is a temp storage location used during encoding
 	b         []byte
 	encodings []execinfrapb.OutputRouterSpec_RangeRouterSpec_ColumnEncoding
@@ -486,12 +552,13 @@ func makeMirrorRouter(rb routerBase) (router, error) {
 
 // Push is part of the RowReceiver interface.
 func (mr *mirrorRouter) Push(
-	row sqlbase.EncDatumRow, meta *execinfrapb.ProducerMetadata,
+	row rowenc.EncDatumRow, meta *execinfrapb.ProducerMetadata,
 ) execinfra.ConsumerStatus {
 	aggStatus := mr.aggStatus()
 	if meta != nil {
 		mr.fwdMetadata(meta)
-		return aggStatus
+		// fwdMetadata can change the status, re-read it.
+		return mr.aggStatus()
 	}
 	if aggStatus != execinfra.NeedMoreRows {
 		return aggStatus
@@ -540,7 +607,7 @@ func makeHashRouter(rb routerBase, hashCols []uint32) (router, error) {
 // If, according to the hash, the row needs to go to a consumer that's draining
 // or closed, the row is silently dropped.
 func (hr *hashRouter) Push(
-	row sqlbase.EncDatumRow, meta *execinfrapb.ProducerMetadata,
+	row rowenc.EncDatumRow, meta *execinfrapb.ProducerMetadata,
 ) execinfra.ConsumerStatus {
 	aggStatus := hr.aggStatus()
 	if meta != nil {
@@ -578,7 +645,7 @@ func (hr *hashRouter) Push(
 
 // computeDestination hashes a row and returns the index of the output stream on
 // which it must be sent.
-func (hr *hashRouter) computeDestination(row sqlbase.EncDatumRow) (int, error) {
+func (hr *hashRouter) computeDestination(row rowenc.EncDatumRow) (int, error) {
 	hr.buffer = hr.buffer[:0]
 	for _, col := range hr.hashCols {
 		if int(col) >= len(row) {
@@ -586,7 +653,9 @@ func (hr *hashRouter) computeDestination(row sqlbase.EncDatumRow) (int, error) {
 			return -1, err
 		}
 		var err error
-		hr.buffer, err = row[col].Fingerprint(hr.types[col], &hr.alloc, hr.buffer)
+		// We choose to not perform the memory accounting for possibly decoded
+		// tree.Datum because we will lose the references to row very soon.
+		hr.buffer, err = row[col].Fingerprint(context.TODO(), hr.types[col], &hr.alloc, hr.buffer, nil /* acc */)
 		if err != nil {
 			return -1, err
 		}
@@ -626,7 +695,7 @@ func makeRangeRouter(
 }
 
 func (rr *rangeRouter) Push(
-	row sqlbase.EncDatumRow, meta *execinfrapb.ProducerMetadata,
+	row rowenc.EncDatumRow, meta *execinfrapb.ProducerMetadata,
 ) execinfra.ConsumerStatus {
 	aggStatus := rr.aggStatus()
 	if meta != nil {
@@ -659,7 +728,7 @@ func (rr *rangeRouter) Push(
 	return aggStatus
 }
 
-func (rr *rangeRouter) computeDestination(row sqlbase.EncDatumRow) (int, error) {
+func (rr *rangeRouter) computeDestination(row rowenc.EncDatumRow) (int, error) {
 	var err error
 	rr.b = rr.b[:0]
 	for _, enc := range rr.encodings {

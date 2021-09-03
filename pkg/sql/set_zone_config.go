@@ -23,11 +23,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
@@ -202,7 +206,7 @@ func checkPrivilegeForSetZoneConfig(ctx context.Context, p *planner, zs tree.Zon
 
 		return pgerror.Newf(pgcode.InsufficientPrivilege,
 			"user %s does not have %s or %s privilege on %s %s",
-			p.SessionData().User, privilege.ZONECONFIG, privilege.CREATE, dbDesc.TypeName(), dbDesc.GetName())
+			p.SessionData().User(), privilege.ZONECONFIG, privilege.CREATE, dbDesc.TypeName(), dbDesc.GetName())
 	}
 	tableDesc, err := p.resolveTableForZone(ctx, &zs)
 	if err != nil {
@@ -211,7 +215,7 @@ func checkPrivilegeForSetZoneConfig(ctx context.Context, p *planner, zs tree.Zon
 		}
 		return err
 	}
-	if tableDesc.TableDesc().ParentID == keys.SystemDatabaseID {
+	if tableDesc.GetParentID() == keys.SystemDatabaseID {
 		return p.RequireAdminRole(ctx, "alter system tables")
 	}
 
@@ -225,7 +229,7 @@ func checkPrivilegeForSetZoneConfig(ctx context.Context, p *planner, zs tree.Zon
 
 	return pgerror.Newf(pgcode.InsufficientPrivilege,
 		"user %s does not have %s or %s privilege on %s %s",
-		p.SessionData().User, privilege.ZONECONFIG, privilege.CREATE, tableDesc.TypeName(), tableDesc.GetName())
+		p.SessionData().User(), privilege.ZONECONFIG, privilege.CREATE, tableDesc.TypeName(), tableDesc.GetName())
 }
 
 // setZoneConfigRun contains the run-time state of setZoneConfigNode during local execution.
@@ -325,7 +329,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 		// Backward compatibility for ALTER PARTITION ... OF TABLE. Determine which
 		// index has the specified partition.
 		partitionName := string(n.zoneSpecifier.Partition)
-		indexes := table.TableDesc().FindIndexesWithPartition(partitionName)
+		indexes := table.FindIndexesWithPartition(partitionName)
 		switch len(indexes) {
 		case 0:
 			return fmt.Errorf("partition %q does not exist on table %q", partitionName, table.GetName())
@@ -346,8 +350,8 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 	var specifiers []tree.ZoneSpecifier
 	if n.zoneSpecifier.TargetsPartition() && n.allIndexes {
 		sqltelemetry.IncrementPartitioningCounter(sqltelemetry.AlterAllPartitions)
-		for _, idx := range table.TableDesc().AllNonDropIndexes() {
-			if p := idx.FindPartitionByName(string(n.zoneSpecifier.Partition)); p != nil {
+		for _, idx := range table.AllNonDropIndexes() {
+			if p := tabledesc.FindIndexPartitionByName(idx, string(n.zoneSpecifier.Partition)); p != nil {
 				zs := n.zoneSpecifier
 				zs.TableOrIndex.Index = tree.UnrestrictedName(idx.Name)
 				specifiers = append(specifiers, zs)
@@ -368,7 +372,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 		}
 		// NamespaceTableID is not in the system gossip range, but users should not
 		// be allowed to set zone configs on it.
-		if targetID != keys.SystemDatabaseID && sqlbase.IsSystemConfigID(targetID) || targetID == keys.NamespaceTableID {
+		if targetID != keys.SystemDatabaseID && descpb.IsSystemConfigID(targetID) || targetID == keys.NamespaceTableID {
 			return pgerror.Newf(pgcode.CheckViolation,
 				`cannot set zone configs for system config tables; `+
 					`try setting your config on the entire "system" database instead`)
@@ -569,7 +573,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 				return err
 			}
 
-			ss, err := params.extendedEvalCtx.StatusServer.OptionalErr()
+			ss, err := params.extendedEvalCtx.NodesStatusServer.OptionalNodesStatusServer(multitenancyZoneCfgIssueNo)
 			if err != nil {
 				return err
 			}
@@ -658,12 +662,8 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 		zoneToWrite := partialZone
 		// TODO(ajwerner): This is extremely fragile because we accept a nil table
 		// all the way down here.
-		var tableDesc *sqlbase.TableDescriptor
-		if table != nil {
-			tableDesc = table.TableDesc()
-		}
 		n.run.numAffected, err = writeZoneConfig(params.ctx, params.p.txn,
-			targetID, tableDesc, zoneToWrite, execConfig, hasNewSubzones)
+			targetID, table, zoneToWrite, execConfig, hasNewSubzones)
 		if err != nil {
 			return err
 		}
@@ -679,7 +679,7 @@ func (n *setZoneConfigNode) startExec(params runParams) error {
 			Target:  tree.AsStringWithFQNames(&zs, params.Ann()),
 			Config:  strings.TrimSpace(yamlConfig),
 			Options: optionStr.String(),
-			User:    params.SessionData().User,
+			User:    params.p.User().Normalized(),
 		}
 		if deleteZone {
 			eventLogType = EventLogRemoveZoneConfig
@@ -842,8 +842,8 @@ const multitenancyZoneCfgIssueNo = 49854
 func writeZoneConfig(
 	ctx context.Context,
 	txn *kv.Txn,
-	targetID sqlbase.ID,
-	table *sqlbase.TableDescriptor,
+	targetID descpb.ID,
+	table catalog.TableDescriptor,
 	zone *zonepb.ZoneConfig,
 	execCfg *ExecutorConfig,
 	hasNewSubzones bool,
@@ -881,7 +881,7 @@ func writeZoneConfig(
 // getZoneConfig, it does not attempt to ascend the zone config hierarchy. If no
 // zone config exists for the given ID, it returns nil.
 func getZoneConfigRaw(
-	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, id sqlbase.ID,
+	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, id descpb.ID,
 ) (*zonepb.ZoneConfig, error) {
 	if !codec.ForSystemTenant() {
 		// Secondary tenants do not have zone configs for individual objects.
@@ -903,7 +903,7 @@ func getZoneConfigRaw(
 
 // RemoveIndexZoneConfigs removes the zone configurations for some
 // indexs being dropped. It is a no-op if there is no zone
-// configuration.
+// configuration or run on behalf of a tenant.
 //
 // It operates entirely on the current goroutine and is thus able to
 // reuse an existing client.Txn safely.
@@ -911,13 +911,19 @@ func RemoveIndexZoneConfigs(
 	ctx context.Context,
 	txn *kv.Txn,
 	execCfg *ExecutorConfig,
-	tableID sqlbase.ID,
-	indexDescs []sqlbase.IndexDescriptor,
+	tableID descpb.ID,
+	indexDescs []descpb.IndexDescriptor,
 ) error {
-	tableDesc, err := sqlbase.GetTableDescFromID(ctx, txn, execCfg.Codec, tableID)
+	if !execCfg.Codec.ForSystemTenant() {
+		// Tenants are agnostic to zone configs.
+		return nil
+	}
+	desc, err := catalogkv.GetDescriptorByID(ctx, txn, execCfg.Codec, tableID,
+		catalogkv.Mutable, catalogkv.TableDescriptorKind, true)
 	if err != nil {
 		return err
 	}
+	tableDesc := desc.(catalog.TableDescriptor)
 
 	zone, err := getZoneConfigRaw(ctx, txn, execCfg.Codec, tableID)
 	if err != nil {
@@ -932,7 +938,7 @@ func RemoveIndexZoneConfigs(
 
 	// Ignore CCL required error to allow schema change to progress.
 	_, err = writeZoneConfig(ctx, txn, tableID, tableDesc, zone, execCfg, false /* hasNewSubzones */)
-	if err != nil && !sqlbase.IsCCLRequiredError(err) {
+	if err != nil && !sqlerrors.IsCCLRequiredError(err) {
 		return err
 	}
 	return nil

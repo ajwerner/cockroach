@@ -19,8 +19,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/distsqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -33,9 +33,9 @@ func runProcessorTest(
 	core execinfrapb.ProcessorCoreUnion,
 	post execinfrapb.PostProcessSpec,
 	inputTypes []*types.T,
-	inputRows sqlbase.EncDatumRows,
+	inputRows rowenc.EncDatumRows,
 	outputTypes []*types.T,
-	expected sqlbase.EncDatumRows,
+	expected rowenc.EncDatumRows,
 	txn *kv.Txn,
 ) {
 	in := distsqlutils.NewRowBuffer(inputTypes, inputRows, distsqlutils.RowBufferArgs{})
@@ -61,18 +61,19 @@ func runProcessorTest(
 	case *joinReader:
 		// Reduce batch size to exercise batching logic.
 		pt.SetBatchSizeBytes(2 * int64(inputRows[0].Size()))
-	case *indexJoiner:
-		//	Reduce batch size to exercise batching logic.
-		pt.SetBatchSize(2 /* batchSize */)
 	}
 
 	p.Run(context.Background())
 	if !out.ProducerClosed() {
 		t.Fatalf("output RowReceiver not closed")
 	}
-	var res sqlbase.EncDatumRows
+	var res rowenc.EncDatumRows
 	for {
-		row := out.NextNoMeta(t).Copy()
+		row, meta := out.Next()
+		if meta != nil && meta.Metrics == nil {
+			t.Fatalf("unexpected metadata %+v", meta)
+		}
+		row = row.Copy()
 		if row == nil {
 			break
 		}
@@ -96,7 +97,7 @@ func (s *sorterBase) getRows() *rowcontainer.DiskBackedRowContainer {
 type rowGeneratingSource struct {
 	types              []*types.T
 	fn                 sqlutils.GenRowFn
-	scratchEncDatumRow sqlbase.EncDatumRow
+	scratchEncDatumRow rowenc.EncDatumRow
 
 	rowIdx  int
 	maxRows int
@@ -114,7 +115,7 @@ func (r *rowGeneratingSource) OutputTypes() []*types.T { return r.types }
 
 func (r *rowGeneratingSource) Start(ctx context.Context) context.Context { return ctx }
 
-func (r *rowGeneratingSource) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (r *rowGeneratingSource) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	if r.rowIdx > r.maxRows {
 		// Done.
 		return nil, nil
@@ -122,13 +123,13 @@ func (r *rowGeneratingSource) Next() (sqlbase.EncDatumRow, *execinfrapb.Producer
 
 	datumRow := r.fn(r.rowIdx)
 	if cap(r.scratchEncDatumRow) < len(datumRow) {
-		r.scratchEncDatumRow = make(sqlbase.EncDatumRow, len(datumRow))
+		r.scratchEncDatumRow = make(rowenc.EncDatumRow, len(datumRow))
 	} else {
 		r.scratchEncDatumRow = r.scratchEncDatumRow[:len(datumRow)]
 	}
 
 	for i := range r.scratchEncDatumRow {
-		r.scratchEncDatumRow[i] = sqlbase.DatumToEncDatum(r.types[i], datumRow[i])
+		r.scratchEncDatumRow[i] = rowenc.DatumToEncDatum(r.types[i], datumRow[i])
 	}
 	r.rowIdx++
 	return r.scratchEncDatumRow, nil
@@ -154,7 +155,7 @@ var _ execinfra.RowReceiver = &rowDisposer{}
 
 // Push is part of the distsql.RowReceiver interface.
 func (r *rowDisposer) Push(
-	row sqlbase.EncDatumRow, meta *execinfrapb.ProducerMetadata,
+	row rowenc.EncDatumRow, meta *execinfrapb.ProducerMetadata,
 ) execinfra.ConsumerStatus {
 	if row != nil {
 		r.numRowsDisposed++
@@ -181,5 +182,7 @@ func (r *rowDisposer) NumRowsDisposed() int {
 }
 
 func (r *rowDisposer) DrainMeta(context.Context) []execinfrapb.ProducerMetadata {
-	return r.bufferedMeta
+	meta := r.bufferedMeta
+	r.bufferedMeta = r.bufferedMeta[:0]
+	return meta
 }

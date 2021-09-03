@@ -77,6 +77,7 @@ func TestBootstrapCluster(t *testing.T) {
 	for _, kv := range res.KVs {
 		foundKeys = append(foundKeys, kv.Key)
 	}
+	const firstNodeID = 1
 	var expectedKeys = keySlice{
 		testutils.MakeKey(roachpb.Key("\x02"), roachpb.KeyMax),
 		testutils.MakeKey(roachpb.Key("\x03"), roachpb.KeyMax),
@@ -84,6 +85,7 @@ func TestBootstrapCluster(t *testing.T) {
 		roachpb.Key("\x04node-idgen"),
 		roachpb.Key("\x04range-idgen"),
 		roachpb.Key("\x04store-idgen"),
+		keys.NodeLivenessKey(firstNodeID),
 	}
 	for _, splitKey := range config.StaticSplits() {
 		meta2Key := keys.RangeMetaKey(splitKey)
@@ -189,7 +191,7 @@ func TestNodeJoin(t *testing.T) {
 
 	numNodes := len(perNode)
 
-	s := serverutils.StartTestCluster(t, numNodes, args)
+	s := serverutils.StartNewTestCluster(t, numNodes, args)
 	defer s.Stopper().Stop(ctx)
 
 	// Verify all stores are initialized.
@@ -444,7 +446,7 @@ func TestNodeStatusWritten(t *testing.T) {
 
 	expectedStoreStatuses := make(map[roachpb.StoreID]statuspb.StoreStatus)
 	if err := ts.node.stores.VisitStores(func(s *kvserver.Store) error {
-		desc, err := s.Descriptor(false /* useCached */)
+		desc, err := s.Descriptor(ctx, false /* useCached */)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -585,7 +587,7 @@ func TestStartNodeWithLocality(t *testing.T) {
 		}
 
 		if err := s.GetStores().(*kvserver.Stores).VisitStores(func(store *kvserver.Store) error {
-			desc, err := store.Descriptor(false /* useCached */)
+			desc, err := store.Descriptor(ctx, false /* useCached */)
 			if err != nil {
 				t.Fatal(err)
 			}

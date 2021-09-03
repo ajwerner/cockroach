@@ -23,6 +23,24 @@ CREATE INDEX bar ON t (c)
 statement error index \"bar\" contains duplicate column \"b\"
 CREATE INDEX bar ON t (b, b);
 
+statement error pgcode 0A000 only simple columns are supported as index elements
+CREATE INDEX bar ON t ((a+b))
+
+statement error pgcode 0A000 only simple columns are supported as index elements
+CREATE INDEX bar ON t (abs(b))
+
+statement error pgcode 0A000 only simple columns are supported as index elements
+CREATE UNIQUE INDEX bar ON t (abs(b))
+
+statement error pgcode 0A000 only simple columns are supported as index elements
+CREATE INVERTED INDEX bar ON t ((ARRAY[a,b]))
+
+statement error pgcode 0A000 only simple columns are supported as index elements
+CREATE TABLE t2 (a INT PRIMARY KEY, b INT, INDEX ((a+b)))
+
+statement error pgcode 0A000 only simple columns are supported as index elements
+CREATE TABLE t2 (a INT PRIMARY KEY, b INT, INVERTED INDEX ((ARRAY[a,b])))
+
 query TTBITTBB colnames
 SHOW INDEXES FROM t
 ----
@@ -83,7 +101,7 @@ CREATE INDEX fail ON foo (b DESC)
 statement ok
 CREATE VIEW v AS SELECT a,b FROM t
 
-statement error pgcode 42809 "v" is not a table
+statement error pgcode 42809 "v" is not a table or materialized view
 CREATE INDEX failview ON v (b DESC)
 
 statement ok
@@ -160,7 +178,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS create_index_concurrently_idx ON create_
 query TT
 SHOW CREATE TABLE create_index_concurrently_tbl
 ----
-create_index_concurrently_tbl  CREATE TABLE create_index_concurrently_tbl (
+create_index_concurrently_tbl  CREATE TABLE public.create_index_concurrently_tbl (
                                a INT8 NULL,
                                INDEX create_index_concurrently_idx (a ASC),
                                FAMILY "primary" (a, rowid)
@@ -181,7 +199,7 @@ NOTICE: CONCURRENTLY is not required as all indexes are dropped concurrently
 query TT
 SHOW CREATE TABLE create_index_concurrently_tbl
 ----
-create_index_concurrently_tbl  CREATE TABLE create_index_concurrently_tbl (
+create_index_concurrently_tbl  CREATE TABLE public.create_index_concurrently_tbl (
                                a INT8 NULL,
                                FAMILY "primary" (a, rowid)
 )

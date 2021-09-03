@@ -17,9 +17,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -29,9 +30,7 @@ import (
 func TestDistBackfill(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	if testing.Short() {
-		t.Skip("short flag #13645")
-	}
+	skip.UnderShort(t, "13645")
 
 	// This test sets up various queries using these tables:
 	//  - a NumToSquare table of size N that maps integers from 1 to n to their
@@ -45,7 +44,7 @@ func TestDistBackfill(t *testing.T) {
 	}
 	const numNodes = 5
 
-	tc := serverutils.StartTestCluster(t, numNodes,
+	tc := serverutils.StartNewTestCluster(t, numNodes,
 		base.TestClusterArgs{
 			ReplicationMode: base.ReplicationManual,
 			ServerArgs: base.TestServerArgs{
@@ -77,7 +76,7 @@ func TestDistBackfill(t *testing.T) {
 		sqlutils.ToRowFn(sqlutils.RowIdxFn, sqlutils.RowEnglishFn),
 	)
 	// Split the table into multiple ranges.
-	descNumToStr := sqlbase.TestingGetTableDescriptor(cdb, keys.SystemSQLCodec, "test", "numtostr")
+	descNumToStr := catalogkv.TestingGetTableDescriptor(cdb, keys.SystemSQLCodec, "test", "numtostr")
 	var sps []SplitPoint
 	//for i := 1; i <= numNodes-1; i++ {
 	for i := numNodes - 1; i > 0; i-- {

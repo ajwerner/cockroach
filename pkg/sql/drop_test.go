@@ -29,9 +29,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/gcjob"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltestutils"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/sqlmigrations"
@@ -52,7 +57,7 @@ import (
 // Returns an error if a zone config for the specified table or
 // database ID doesn't match the expected parameter. If expected
 // is nil, then we verify no zone config exists.
-func zoneExists(sqlDB *gosql.DB, expected *zonepb.ZoneConfig, id sqlbase.ID) error {
+func zoneExists(sqlDB *gosql.DB, expected *zonepb.ZoneConfig, id descpb.ID) error {
 	rows, err := sqlDB.Query(`SELECT * FROM system.zones WHERE id = $1`, id)
 	if err != nil {
 		return err
@@ -63,7 +68,7 @@ func zoneExists(sqlDB *gosql.DB, expected *zonepb.ZoneConfig, id sqlbase.ID) err
 	}
 	if expected != nil {
 		// Ensure that the zone config matches.
-		var storedID sqlbase.ID
+		var storedID descpb.ID
 		var val []byte
 		if err := rows.Scan(&storedID, &val); err != nil {
 			return errors.Errorf("row scan failed: %s", err)
@@ -83,7 +88,7 @@ func zoneExists(sqlDB *gosql.DB, expected *zonepb.ZoneConfig, id sqlbase.ID) err
 }
 
 // Returns an error if a descriptor "exists" for the table id.
-func descExists(sqlDB *gosql.DB, exists bool, id sqlbase.ID) error {
+func descExists(sqlDB *gosql.DB, exists bool, id descpb.ID) error {
 	rows, err := sqlDB.Query(`SELECT * FROM system.descriptor WHERE id = $1`, id)
 	if err != nil {
 		return err
@@ -113,34 +118,12 @@ INSERT INTO t.kv VALUES ('c', 'e'), ('a', 'c'), ('b', 'd');
 		t.Fatal(err)
 	}
 
-	dbNameKey := sqlbase.NewDatabaseKey("t").Key(keys.SystemSQLCodec)
-	r, err := kvDB.Get(ctx, dbNameKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !r.Exists() {
-		t.Fatalf(`database "t" does not exist`)
-	}
-	dbDescKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, sqlbase.ID(r.ValueInt()))
-	desc := &sqlbase.Descriptor{}
-	if err := kvDB.GetProto(ctx, dbDescKey, desc); err != nil {
-		t.Fatal(err)
-	}
-	dbDesc := sqlbase.NewImmutableDatabaseDescriptor(*desc.GetDatabase())
-	tbNameKey := sqlbase.NewPublicTableKey(dbDesc.GetID(), "kv").Key(keys.SystemSQLCodec)
-	gr, err := kvDB.Get(ctx, tbNameKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !gr.Exists() {
-		t.Fatalf(`table "kv" does not exist`)
-	}
-	tbDescKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, sqlbase.ID(gr.ValueInt()))
-	ts, err := kvDB.GetProtoTs(ctx, tbDescKey, desc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tbDesc := desc.Table(ts)
+	tbDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	var dbDesc *dbdesc.Immutable
+	require.NoError(t, kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
+		dbDesc, err = catalogkv.GetDatabaseDescByID(ctx, txn, keys.SystemSQLCodec, tbDesc.GetParentID())
+		return err
+	}))
 
 	// Add a zone config for both the table and database.
 	cfg := zonepb.DefaultZoneConfig()
@@ -180,7 +163,8 @@ INSERT INTO t.kv VALUES ('c', 'e'), ('a', 'c'), ('b', 'd');
 	if err := descExists(sqlDB, true, tbDesc.ID); err != nil {
 		t.Fatal(err)
 	}
-
+	tbNameKey := catalogkeys.MakeNameMetadataKey(keys.SystemSQLCodec,
+		tbDesc.GetParentID(), keys.PublicSchemaID, tbDesc.Name)
 	if gr, err := kvDB.Get(ctx, tbNameKey); err != nil {
 		t.Fatal(err)
 	} else if gr.Exists() {
@@ -195,6 +179,7 @@ INSERT INTO t.kv VALUES ('c', 'e'), ('a', 'c'), ('b', 'd');
 		t.Fatal(err)
 	}
 
+	dbNameKey := catalogkeys.MakeNameMetadataKey(keys.SystemSQLCodec, 0, 0, dbDesc.Name)
 	if gr, err := kvDB.Get(ctx, dbNameKey); err != nil {
 		t.Fatal(err)
 	} else if gr.Exists() {
@@ -215,9 +200,9 @@ INSERT INTO t.kv VALUES ('c', 'e'), ('a', 'c'), ('b', 'd');
 	// TODO (lucy): Maybe this test API should use an offset starting
 	// from the most recent job instead.
 	if err := jobutils.VerifySystemJob(t, sqlRun, 0, jobspb.TypeSchemaChange, jobs.StatusSucceeded, jobs.Record{
-		Username:    security.RootUser,
+		Username:    security.RootUserName(),
 		Description: "DROP DATABASE t CASCADE",
-		DescriptorIDs: sqlbase.IDs{
+		DescriptorIDs: descpb.IDs{
 			tbDesc.ID,
 		},
 	}); err != nil {
@@ -240,7 +225,7 @@ CREATE DATABASE t;
 		t.Fatal(err)
 	}
 
-	dKey := sqlbase.NewDatabaseKey("t")
+	dKey := catalogkeys.NewDatabaseKey("t")
 	r, err := kvDB.Get(ctx, dKey.Key(keys.SystemSQLCodec))
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +233,7 @@ CREATE DATABASE t;
 	if !r.Exists() {
 		t.Fatalf(`database "t" does not exist`)
 	}
-	dbID := sqlbase.ID(r.ValueInt())
+	dbID := descpb.ID(r.ValueInt())
 
 	if cfg, err := sqltestutils.AddDefaultZoneConfig(sqlDB, dbID); err != nil {
 		t.Fatal(err)
@@ -297,50 +282,13 @@ INSERT INTO t.kv2 VALUES ('c', 'd'), ('a', 'b'), ('e', 'a');
 		t.Fatal(err)
 	}
 
-	dKey := sqlbase.NewDatabaseKey("t")
-	r, err := kvDB.Get(ctx, dKey.Key(keys.SystemSQLCodec))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !r.Exists() {
-		t.Fatalf(`database "t" does not exist`)
-	}
-	dbDescKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, sqlbase.ID(r.ValueInt()))
-	desc := &sqlbase.Descriptor{}
-	if err := kvDB.GetProto(ctx, dbDescKey, desc); err != nil {
-		t.Fatal(err)
-	}
-	dbDesc := sqlbase.NewImmutableDatabaseDescriptor(*desc.GetDatabase())
-
-	tKey := sqlbase.NewPublicTableKey(dbDesc.GetID(), "kv")
-	gr, err := kvDB.Get(ctx, tKey.Key(keys.SystemSQLCodec))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !gr.Exists() {
-		t.Fatalf(`table "kv" does not exist`)
-	}
-	tbDescKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, sqlbase.ID(gr.ValueInt()))
-	ts, err := kvDB.GetProtoTs(ctx, tbDescKey, desc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tbDesc := desc.Table(ts)
-
-	t2Key := sqlbase.NewPublicTableKey(dbDesc.GetID(), "kv2")
-	gr2, err := kvDB.Get(ctx, t2Key.Key(keys.SystemSQLCodec))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !gr2.Exists() {
-		t.Fatalf(`table "kv2" does not exist`)
-	}
-	tb2DescKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, sqlbase.ID(gr2.ValueInt()))
-	ts, err = kvDB.GetProtoTs(ctx, tb2DescKey, desc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tb2Desc := desc.Table(ts)
+	tbDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tb2Desc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv2")
+	var dbDesc *dbdesc.Immutable
+	require.NoError(t, kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
+		dbDesc, err = catalogkv.GetDatabaseDescByID(ctx, txn, keys.SystemSQLCodec, tbDesc.GetParentID())
+		return err
+	}))
 
 	tableSpan := tbDesc.TableSpan(keys.SystemSQLCodec)
 	table2Span := tb2Desc.TableSpan(keys.SystemSQLCodec)
@@ -368,9 +316,9 @@ INSERT INTO t.kv2 VALUES ('c', 'd'), ('a', 'b'), ('e', 'a');
 	const migrationJobOffset = 0
 	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
 	if err := jobutils.VerifySystemJob(t, sqlRun, migrationJobOffset, jobspb.TypeSchemaChange, jobs.StatusSucceeded, jobs.Record{
-		Username:    security.RootUser,
+		Username:    security.RootUserName(),
 		Description: "DROP DATABASE t CASCADE",
-		DescriptorIDs: sqlbase.IDs{
+		DescriptorIDs: descpb.IDs{
 			tbDesc.ID, tb2Desc.ID,
 		},
 	}); err != nil {
@@ -402,9 +350,9 @@ INSERT INTO t.kv2 VALUES ('c', 'd'), ('a', 'b'), ('e', 'a');
 
 	testutils.SucceedsSoon(t, func() error {
 		return jobutils.VerifySystemJob(t, sqlRun, 0, jobspb.TypeSchemaChangeGC, jobs.StatusRunning, jobs.Record{
-			Username:    security.RootUser,
+			Username:    security.RootUserName(),
 			Description: "GC for DROP DATABASE t CASCADE",
-			DescriptorIDs: sqlbase.IDs{
+			DescriptorIDs: descpb.IDs{
 				tbDesc.ID, tb2Desc.ID,
 			},
 		})
@@ -429,9 +377,9 @@ INSERT INTO t.kv2 VALUES ('c', 'd'), ('a', 'b'), ('e', 'a');
 	tests.CheckKeyCount(t, kvDB, table2Span, 0)
 
 	if err := jobutils.VerifySystemJob(t, sqlRun, migrationJobOffset, jobspb.TypeSchemaChange, jobs.StatusSucceeded, jobs.Record{
-		Username:    security.RootUser,
+		Username:    security.RootUserName(),
 		Description: "DROP DATABASE t CASCADE",
-		DescriptorIDs: sqlbase.IDs{
+		DescriptorIDs: descpb.IDs{
 			tbDesc.ID, tb2Desc.ID,
 		},
 	}); err != nil {
@@ -441,52 +389,6 @@ INSERT INTO t.kv2 VALUES ('c', 'd'), ('a', 'b'), ('e', 'a');
 	// Database zone config is removed once all table data and zone configs are removed.
 	if err := zoneExists(sqlDB, nil, dbDesc.GetID()); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// Tests that SHOW TABLES works correctly when a database is recreated
-// during the time the underlying tables are still being deleted.
-func TestShowTablesAfterRecreateDatabase(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	params, _ := tests.CreateTestServerParams()
-	// Turn off the application of schema changes so that tables do not
-	// get completely dropped.
-	params.Knobs = base.TestingKnobs{
-		SQLSchemaChanger: &sql.SchemaChangerTestingKnobs{
-			SchemaChangeJobNoOp: func() bool {
-				return true
-			},
-		},
-	}
-	s, sqlDB, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.Background())
-
-	if _, err := sqlDB.Exec(`
-CREATE DATABASE t;
-CREATE TABLE t.kv (k CHAR PRIMARY KEY, v CHAR);
-INSERT INTO t.kv VALUES ('c', 'e'), ('a', 'c'), ('b', 'd');
-`); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := sqlDB.Exec(`
-DROP DATABASE t CASCADE;
-CREATE DATABASE t;
-`); err != nil {
-		t.Fatal(err)
-	}
-
-	rows, err := sqlDB.Query(`
-SET DATABASE=t;
-SHOW TABLES;
-`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	if rows.Next() {
-		t.Fatal("table should be invisible through SHOW TABLES")
 	}
 }
 
@@ -521,7 +423,7 @@ func TestDropIndex(t *testing.T) {
 	if err := tests.CreateKVTable(sqlDB, "kv", numRows); err != nil {
 		t.Fatal(err)
 	}
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
 	tests.CheckKeyCount(t, kvDB, tableDesc.TableSpan(keys.SystemSQLCodec), 3*numRows)
 	idx, _, err := tableDesc.FindIndexByName("foo")
 	if err != nil {
@@ -533,7 +435,7 @@ func TestDropIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tableDesc = sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDesc = catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
 	if _, _, err := tableDesc.FindIndexByName("foo"); err == nil {
 		t.Fatalf("table descriptor still contains index after index is dropped")
 	}
@@ -546,9 +448,9 @@ func TestDropIndex(t *testing.T) {
 	const migrationJobOffset = 0
 	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
 	if err := jobutils.VerifySystemJob(t, sqlRun, migrationJobOffset+1, jobspb.TypeSchemaChange, jobs.StatusSucceeded, jobs.Record{
-		Username:    security.RootUser,
+		Username:    security.RootUserName(),
 		Description: `DROP INDEX t.public.kv@foo`,
-		DescriptorIDs: sqlbase.IDs{
+		DescriptorIDs: descpb.IDs{
 			tableDesc.ID,
 		},
 	}); err != nil {
@@ -559,7 +461,7 @@ func TestDropIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tableDesc = sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDesc = catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
 	newIdx, _, err := tableDesc.FindIndexByName("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -576,9 +478,9 @@ func TestDropIndex(t *testing.T) {
 
 	testutils.SucceedsSoon(t, func() error {
 		return jobutils.VerifySystemJob(t, sqlRun, migrationJobOffset+1, jobspb.TypeSchemaChange, jobs.StatusSucceeded, jobs.Record{
-			Username:    security.RootUser,
+			Username:    security.RootUserName(),
 			Description: `DROP INDEX t.public.kv@foo`,
-			DescriptorIDs: sqlbase.IDs{
+			DescriptorIDs: descpb.IDs{
 				tableDesc.ID,
 			},
 		})
@@ -586,9 +488,9 @@ func TestDropIndex(t *testing.T) {
 
 	testutils.SucceedsSoon(t, func() error {
 		return jobutils.VerifySystemJob(t, sqlRun, 0, jobspb.TypeSchemaChangeGC, jobs.StatusSucceeded, jobs.Record{
-			Username:    security.RootUser,
+			Username:    security.RootUserName(),
 			Description: `GC for DROP INDEX t.public.kv@foo`,
-			DescriptorIDs: sqlbase.IDs{
+			DescriptorIDs: descpb.IDs{
 				tableDesc.ID,
 			},
 		})
@@ -622,7 +524,7 @@ func TestDropIndexWithZoneConfigOSS(t *testing.T) {
 	if err := tests.CreateKVTable(sqlDBRaw, "kv", numRows); err != nil {
 		t.Fatal(err)
 	}
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
 	indexDesc, _, err := tableDesc.FindIndexByName("foo")
 	if err != nil {
 		t.Fatal(err)
@@ -661,7 +563,7 @@ func TestDropIndexWithZoneConfigOSS(t *testing.T) {
 	// TODO(benesch): Run scrub here. It can't currently handle the way t.kv
 	// declares column families.
 
-	tableDesc = sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDesc = catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
 	if _, _, err := tableDesc.FindIndexByName("foo"); err == nil {
 		t.Fatalf("table descriptor still contains index after index is dropped")
 	}
@@ -683,7 +585,7 @@ func TestDropIndexInterleaved(t *testing.T) {
 	numRows := 2*chunkSize + 1
 	tests.CreateKVInterleavedTable(t, sqlDB, numRows)
 
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
 	tableSpan := tableDesc.TableSpan(keys.SystemSQLCodec)
 
 	tests.CheckKeyCount(t, kvDB, tableSpan, 3*numRows)
@@ -694,7 +596,7 @@ func TestDropIndexInterleaved(t *testing.T) {
 	tests.CheckKeyCount(t, kvDB, tableSpan, 2*numRows)
 
 	// Ensure that index is not active.
-	tableDesc = sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "intlv")
+	tableDesc = catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "intlv")
 	if _, _, err := tableDesc.FindIndexByName("intlv_idx"); err == nil {
 		t.Fatalf("table descriptor still contains index after index is dropped")
 	}
@@ -710,13 +612,13 @@ func TestDropTable(t *testing.T) {
 	defer s.Stopper().Stop(context.Background())
 	ctx := context.Background()
 
-	numRows := 2*sql.TableTruncateChunkSize + 1
+	numRows := 2*row.TableTruncateChunkSize + 1
 	if err := tests.CreateKVTable(sqlDB, "kv", numRows); err != nil {
 		t.Fatal(err)
 	}
 
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
-	nameKey := sqlbase.NewPublicTableKey(keys.MinNonPredefinedUserDescID, "kv").Key(keys.SystemSQLCodec)
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	nameKey := catalogkeys.NewPublicTableKey(keys.MinNonPredefinedUserDescID, "kv").Key(keys.SystemSQLCodec)
 	gr, err := kvDB.Get(ctx, nameKey)
 
 	if err != nil {
@@ -761,9 +663,9 @@ func TestDropTable(t *testing.T) {
 	// Job still running, waiting for GC.
 	sqlRun := sqlutils.MakeSQLRunner(sqlDB)
 	if err := jobutils.VerifySystemJob(t, sqlRun, 1, jobspb.TypeSchemaChange, jobs.StatusSucceeded, jobs.Record{
-		Username:    security.RootUser,
+		Username:    security.RootUserName(),
 		Description: `DROP TABLE t.public.kv`,
-		DescriptorIDs: sqlbase.IDs{
+		DescriptorIDs: descpb.IDs{
 			tableDesc.ID,
 		},
 	}); err != nil {
@@ -804,19 +706,19 @@ func TestDropTableDeleteData(t *testing.T) {
 	// TTL into the system with AddImmediateGCZoneConfig.
 	defer sqltestutils.DisableGCTTLStrictEnforcement(t, sqlDB)()
 
-	const numRows = 2*sql.TableTruncateChunkSize + 1
+	const numRows = 2*row.TableTruncateChunkSize + 1
 	const numKeys = 3 * numRows
 	const numTables = 5
-	var descs []*sqlbase.TableDescriptor
+	var descs []*tabledesc.Immutable
 	for i := 0; i < numTables; i++ {
 		tableName := fmt.Sprintf("test%d", i)
 		if err := tests.CreateKVTable(sqlDB, tableName, numRows); err != nil {
 			t.Fatal(err)
 		}
 
-		descs = append(descs, sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", tableName))
+		descs = append(descs, catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", tableName))
 
-		nameKey := sqlbase.NewPublicTableKey(keys.MinNonPredefinedUserDescID, tableName).Key(keys.SystemSQLCodec)
+		nameKey := catalogkeys.NewPublicTableKey(keys.MinNonPredefinedUserDescID, tableName).Key(keys.SystemSQLCodec)
 		gr, err := kvDB.Get(ctx, nameKey)
 		if err != nil {
 			t.Fatal(err)
@@ -847,9 +749,9 @@ func TestDropTableDeleteData(t *testing.T) {
 		tests.CheckKeyCount(t, kvDB, tableSpan, numKeys)
 
 		if err := jobutils.VerifySystemJob(t, sqlRun, 2*i+1+migrationJobOffset, jobspb.TypeSchemaChange, jobs.StatusSucceeded, jobs.Record{
-			Username:    security.RootUser,
+			Username:    security.RootUserName(),
 			Description: fmt.Sprintf(`DROP TABLE t.public.%s`, descs[i].GetName()),
-			DescriptorIDs: sqlbase.IDs{
+			DescriptorIDs: descpb.IDs{
 				descs[i].ID,
 			},
 		}); err != nil {
@@ -877,9 +779,9 @@ func TestDropTableDeleteData(t *testing.T) {
 
 		// Ensure that the job is marked as succeeded.
 		if err := jobutils.VerifySystemJob(t, sqlRun, 2*i+1+migrationJobOffset, jobspb.TypeSchemaChange, jobs.StatusSucceeded, jobs.Record{
-			Username:    security.RootUser,
+			Username:    security.RootUserName(),
 			Description: fmt.Sprintf(`DROP TABLE t.public.%s`, descs[i].GetName()),
-			DescriptorIDs: sqlbase.IDs{
+			DescriptorIDs: descpb.IDs{
 				descs[i].ID,
 			},
 		}); err != nil {
@@ -889,9 +791,9 @@ func TestDropTableDeleteData(t *testing.T) {
 		// Ensure that the job is marked as succeeded.
 		testutils.SucceedsSoon(t, func() error {
 			return jobutils.VerifySystemJob(t, sqlRun, i, jobspb.TypeSchemaChangeGC, jobs.StatusSucceeded, jobs.Record{
-				Username:    security.RootUser,
+				Username:    security.RootUserName(),
 				Description: fmt.Sprintf(`GC for DROP TABLE t.public.%s`, descs[i].GetName()),
-				DescriptorIDs: sqlbase.IDs{
+				DescriptorIDs: descpb.IDs{
 					descs[i].ID,
 				},
 			})
@@ -925,15 +827,13 @@ func TestDropTableDeleteData(t *testing.T) {
 	}
 }
 
-func writeTableDesc(
-	ctx context.Context, db *kv.DB, tableDesc *sqlbase.MutableTableDescriptor,
-) error {
+func writeTableDesc(ctx context.Context, db *kv.DB, tableDesc *tabledesc.Mutable) error {
 	return db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		if err := txn.SetSystemConfigTrigger(); err != nil {
+		if err := txn.SetSystemConfigTrigger(true /* forSystemTenant */); err != nil {
 			return err
 		}
 		tableDesc.ModificationTime = txn.CommitTimestamp()
-		return txn.Put(ctx, sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, tableDesc.ID), tableDesc.DescriptorProto())
+		return txn.Put(ctx, catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, tableDesc.ID), tableDesc.DescriptorProto())
 	})
 }
 
@@ -969,8 +869,8 @@ func TestDropTableWhileUpgradingFormat(t *testing.T) {
 	sqlutils.CreateTable(t, sqlDBRaw, "t", "a INT", numRows, sqlutils.ToRowFn(sqlutils.RowIdxFn))
 
 	// Give the table an old format version.
-	tableDesc := sqlbase.TestingGetMutableExistingTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
-	tableDesc.FormatVersion = sqlbase.FamilyFormatVersion
+	tableDesc := catalogkv.TestingGetMutableExistingTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
+	tableDesc.FormatVersion = descpb.FamilyFormatVersion
 	tableDesc.Version++
 	if err := writeTableDesc(ctx, kvDB, tableDesc); err != nil {
 		t.Fatal(err)
@@ -983,15 +883,21 @@ func TestDropTableWhileUpgradingFormat(t *testing.T) {
 
 	// Simulate a migration upgrading the table descriptor's format version after
 	// the table has been dropped but before the truncation has occurred.
-	var err error
-	tableDesc, err = sqlbase.GetMutableTableDescFromID(ctx, kvDB.NewTxn(ctx, ""), keys.SystemSQLCodec, tableDesc.ID)
-	if err != nil {
+	if err := kvDB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		desc, err := catalogkv.GetDescriptorByID(ctx, txn, keys.SystemSQLCodec, tableDesc.ID,
+			catalogkv.Mutable, catalogkv.TableDescriptorKind, true /* required */)
+		if err != nil {
+			return err
+		}
+		tableDesc = desc.(*tabledesc.Mutable)
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if !tableDesc.Dropped() {
 		t.Fatalf("expected descriptor to be in DROP state, but was in %s", tableDesc.State)
 	}
-	tableDesc.FormatVersion = sqlbase.InterleavedFormatVersion
+	tableDesc.FormatVersion = descpb.InterleavedFormatVersion
 	tableDesc.Version++
 	if err := writeTableDesc(ctx, kvDB, tableDesc); err != nil {
 		t.Fatal(err)
@@ -1022,11 +928,11 @@ func TestDropTableInterleavedDeleteData(t *testing.T) {
 	s, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
 
-	numRows := 2*sql.TableTruncateChunkSize + 1
+	numRows := 2*row.TableTruncateChunkSize + 1
 	tests.CreateKVInterleavedTable(t, sqlDB, numRows)
 
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
-	tableDescInterleaved := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "intlv")
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDescInterleaved := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "intlv")
 	tableSpan := tableDesc.TableSpan(keys.SystemSQLCodec)
 
 	tests.CheckKeyCount(t, kvDB, tableSpan, 3*numRows)
@@ -1112,7 +1018,7 @@ func TestDropDatabaseAfterDropTable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "kv")
 
 	if _, err := sqlDB.Exec(`DROP TABLE t.kv`); err != nil {
 		t.Fatal(err)
@@ -1129,9 +1035,9 @@ func TestDropDatabaseAfterDropTable(t *testing.T) {
 	if err := jobutils.VerifySystemJob(
 		t, sqlRun, 1, jobspb.TypeSchemaChange, jobs.StatusSucceeded,
 		jobs.Record{
-			Username:    security.RootUser,
+			Username:    security.RootUserName(),
 			Description: "DROP TABLE t.public.kv",
-			DescriptorIDs: sqlbase.IDs{
+			DescriptorIDs: descpb.IDs{
 				tableDesc.ID,
 			},
 		}); err != nil {
@@ -1405,7 +1311,7 @@ WHERE
 		}
 		if getRequest, ok := request.GetArg(roachpb.Get); ok {
 			put := getRequest.(*roachpb.GetRequest)
-			if put.Key.Equal(sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, sqlbase.ID(tableID))) {
+			if put.Key.Equal(catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, descpb.ID(tableID))) {
 				filterState.txnID = uuid.UUID{}
 				return roachpb.NewError(roachpb.NewReadWithinUncertaintyIntervalError(
 					request.Txn.ReadTimestamp, afterInsert, request.Txn))
@@ -1432,7 +1338,6 @@ func TestDropDatabaseWithForeignKeys(t *testing.T) {
 	params, _ := tests.CreateTestServerParams()
 	s, sqlDB, kvDB := serverutils.StartServer(t, params)
 	defer s.Stopper().Stop(context.Background())
-	ctx := context.Background()
 
 	defer sqltestutils.DisableGCTTLStrictEnforcement(t, sqlDB)()
 
@@ -1443,42 +1348,15 @@ CREATE TABLE t.child(k INT PRIMARY KEY REFERENCES t.parent);
 `)
 	require.NoError(t, err)
 
-	dbNameKey := sqlbase.NewDatabaseKey("t").Key(keys.SystemSQLCodec)
-	r, err := kvDB.Get(ctx, dbNameKey)
-	require.NoError(t, err)
-	require.True(t, r.Exists())
-	dbID := sqlbase.ID(r.ValueInt())
-
-	parentNameKey := sqlbase.NewPublicTableKey(dbID, "parent").Key(keys.SystemSQLCodec)
-	r, err = kvDB.Get(ctx, parentNameKey)
-	require.NoError(t, err)
-	require.True(t, r.Exists())
-	parentID := sqlbase.ID(r.ValueInt())
-
-	parentDescKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, parentID)
-	desc := &sqlbase.Descriptor{}
-	ts, err := kvDB.GetProtoTs(ctx, parentDescKey, desc)
-	require.NoError(t, err)
-	parentDesc := desc.Table(ts)
-
-	childNameKey := sqlbase.NewPublicTableKey(dbID, "child").Key(keys.SystemSQLCodec)
-	r, err = kvDB.Get(ctx, childNameKey)
-	require.NoError(t, err)
-	require.True(t, r.Exists())
-	childID := sqlbase.ID(r.ValueInt())
-
-	childDescKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, childID)
-	desc = &sqlbase.Descriptor{}
-	ts, err = kvDB.GetProtoTs(ctx, childDescKey, desc)
-	require.NoError(t, err)
-	childDesc := desc.Table(ts)
+	parentDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "parent")
+	childDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, "t", "child")
 
 	_, err = sqlDB.Exec(`DROP DATABASE t CASCADE;`)
 	require.NoError(t, err)
 
 	// Push a new zone config for the table with TTL=0 so the data is
 	// deleted immediately.
-	_, err = sqltestutils.AddImmediateGCZoneConfig(sqlDB, dbID)
+	_, err = sqltestutils.AddImmediateGCZoneConfig(sqlDB, parentDesc.GetParentID())
 	require.NoError(t, err)
 
 	// Ensure the main GC job for the whole database succeeds.

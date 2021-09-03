@@ -15,10 +15,11 @@ import (
 	"go/constant"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/scrub"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
@@ -26,13 +27,13 @@ import (
 // CHECK constraint on a table.
 type sqlCheckConstraintCheckOperation struct {
 	tableName *tree.TableName
-	tableDesc *sqlbase.ImmutableTableDescriptor
-	checkDesc *sqlbase.TableDescriptor_CheckConstraint
+	tableDesc *tabledesc.Immutable
+	checkDesc *descpb.TableDescriptor_CheckConstraint
 	asOf      hlc.Timestamp
 
 	// columns is a list of the columns returned in the query result
 	// tree.Datums.
-	columns []*sqlbase.ColumnDescriptor
+	columns []*descpb.ColumnDescriptor
 	// primaryColIdxs maps PrimaryIndex.Columns to the row
 	// indexes in the query result tree.Datums.
 	primaryColIdxs []int
@@ -50,8 +51,8 @@ type sqlCheckConstraintCheckRun struct {
 
 func newSQLCheckConstraintCheckOperation(
 	tableName *tree.TableName,
-	tableDesc *sqlbase.ImmutableTableDescriptor,
-	checkDesc *sqlbase.TableDescriptor_CheckConstraint,
+	tableDesc *tabledesc.Immutable,
+	checkDesc *descpb.TableDescriptor_CheckConstraint,
 	asOf hlc.Timestamp,
 ) *sqlCheckConstraintCheckOperation {
 	return &sqlCheckConstraintCheckOperation{
@@ -78,7 +79,7 @@ func (o *sqlCheckConstraintCheckOperation) Start(params runParams) error {
 	tn.ExplicitCatalog = true
 	tn.ExplicitSchema = true
 	sel := &tree.SelectClause{
-		Exprs: sqlbase.ColumnsSelectors(o.tableDesc.Columns),
+		Exprs: tabledesc.ColumnsSelectors(o.tableDesc.Columns),
 		From: tree.From{
 			Tables: tree.TableExprs{&tn},
 		},

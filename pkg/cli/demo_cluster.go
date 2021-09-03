@@ -31,10 +31,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status"
-	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logflags"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
@@ -52,11 +51,14 @@ type transientCluster struct {
 	stopper    *stop.Stopper
 	s          *server.TestServer
 	servers    []*server.TestServer
+
+	adminPassword string
+	adminUser     security.SQLUsername
 }
 
-func setupTransientCluster(
-	ctx context.Context, cmd *cobra.Command, gen workload.Generator,
-) (c transientCluster, err error) {
+func (c *transientCluster) checkConfigAndSetupLogging(
+	ctx context.Context, cmd *cobra.Command,
+) (err error) {
 	// useSockets is true on unix, false on windows.
 	c.useSockets = useUnixSocketsInDemo()
 
@@ -65,7 +67,7 @@ func setupTransientCluster(
 		// Error out of localities don't line up with requested node
 		// count before doing any sort of setup.
 		if len(demoCtx.localities) != demoCtx.nodes {
-			return c, errors.Errorf("number of localities specified must equal number of nodes")
+			return errors.Errorf("number of localities specified must equal number of nodes")
 		}
 	} else {
 		demoCtx.localities = make([]roachpb.Locality, demoCtx.nodes)
@@ -74,23 +76,15 @@ func setupTransientCluster(
 		}
 	}
 
-	// Set up logging. For demo/transient server we use non-standard
-	// behavior where we avoid file creation if possible.
-	fl := flagSetForCmd(cmd)
-	df := fl.Lookup(cliflags.LogDir.Name)
-	sf := fl.Lookup(logflags.LogToStderrName)
-	if !df.Changed && !sf.Changed {
-		// User did not request logging flags; shut down all logging.
-		// Otherwise, the demo command would cause a cockroach-data
-		// directory to appear in the current directory just for logs.
-		_ = df.Value.Set("")
-		df.Changed = true
-		_ = sf.Value.Set(log.Severity_NONE.String())
-		sf.Changed = true
-	}
+	// Override the default server store spec.
+	//
+	// This is needed because the logging setup code peeks into this to
+	// decide how to enable logging.
+	serverCfg.Stores.Specs = nil
+
 	c.stopper, err = setupAndInitializeLoggingAndProfiling(ctx, cmd)
 	if err != nil {
-		return c, err
+		return err
 	}
 	maybeWarnMemSize(ctx)
 
@@ -98,15 +92,21 @@ func setupTransientCluster(
 	// the unix sockets.
 	// The directory is removed in the cleanup() method.
 	if c.demoDir, err = ioutil.TempDir("", "demo"); err != nil {
-		return c, err
+		return err
 	}
 
 	if !demoCtx.insecure {
 		if err := generateCerts(c.demoDir); err != nil {
-			return c, err
+			return err
 		}
 	}
 
+	return nil
+}
+
+func (c *transientCluster) start(
+	ctx context.Context, cmd *cobra.Command, gen workload.Generator,
+) (err error) {
 	serverFactory := server.TestServerFactory
 	var servers []*server.TestServer
 
@@ -121,11 +121,15 @@ func setupTransientCluster(
 	for i := 0; i < demoCtx.nodes; i++ {
 		// All the nodes connect to the address of the first server created.
 		var joinAddr string
-		if c.s != nil {
+		if i != 0 {
 			joinAddr = c.s.ServingRPCAddr()
 		}
 		nodeID := roachpb.NodeID(i + 1)
 		args := testServerArgsForTransientCluster(c.sockForServer(nodeID), nodeID, joinAddr, c.demoDir)
+		if i == 0 {
+			// The first node also auto-inits the cluster.
+			args.NoAutoInitializeCluster = false
+		}
 
 		// servRPCReadyCh is used if latency simulation is requested to notify that a test server has
 		// successfully computed its RPC address.
@@ -144,9 +148,19 @@ func setupTransientCluster(
 		}
 
 		serv := serverFactory.New(args).(*server.TestServer)
-
 		if i == 0 {
 			c.s = serv
+			// The first node connects its Settings instance to the `log`
+			// package for crash reporting.
+			//
+			// There's a known shortcoming with this approach: restarting
+			// node 1 using the \demo commands will break this connection:
+			// if the user changes the cluster setting after restarting node
+			// 1, the `log` package will not see this change.
+			//
+			// TODO(knz): re-connect the `log` package every time the first
+			// node is restarted and gets a new `Settings` instance.
+			settings.SetCanonicalValuesContainer(&serv.ClusterSettings().SV)
 		}
 		servers = append(servers, serv)
 
@@ -160,7 +174,7 @@ func setupTransientCluster(
 		// the start routine needs to wait for the latency map construction after their RPC address has been computed.
 		if demoCtx.simulateLatency {
 			go func(i int) {
-				if err := serv.Start(args); err != nil {
+				if err := serv.Start(); err != nil {
 					errCh <- err
 				} else {
 					// Block until the ReadyFn has been called before continuing.
@@ -170,8 +184,8 @@ func setupTransientCluster(
 			}(i)
 			<-servRPCReadyCh
 		} else {
-			if err := serv.Start(args); err != nil {
-				return c, err
+			if err := serv.Start(); err != nil {
+				return err
 			}
 			// Block until the ReadyFn has been called before continuing.
 			<-servReadyFnCh
@@ -242,37 +256,36 @@ func setupTransientCluster(
 			case e := <-errCh:
 				err = errors.CombineErrors(err, e)
 			case <-time.After(timeRemaining):
-				return c, errors.New("failed to setup transientCluster in time")
+				return errors.New("failed to setup transientCluster in time")
 			}
 			updateTime := timeutil.Now()
 			timeRemaining -= updateTime.Sub(lastUpdateTime)
 			lastUpdateTime = updateTime
 		}
 		if err != nil {
-			return c, err
+			return err
 		}
 	}
 
-	// Create the root password if running in secure mode. We'll
-	// need that for the URL.
-	if !demoCtx.insecure {
-		if err := c.setupUserAuth(ctx); err != nil {
-			return c, err
-		}
+	// Run the SQL initialization. This takes care of setting up the
+	// initial replication factor for small clusters and creating the
+	// admin user.
+	const demoUsername = "demo"
+	demoPassword, err := runInitialSQL(ctx, c.s.Server, demoCtx.nodes < 3, demoUsername)
+	if err != nil {
+		return err
 	}
-
-	if demoCtx.nodes < 3 {
-		// Set up the default zone configuration. We are using an in-memory store
-		// so we really want to disable replication.
-		if err := cliDisableReplication(ctx, c.s.Server); err != nil {
-			return c, err
-		}
+	c.adminUser = security.MakeSQLUsernameFromPreNormalizedString(demoUsername)
+	c.adminPassword = demoPassword
+	if demoCtx.insecure {
+		c.adminUser = security.RootUserName()
+		c.adminPassword = "unused"
 	}
 
 	// Prepare the URL for use by the SQL shell.
 	c.connURL, err = c.getNetworkURLForServer(0, gen, true /* includeAppName */)
 	if err != nil {
-		return c, err
+		return err
 	}
 
 	// Start up the update check loop.
@@ -281,7 +294,7 @@ func setupTransientCluster(
 	if !demoCtx.disableTelemetry {
 		c.s.PeriodicallyCheckForUpdates(ctx)
 	}
-	return c, nil
+	return nil
 }
 
 // testServerArgsForTransientCluster creates the test arguments for
@@ -294,14 +307,18 @@ func testServerArgsForTransientCluster(
 	storeSpec.StickyInMemoryEngineID = fmt.Sprintf("demo-node%d", nodeID)
 
 	args := base.TestServerArgs{
-		SocketFile:        sock.filename(),
-		PartOfCluster:     true,
-		Stopper:           stop.NewStopper(),
-		JoinAddr:          joinAddr,
-		DisableTLSForHTTP: true,
-		StoreSpecs:        []base.StoreSpec{storeSpec},
-		SQLMemoryPoolSize: demoCtx.sqlPoolMemorySize,
-		CacheSize:         demoCtx.cacheSize,
+		SocketFile:              sock.filename(),
+		PartOfCluster:           true,
+		Stopper:                 stop.NewStopper(),
+		JoinAddr:                joinAddr,
+		DisableTLSForHTTP:       true,
+		StoreSpecs:              []base.StoreSpec{storeSpec},
+		SQLMemoryPoolSize:       demoCtx.sqlPoolMemorySize,
+		CacheSize:               demoCtx.cacheSize,
+		NoAutoInitializeCluster: true,
+		// This disables the tenant server. We could enable it but would have to
+		// generate the suitable certs at the caller who wishes to do so.
+		TenantAddr: new(string),
 	}
 
 	if demoCtx.localities != nil {
@@ -460,7 +477,7 @@ func (c *transientCluster) RestartNode(nodeID roachpb.NodeID) error {
 		close(readyCh)
 	}
 
-	if err := serv.Start(args); err != nil {
+	if err := serv.Start(); err != nil {
 		return err
 	}
 
@@ -529,7 +546,7 @@ func generateCerts(certsDir string) (err error) {
 		defaultKeySize,
 		defaultCertLifetime,
 		false, /* overwrite */
-		security.RootUser,
+		security.RootUserName(),
 		false, /* generatePKCS8Key */
 	)
 }
@@ -539,7 +556,7 @@ func (c *transientCluster) getNetworkURLForServer(
 ) (string, error) {
 	options := url.Values{}
 	if includeAppName {
-		options.Add("application_name", sqlbase.ReportableAppNamePrefix+"cockroach demo")
+		options.Add("application_name", catconstants.ReportableAppNamePrefix+"cockroach demo")
 	}
 	sqlURL := url.URL{
 		Scheme: "postgres",
@@ -557,21 +574,11 @@ func (c *transientCluster) getNetworkURLForServer(
 		sqlURL.User = url.User(security.RootUser)
 		options.Add("sslmode", "disable")
 	} else {
-		sqlURL.User = url.UserPassword(security.RootUser, defaultRootPassword)
+		sqlURL.User = url.UserPassword(c.adminUser.Normalized(), c.adminPassword)
 		options.Add("sslmode", "require")
 	}
 	sqlURL.RawQuery = options.Encode()
 	return sqlURL.String(), nil
-}
-
-func (c *transientCluster) setupUserAuth(ctx context.Context) error {
-	ie := c.s.InternalExecutor().(*sql.InternalExecutor)
-	_, err := ie.Exec(ctx, "set-root-password", nil, /* txn*/
-		`ALTER USER $1 WITH PASSWORD $2`,
-		security.RootUser,
-		defaultRootPassword,
-	)
-	return err
 }
 
 func (c *transientCluster) setupWorkload(
@@ -651,7 +658,7 @@ func (c *transientCluster) runWorkload(
 
 	// Dummy registry to prove to the Opser.
 	reg := histogram.NewRegistry(time.Duration(100) * time.Millisecond)
-	ops, err := opser.Ops(sqlUrls, reg)
+	ops, err := opser.Ops(ctx, sqlUrls, reg)
 	if err != nil {
 		return errors.Wrap(err, "unable to create workload")
 	}
@@ -674,7 +681,7 @@ func (c *transientCluster) runWorkload(
 						// Only log an error and return when the workload function throws
 						// an error, because errors these errors should be ignored, and
 						// should not interrupt the rest of the demo.
-						log.Warningf(ctx, "Error running workload query: %+v\n", err)
+						log.Warningf(ctx, "error running workload query: %+v", err)
 						return
 					}
 				}
@@ -743,12 +750,16 @@ func (c *transientCluster) sockForServer(nodeID roachpb.NodeID) unixSocketDetail
 	return unixSocketDetails{
 		socketDir:  c.demoDir,
 		portNumber: defaultPort + int(nodeID) - 1,
+		username:   c.adminUser,
+		password:   c.adminPassword,
 	}
 }
 
 type unixSocketDetails struct {
 	socketDir  string
 	portNumber int
+	username   security.SQLUsername
+	password   string
 }
 
 func (s unixSocketDetails) exists() bool {
@@ -773,7 +784,7 @@ func (s unixSocketDetails) String() string {
 	// mode the password is not checked on the server.
 	sqlURL := url.URL{
 		Scheme:   "postgres",
-		User:     url.UserPassword(security.RootUser, defaultRootPassword),
+		User:     url.UserPassword(s.username.Normalized(), s.password),
 		RawQuery: options.Encode(),
 	}
 	return sqlURL.String()

@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/cockroachdb/cockroach/pkg/util/version"
 	"github.com/cockroachdb/errors"
 	"github.com/codahale/hdrhistogram"
 )
@@ -43,11 +42,9 @@ type cdcTestArgs struct {
 	tpccWarehouseCount int
 	workloadDuration   string
 	initialScan        bool
-	rangefeed          bool
 	kafkaChaos         bool
 	crdbChaos          bool
 	cloudStorageSink   bool
-	fixturesImport     bool
 
 	targetInitialScanLatency time.Duration
 	targetSteadyLatency      time.Duration
@@ -55,12 +52,6 @@ type cdcTestArgs struct {
 }
 
 func cdcBasicTest(ctx context.Context, t *test, c *cluster, args cdcTestArgs) {
-	// Skip the poller test on v19.2. After 19.2 is out, we should likely delete
-	// the test entirely.
-	if !args.rangefeed && t.buildVersion.Compare(version.MustParse(`v19.1.0-0`)) > 0 {
-		t.Skip("no poller in >= v19.2.0", "")
-	}
-
 	crdbNodes := c.Range(1, c.spec.NodeCount-1)
 	workloadNode := c.Node(c.spec.NodeCount)
 	kafkaNode := c.Node(c.spec.NodeCount)
@@ -70,16 +61,7 @@ func cdcBasicTest(ctx context.Context, t *test, c *cluster, args cdcTestArgs) {
 
 	db := c.Conn(ctx, 1)
 	defer stopFeeds(db)
-	if _, err := db.Exec(
-		`SET CLUSTER SETTING kv.rangefeed.enabled = $1`, args.rangefeed,
-	); err != nil {
-		t.Fatal(err)
-	}
-	// The 2.1 branch doesn't have this cluster setting, so ignore the error if
-	// it's about an unknown cluster setting
-	if _, err := db.Exec(
-		`SET CLUSTER SETTING changefeed.push.enabled = $1`, args.rangefeed,
-	); err != nil && !strings.Contains(err.Error(), "unknown cluster setting") {
+	if _, err := db.Exec(`SET CLUSTER SETTING kv.rangefeed.enabled = true`); err != nil {
 		t.Fatal(err)
 	}
 	kafka := kafkaManager{
@@ -118,7 +100,7 @@ func cdcBasicTest(ctx context.Context, t *test, c *cluster, args cdcTestArgs) {
 		// value" errors #34025.
 		tpcc.tolerateErrors = true
 
-		tpcc.install(ctx, c, args.fixturesImport)
+		tpcc.install(ctx, c)
 		// TODO(dan,ajwerner): sleeping momentarily before running the workload
 		// mitigates errors like "error in newOrder: missing stock row" from tpcc.
 		time.Sleep(2 * time.Second)
@@ -225,6 +207,7 @@ func cdcBasicTest(ctx context.Context, t *test, c *cluster, args cdcTestArgs) {
 }
 
 func runCDCBank(ctx context.Context, t *test, c *cluster) {
+
 	// Make the logs dir on every node to work around the `roachprod get logs`
 	// spam.
 	c.Run(ctx, c.All(), `mkdir -p logs`)
@@ -374,6 +357,7 @@ func runCDCBank(ctx context.Context, t *test, c *cluster) {
 // end-to-end (including the schema registry default of requiring backward
 // compatibility within a topic).
 func runCDCSchemaRegistry(ctx context.Context, t *test, c *cluster) {
+
 	crdbNodes, kafkaNode := c.Node(1), c.Node(1)
 	c.Put(ctx, cockroach, "./cockroach", crdbNodes)
 	c.Start(ctx, t, crdbNodes)
@@ -497,77 +481,58 @@ func runCDCSchemaRegistry(ctx context.Context, t *test, c *cluster) {
 }
 
 func registerCDC(r *testRegistry) {
-	useRangeFeed := true
-	if r.buildVersion.Compare(version.MustParse(`v19.1.0-0`)) < 0 {
-		// RangeFeed is not production ready in 2.1, so run the tests with the
-		// poller.
-		useRangeFeed = false
-	}
-
 	r.Add(testSpec{
-		Name:       fmt.Sprintf("cdc/tpcc-1000/rangefeed=%t", useRangeFeed),
-		Owner:      `cdc`,
-		MinVersion: "v2.1.0",
-		Cluster:    makeClusterSpec(4, cpu(16)),
+		Name:    fmt.Sprintf("cdc/tpcc-1000"),
+		Owner:   OwnerCDC,
+		Cluster: makeClusterSpec(4, cpu(16)),
 		Run: func(ctx context.Context, t *test, c *cluster) {
 			cdcBasicTest(ctx, t, c, cdcTestArgs{
 				workloadType:             tpccWorkloadType,
 				tpccWarehouseCount:       1000,
 				workloadDuration:         "120m",
-				rangefeed:                useRangeFeed,
 				targetInitialScanLatency: 3 * time.Minute,
 				targetSteadyLatency:      10 * time.Minute,
 			})
 		},
 	})
 	r.Add(testSpec{
-		Name:       fmt.Sprintf("cdc/initial-scan/rangefeed=%t", useRangeFeed),
-		Owner:      `cdc`,
-		MinVersion: "v2.1.0",
-		Cluster:    makeClusterSpec(4, cpu(16)),
+		Name:    fmt.Sprintf("cdc/initial-scan"),
+		Owner:   OwnerCDC,
+		Cluster: makeClusterSpec(4, cpu(16)),
 		Run: func(ctx context.Context, t *test, c *cluster) {
 			cdcBasicTest(ctx, t, c, cdcTestArgs{
 				workloadType:             tpccWorkloadType,
 				tpccWarehouseCount:       100,
 				workloadDuration:         "30m",
 				initialScan:              true,
-				rangefeed:                useRangeFeed,
 				targetInitialScanLatency: 30 * time.Minute,
 				targetSteadyLatency:      time.Minute,
 			})
 		},
 	})
 	r.Add(testSpec{
-		Name:  "cdc/poller/rangefeed=false",
-		Owner: `cdc`,
-		// When testing a 2.1 binary, we use the poller for all the other tests
-		// and this is close enough to cdc/tpcc-1000 test to be redundant, so
-		// skip it.
-		MinVersion: "v19.1.0",
-		Cluster:    makeClusterSpec(4, cpu(16)),
+		Name:    "cdc/poller/rangefeed=false",
+		Owner:   OwnerCDC,
+		Cluster: makeClusterSpec(4, cpu(16)),
 		Run: func(ctx context.Context, t *test, c *cluster) {
 			cdcBasicTest(ctx, t, c, cdcTestArgs{
 				workloadType:             tpccWorkloadType,
 				tpccWarehouseCount:       1000,
 				workloadDuration:         "30m",
-				rangefeed:                false,
 				targetInitialScanLatency: 30 * time.Minute,
 				targetSteadyLatency:      2 * time.Minute,
 			})
 		},
 	})
 	r.Add(testSpec{
-		Name:  fmt.Sprintf("cdc/sink-chaos/rangefeed=%t", useRangeFeed),
-		Owner: `cdc`,
-		// TODO(dan): Re-enable this test on 2.1 if we decide to backport #36852.
-		MinVersion: "v19.1.0",
-		Cluster:    makeClusterSpec(4, cpu(16)),
+		Name:    fmt.Sprintf("cdc/sink-chaos"),
+		Owner:   `cdc`,
+		Cluster: makeClusterSpec(4, cpu(16)),
 		Run: func(ctx context.Context, t *test, c *cluster) {
 			cdcBasicTest(ctx, t, c, cdcTestArgs{
 				workloadType:             tpccWorkloadType,
 				tpccWarehouseCount:       100,
 				workloadDuration:         "30m",
-				rangefeed:                useRangeFeed,
 				kafkaChaos:               true,
 				targetInitialScanLatency: 3 * time.Minute,
 				targetSteadyLatency:      5 * time.Minute,
@@ -575,18 +540,15 @@ func registerCDC(r *testRegistry) {
 		},
 	})
 	r.Add(testSpec{
-		Name:  fmt.Sprintf("cdc/crdb-chaos/rangefeed=%t", useRangeFeed),
-		Owner: `cdc`,
-		Skip:  "#37716",
-		// TODO(dan): Re-enable this test on 2.1 if we decide to backport #36852.
-		MinVersion: "v19.1.0",
-		Cluster:    makeClusterSpec(4, cpu(16)),
+		Name:    fmt.Sprintf("cdc/crdb-chaos"),
+		Owner:   `cdc`,
+		Skip:    "#37716",
+		Cluster: makeClusterSpec(4, cpu(16)),
 		Run: func(ctx context.Context, t *test, c *cluster) {
 			cdcBasicTest(ctx, t, c, cdcTestArgs{
 				workloadType:             tpccWorkloadType,
 				tpccWarehouseCount:       100,
 				workloadDuration:         "30m",
-				rangefeed:                useRangeFeed,
 				crdbChaos:                true,
 				targetInitialScanLatency: 3 * time.Minute,
 				// TODO(dan): It should be okay to drop this as low as 2 to 3 minutes,
@@ -598,9 +560,8 @@ func registerCDC(r *testRegistry) {
 		},
 	})
 	r.Add(testSpec{
-		Name:       fmt.Sprintf("cdc/ledger/rangefeed=%t", useRangeFeed),
-		Owner:      `cdc`,
-		MinVersion: "v2.1.0",
+		Name:  fmt.Sprintf("cdc/ledger"),
+		Owner: `cdc`,
 		// TODO(mrtracy): This workload is designed to be running on a 20CPU nodes,
 		// but this cannot be allocated without some sort of configuration outside
 		// of this test. Look into it.
@@ -610,7 +571,6 @@ func registerCDC(r *testRegistry) {
 				workloadType:             ledgerWorkloadType,
 				workloadDuration:         "30m",
 				initialScan:              true,
-				rangefeed:                useRangeFeed,
 				targetInitialScanLatency: 10 * time.Minute,
 				targetSteadyLatency:      time.Minute,
 				targetTxnPerSecond:       575,
@@ -618,10 +578,9 @@ func registerCDC(r *testRegistry) {
 		},
 	})
 	r.Add(testSpec{
-		Name:       "cdc/cloud-sink-gcs/rangefeed=true",
-		Owner:      `cdc`,
-		MinVersion: "v19.1.0",
-		Cluster:    makeClusterSpec(4, cpu(16)),
+		Name:    "cdc/cloud-sink-gcs/rangefeed=true",
+		Owner:   `cdc`,
+		Cluster: makeClusterSpec(4, cpu(16)),
 		Run: func(ctx context.Context, t *test, c *cluster) {
 			cdcBasicTest(ctx, t, c, cdcTestArgs{
 				workloadType: tpccWorkloadType,
@@ -632,28 +591,24 @@ func registerCDC(r *testRegistry) {
 				tpccWarehouseCount:       50,
 				workloadDuration:         "30m",
 				initialScan:              true,
-				rangefeed:                true,
 				cloudStorageSink:         true,
-				fixturesImport:           true,
 				targetInitialScanLatency: 30 * time.Minute,
 				targetSteadyLatency:      time.Minute,
 			})
 		},
 	})
 	r.Add(testSpec{
-		Name:       "cdc/bank",
-		Owner:      `cdc`,
-		MinVersion: "v2.1.0",
-		Cluster:    makeClusterSpec(4),
+		Name:    "cdc/bank",
+		Owner:   `cdc`,
+		Cluster: makeClusterSpec(4),
 		Run: func(ctx context.Context, t *test, c *cluster) {
 			runCDCBank(ctx, t, c)
 		},
 	})
 	r.Add(testSpec{
-		Name:       "cdc/schemareg",
-		Owner:      `cdc`,
-		MinVersion: "v19.1.0",
-		Cluster:    makeClusterSpec(1),
+		Name:    "cdc/schemareg",
+		Owner:   `cdc`,
+		Cluster: makeClusterSpec(1),
 		Run: func(ctx context.Context, t *test, c *cluster) {
 			runCDCSchemaRegistry(ctx, t, c)
 		},
@@ -676,7 +631,14 @@ func (k kafkaManager) install(ctx context.Context) {
 	k.c.status("installing kafka")
 	folder := k.basePath()
 	k.c.Run(ctx, k.nodes, `mkdir -p `+folder)
-	k.c.Run(ctx, k.nodes, `curl -s https://packages.confluent.io/archive/4.0/confluent-oss-4.0.0-2.11.tar.gz | tar -xz -C `+folder)
+	k.c.Run(
+		ctx,
+		k.nodes,
+		fmt.Sprintf(
+			`for i in $(seq 1 5); do curl --retry 3 --retry-delay 1 -o /tmp/confluent.tar.gz https://storage.googleapis.com/cockroach-fixtures/tools/confluent-oss-4.0.0-2.11.tar.gz && break || sleep 15; done && tar xvf /tmp/confluent.tar.gz -C %s`,
+			folder,
+		),
+	)
 	if !k.c.isLocal() {
 		k.c.Run(ctx, k.nodes, `mkdir -p logs`)
 		k.c.Run(ctx, k.nodes, `sudo apt-get -q update 2>&1 > logs/apt-get-update.log`)
@@ -769,16 +731,11 @@ type tpccWorkload struct {
 	tolerateErrors     bool
 }
 
-func (tw *tpccWorkload) install(ctx context.Context, c *cluster, fixturesImport bool) {
-	command := `./workload fixtures load`
-	if fixturesImport {
-		// For fixtures import, use the version built into the cockroach binary so
-		// the tpcc workload-versions match on release branches.
-		command = `./cockroach workload fixtures import`
-	}
+func (tw *tpccWorkload) install(ctx context.Context, c *cluster) {
+	// For fixtures import, use the version built into the cockroach binary so
+	// the tpcc workload-versions match on release branches.
 	c.Run(ctx, tw.workloadNodes, fmt.Sprintf(
-		`%s tpcc --warehouses=%d --checks=false {pgurl%s}`,
-		command,
+		`./cockroach workload fixtures import tpcc --warehouses=%d --checks=false {pgurl%s}`,
 		tw.tpccWarehouseCount,
 		tw.sqlNodes.randNode(),
 	))

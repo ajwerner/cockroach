@@ -26,7 +26,7 @@ func runDumpBackwardsCompat(ctx context.Context, t *test, c *cluster, predecesso
 	FAMILY "primary" (x, y, rowid)
 );
 
-INSERT INTO t (x, y) VALUES
+INSERT INTO public.t (x, y) VALUES
 	(1, 1),
 	(2, 2);`
 	roachNodes := c.All()
@@ -62,7 +62,7 @@ func runDump(nodes nodeListOption, mainVersion, expected string) versionStep {
 	return func(ctx context.Context, t *test, u *versionUpgradeTest) {
 		// Put the new version of Cockroach onto the node.
 		u.uploadVersion(ctx, t, nodes, mainVersion)
-		raw, err := u.c.RunWithBuffer(ctx, t.logger(), nodes, `cockroach dump --insecure d`)
+		raw, err := u.c.RunWithStdout(ctx, t.logger(), nodes, `./cockroach dump --insecure d`)
 		if err != nil {
 			t.Fatal(err)
 		}

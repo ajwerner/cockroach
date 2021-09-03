@@ -19,10 +19,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -51,7 +52,7 @@ func TestSampleAggregator(t *testing.T) {
 				Settings: st,
 				DB:       kvDB,
 				Executor: server.InternalExecutor().(sqlutil.InternalExecutor),
-				Gossip:   gossip.MakeExposedGossip(server.GossipI().(*gossip.Gossip)),
+				Gossip:   gossip.MakeOptionalGossip(server.GossipI().(*gossip.Gossip)),
 			},
 		}
 		// Override the default memory limit. If memLimitBytes is small but
@@ -112,8 +113,8 @@ func TestSampleAggregator(t *testing.T) {
 
 		outputs := make([]*distsqlutils.RowBuffer, numSamplers)
 		for i := 0; i < numSamplers; i++ {
-			rows := sqlbase.GenEncDatumRowsInt(rowPartitions[i])
-			in := distsqlutils.NewRowBuffer(sqlbase.TwoIntCols, rows, distsqlutils.RowBufferArgs{})
+			rows := rowenc.GenEncDatumRowsInt(rowPartitions[i])
+			in := distsqlutils.NewRowBuffer(rowenc.TwoIntCols, rows, distsqlutils.RowBufferArgs{})
 			outputs[i] = distsqlutils.NewRowBuffer(samplerOutTypes, nil /* rows */, distsqlutils.RowBufferArgs{})
 
 			spec := &execinfrapb.SamplerSpec{SampleSize: 100, Sketches: sketchSpecs}
@@ -146,7 +147,7 @@ func TestSampleAggregator(t *testing.T) {
 		spec := &execinfrapb.SampleAggregatorSpec{
 			SampleSize:       100,
 			Sketches:         sketchSpecs,
-			SampledColumnIDs: []sqlbase.ColumnID{100, 101},
+			SampledColumnIDs: []descpb.ColumnID{100, 101},
 			TableID:          13,
 		}
 
@@ -238,13 +239,13 @@ func TestSampleAggregator(t *testing.T) {
 				}
 
 				for _, b := range h.Buckets {
-					ed, _, err := sqlbase.EncDatumFromBuffer(
-						types.Int, sqlbase.DatumEncoding_ASCENDING_KEY, b.UpperBound,
+					ed, _, err := rowenc.EncDatumFromBuffer(
+						types.Int, descpb.DatumEncoding_ASCENDING_KEY, b.UpperBound,
 					)
 					if err != nil {
 						t.Fatal(err)
 					}
-					var d sqlbase.DatumAlloc
+					var d rowenc.DatumAlloc
 					if err := ed.EnsureDecoded(types.Int, &d); err != nil {
 						t.Fatal(err)
 					}

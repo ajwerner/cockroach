@@ -21,13 +21,8 @@ import (
 
 // RemoveOptions bundles boolean parameters for Store.RemoveReplica.
 type RemoveOptions struct {
+	// If true, the replica's destroyStatus must be marked as removed.
 	DestroyData bool
-
-	// ignoreDestroyStatus allows a caller to instruct the store to remove
-	// replicas which are already marked as destroyed. This is helpful in cases
-	// where the caller knows that it set the destroy status and cannot have raced
-	// with another goroutine. See Replica.handleChangeReplicasResult().
-	ignoreDestroyStatus bool
 }
 
 // RemoveReplica removes the replica from the store's replica map and from the
@@ -74,13 +69,23 @@ func (s *Store) removeInitializedReplicaRaftMuLocked(
 	// destroy status.
 	var desc *roachpb.RangeDescriptor
 	var replicaID roachpb.ReplicaID
+	var tenantID roachpb.TenantID
 	{
 		rep.mu.Lock()
 
-		// Detect if we were already removed.
-		if !opts.ignoreDestroyStatus && rep.mu.destroyStatus.Removed() {
-			rep.mu.Unlock()
-			return nil // already removed, noop
+		if opts.DestroyData {
+			// Detect if we were already removed.
+			if rep.mu.destroyStatus.Removed() {
+				rep.mu.Unlock()
+				return nil // already removed, noop
+			}
+		} else {
+			// If the caller doesn't want to destroy the data because it already
+			// has done so, then it must have already also set the destroyStatus.
+			if !rep.mu.destroyStatus.Removed() {
+				rep.mu.Unlock()
+				log.Fatalf(ctx, "replica not marked as destroyed but data already destroyed: %v", rep)
+			}
 		}
 
 		desc = rep.mu.state.Desc
@@ -95,14 +100,14 @@ func (s *Store) removeInitializedReplicaRaftMuLocked(
 		/// uninitialized.
 		if !rep.isInitializedRLocked() {
 			rep.mu.Unlock()
-			log.Fatalf(ctx, "uninitialized replica cannot be removed with removeInitializedReplica: %v",
-				rep)
+			log.Fatalf(ctx, "uninitialized replica cannot be removed with removeInitializedReplica: %v", rep)
 		}
 
 		// Mark the replica as removed before deleting data.
 		rep.mu.destroyStatus.Set(roachpb.NewRangeNotFoundError(rep.RangeID, rep.StoreID()),
 			destroyReasonRemoved)
 		replicaID = rep.mu.replicaID
+		tenantID = rep.mu.tenantID
 		rep.mu.Unlock()
 	}
 
@@ -132,7 +137,8 @@ func (s *Store) removeInitializedReplicaRaftMuLocked(
 	// Adjust stats before calling Destroy. This can be called before or after
 	// Destroy, but this configuration helps avoid races in stat verification
 	// tests.
-	s.metrics.subtractMVCCStats(rep.GetMVCCStats())
+
+	s.metrics.subtractMVCCStats(ctx, tenantID, rep.GetMVCCStats())
 	s.metrics.ReplicaCount.Dec(1)
 	s.mu.Unlock()
 

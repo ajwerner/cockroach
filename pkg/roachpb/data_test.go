@@ -461,18 +461,17 @@ var nonZeroTxn = Transaction{
 		Priority:       957356782,
 		Sequence:       123,
 	},
-	Name:                    "name",
-	Status:                  COMMITTED,
-	LastHeartbeat:           makeTS(1, 2),
-	DeprecatedOrigTimestamp: makeTS(30, 31),
-	ReadTimestamp:           makeTS(20, 22),
-	MaxTimestamp:            makeTS(40, 41),
-	ObservedTimestamps:      []ObservedTimestamp{{NodeID: 1, Timestamp: makeTS(1, 2)}},
-	WriteTooOld:             true,
-	LockSpans:               []Span{{Key: []byte("a"), EndKey: []byte("b")}},
-	InFlightWrites:          []SequencedWrite{{Key: []byte("c"), Sequence: 1}},
-	CommitTimestampFixed:    true,
-	IgnoredSeqNums:          []enginepb.IgnoredSeqNumRange{{Start: 888, End: 999}},
+	Name:                 "name",
+	Status:               COMMITTED,
+	LastHeartbeat:        makeTS(1, 2),
+	ReadTimestamp:        makeTS(20, 22),
+	MaxTimestamp:         makeTS(40, 41),
+	ObservedTimestamps:   []ObservedTimestamp{{NodeID: 1, Timestamp: makeTS(1, 2)}},
+	WriteTooOld:          true,
+	LockSpans:            []Span{{Key: []byte("a"), EndKey: []byte("b")}},
+	InFlightWrites:       []SequencedWrite{{Key: []byte("c"), Sequence: 1}},
+	CommitTimestampFixed: true,
+	IgnoredSeqNums:       []enginepb.IgnoredSeqNumRange{{Start: 888, End: 999}},
 }
 
 func TestTransactionUpdate(t *testing.T) {
@@ -689,12 +688,22 @@ func TestTransactionRestart(t *testing.T) {
 	expTxn.Sequence = 0
 	expTxn.WriteTimestamp = makeTS(25, 1)
 	expTxn.ReadTimestamp = makeTS(25, 1)
-	expTxn.DeprecatedOrigTimestamp = expTxn.ReadTimestamp
 	expTxn.WriteTooOld = false
 	expTxn.CommitTimestampFixed = false
 	expTxn.LockSpans = nil
 	expTxn.InFlightWrites = nil
 	expTxn.IgnoredSeqNums = nil
+	require.Equal(t, expTxn, txn)
+}
+
+func TestTransactionRefresh(t *testing.T) {
+	txn := nonZeroTxn
+	txn.Refresh(makeTS(25, 1))
+
+	expTxn := nonZeroTxn
+	expTxn.WriteTimestamp = makeTS(25, 1)
+	expTxn.ReadTimestamp = makeTS(25, 1)
+	expTxn.WriteTooOld = false
 	require.Equal(t, expTxn, txn)
 }
 
@@ -1904,9 +1913,9 @@ func TestChangeReplicasTrigger_ConfChange(t *testing.T) {
 	}
 }
 
-// TestAsLockUpdates verifies that AsLockUpdates propagates all the important
-// fields from a txn to each intent.
-func TestAsLockUpdates(t *testing.T) {
+// TestAsLockUpdates verifies that txn.LocksAsLockUpdates propagates all the
+// important fields from the txn to each intent.
+func TestTxnLocksAsLockUpdates(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	ts := hlc.Timestamp{WallTime: 1}
@@ -1914,9 +1923,8 @@ func TestAsLockUpdates(t *testing.T) {
 
 	txn.Status = COMMITTED
 	txn.IgnoredSeqNums = []enginepb.IgnoredSeqNumRange{{Start: 0, End: 0}}
-
-	spans := []Span{{Key: Key("a"), EndKey: Key("b")}}
-	for _, intent := range AsLockUpdates(&txn, spans) {
+	txn.LockSpans = []Span{{Key: Key("a"), EndKey: Key("b")}}
+	for _, intent := range txn.LocksAsLockUpdates() {
 		require.Equal(t, txn.Status, intent.Status)
 		require.Equal(t, txn.IgnoredSeqNums, intent.IgnoredSeqNums)
 		require.Equal(t, txn.TxnMeta, intent.Txn)

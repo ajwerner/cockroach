@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -36,7 +37,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
-	"github.com/gogo/protobuf/proto"
 )
 
 // TestGossipInfoStore verifies operation of gossip instance infostore.
@@ -82,7 +82,7 @@ func TestGossipMoveNode(t *testing.T) {
 	for _, node := range nodes {
 		if val, err := g.GetNodeDescriptor(node.NodeID); err != nil {
 			t.Fatal(err)
-		} else if !proto.Equal(node, val) {
+		} else if !node.Equal(val) {
 			t.Fatalf("expected node %+v, got %+v", node, val)
 		}
 	}
@@ -98,7 +98,7 @@ func TestGossipMoveNode(t *testing.T) {
 	testutils.SucceedsSoon(t, func() error {
 		if val, err := g.GetNodeDescriptor(movedNode.NodeID); err != nil {
 			return err
-		} else if !proto.Equal(movedNode, val) {
+		} else if !movedNode.Equal(val) {
 			return fmt.Errorf("expected node %+v, got %+v", movedNode, val)
 		}
 		return nil
@@ -876,7 +876,7 @@ func TestGossipPropagation(t *testing.T) {
 //     OrigStamp is less than the highwater stamp from n2
 func TestGossipLoopbackInfoPropagation(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	t.Skipf("#34494")
+	skip.WithIssue(t, 34494)
 	stopper := stop.NewStopper()
 	defer stopper.Stop(context.Background())
 

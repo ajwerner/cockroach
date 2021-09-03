@@ -509,7 +509,7 @@ func (sr *StoreRebalancer) chooseReplicaToRebalance(
 		// Check the range's existing diversity score, since we want to ensure we
 		// don't hurt locality diversity just to improve QPS.
 		curDiversity := rangeDiversityScore(
-			sr.rq.allocator.storePool.getLocalities(currentReplicas))
+			sr.rq.allocator.storePool.getLocalitiesByStore(currentReplicas))
 
 		// Check the existing replicas, keeping around those that aren't overloaded.
 		for i := range currentReplicas {
@@ -579,7 +579,7 @@ func (sr *StoreRebalancer) chooseReplicaToRebalance(
 				desc.RangeID, len(targets), desiredReplicas)
 			continue
 		}
-		newDiversity := rangeDiversityScore(sr.rq.allocator.storePool.getLocalities(targetReplicas))
+		newDiversity := rangeDiversityScore(sr.rq.allocator.storePool.getLocalitiesByStore(targetReplicas))
 		if newDiversity < curDiversity {
 			log.VEventf(ctx, 3,
 				"new diversity %.2f for r%d worse than current diversity %.2f; not rebalancing",
@@ -622,7 +622,7 @@ func shouldNotMoveAway(
 	now hlc.Timestamp,
 	minQPS float64,
 ) bool {
-	if !replWithStats.repl.OwnsValidLease(now) {
+	if !replWithStats.repl.OwnsValidLease(ctx, now) {
 		log.VEventf(ctx, 3, "store doesn't own the lease for r%d", replWithStats.repl.RangeID)
 		return true
 	}

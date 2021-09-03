@@ -26,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
+	"github.com/cockroachdb/errors"
 )
 
 var sortAllTestCases []sortTestCase
@@ -163,17 +164,16 @@ func TestSortRandomized(t *testing.T) {
 			for _, k := range []int{0, rng.Intn(nTups) + 1} {
 				topK := k != 0
 				name := fmt.Sprintf("nCols=%d/nOrderingCols=%d/topK=%t", nCols, nOrderingCols, topK)
-				t.Run(name, func(t *testing.T) {
-					tups, expected, ordCols := generateRandomDataForTestSort(rng, nTups, nCols, nOrderingCols)
+				log.Infof(context.Background(), "%s", name)
+				tups, expected, ordCols := generateRandomDataForTestSort(rng, nTups, nCols, nOrderingCols)
+				if topK {
+					expected = expected[:k]
+				}
+				runTests(t, []tuples{tups}, expected, orderedVerifier, func(input []colexecbase.Operator) (colexecbase.Operator, error) {
 					if topK {
-						expected = expected[:k]
+						return NewTopKSorter(testAllocator, input[0], typs[:nCols], ordCols, k), nil
 					}
-					runTests(t, []tuples{tups}, expected, orderedVerifier, func(input []colexecbase.Operator) (colexecbase.Operator, error) {
-						if topK {
-							return NewTopKSorter(testAllocator, input[0], typs[:nCols], ordCols, k), nil
-						}
-						return NewSorter(testAllocator, input[0], typs[:nCols], ordCols)
-					})
+					return NewSorter(testAllocator, input[0], typs[:nCols], ordCols)
 				})
 			}
 		}
@@ -295,7 +295,7 @@ func BenchmarkSort(b *testing.B) {
 					for i := range typs {
 						typs[i] = types.Int
 					}
-					batch := testAllocator.NewMemBatch(typs)
+					batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
 					batch.SetLength(coldata.BatchSize())
 					ordCols := make([]execinfrapb.Ordering_Column, nCols)
 					for i := range ordCols {
@@ -344,7 +344,7 @@ func BenchmarkAllSpooler(b *testing.B) {
 				for i := range typs {
 					typs[i] = types.Int
 				}
-				batch := testAllocator.NewMemBatch(typs)
+				batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
 				batch.SetLength(coldata.BatchSize())
 				for i := 0; i < nCols; i++ {
 					col := batch.ColVec(i).Int64()
@@ -403,7 +403,7 @@ func generateColumnOrdering(
 	rng *rand.Rand, nCols int, nOrderingCols int,
 ) []execinfrapb.Ordering_Column {
 	if nOrderingCols > nCols {
-		colexecerror.InternalError("nOrderingCols > nCols in generateColumnOrdering")
+		colexecerror.InternalError(errors.AssertionFailedf("nOrderingCols > nCols in generateColumnOrdering"))
 	}
 	orderingCols := make([]execinfrapb.Ordering_Column, nOrderingCols)
 	for i, col := range rng.Perm(nCols)[:nOrderingCols] {

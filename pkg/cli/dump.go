@@ -22,10 +22,13 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/timeofday"
@@ -33,6 +36,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/version"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq"
+	"github.com/lib/pq/oid"
 	"github.com/spf13/cobra"
 )
 
@@ -45,6 +49,8 @@ Dump SQL tables of a cockroach database. If the table name
 is omitted, dump all tables in the database.
 `,
 	RunE: MaybeDecorateGRPCError(runDump),
+	Deprecated: "cockroach dump will be removed in a subsequent release.\n" +
+		"For details, see: https://github.com/cockroachdb/cockroach/issues/54040",
 }
 
 // We accept versions that are strictly newer than v2.1.0-alpha.20180416
@@ -137,6 +143,15 @@ func runDump(cmd *cobra.Command, args []string) error {
 		// is requested, not when specific tables are requested to be dumped.
 		shouldDumpTypes := len(tableNames) == 0
 
+		// Collect any user defined schemas in the database.
+		schemas, err := collectUserDefinedSchemas(conn, dbName, clusterTS)
+		if err != nil {
+			return err
+		}
+		// As with types, we only dump schema create statements when dumping
+		// the full database, not when specific tables are requested.
+		shouldDumpSchemas := len(tableNames) == 0
+
 		mds, err := getDumpMetadata(conn, dbName, tableNames, clusterTS)
 		if err != nil {
 			return err
@@ -185,13 +200,18 @@ func runDump(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		if shouldDumpTypes && dumpCtx.dumpMode != dumpDataOnly {
-			// Only emit the settings change if there are any user defined types.
-			if len(typContext.createStatements) > 0 {
-				if _, err := fmt.Fprintf(w, "SET experimental_enable_enums = true;\n"); err != nil {
+		// Dump schema create statements, if any. If connecting to a cockroach version
+		// before 20.2 the list of schemas will be empty, so nothing will be emitted.
+		if shouldDumpSchemas && dumpCtx.dumpMode != dumpDataOnly {
+			for _, schema := range schemas {
+				if _, err := fmt.Fprintf(w, "CREATE SCHEMA %s;\n\n", tree.Name(schema)); err != nil {
 					return err
 				}
 			}
+		}
+
+		// Dump any type creation statements.
+		if shouldDumpTypes && dumpCtx.dumpMode != dumpDataOnly {
 			for _, stmt := range typContext.createStatements {
 				if _, err := fmt.Fprintf(w, "%s;\n\n", stmt); err != nil {
 					return err
@@ -315,9 +335,51 @@ func (d *dumpTypeContext) ResolveType(
 	return typ, nil
 }
 
-// ResolveTypeByID implements the tree.TypeReferenceResolver interface.
-func (d *dumpTypeContext) ResolveTypeByID(context.Context, uint32) (*types.T, error) {
-	return nil, errors.AssertionFailedf("cannot resolve types in dump by ID")
+// ResolveTypeByOID implements the tree.TypeReferenceResolver interface.
+func (d *dumpTypeContext) ResolveTypeByOID(context.Context, oid.Oid) (*types.T, error) {
+	return nil, errors.AssertionFailedf("cannot resolve types in dump by OID")
+}
+
+func collectUserDefinedSchemas(conn *sqlConn, dbName string, ts string) ([]string, error) {
+	query := `
+SELECT
+	schema_name
+FROM
+  %s.information_schema.schemata
+AS OF SYSTEM TIME %s
+WHERE
+  crdb_is_user_defined = 'YES' AND
+  catalog_name = $1
+`
+	rows, err := conn.Query(fmt.Sprintf(query, tree.NameString(dbName), lex.EscapeSQLString(ts)), []driver.Value{dbName})
+	if err != nil {
+		// On versions before 20.2, the cluster won't have the crdb_is_user_defined
+		// column. If we can't find it, then continue with an empty set of user
+		// defined schemas.
+		if pqErr := (*pq.Error)(nil); errors.As(err, &pqErr) {
+			if pgcode.MakeCode(string(pqErr.Code)) == pgcode.UndefinedColumn {
+				return nil, nil
+			}
+		}
+		return nil, err
+	}
+	vals := make([]driver.Value, 1)
+	var schemas []string
+	for {
+		if err := rows.Next(vals); err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, err
+		}
+		// Get the schema name from the row.
+		schemaI := vals[0]
+		schema, ok := schemaI.(string)
+		if !ok {
+			return nil, errors.AssertionFailedf("unexpected value %T", schemaI)
+		}
+		schemas = append(schemas, schema)
+	}
+	return schemas, nil
 }
 
 // collectUserDefinedTypes constructs a dumpTypeContext consisting of all user
@@ -402,7 +464,7 @@ WHERE
 		// type kind in the typing context.
 		switch {
 		case len(enumMembers) != 0:
-			typ := types.MakeEnum(uint32(id), 0 /* arrayTypeID */)
+			typ := types.MakeEnum(typedesc.TypeIDToOID(descpb.ID(id)), 0 /* arrayTypeOID */)
 			typ.TypeMeta = types.UserDefinedTypeMetadata{
 				Name: &types.UserDefinedTypeName{
 					Name:   name,
@@ -415,6 +477,7 @@ WHERE
 					// internals expect that there are as many physical representations
 					// as there are logical representations.
 					PhysicalRepresentations: make([][]byte, len(enumMembers)),
+					IsMemberReadOnly:        make([]bool, len(enumMembers)),
 				},
 			}
 			typContext.typMap[*typ.TypeMeta.Name] = typ
@@ -447,22 +510,52 @@ func getAsOf(conn *sqlConn, asOf string) (string, error) {
 	return clusterTS, nil
 }
 
+type dumpTable struct {
+	schema string
+	table  string
+}
+
 // getDumpMetadata retrieves the table information for the specified table(s).
 // It also retrieves the cluster timestamp at which the metadata was
 // retrieved.
 func getDumpMetadata(
 	conn *sqlConn, dbName string, tableNames []string, clusterTS string,
 ) (mds []basicMetadata, err error) {
-	if tableNames == nil {
-		tableNames, err = getTableNames(conn, dbName, clusterTS)
+	var dumpTables []dumpTable
+	if len(tableNames) == 0 {
+		var err error
+		dumpTables, err = getTableNames(conn, dbName, clusterTS)
 		if err != nil {
 			return nil, err
 		}
+	} else {
+		// Try and resolve the input table names.
+		for _, table := range tableNames {
+			// Attempt to parse the input table name. Note that we use
+			// ParseTableNameWithQualifiedNames here because input table names to
+			// dump are not necessarily going to have quoted identifiers.
+			tableName, err := parser.ParseTableNameWithQualifiedNames(table)
+			if err != nil {
+				return nil, err
+			}
+			dt := dumpTable{table: tableName.Object()}
+			switch tableName.NumParts {
+			case 1:
+				// If there is no qualification, then the table is assumed to be in
+				// the public schema.
+				dt.schema = tree.PublicSchema
+			case 2:
+				dt.schema = tableName.Schema()
+			default:
+				return nil, errors.Newf("cannot qualify name with database: %s", tableName)
+			}
+			dumpTables = append(dumpTables, dt)
+		}
 	}
 
-	mds = make([]basicMetadata, len(tableNames))
-	for i, tableName := range tableNames {
-		basicMD, err := getBasicMetadata(conn, dbName, tableName, clusterTS)
+	mds = make([]basicMetadata, len(dumpTables))
+	for i, dumpTable := range dumpTables {
+		basicMD, err := getBasicMetadata(conn, dbName, dumpTable, clusterTS)
 		if err != nil {
 			return nil, err
 		}
@@ -472,31 +565,38 @@ func getDumpMetadata(
 	return mds, nil
 }
 
-// getTableNames retrieves all tables names in the given database.
-func getTableNames(conn *sqlConn, dbName string, ts string) (tableNames []string, err error) {
+// getTableNames retrieves all tables names in the given database. Following
+// pg_dump, we ignore all descriptors which are part of the temp schema. This
+// includes tables, views and sequences.
+func getTableNames(conn *sqlConn, dbName string, ts string) (tableNames []dumpTable, err error) {
 	rows, err := conn.Query(fmt.Sprintf(`
-		SELECT descriptor_name
+		SELECT schema_name, descriptor_name
 		FROM "".crdb_internal.create_statements
 		AS OF SYSTEM TIME %s
-		WHERE database_name = $1
-		`, lex.EscapeSQLString(ts)), []driver.Value{dbName})
+		WHERE database_name = $1 AND schema_name NOT LIKE $2
+		`, lex.EscapeSQLString(ts)), []driver.Value{dbName, sessiondata.PgTempSchemaName + "%"})
 	if err != nil {
 		return nil, err
 	}
 
-	vals := make([]driver.Value, 1)
+	vals := make([]driver.Value, 2)
 	for {
 		if err := rows.Next(vals); err == io.EOF {
 			break
 		} else if err != nil {
 			return nil, err
 		}
-		nameI := vals[0]
+		schemaI := vals[0]
+		schema, ok := schemaI.(string)
+		if !ok {
+			return nil, fmt.Errorf("unexpected value: %T", schemaI)
+		}
+		nameI := vals[1]
 		name, ok := nameI.(string)
 		if !ok {
 			return nil, fmt.Errorf("unexpected value: %T", nameI)
 		}
-		tableNames = append(tableNames, name)
+		tableNames = append(tableNames, dumpTable{table: name, schema: schema})
 	}
 
 	if err := rows.Close(); err != nil {
@@ -506,13 +606,15 @@ func getTableNames(conn *sqlConn, dbName string, ts string) (tableNames []string
 	return tableNames, nil
 }
 
-func getBasicMetadata(conn *sqlConn, dbName, tableName string, ts string) (basicMetadata, error) {
-	name := tree.NewTableName(tree.Name(dbName), tree.Name(tableName))
-
+func getBasicMetadata(
+	conn *sqlConn, dbName string, table dumpTable, ts string,
+) (basicMetadata, error) {
+	tn := tree.MakeTableNameWithSchema(tree.Name(dbName), tree.Name(table.schema), tree.Name(table.table))
 	// Fetch table ID.
 	dbNameEscaped := tree.NameString(dbName)
 	vals, err := conn.QueryRow(fmt.Sprintf(`
 		SELECT
+			schema_name,
 			descriptor_id,
 			create_nofks,
 			descriptor_type,
@@ -521,37 +623,53 @@ func getBasicMetadata(conn *sqlConn, dbName, tableName string, ts string) (basic
 		FROM %s.crdb_internal.create_statements
 		AS OF SYSTEM TIME %s
 		WHERE database_name = $1
-			AND descriptor_name = $2
-	`, dbNameEscaped, lex.EscapeSQLString(ts)), []driver.Value{dbName, tableName})
+      AND schema_name = $2
+			AND descriptor_name = $3
+	`, dbNameEscaped, lex.EscapeSQLString(ts)), []driver.Value{dbName, table.schema, table.table})
 	if err != nil {
 		if err == io.EOF {
 			return basicMetadata{}, errors.Wrap(
-				errors.Errorf("relation %s does not exist", tree.ErrString(name)),
+				errors.Errorf("relation %s does not exist", tree.ErrString(&tn)),
 				"getBasicMetadata",
 			)
 		}
 		return basicMetadata{}, errors.Wrap(err, "getBasicMetadata")
 	}
-	idI := vals[0]
+
+	// Check the schema to disallow dumping temp tables, views and sequences. This
+	// will only be triggered if a user explicitly specifies a temp construct as
+	// one of the arguments to the `cockroach dump` command. When no table names
+	// are specified on the CLI, we ignore temp tables at the stage where we read
+	// all table names in getTableNames.
+	schemaNameI := vals[0]
+	schemaName, ok := schemaNameI.(string)
+	if !ok {
+		return basicMetadata{}, fmt.Errorf("unexpected value: %T", schemaNameI)
+	}
+	if strings.HasPrefix(schemaName, sessiondata.PgTempSchemaName) {
+		return basicMetadata{}, errors.Newf("cannot dump temp table %s", tn.String())
+	}
+
+	idI := vals[1]
 	id, ok := idI.(int64)
 	if !ok {
 		return basicMetadata{}, fmt.Errorf("unexpected value: %T", idI)
 	}
-	createStatementI := vals[1]
+	createStatementI := vals[2]
 	createStatement, ok := createStatementI.(string)
 	if !ok {
 		return basicMetadata{}, fmt.Errorf("unexpected value: %T", createStatementI)
 	}
-	kindI := vals[2]
+	kindI := vals[3]
 	kind, ok := kindI.(string)
 	if !ok {
 		return basicMetadata{}, fmt.Errorf("unexpected value: %T", kindI)
 	}
-	alterStatements, err := extractArray(vals[3])
+	alterStatements, err := extractArray(vals[4])
 	if err != nil {
 		return basicMetadata{}, err
 	}
-	validateStatements, err := extractArray(vals[4])
+	validateStatements, err := extractArray(vals[5])
 	if err != nil {
 		return basicMetadata{}, err
 	}
@@ -584,7 +702,7 @@ func getBasicMetadata(conn *sqlConn, dbName, tableName string, ts string) (basic
 
 	md := basicMetadata{
 		ID:         id,
-		name:       tree.NewTableName(tree.Name(dbName), tree.Name(tableName)),
+		name:       &tn,
 		createStmt: createStatement,
 		dependsOn:  refs,
 		kind:       kind,
@@ -916,6 +1034,11 @@ func dumpTableData(
 						if err != nil {
 							return err
 						}
+					case types.Box2DFamily:
+						d, err = tree.ParseDBox2D(string(t))
+						if err != nil {
+							return err
+						}
 					case types.GeographyFamily:
 						d, err = tree.ParseDGeography(string(t))
 						if err != nil {
@@ -959,6 +1082,11 @@ func dumpTableData(
 					case types.EnumFamily:
 						// Enum values are streamed back in their logical representation.
 						d, err = tree.MakeDEnumFromLogicalRepresentation(ct, string(t))
+						if err != nil {
+							return err
+						}
+					case types.BitFamily:
+						d, err = tree.ParseDBitArray(string(t))
 						if err != nil {
 							return err
 						}
@@ -1022,7 +1150,10 @@ func dumpTableData(
 }
 
 func writeInserts(w io.Writer, tmd tableMetadata, inserts []string) {
-	fmt.Fprintf(w, "\nINSERT INTO %s (%s) VALUES", &tmd.name.ObjectName, tmd.columnNames)
+	// Ensure that the table name gets formatted with its schema.
+	tn := tree.MakeTableNameWithSchema(tmd.name.CatalogName, tmd.name.SchemaName, tmd.name.ObjectName)
+	tn.ExplicitCatalog = false
+	fmt.Fprintf(w, "\nINSERT INTO %s (%s) VALUES", &tn, tmd.columnNames)
 	for idx, values := range inserts {
 		if idx > 0 {
 			fmt.Fprint(w, ",")

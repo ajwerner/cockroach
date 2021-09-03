@@ -12,8 +12,6 @@ package keys
 
 import "github.com/cockroachdb/cockroach/pkg/roachpb"
 
-//go:generate go run gen_cpp_keys.go
-
 var (
 	// Meta1Span holds all first level addressing records.
 	Meta1Span = roachpb.Span{Key: roachpb.KeyMin, EndKey: Meta2Prefix}
@@ -34,9 +32,6 @@ var (
 	NodeLivenessSpan = roachpb.Span{Key: NodeLivenessPrefix, EndKey: NodeLivenessKeyMax}
 
 	// SystemConfigSpan is the range of system objects which will be gossiped.
-	//
-	// TODO(nvanbenschoten): references to this span need to be prefixed by
-	// tenant ID. This is tracked in #48184.
 	SystemConfigSpan = roachpb.Span{Key: SystemConfigSplitKey, EndKey: SystemConfigTableDataMax}
 
 	// NoSplitSpans describes the ranges that should never be split.
@@ -46,6 +41,3 @@ var (
 	// SystemConfigSpan: system objects which will be gossiped.
 	NoSplitSpans = []roachpb.Span{Meta1Span, Meta2MaxSpan, NodeLivenessSpan, SystemConfigSpan}
 )
-
-// Silence unused warnings. These variables are actually used by gen_cpp_keys.go.
-var _ = NoSplitSpans

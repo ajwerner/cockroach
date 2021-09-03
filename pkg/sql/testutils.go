@@ -15,10 +15,11 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
 )
@@ -28,10 +29,10 @@ import (
 // other tables.
 func CreateTestTableDescriptor(
 	ctx context.Context,
-	parentID, id sqlbase.ID,
+	parentID, id descpb.ID,
 	schema string,
-	privileges *sqlbase.PrivilegeDescriptor,
-) (*sqlbase.MutableTableDescriptor, error) {
+	privileges *descpb.PrivilegeDescriptor,
+) (*tabledesc.Mutable, error) {
 	st := cluster.MakeTestingClusterSettings()
 	stmt, err := parser.ParseOne(schema)
 	if err != nil {
@@ -41,7 +42,7 @@ func CreateTestTableDescriptor(
 	evalCtx := tree.MakeTestingEvalContext(st)
 	switch n := stmt.AST.(type) {
 	case *tree.CreateTable:
-		desc, err := MakeTableDesc(
+		desc, err := NewTableDesc(
 			ctx,
 			nil, /* txn */
 			nil, /* vs */
@@ -54,20 +55,21 @@ func CreateTestTableDescriptor(
 			&semaCtx,
 			&evalCtx,
 			&sessiondata.SessionData{}, /* sessionData */
-			false,                      /* temporary */
+			tree.PersistencePermanent,
 		)
-		return &desc, err
+		return desc, err
 	case *tree.CreateSequence:
-		desc, err := MakeSequenceTableDesc(
+		desc, err := NewSequenceTableDesc(
+			ctx,
 			n.Name.Table(),
 			n.Options,
 			parentID, keys.PublicSchemaID, id,
 			hlc.Timestamp{}, /* creationTime */
 			privileges,
-			false, /* temporary */
-			nil,   /* params */
+			tree.PersistencePermanent,
+			nil, /* params */
 		)
-		return &desc, err
+		return desc, err
 	default:
 		return nil, errors.Errorf("unexpected AST %T", stmt.AST)
 	}

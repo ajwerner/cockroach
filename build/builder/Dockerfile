@@ -39,6 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libncurses-dev \
     make \
     patch \
+    patchelf \
     texinfo \
     xz-utils \
  && apt-get clean
@@ -197,8 +198,8 @@ RUN curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.17.0/cmake-
 # releases of Go will no longer be run in CI once it is changed. Consider
 # bumping the minimum allowed version of Go in /build/go-version-chech.sh.
 RUN apt-get install -y --no-install-recommends golang \
- && curl -fsSL https://storage.googleapis.com/golang/go1.14.4.src.tar.gz -o golang.tar.gz \
- && echo '7011af3bbc2ac108d1b82ea8abb87b2e63f78844f0259be20cde4d42c5c40584 golang.tar.gz' | sha256sum -c - \
+ && curl -fsSL https://storage.googleapis.com/golang/go1.13.14.src.tar.gz -o golang.tar.gz \
+ && echo '197333e97290e9ea8796f738d61019dcba1c377c2f3961fd6a114918ecc7ab06 golang.tar.gz' | sha256sum -c - \
  && tar -C /usr/local -xzf golang.tar.gz \
  && rm golang.tar.gz \
  && cd /usr/local/go/src \
@@ -223,8 +224,11 @@ RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource.gpg.key | apt-key ad
  && echo 'deb https://packages.cloud.google.com/apt cloud-sdk-xenial main' | tee /etc/apt/sources.list.d/gcloud.list \
  && curl -fsSL https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
  && echo "deb [arch=amd64] https://dl.google.com/linux/chrome/deb/ stable main" | tee /etc/apt/sources.list.d/google.list \
+ && echo "deb [arch=amd64] https://storage.googleapis.com/bazel-apt stable jdk1.8" | tee /etc/apt/sources.list.d/bazel.list \
+ && curl https://bazel.build/bazel-release.pub.gpg | apt-key add - \
  && apt-get update
 
+# bazel - build system
 # ccache - speed up C and C++ compilation
 # lsof - roachprod monitor
 # netcat - roachprod monitor
@@ -236,6 +240,7 @@ RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource.gpg.key | apt-key ad
 # chrome - ui
 # unzip - for installing awscli
 RUN apt-get install -y --no-install-recommends \
+    bazel-3.7.0 \
     ccache \
     google-cloud-sdk \
     lsof \
@@ -282,10 +287,11 @@ RUN apt-get purge -y \
 
 RUN rm -rf /tmp/* /var/lib/apt/lists/*
 
-RUN ln -s /go/src/github.com/cockroachdb/cockroach/build/builder/mkrelease.sh /usr/local/bin/mkrelease
+RUN ln -s /go/src/github.com/cockroachdb/cockroach/build/builder/mkrelease.sh /usr/local/bin/mkrelease \
+    && ln -s /usr/bin/bazel-3.7.0 /usr/bin/bazel
 
-RUN curl -fsSL https://github.com/benesch/autouseradd/releases/download/1.1.0/autouseradd-1.1.0-amd64.tar.gz \
-    | tar xz -C /usr --strip-components 1
+RUN curl -fsSL https://github.com/benesch/autouseradd/releases/download/1.2.0/autouseradd-1.2.0-amd64.tar.gz \
+    | tar xz -C / --strip-components 1
 
 COPY entrypoint.sh /usr/local/bin
 

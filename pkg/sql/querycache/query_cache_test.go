@@ -17,8 +17,8 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
+	"github.com/cockroachdb/errors"
 )
 
 func toStr(c *C) string {
@@ -45,10 +45,10 @@ func expect(t *testing.T, c *C, exp string) {
 }
 
 func data(sql string, mem *memo.Memo, memEstimate int64) *CachedData {
-	cd := &CachedData{SQL: sql, Memo: mem, PrepareMetadata: &sqlbase.PrepareMetadata{}}
+	cd := &CachedData{SQL: sql, Memo: mem, PrepareMetadata: &PrepareMetadata{}}
 	n := memEstimate - cd.memoryEstimate()
 	if n < 0 {
-		panic(fmt.Sprintf("size %d too small", memEstimate))
+		panic(errors.AssertionFailedf("size %d too small", memEstimate))
 	}
 	// Add characters to AnonymizedStr which should increase the estimate.
 	s := make([]byte, n)
@@ -57,7 +57,7 @@ func data(sql string, mem *memo.Memo, memEstimate int64) *CachedData {
 	}
 	cd.PrepareMetadata.AnonymizedStr = string(s)
 	if cd.memoryEstimate() != memEstimate {
-		panic(fmt.Sprintf("failed to create CachedData of size %d", memEstimate))
+		panic(errors.AssertionFailedf("failed to create CachedData of size %d", memEstimate))
 	}
 	return cd
 }

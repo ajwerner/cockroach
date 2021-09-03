@@ -21,7 +21,7 @@ option go_package = "execinfrapb";
 
 import "jobs/jobspb/jobs.proto";
 import "roachpb/io-formats.proto";
-import "sql/sqlbase/structured.proto";
+import "sql/catalog/descpb/structured.proto";
 import "sql/execinfrapb/processors_base.proto";
 import "util/hlc/timestamp.proto";
 import "gogoproto/gogo.proto";
@@ -130,7 +130,7 @@ message ReadImportDataSpec {
 
   // User who initiated the import. This is used to check access privileges
   // when using FileTable ExternalStorage.
-  optional string user = 15 [(gogoproto.nullable) = false];
+  optional string user_proto = 15 [(gogoproto.nullable) = false, (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/security.SQLUsernameProto"];
 
   // NEXTID: 16
 }
@@ -151,7 +151,36 @@ message BackupDataSpec {
 
   // User who initiated the backup. This is used to check access privileges
   // when using FileTable ExternalStorage.
-  optional string user = 10 [(gogoproto.nullable) = false];
+  optional string user_proto = 10 [(gogoproto.nullable) = false, (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/security.SQLUsernameProto"];
+}
+
+// RestoreDataEntry will be specified at planning time to the SplitAndScatter
+// processors, then those processors will stream these, encoded as bytes in rows
+// to the RestoreDataProcessors.
+// This field has a subset of the importEntry struct defined in restore.
+message RestoreSpanEntry {
+  optional roachpb.Span span = 1 [(gogoproto.nullable) = false];
+  repeated roachpb.ImportRequest.File files = 2 [(gogoproto.nullable) = false];
+  optional int64 progressIdx = 3 [(gogoproto.nullable) = false];
+}
+
+message RestoreDataSpec {
+  optional util.hlc.Timestamp restore_time = 1 [(gogoproto.nullable) = false];
+  optional roachpb.FileEncryptionOptions encryption = 2;
+  repeated roachpb.ImportRequest.TableRekey rekeys = 3 [(gogoproto.nullable) = false];
+
+  // PKIDs is used to convert result from an ExportRequest into row count
+  // information passed back to track progress in the backup job.
+  map<uint64, bool> pk_ids = 4 [(gogoproto.customname) = "PKIDs"];
+}
+
+message SplitAndScatterSpec {
+  message RestoreEntryChunk {
+    repeated RestoreSpanEntry entries = 1 [(gogoproto.nullable) = false];
+  }
+
+  repeated RestoreEntryChunk chunks = 1 [(gogoproto.nullable) = false];
+  repeated roachpb.ImportRequest.TableRekey rekeys = 2 [(gogoproto.nullable) = false];
 }
 
 // FileCompression list of the compression codecs which are currently
@@ -178,7 +207,7 @@ message CSVWriterSpec {
 
   // User who initiated the export. This is used to check access privileges
   // when using FileTable ExternalStorage.
-  optional string user = 6 [(gogoproto.nullable) = false];
+  optional string user_proto = 6 [(gogoproto.nullable) = false, (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/security.SQLUsernameProto"];
 }
 
 // BulkRowWriterSpec is the specification for a processor that consumes rows and

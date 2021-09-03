@@ -62,7 +62,7 @@ func TestDistSQLRunningInAbortedTxn(t *testing.T) {
 	internalPlanner, cleanup := NewInternalPlanner(
 		"test",
 		kv.NewTxn(ctx, db, s.NodeID()),
-		security.RootUser,
+		security.RootUserName(),
 		&MemoryMetrics{},
 		&execCfg,
 	)
@@ -102,7 +102,7 @@ func TestDistSQLRunningInAbortedTxn(t *testing.T) {
 		},
 		s.DistSenderI().(*kvcoord.DistSender),
 	)
-	shortDB := kv.NewDB(ambient, tsf, s.Clock())
+	shortDB := kv.NewDB(ambient, tsf, s.Clock(), s.Stopper())
 
 	iter := 0
 	// We'll trace to make sure the test isn't fooling itself.

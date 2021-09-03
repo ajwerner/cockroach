@@ -98,6 +98,32 @@ func TestFormatStatement(t *testing.T) {
 			`SET time zone = utc`},
 		{`SET "time zone" = UTC`, tree.FmtBareStrings,
 			`SET "time zone" = utc`},
+
+		// Test schema anonymization.
+		{`CREATE SCHEMA s`, tree.FmtAnonymize,
+			`CREATE SCHEMA _`},
+		{`ALTER SCHEMA s1 RENAME TO s2`, tree.FmtAnonymize,
+			`ALTER SCHEMA _ RENAME TO _`},
+		{`DROP SCHEMA a, b`, tree.FmtAnonymize,
+			`DROP SCHEMA _, _`},
+		{`GRANT SELECT ON SCHEMA a TO b, c`, tree.FmtAnonymize,
+			`GRANT SELECT ON SCHEMA _ TO _, _`},
+		{`ALTER TYPE t SET SCHEMA s`, tree.FmtAnonymize,
+			`ALTER TYPE _ SET SCHEMA _`},
+
+		// Test owner anonymization.
+		{`ALTER DATABASE d OWNER TO o`, tree.FmtAnonymize,
+			`ALTER DATABASE _ OWNER TO _`},
+		{`ALTER SCHEMA s OWNER TO o`, tree.FmtAnonymize,
+			`ALTER SCHEMA _ OWNER TO _`},
+
+		// Test ENUM anonymization.
+		{`CREATE TYPE a AS ENUM ('a', 'b', 'c')`, tree.FmtAnonymize,
+			`CREATE TYPE _ AS ENUM (_, _, _)`},
+		{`ALTER TYPE a ADD VALUE 'hi' BEFORE 'hello'`, tree.FmtAnonymize,
+			`ALTER TYPE _ ADD VALUE _ BEFORE _`},
+		{`ALTER TYPE a RENAME VALUE 'value1' TO 'value2'`, tree.FmtAnonymize,
+			`ALTER TYPE _ RENAME VALUE _ TO _`},
 	}
 
 	for i, test := range testData {
@@ -194,7 +220,7 @@ func TestFormatExpr(t *testing.T) {
 		{`date 'today'`, tree.FmtShowTypes,
 			`(('today')[string]::DATE)[date]`},
 		{`timestamp '2003-01-01 00:00:00'`, tree.FmtShowTypes,
-			`('2003-01-01 00:00:00+00:00')[timestamp]`},
+			`('2003-01-01 00:00:00')[timestamp]`},
 		{`timestamp 'now'`, tree.FmtShowTypes,
 			`(('now')[string]::TIMESTAMP)[timestamp]`},
 		{`timestamptz '2003-01-01 00:00:00+03:00'`, tree.FmtShowTypes,
@@ -254,9 +280,9 @@ func TestFormatExpr(t *testing.T) {
 		{`current_date() - date 'yesterday'`, tree.FmtSimple,
 			`current_date() - 'yesterday'::DATE`},
 		{`now() - timestamp '2003-01-01'`, tree.FmtSimple,
-			`now() - '2003-01-01 00:00:00+00:00'`},
+			`now() - '2003-01-01 00:00:00'`},
 		{`now() - timestamp '2003-01-01'`, tree.FmtParsable,
-			`now():::TIMESTAMPTZ - '2003-01-01 00:00:00+00:00':::TIMESTAMP`},
+			`now():::TIMESTAMPTZ - '2003-01-01 00:00:00':::TIMESTAMP`},
 		{`'+Inf':::DECIMAL + '-Inf':::DECIMAL + 'NaN':::DECIMAL`, tree.FmtParsable,
 			`('Infinity':::DECIMAL + '-Infinity':::DECIMAL) + 'NaN':::DECIMAL`},
 		{`'+Inf':::FLOAT8 + '-Inf':::FLOAT8 + 'NaN':::FLOAT8`, tree.FmtParsable,

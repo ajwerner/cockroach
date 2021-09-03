@@ -50,6 +50,7 @@ type FilterArgs struct {
 	Sid   roachpb.StoreID
 	Req   roachpb.Request
 	Hdr   roachpb.Header
+	Err   error // only used for TestingPostEvalFilter
 }
 
 // ProposalFilterArgs groups the arguments to ReplicaProposalFilter.
@@ -78,6 +79,10 @@ func (f *FilterArgs) InRaftCmd() bool {
 // from a request before it is evaluated. Return nil to continue with regular
 // processing or non-nil to terminate processing with the returned error.
 type ReplicaRequestFilter func(context.Context, roachpb.BatchRequest) *roachpb.Error
+
+// ReplicaConcurrencyRetryFilter can be used to examine a concurrency retry
+// error before it is handled and its batch is re-evaluated.
+type ReplicaConcurrencyRetryFilter func(context.Context, roachpb.BatchRequest, *roachpb.Error)
 
 // ReplicaCommandFilter may be used in tests through the StoreTestingKnobs to
 // intercept the handling of commands and artificially generate errors. Return

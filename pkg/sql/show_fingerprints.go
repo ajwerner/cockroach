@@ -16,9 +16,11 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 )
@@ -26,8 +28,8 @@ import (
 type showFingerprintsNode struct {
 	optColumnsSlot
 
-	tableDesc *sqlbase.ImmutableTableDescriptor
-	indexes   []*sqlbase.IndexDescriptor
+	tableDesc *tabledesc.Immutable
+	indexes   []*descpb.IndexDescriptor
 
 	run showFingerprintsRun
 }
@@ -89,7 +91,7 @@ func (n *showFingerprintsNode) Next(params runParams) (bool, error) {
 	index := n.indexes[n.run.rowIdx]
 
 	cols := make([]string, 0, len(n.tableDesc.Columns))
-	addColumn := func(col *sqlbase.ColumnDescriptor) {
+	addColumn := func(col *descpb.ColumnDescriptor) {
 		// TODO(dan): This is known to be a flawed way to fingerprint. Any datum
 		// with the same string representation is fingerprinted the same, even
 		// if they're different types.
@@ -106,7 +108,7 @@ func (n *showFingerprintsNode) Next(params runParams) (bool, error) {
 			addColumn(&n.tableDesc.Columns[i])
 		}
 	} else {
-		colsByID := make(map[sqlbase.ColumnID]*sqlbase.ColumnDescriptor)
+		colsByID := make(map[descpb.ColumnID]*descpb.ColumnDescriptor)
 		for i := range n.tableDesc.Columns {
 			col := &n.tableDesc.Columns[i]
 			colsByID[col.ID] = col
@@ -144,7 +146,7 @@ func (n *showFingerprintsNode) Next(params runParams) (bool, error) {
 	fingerprintCols, err := params.extendedEvalCtx.ExecCfg.InternalExecutor.QueryRowEx(
 		params.ctx, "hash-fingerprint",
 		params.p.txn,
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		sql,
 	)
 	if err != nil {

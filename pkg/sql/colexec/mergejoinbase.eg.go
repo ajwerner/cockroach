@@ -11,7 +11,6 @@ package colexec
 
 import (
 	"bytes"
-	"fmt"
 	"math"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
@@ -20,6 +19,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
+)
+
+// Workaround for bazel auto-generated code. goimports does not automatically
+// pick up the right packages when run within the bazel sandbox.
+var (
+	_ = typeconv.DatumVecCanonicalTypeFamily
+	_ coldataext.Datum
+	_ tree.AggType
 )
 
 // isBufferedGroupFinished checks to see whether or not the buffered group
@@ -476,7 +484,7 @@ func (o *mergeJoinBase) isBufferedGroupFinished(
 				}
 			}
 		default:
-			colexecerror.InternalError(fmt.Sprintf("unhandled type %s", input.sourceTypes[colIdx]))
+			colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", input.sourceTypes[colIdx]))
 		}
 	}
 	return false

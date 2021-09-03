@@ -25,23 +25,34 @@ import (
 
 // Construct a fake tls.ConnectionState object. The spec is a semicolon
 // separated list if peer certificate specifications. Each peer certificate
-// specification is a comma separated list of names where the first name is the
+// specification can have an optional OU in parenthesis followed by
+// a comma separated list of names where the first name is the
 // CommonName and the remaining names are SubjectAlternateNames. For example,
 // "foo" creates a single peer certificate with the CommonName "foo". The spec
 // "foo,bar" creates a single peer certificate with the CommonName "foo" and a
-// single SubjectAlternateName "bar". Contrast that with "foo;bar" which
-// creates two peer certificates with the CommonNames "foo" and "bar"
-// respectively.
+// single SubjectAlternateName "bar". "(Tenants)foo,bar" creates a single
+// tenant client certificate with OU=Tenants, CN=foo and subjectAlternativeName=bar
+// Contrast that with "foo;bar" which creates two peer certificates with the
+// CommonNames "foo" and "bar" respectively.
 func makeFakeTLSState(spec string) *tls.ConnectionState {
 	tls := &tls.ConnectionState{}
 	if spec != "" {
 		for _, peerSpec := range strings.Split(spec, ";") {
+			var ou []string
+			if strings.HasPrefix(peerSpec, "(") {
+				ouAndRest := strings.Split(peerSpec[1:], ")")
+				ou = ouAndRest[:1]
+				peerSpec = ouAndRest[1]
+			}
 			names := strings.Split(peerSpec, ",")
 			if len(names) == 0 {
 				continue
 			}
 			peerCert := &x509.Certificate{}
-			peerCert.Subject = pkix.Name{CommonName: names[0]}
+			peerCert.Subject = pkix.Name{
+				CommonName:         names[0],
+				OrganizationalUnit: ou,
+			}
 			peerCert.DNSNames = names[1:]
 			tls.PeerCertificates = append(tls.PeerCertificates, peerCert)
 		}
@@ -158,33 +169,39 @@ func TestAuthenticationHook(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer func() { _ = security.SetCertPrincipalMap(nil) }()
 
+	fooUser := security.MakeSQLUsernameFromPreNormalizedString("foo")
+	barUser := security.MakeSQLUsernameFromPreNormalizedString("bar")
+	blahUser := security.MakeSQLUsernameFromPreNormalizedString("blah")
+
 	testCases := []struct {
 		insecure           bool
 		tlsSpec            string
-		username           string
+		username           security.SQLUsername
 		principalMap       string
 		buildHookSuccess   bool
 		publicHookSuccess  bool
 		privateHookSuccess bool
 	}{
 		// Insecure mode, empty username.
-		{true, "", "", "", true, false, false},
+		{true, "", security.SQLUsername{}, "", true, false, false},
 		// Insecure mode, non-empty username.
-		{true, "", "foo", "", true, true, false},
+		{true, "", fooUser, "", true, true, false},
 		// Secure mode, no TLS state.
-		{false, "", "", "", false, false, false},
+		{false, "", security.SQLUsername{}, "", false, false, false},
 		// Secure mode, bad user.
-		{false, "foo", "node", "", true, false, false},
+		{false, "foo", security.NodeUserName(), "", true, false, false},
 		// Secure mode, node user.
-		{false, security.NodeUser, "node", "", true, true, true},
+		{false, security.NodeUser, security.NodeUserName(), "", true, true, true},
 		// Secure mode, root user.
-		{false, security.RootUser, "node", "", true, false, false},
+		{false, security.RootUser, security.NodeUserName(), "", true, false, false},
+		// Secure mode, tenant cert, foo user.
+		{false, "(Tenants)foo", fooUser, "", true, false, false},
 		// Secure mode, multiple cert principals.
-		{false, "foo,bar", "foo", "", true, true, false},
-		{false, "foo,bar", "bar", "", true, true, false},
+		{false, "foo,bar", fooUser, "", true, true, false},
+		{false, "foo,bar", barUser, "", true, true, false},
 		// Secure mode, principal map.
-		{false, "foo,bar", "blah", "foo:blah", true, true, false},
-		{false, "foo,bar", "blah", "bar:blah", true, true, false},
+		{false, "foo,bar", blahUser, "foo:blah", true, true, false},
+		{false, "foo,bar", blahUser, "bar:blah", true, true, false},
 	}
 
 	for _, tc := range testCases {

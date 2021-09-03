@@ -13,22 +13,36 @@ package norm
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
 )
 
 // CanMapOnSetOp determines whether the filter can be mapped to either
 // side of a set operator.
-func (c *CustomFuncs) CanMapOnSetOp(src *memo.FiltersItem) bool {
-	filterProps := src.ScalarProps()
-	for i, ok := filterProps.OuterCols.Next(0); ok; i, ok = filterProps.OuterCols.Next(i + 1) {
-		colType := c.f.Metadata().ColumnMeta(i).Type
-		if sqlbase.HasCompositeKeyEncoding(colType) {
-			return false
-		}
+func (c *CustomFuncs) CanMapOnSetOp(filter *memo.FiltersItem) bool {
+	if memo.CanBeCompositeSensitive(c.mem.Metadata(), filter) {
+		// In general, it is not safe to remap a composite-sensitive filter.
+		// For example:
+		//  - the set operation is Except
+		//  - the left side has the decimal 1.0
+		//  - the right side has the decimal 1.00
+		//  - the filter is d::string != '1.00'
+		//
+		// If we push the filter to the right side, we will incorrectly remove 1.00,
+		// causing the overall Except operation to return a result.
+		//
+		// TODO(radu): we can do better on a case-by-case basis. For example, it is
+		// OK to push the filter for Union, and it is OK to push it to the left side
+		// of an Except.
+		return false
 	}
-	return !filterProps.HasCorrelatedSubquery
+
+	if filter.ScalarProps().HasCorrelatedSubquery {
+		// If the filter has a correlated subquery, we want to try to hoist it up as
+		// much as possible to decorrelate it.
+		return false
+	}
+	return true
 }
 
 // MapSetOpFilterLeft maps the filter onto the left expression by replacing
@@ -39,7 +53,7 @@ func (c *CustomFuncs) MapSetOpFilterLeft(
 	filter *memo.FiltersItem, set *memo.SetPrivate,
 ) opt.ScalarExpr {
 	colMap := makeMapFromColLists(set.OutCols, set.LeftCols)
-	return c.MapFiltersItemCols(filter, colMap)
+	return c.RemapCols(filter.Condition, colMap)
 }
 
 // MapSetOpFilterRight maps the filter onto the right expression by replacing
@@ -50,48 +64,23 @@ func (c *CustomFuncs) MapSetOpFilterRight(
 	filter *memo.FiltersItem, set *memo.SetPrivate,
 ) opt.ScalarExpr {
 	colMap := makeMapFromColLists(set.OutCols, set.RightCols)
-	return c.MapFiltersItemCols(filter, colMap)
+	return c.RemapCols(filter.Condition, colMap)
 }
 
 // makeMapFromColLists maps each column ID in src to a column ID in dst. The
 // columns IDs are mapped based on their relative positions in the column lists,
 // e.g. the third item in src maps to the third item in dst. The lists must be
 // of equal length.
-func makeMapFromColLists(src opt.ColList, dst opt.ColList) util.FastIntMap {
+func makeMapFromColLists(src opt.ColList, dst opt.ColList) opt.ColMap {
 	if len(src) != len(dst) {
 		panic(errors.AssertionFailedf("src and dst must have the same length, src: %v, dst: %v", src, dst))
 	}
 
-	var colMap util.FastIntMap
+	var colMap opt.ColMap
 	for colIndex, outColID := range src {
 		colMap.Set(int(outColID), int(dst[colIndex]))
 	}
 	return colMap
-}
-
-// MapFiltersItemCols maps filter expressions by replacing occurrences of
-// the keys of colMap with the corresponding values. Outer columns are not
-// replaced.
-func (c *CustomFuncs) MapFiltersItemCols(
-	filter *memo.FiltersItem, colMap util.FastIntMap,
-) opt.ScalarExpr {
-	// Recursively walk the scalar sub-tree looking for references to columns
-	// that need to be replaced and then replace them appropriately.
-	var replace ReplaceFunc
-	replace = func(nd opt.Expr) opt.Expr {
-		switch t := nd.(type) {
-		case *memo.VariableExpr:
-			dstCol, ok := colMap.Get(int(t.Col))
-			if !ok {
-				// It is not part of the output cols so no replacement required.
-				return nd
-			}
-			return c.f.ConstructVariable(opt.ColumnID(dstCol))
-		}
-		return c.f.Replace(nd, replace)
-	}
-
-	return replace(filter.Condition).(opt.ScalarExpr)
 }
 
 // GroupingAndConstCols returns the grouping columns and ConstAgg columns (for

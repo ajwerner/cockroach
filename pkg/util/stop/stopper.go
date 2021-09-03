@@ -14,21 +14,27 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/util/caller"
+	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	opentracing "github.com/opentracing/opentracing-go"
 )
+
+func init() {
+	leaktest.PrintLeakedStoppers = PrintLeakedStoppers
+}
 
 const asyncTaskNamePrefix = "[async] "
 
@@ -42,7 +48,8 @@ var ErrUnavailable = &roachpb.NodeUnavailableError{}
 
 func register(s *Stopper) {
 	trackedStoppers.Lock()
-	trackedStoppers.stoppers = append(trackedStoppers.stoppers, s)
+	trackedStoppers.stoppers = append(trackedStoppers.stoppers,
+		stopperWithStack{s: s, createdAt: string(debug.Stack())})
 	trackedStoppers.Unlock()
 }
 
@@ -51,7 +58,7 @@ func unregister(s *Stopper) {
 	defer trackedStoppers.Unlock()
 	sl := trackedStoppers.stoppers
 	for i, tracked := range sl {
-		if tracked == s {
+		if tracked.s == s {
 			trackedStoppers.stoppers = sl[:i+copy(sl[i:], sl[i+1:])]
 			return
 		}
@@ -59,9 +66,14 @@ func unregister(s *Stopper) {
 	panic("attempt to unregister untracked stopper")
 }
 
+type stopperWithStack struct {
+	s         *Stopper
+	createdAt string // stack from NewStopper()
+}
+
 var trackedStoppers struct {
 	syncutil.Mutex
-	stoppers []*Stopper
+	stoppers []stopperWithStack
 }
 
 // HandleDebug responds with the list of stopper tasks actively running.
@@ -69,10 +81,21 @@ func HandleDebug(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	trackedStoppers.Lock()
 	defer trackedStoppers.Unlock()
-	for _, s := range trackedStoppers.stoppers {
+	for _, ss := range trackedStoppers.stoppers {
+		s := ss.s
 		s.mu.Lock()
 		fmt.Fprintf(w, "%p: %d tasks\n%s", s, s.mu.numTasks, s.runningTasksLocked())
 		s.mu.Unlock()
+	}
+}
+
+// PrintLeakedStoppers prints (using `t`) the creation site of each Stopper
+// for which `.Stop()` has not yet been called.
+func PrintLeakedStoppers(t testing.TB) {
+	trackedStoppers.Lock()
+	defer trackedStoppers.Unlock()
+	for _, tracked := range trackedStoppers.stoppers {
+		t.Logf("leaked stopper, created at:\n%s", tracked.createdAt)
 	}
 }
 
@@ -192,7 +215,7 @@ func (s *Stopper) RunWorker(ctx context.Context, f func(context.Context)) {
 		// Remove any associated span; we need to ensure this because the
 		// worker may run longer than the caller which presumably closes
 		// any spans it has created.
-		ctx = opentracing.ContextWithSpan(ctx, nil)
+		ctx = tracing.ContextWithSpan(ctx, nil)
 		defer s.Recover(ctx)
 		defer s.stop.Done()
 		f(ctx)

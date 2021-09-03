@@ -43,6 +43,12 @@ func TryDelegate(
 	case *tree.ShowDatabases:
 		return d.delegateShowDatabases(t)
 
+	case *tree.ShowEnums:
+		return d.delegateShowEnums()
+
+	case *tree.ShowTypes:
+		return d.delegateShowTypes()
+
 	case *tree.ShowCreate:
 		return d.delegateShowCreate(t)
 
@@ -76,6 +82,9 @@ func TryDelegate(
 	case *tree.ShowRangeForRow:
 		return d.delegateShowRangeForRow(t)
 
+	case *tree.ShowRegions:
+		return d.delegateShowRegions(t)
+
 	case *tree.ShowRoleGrants:
 		return d.delegateShowRoleGrants(t)
 
@@ -97,6 +106,9 @@ func TryDelegate(
 	case *tree.ShowTables:
 		return d.delegateShowTables(t)
 
+	case *tree.ShowTransactions:
+		return d.delegateShowTransactions(t)
+
 	case *tree.ShowUsers:
 		return d.delegateShowRoles()
 
@@ -108,6 +120,12 @@ func TryDelegate(
 
 	case *tree.ShowTransactionStatus:
 		return d.delegateShowVar(&tree.ShowVar{Name: "transaction_status"})
+
+	case *tree.ShowSchedules:
+		return d.delegateShowSchedules(t)
+
+	case *tree.ControlJobsForSchedules:
+		return d.delegateJobControl(t)
 
 	case *tree.ShowLastQueryStatistics:
 		return nil, unimplemented.New(

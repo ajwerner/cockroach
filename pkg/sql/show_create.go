@@ -14,9 +14,13 @@ import (
 	"bytes"
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 )
 
 type shouldOmitFKClausesFromCreate int
@@ -62,17 +66,17 @@ type ShowCreateDisplayOptions struct {
 func ShowCreateTable(
 	ctx context.Context,
 	p PlanHookState,
-	tn *tree.Name,
+	tn *tree.TableName,
 	dbPrefix string,
-	desc *sqlbase.ImmutableTableDescriptor,
+	desc catalog.TableDescriptor,
 	lCtx simpleSchemaResolver,
 	displayOptions ShowCreateDisplayOptions,
 ) (string, error) {
-	a := &sqlbase.DatumAlloc{}
+	a := &rowenc.DatumAlloc{}
 
 	f := tree.NewFmtCtx(tree.FmtSimple)
 	f.WriteString("CREATE ")
-	if desc.Temporary {
+	if desc.IsTemporary() {
 		f.WriteString("TEMP ")
 	}
 	f.WriteString("TABLE ")
@@ -86,44 +90,58 @@ func ShowCreateTable(
 			f.WriteString(",")
 		}
 		f.WriteString("\n\t")
-		colstr, err := schemaexpr.FormatColumnForDisplay(ctx, &p.RunParams(ctx).p.semaCtx, desc, col)
+		colstr, err := schemaexpr.FormatColumnForDisplay(ctx, desc, col, &p.RunParams(ctx).p.semaCtx)
 		if err != nil {
 			return "", err
 		}
 		f.WriteString(colstr)
-		if desc.IsPhysicalTable() && desc.PrimaryIndex.ColumnIDs[0] == col.ID {
+		if desc.IsPhysicalTable() && desc.GetPrimaryIndex().ColumnIDs[0] == col.ID {
 			// Only set primaryKeyIsOnVisibleColumn to true if the primary key
 			// is on a visible column (not rowid).
 			primaryKeyIsOnVisibleColumn = true
 		}
 	}
 	if primaryKeyIsOnVisibleColumn ||
-		(desc.IsPhysicalTable() && desc.PrimaryIndex.IsSharded()) {
+		(desc.IsPhysicalTable() && desc.GetPrimaryIndex().IsSharded()) {
 		f.WriteString(",\n\tCONSTRAINT ")
-		formatQuoteNames(&f.Buffer, desc.PrimaryIndex.Name)
+		formatQuoteNames(&f.Buffer, desc.GetPrimaryIndex().Name)
 		f.WriteString(" ")
 		f.WriteString(desc.PrimaryKeyString())
 	}
 	// TODO (lucy): Possibly include FKs in the mutations list here, or else
 	// exclude check mutations below, for consistency.
 	if displayOptions.FKDisplayMode != OmitFKClausesFromCreate {
-		for i := range desc.OutboundFKs {
+		if err := desc.ForeachOutboundFK(func(fk *descpb.ForeignKeyConstraint) error {
 			fkCtx := tree.NewFmtCtx(tree.FmtSimple)
-			fk := &desc.OutboundFKs[i]
 			fkCtx.WriteString(",\n\tCONSTRAINT ")
 			fkCtx.FormatNameP(&fk.Name)
 			fkCtx.WriteString(" ")
-			if err := showForeignKeyConstraint(&fkCtx.Buffer, dbPrefix, desc, fk, lCtx); err != nil {
+			// Passing in EmptySearchPath causes the schema name to show up in the
+			// constraint definition, which we need for `cockroach dump` output to be
+			// usable.
+			if err := showForeignKeyConstraint(
+				&fkCtx.Buffer,
+				dbPrefix,
+				desc,
+				fk,
+				lCtx,
+				sessiondata.EmptySearchPath,
+			); err != nil {
 				if displayOptions.FKDisplayMode == OmitMissingFKClausesFromCreate {
-					continue
-				} else { // When FKDisplayMode == IncludeFkClausesInCreate.
-					return "", err
+					return nil
 				}
+				// When FKDisplayMode == IncludeFkClausesInCreate.
+				return err
 			}
 			f.WriteString(fkCtx.String())
+			return nil
+		}); err != nil {
+			return "", err
 		}
 	}
-	allIdx := append(desc.Indexes, desc.PrimaryIndex)
+	allIdx := append(
+		append([]descpb.IndexDescriptor{}, desc.GetPublicNonPrimaryIndexes()...),
+		*desc.GetPrimaryIndex())
 	for i := range allIdx {
 		idx := &allIdx[i]
 		// Only add indexes to the create_statement column, and not to the
@@ -139,10 +157,14 @@ func ShowCreateTable(
 			// clauses as well.
 			includeInterleaveClause = true
 		}
-		if idx.ID != desc.PrimaryIndex.ID && includeInterleaveClause {
+		if idx.ID != desc.GetPrimaryIndex().ID && includeInterleaveClause {
 			// Showing the primary index is handled above.
 			f.WriteString(",\n\t")
-			f.WriteString(idx.SQLString(&sqlbase.AnonymousTable))
+			idxStr, err := schemaexpr.FormatIndexForDisplay(ctx, desc, &descpb.AnonymousTable, idx, &p.RunParams(ctx).p.semaCtx)
+			if err != nil {
+				return "", err
+			}
+			f.WriteString(idxStr)
 			// Showing the INTERLEAVE and PARTITION BY for the primary index are
 			// handled last.
 
@@ -167,17 +189,17 @@ func ShowCreateTable(
 		return "", err
 	}
 
-	if err := showCreateInterleave(&desc.PrimaryIndex, &f.Buffer, dbPrefix, lCtx); err != nil {
+	if err := showCreateInterleave(desc.GetPrimaryIndex(), &f.Buffer, dbPrefix, lCtx); err != nil {
 		return "", err
 	}
 	if err := ShowCreatePartitioning(
-		a, p.ExecCfg().Codec, desc, &desc.PrimaryIndex, &desc.PrimaryIndex.Partitioning, &f.Buffer, 0 /* indent */, 0, /* colOffset */
+		a, p.ExecCfg().Codec, desc, desc.GetPrimaryIndex(), &desc.GetPrimaryIndex().Partitioning, &f.Buffer, 0 /* indent */, 0, /* colOffset */
 	); err != nil {
 		return "", err
 	}
 
 	if !displayOptions.IgnoreComments {
-		if err := showComments(desc, selectComment(ctx, p, desc.ID), &f.Buffer); err != nil {
+		if err := showComments(tn, desc, selectComment(ctx, p, desc.GetID()), &f.Buffer); err != nil {
 			return "", err
 		}
 	}
@@ -198,7 +220,7 @@ func formatQuoteNames(buf *bytes.Buffer, names ...string) {
 }
 
 // ShowCreate returns a valid SQL representation of the CREATE
-// statement used to create the descriptor passed in. The
+// statement used to create the descriptor passed in.
 //
 // The names of the tables references by foreign keys, and the
 // interleaved parent if any, are prefixed by their own database name
@@ -208,20 +230,23 @@ func formatQuoteNames(buf *bytes.Buffer, names ...string) {
 func (p *planner) ShowCreate(
 	ctx context.Context,
 	dbPrefix string,
-	allDescs []sqlbase.Descriptor,
-	desc *sqlbase.ImmutableTableDescriptor,
+	allDescs []descpb.Descriptor,
+	desc *tabledesc.Immutable,
 	displayOptions ShowCreateDisplayOptions,
 ) (string, error) {
 	var stmt string
 	var err error
-	tn := (*tree.Name)(&desc.Name)
+	tn := tree.MakeUnqualifiedTableName(tree.Name(desc.Name))
 	if desc.IsView() {
-		stmt, err = ShowCreateView(ctx, tn, desc)
+		stmt, err = ShowCreateView(ctx, &tn, desc)
 	} else if desc.IsSequence() {
-		stmt, err = ShowCreateSequence(ctx, tn, desc)
+		stmt, err = ShowCreateSequence(ctx, &tn, desc)
 	} else {
-		lCtx := newInternalLookupCtxFromDescriptors(allDescs, nil /* want all tables */)
-		stmt, err = ShowCreateTable(ctx, p, tn, dbPrefix, desc, lCtx, displayOptions)
+		lCtx, lErr := newInternalLookupCtxFromDescriptors(ctx, allDescs, nil /* want all tables */)
+		if lErr != nil {
+			return "", lErr
+		}
+		stmt, err = ShowCreateTable(ctx, p, &tn, dbPrefix, desc, lCtx, displayOptions)
 	}
 
 	return stmt, err

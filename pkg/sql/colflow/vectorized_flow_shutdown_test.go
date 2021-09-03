@@ -208,7 +208,10 @@ func TestVectorizedFlowShutdown(t *testing.T) {
 					inboxMemAccount := testMemMonitor.MakeBoundAccount()
 					defer inboxMemAccount.Close(ctxLocal)
 					inbox, err := colrpc.NewInbox(
-						colmem.NewAllocator(ctxLocal, &inboxMemAccount, testColumnFactory), typs, execinfrapb.StreamID(streamID),
+						ctxLocal,
+						colmem.NewAllocator(ctxLocal, &inboxMemAccount, testColumnFactory),
+						typs,
+						execinfrapb.StreamID(streamID),
 					)
 					require.NoError(t, err)
 					inboxes = append(inboxes, inbox)
@@ -244,7 +247,7 @@ func TestVectorizedFlowShutdown(t *testing.T) {
 					idToClosed.Unlock()
 					outbox, err := colrpc.NewOutbox(
 						colmem.NewAllocator(ctx, outboxMemAcc, testColumnFactory), outboxInput, typs, outboxMetadataSources,
-						[]colexec.Closer{callbackCloser{closeCb: func() error {
+						[]colexecbase.Closer{callbackCloser{closeCb: func() error {
 							idToClosed.Lock()
 							idToClosed.mapping[id] = true
 							idToClosed.Unlock()
@@ -255,7 +258,15 @@ func TestVectorizedFlowShutdown(t *testing.T) {
 					require.NoError(t, err)
 					wg.Add(1)
 					go func(id int) {
-						outbox.Run(ctx, dialer, execinfra.StaticNodeID, flowID, execinfrapb.StreamID(id), cancelFn)
+						outbox.Run(
+							ctx,
+							dialer,
+							execinfra.StaticNodeID,
+							flowID,
+							execinfrapb.StreamID(id),
+							cancelFn,
+							0, /* connectionTimeout */
+						)
 						wg.Done()
 					}(id)
 
@@ -286,9 +297,17 @@ func TestVectorizedFlowShutdown(t *testing.T) {
 						sourceMemAccount := testMemMonitor.MakeBoundAccount()
 						defer sourceMemAccount.Close(ctxRemote)
 						remoteAllocator := colmem.NewAllocator(ctxRemote, &sourceMemAccount, testColumnFactory)
-						batch := remoteAllocator.NewMemBatch(typs)
+						batch := remoteAllocator.NewMemBatchWithMaxCapacity(typs)
 						batch.SetLength(coldata.BatchSize())
-						runOutboxInbox(ctxRemote, cancelRemote, &outboxMemAccount, colexecbase.NewRepeatableBatchSource(remoteAllocator, batch, typs), inboxes[i], streamID, []execinfrapb.MetadataSource{createMetadataSourceForID(streamID)})
+						runOutboxInbox(
+							ctxRemote,
+							cancelRemote,
+							&outboxMemAccount,
+							colexecbase.NewRepeatableBatchSource(remoteAllocator, batch, typs),
+							inboxes[i],
+							streamID,
+							[]execinfrapb.MetadataSource{createMetadataSourceForID(streamID)},
+						)
 					}
 					streamID++
 				}
@@ -300,14 +319,24 @@ func TestVectorizedFlowShutdown(t *testing.T) {
 					inboxMemAccount := testMemMonitor.MakeBoundAccount()
 					defer inboxMemAccount.Close(ctxAnotherRemote)
 					inbox, err := colrpc.NewInbox(
+						ctxAnotherRemote,
 						colmem.NewAllocator(ctxAnotherRemote, &inboxMemAccount, testColumnFactory),
-						typs, execinfrapb.StreamID(streamID),
+						typs,
+						execinfrapb.StreamID(streamID),
 					)
 					require.NoError(t, err)
 					inboxes = append(inboxes, inbox)
 					outboxMemAccount := testMemMonitor.MakeBoundAccount()
 					defer outboxMemAccount.Close(ctxAnotherRemote)
-					runOutboxInbox(ctxAnotherRemote, cancelAnotherRemote, &outboxMemAccount, synchronizer, inbox, streamID, []execinfrapb.MetadataSource{materializerMetadataSource, createMetadataSourceForID(streamID)})
+					runOutboxInbox(
+						ctxAnotherRemote,
+						cancelAnotherRemote,
+						&outboxMemAccount,
+						synchronizer,
+						inbox,
+						streamID,
+						[]execinfrapb.MetadataSource{materializerMetadataSource, createMetadataSourceForID(streamID)},
+					)
 					streamID++
 					// There is now only a single Inbox on the "local" node which is the
 					// only metadata source.
@@ -326,7 +355,7 @@ func TestVectorizedFlowShutdown(t *testing.T) {
 					typs,
 					nil, /* output */
 					[]execinfrapb.MetadataSource{materializerMetadataSource},
-					[]colexec.Closer{callbackCloser{closeCb: func() error {
+					[]colexecbase.Closer{callbackCloser{closeCb: func() error {
 						materializerCalledClose = true
 						return nil
 					}}}, /* toClose */
@@ -356,10 +385,11 @@ func TestVectorizedFlowShutdown(t *testing.T) {
 						require.NotNil(t, meta.Err)
 						id, err := strconv.Atoi(meta.Err.Error())
 						require.NoError(t, err)
-						require.False(t, receivedMetaFromID[id])
 						receivedMetaFromID[id] = true
 					}
-					require.Equal(t, streamID, metaCount, fmt.Sprintf("received metadata from Outbox %+v", receivedMetaFromID))
+					for id, received := range receivedMetaFromID {
+						require.True(t, received, "did not receive metadata from Outbox %d", id)
+					}
 				case consumerClosed:
 					materializer.ConsumerClosed()
 				}

@@ -18,10 +18,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/span"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
@@ -31,7 +32,7 @@ import (
 )
 
 type requestedStat struct {
-	columns             []sqlbase.ColumnID
+	columns             []descpb.ColumnID
 	histogram           bool
 	histogramMaxBuckets int
 	name                string
@@ -39,7 +40,6 @@ type requestedStat struct {
 }
 
 const histogramSamples = 10000
-const histogramBuckets = 200
 
 // maxTimestampAge is the maximum allowed age of a scan timestamp during table
 // stats collection, used when creating statistics AS OF SYSTEM TIME. The
@@ -54,10 +54,7 @@ var maxTimestampAge = settings.RegisterDurationSetting(
 )
 
 func (dsp *DistSQLPlanner) createStatsPlan(
-	planCtx *PlanningCtx,
-	desc *sqlbase.ImmutableTableDescriptor,
-	reqStats []requestedStat,
-	job *jobs.Job,
+	planCtx *PlanningCtx, desc *tabledesc.Immutable, reqStats []requestedStat, job *jobs.Job,
 ) (*PhysicalPlan, error) {
 	if len(reqStats) == 0 {
 		return nil, errors.New("no stats requested")
@@ -83,7 +80,7 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 	if err != nil {
 		return nil, err
 	}
-	sb := span.MakeBuilder(planCtx.planner.ExecCfg().Codec, desc.TableDesc(), scan.index)
+	sb := span.MakeBuilder(planCtx.planner.ExecCfg().Codec, desc, scan.index)
 	scan.spans, err = sb.UnconstrainedSpans()
 	if err != nil {
 		return nil, err
@@ -105,7 +102,7 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 	}
 
 	var sketchSpecs, invSketchSpecs []execinfrapb.SketchSpec
-	sampledColumnIDs := make([]sqlbase.ColumnID, len(scan.cols))
+	sampledColumnIDs := make([]descpb.ColumnID, len(scan.cols))
 	for _, s := range reqStats {
 		spec := execinfrapb.SketchSpec{
 			SketchType:          execinfrapb.SketchType_HLL_PLUS_PLUS_V1,
@@ -124,6 +121,22 @@ func (dsp *DistSQLPlanner) createStatsPlan(
 			sampledColumnIDs[streamColIdx] = colID
 		}
 		if s.inverted {
+			// Find the first inverted index on the first column. Although there may be
+			// more, we don't currently have a way of using more than one or deciding which
+			// one is better.
+			// TODO(mjibson): allow multiple inverted indexes on the same column (i.e.,
+			// with different configurations). See #50655.
+			col := s.columns[0]
+			for _, indexDesc := range desc.GetPublicNonPrimaryIndexes() {
+				if indexDesc.Type == descpb.IndexDescriptor_INVERTED && indexDesc.ColumnIDs[0] == col {
+					spec.Index = &indexDesc
+					break
+				}
+			}
+			// Even if spec.Index is nil because there isn't an inverted index on
+			// the requested stats column, we can still proceed. We aren't generating
+			// histograms in that case so we don't need an index descriptor to generate the
+			// inverted index entries.
 			invSketchSpecs = append(invSketchSpecs, spec)
 		} else {
 			sketchSpecs = append(sketchSpecs, spec)
@@ -225,16 +238,20 @@ func (dsp *DistSQLPlanner) createPlanForCreateStats(
 	histogramCollectionEnabled := stats.HistogramClusterMode.Get(&dsp.st.SV)
 	for i := 0; i < len(reqStats); i++ {
 		histogram := details.ColumnStats[i].HasHistogram && histogramCollectionEnabled
+		histogramMaxBuckets := defaultHistogramBuckets
+		if details.ColumnStats[i].HistogramMaxBuckets > 0 {
+			histogramMaxBuckets = int(details.ColumnStats[i].HistogramMaxBuckets)
+		}
 		reqStats[i] = requestedStat{
 			columns:             details.ColumnStats[i].ColumnIDs,
 			histogram:           histogram,
-			histogramMaxBuckets: histogramBuckets,
+			histogramMaxBuckets: histogramMaxBuckets,
 			name:                details.Name,
 			inverted:            details.ColumnStats[i].Inverted,
 		}
 	}
 
-	tableDesc := sqlbase.NewImmutableTableDescriptor(details.Table)
+	tableDesc := tabledesc.NewImmutable(details.Table)
 	return dsp.createStatsPlan(planCtx, tableDesc, reqStats, job)
 }
 

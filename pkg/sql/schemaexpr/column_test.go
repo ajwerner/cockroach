@@ -14,9 +14,10 @@ import (
 	"context"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 )
 
@@ -27,7 +28,7 @@ func TestDequalifyColumnRefs(t *testing.T) {
 	table := tree.Name("bar")
 	tn := tree.MakeTableName(database, table)
 
-	cols := []sqlbase.ColumnDescriptor{
+	cols := []descpb.ColumnDescriptor{
 		{Name: "a", Type: types.Int},
 		{Name: "b", Type: types.String},
 	}
@@ -58,21 +59,20 @@ func TestDequalifyColumnRefs(t *testing.T) {
 				t.Fatalf("%s: unexpected error: %s", d.expr, err)
 			}
 
-			source := sqlbase.NewSourceInfoForSingleTable(
-				tn, sqlbase.ResultColumnsFromColDescs(
-					sqlbase.ID(1),
+			source := colinfo.NewSourceInfoForSingleTable(
+				tn, colinfo.ResultColumnsFromColDescs(
+					descpb.ID(1),
 					cols,
 				),
 			)
 
-			r, err := DequalifyColumnRefs(ctx, source, expr)
+			deqExpr, err := DequalifyColumnRefs(ctx, source, expr)
 			if err != nil {
 				t.Fatalf("%s: expected success, but found error: %s", d.expr, err)
 			}
 
-			s := tree.Serialize(r)
-			if s != d.expected {
-				t.Errorf("%s: expected %q, got %q", d.expr, d.expected, s)
+			if deqExpr != d.expected {
+				t.Errorf("%s: expected %q, got %q", d.expr, d.expected, deqExpr)
 			}
 		})
 	}

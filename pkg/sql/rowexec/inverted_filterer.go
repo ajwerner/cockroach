@@ -17,15 +17,16 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedexpr"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/invertedidx"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/opentracing/opentracing-go"
+	"github.com/cockroachdb/errors"
 )
 
 // invertedFilterState represents the state of the processor.
@@ -40,6 +41,9 @@ const (
 	ifrEmittingRows
 )
 
+// TODO(sumeer): support pre-filtering, akin to the invertedJoiner, by passing
+// relationship info and parameters in the spec and using it to construct a
+// preFilterer.
 type invertedFilterer struct {
 	execinfra.ProcessorBase
 	runningState   invertedFiltererState
@@ -56,14 +60,13 @@ type invertedFilterer struct {
 	resultIdx int
 
 	// Scratch space for constructing the PK row to feed to rc.
-	keyRow sqlbase.EncDatumRow
+	keyRow rowenc.EncDatumRow
 	// Scratch space for constructing the output row.
-	outputRow sqlbase.EncDatumRow
+	outputRow rowenc.EncDatumRow
 }
 
 var _ execinfra.Processor = &invertedFilterer{}
 var _ execinfra.RowSource = &invertedFilterer{}
-var _ execinfrapb.MetadataSource = &invertedFilterer{}
 var _ execinfra.OpNode = &invertedFilterer{}
 
 const invertedFiltererProcName = "inverted filterer"
@@ -84,13 +87,6 @@ func newInvertedFilterer(
 		},
 	}
 
-	// TODO(sumeer): for expressions that only involve unions, and the output
-	// does not need to be in key-order, we should incrementally output after
-	// de-duping. It will reduce the container memory/disk by 2x.
-
-	// Prepare inverted evaluator for later evaluation.
-	ifr.invertedEval.init()
-
 	// The RowContainer columns are the PK columns, that are the columns
 	// other than the inverted column. The output has the same types as
 	// the input.
@@ -98,8 +94,8 @@ func newInvertedFilterer(
 	rcColTypes := make([]*types.T, len(outputColTypes)-1)
 	copy(rcColTypes, outputColTypes[:ifr.invertedColIdx])
 	copy(rcColTypes[ifr.invertedColIdx:], outputColTypes[ifr.invertedColIdx+1:])
-	ifr.keyRow = make(sqlbase.EncDatumRow, len(rcColTypes))
-	ifr.outputRow = make(sqlbase.EncDatumRow, len(outputColTypes))
+	ifr.keyRow = make(rowenc.EncDatumRow, len(rcColTypes))
+	ifr.outputRow = make(rowenc.EncDatumRow, len(outputColTypes))
 	ifr.outputRow[ifr.invertedColIdx].Datum = tree.DNull
 
 	// Initialize ProcessorBase.
@@ -109,7 +105,7 @@ func newInvertedFilterer(
 			InputsToDrain: []execinfra.RowSource{ifr.input},
 			TrailingMetaCallback: func(ctx context.Context) []execinfrapb.ProducerMetadata {
 				ifr.close()
-				return ifr.generateMeta(ctx)
+				return nil
 			},
 		},
 	); err != nil {
@@ -127,25 +123,46 @@ func newInvertedFilterer(
 		ifr.FlowCtx.Cfg.TempStorage,
 		ifr.MemMonitor,
 		ifr.diskMonitor,
-		0, /* rowCapacity */
 	)
 
-	if sp := opentracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && tracing.IsRecording(sp) {
 		ifr.input = newInputStatCollector(ifr.input)
 		ifr.FinishTrace = ifr.outputStatsToTrace
 	}
+
+	if spec.PreFiltererSpec != nil {
+		semaCtx := flowCtx.TypeResolverFactory.NewSemaContext(flowCtx.EvalCtx.Txn)
+		var exprHelper execinfrapb.ExprHelper
+		colTypes := []*types.T{spec.PreFiltererSpec.Type}
+		if err := exprHelper.Init(spec.PreFiltererSpec.Expression, colTypes, semaCtx, ifr.EvalCtx); err != nil {
+			return nil, err
+		}
+		preFilterer, preFiltererState, err := invertedidx.NewBoundPreFilterer(
+			spec.PreFiltererSpec.Type, exprHelper.Expr)
+		if err != nil {
+			return nil, err
+		}
+		ifr.invertedEval.filterer = preFilterer
+		ifr.invertedEval.preFilterState = append(ifr.invertedEval.preFilterState, preFiltererState)
+	}
+	// TODO(sumeer): for expressions that only involve unions, and the output
+	// does not need to be in key-order, we should incrementally output after
+	// de-duping. It will reduce the container memory/disk by 2x.
+
+	// Prepare inverted evaluator for later evaluation.
+	ifr.invertedEval.init()
 
 	return ifr, nil
 }
 
 // Next is part of the RowSource interface.
-func (ifr *invertedFilterer) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (ifr *invertedFilterer) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	// - Read all the input and add to the row container (with de-duping), and feed it
 	//   to the invertedEval.
 	// - Evaluate the inverted expression
 	// - Retrieve the results and for each row evaluate the ON expression and output.
 	for ifr.State == execinfra.StateRunning {
-		var row sqlbase.EncDatumRow
+		var row rowenc.EncDatumRow
 		var meta *execinfrapb.ProducerMetadata
 		switch ifr.runningState {
 		case ifrReadingInput:
@@ -205,18 +222,25 @@ func (ifr *invertedFilterer) readInput() (invertedFiltererState, *execinfrapb.Pr
 		return ifrStateUnknown, ifr.DrainHelper()
 	}
 	// Add to the evaluator.
-	ifr.invertedEval.addIndexRow(row[ifr.invertedColIdx].EncodedBytes(), keyIndex)
+	if _, err = ifr.invertedEval.prepareAddIndexRow(row[ifr.invertedColIdx].EncodedBytes()); err != nil {
+		ifr.MoveToDraining(err)
+		return ifrStateUnknown, ifr.DrainHelper()
+	}
+	if err = ifr.invertedEval.addIndexRow(keyIndex); err != nil {
+		ifr.MoveToDraining(err)
+		return ifrStateUnknown, ifr.DrainHelper()
+	}
 	return ifrReadingInput, nil
 }
 
 func (ifr *invertedFilterer) emitRow() (
 	invertedFiltererState,
-	sqlbase.EncDatumRow,
+	rowenc.EncDatumRow,
 	*execinfrapb.ProducerMetadata,
 ) {
 	drainFunc := func(err error) (
 		invertedFiltererState,
-		sqlbase.EncDatumRow,
+		rowenc.EncDatumRow,
 		*execinfrapb.ProducerMetadata,
 	) {
 		ifr.MoveToDraining(err)
@@ -296,7 +320,7 @@ func (ifr *invertedFilterer) outputStatsToTrace() {
 	if !ok {
 		return
 	}
-	if sp := opentracing.SpanFromContext(ifr.Ctx); sp != nil {
+	if sp := tracing.SpanFromContext(ifr.Ctx); sp != nil {
 		tracing.SetSpanStats(
 			sp,
 			&InvertedFiltererStats{
@@ -306,18 +330,6 @@ func (ifr *invertedFilterer) outputStatsToTrace() {
 			},
 		)
 	}
-}
-
-func (ifr *invertedFilterer) generateMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
-	if tfs := execinfra.GetLeafTxnFinalState(ctx, ifr.FlowCtx.Txn); tfs != nil {
-		return []execinfrapb.ProducerMetadata{{LeafTxnFinalState: tfs}}
-	}
-	return nil
-}
-
-// DrainMeta is part of the MetadataSource interface.
-func (ifr *invertedFilterer) DrainMeta(ctx context.Context) []execinfrapb.ProducerMetadata {
-	return ifr.generateMeta(ctx)
 }
 
 // ChildCount is part of the execinfra.OpNode interface.
@@ -336,5 +348,5 @@ func (ifr *invertedFilterer) Child(nth int, verbose bool) execinfra.OpNode {
 		}
 		panic("input to invertedFilterer is not an execinfra.OpNode")
 	}
-	panic(fmt.Sprintf("invalid index %d", nth))
+	panic(errors.AssertionFailedf("invalid index %d", nth))
 }

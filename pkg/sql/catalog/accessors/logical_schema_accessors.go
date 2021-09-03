@@ -17,10 +17,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
 )
 
 // This file provides reference implementations of the schema accessor
@@ -47,16 +51,21 @@ type LogicalSchemaAccessor struct {
 
 var _ catalog.Accessor = &LogicalSchemaAccessor{}
 
-// IsValidSchema implements the DatabaseLister interface.
-func (l *LogicalSchemaAccessor) IsValidSchema(
-	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec, dbID sqlbase.ID, scName string,
-) (bool, sqlbase.ID, error) {
+// GetSchema implements the Accessor interface.
+func (l *LogicalSchemaAccessor) GetSchema(
+	ctx context.Context,
+	txn *kv.Txn,
+	codec keys.SQLCodec,
+	dbID descpb.ID,
+	scName string,
+	flags tree.SchemaLookupFlags,
+) (bool, catalog.ResolvedSchema, error) {
 	if _, ok := l.vs.GetVirtualSchema(scName); ok {
-		return true, sqlbase.InvalidID, nil
+		return true, catalog.ResolvedSchema{Kind: catalog.SchemaVirtual, Name: scName}, nil
 	}
 
 	// Fallthrough.
-	return l.Accessor.IsValidSchema(ctx, txn, codec, dbID, scName)
+	return l.Accessor.GetSchema(ctx, txn, codec, dbID, scName, flags)
 }
 
 // GetObjectNames implements the DatabaseLister interface.
@@ -64,16 +73,16 @@ func (l *LogicalSchemaAccessor) GetObjectNames(
 	ctx context.Context,
 	txn *kv.Txn,
 	codec keys.SQLCodec,
-	dbDesc sqlbase.DatabaseDescriptorInterface,
+	dbDesc catalog.DatabaseDescriptor,
 	scName string,
 	flags tree.DatabaseListFlags,
 ) (tree.TableNames, error) {
 	if entry, ok := l.vs.GetVirtualSchema(scName); ok {
 		names := make(tree.TableNames, 0, entry.NumTables())
-		desc := entry.Desc().TableDesc()
+		schemaDesc := entry.Desc()
 		entry.VisitTables(func(table catalog.VirtualObject) {
 			name := tree.MakeTableNameWithSchema(
-				tree.Name(dbDesc.GetName()), tree.Name(desc.Name), tree.Name(table.Desc().TableDesc().Name))
+				tree.Name(dbDesc.GetName()), tree.Name(schemaDesc.GetName()), tree.Name(table.Desc().GetName()))
 			name.ExplicitCatalog = flags.ExplicitPrefix
 			name.ExplicitSchema = flags.ExplicitPrefix
 			names = append(names, name)
@@ -102,7 +111,7 @@ func (l *LogicalSchemaAccessor) GetObjectDesc(
 		if desc == nil {
 			if flags.Required {
 				obj := tree.NewQualifiedObjectName(db, schema, object, flags.DesiredObjectKind)
-				return nil, sqlbase.NewUndefinedObjectError(obj, flags.DesiredObjectKind)
+				return nil, sqlerrors.NewUndefinedObjectError(obj, flags.DesiredObjectKind)
 			}
 			return nil, nil
 		}
@@ -111,6 +120,18 @@ func (l *LogicalSchemaAccessor) GetObjectDesc(
 		}
 		return desc.Desc(), nil
 	}
+
+	// Resolve type aliases which are usually available in the PostgreSQL as an extension
+	// on the public schema.
+	if schema == tree.PublicSchema && flags.DesiredObjectKind == tree.TypeObject {
+		if alias, ok := types.PublicSchemaAliases[object]; ok {
+			if flags.RequireMutable {
+				return nil, errors.Newf("cannot use mutable descriptor of aliased type %s.%s", schema, object)
+			}
+			return typedesc.MakeSimpleAlias(alias, keys.PublicSchemaID), nil
+		}
+	}
+
 	// Fallthrough.
 	return l.Accessor.GetObjectDesc(ctx, txn, settings, codec, db, schema, object, flags)
 }

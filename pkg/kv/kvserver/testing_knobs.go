@@ -13,7 +13,9 @@ package kvserver
 import (
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/tenantrate"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnwait"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -30,6 +32,7 @@ type StoreTestingKnobs struct {
 	IntentResolverKnobs     kvserverbase.IntentResolverTestingKnobs
 	TxnWaitKnobs            txnwait.TestingKnobs
 	ConsistencyTestingKnobs ConsistencyTestingKnobs
+	TenantRateKnobs         tenantrate.TestingKnobs
 
 	// TestingRequestFilter is called before evaluating each request on a
 	// replica. The filter is run before the request acquires latches, so
@@ -42,6 +45,10 @@ type StoreTestingKnobs struct {
 	// block interfering requests. If it returns an error, the command will not
 	// be evaluated.
 	TestingLatchFilter kvserverbase.ReplicaRequestFilter
+
+	// TestingConcurrencyRetryFilter is called before a concurrency retry error is
+	// handled and the batch is retried.
+	TestingConcurrencyRetryFilter kvserverbase.ReplicaConcurrencyRetryFilter
 
 	// TestingProposalFilter is called before proposing each command.
 	TestingProposalFilter kvserverbase.ReplicaProposalFilter
@@ -93,7 +100,7 @@ type StoreTestingKnobs struct {
 	// LeaseRequestEvent, if set, is called when replica.requestLeaseLocked() is
 	// called to acquire a new lease. This can be used to assert that a request
 	// triggers a lease acquisition.
-	LeaseRequestEvent func(ts hlc.Timestamp)
+	LeaseRequestEvent func(ts hlc.Timestamp, storeID roachpb.StoreID, rangeID roachpb.RangeID) *roachpb.Error
 	// LeaseTransferBlockedOnExtensionEvent, if set, is called when
 	// replica.TransferLease() encounters an in-progress lease extension.
 	// nextLeader is the replica that we're trying to transfer the lease to.
@@ -244,3 +251,19 @@ type StoreTestingKnobs struct {
 
 // ModuleTestingKnobs is part of the base.ModuleTestingKnobs interface.
 func (*StoreTestingKnobs) ModuleTestingKnobs() {}
+
+// NodeLivenessTestingKnobs allows tests to override some node liveness
+// controls. When set, fields ultimately affect the NodeLivenessOptions used by
+// the cluster.
+type NodeLivenessTestingKnobs struct {
+	// LivenessDuration overrides a liveness record's life time.
+	LivenessDuration time.Duration
+	// RenewalDuration specifies how long before the expiration a record is
+	// heartbeated. If LivenessDuration is set, this should probably be set too.
+	RenewalDuration time.Duration
+}
+
+var _ base.ModuleTestingKnobs = NodeLivenessTestingKnobs{}
+
+// ModuleTestingKnobs implements the base.ModuleTestingKnobs interface.
+func (NodeLivenessTestingKnobs) ModuleTestingKnobs() {}

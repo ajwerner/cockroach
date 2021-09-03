@@ -70,7 +70,7 @@ func TestClosedTimestampWorksWhenRequestsAreSentToNonLeaseHolders(t *testing.T) 
 			Epoch:      1000,
 			Expiration: hlc.LegacyTimestamp{WallTime: 1},
 		}))
-	tc.AddServer(t, serverArgs)
+	tc.AddAndStartServer(t, serverArgs)
 
 	// Create our scratch range and up-replicate it.
 	k := tc.ScratchRange(t)
@@ -96,7 +96,7 @@ func TestClosedTimestampWorksWhenRequestsAreSentToNonLeaseHolders(t *testing.T) 
 		target := tc.Target(serverIdx)
 		transferLease(repl.Desc(), target)
 		testutils.SucceedsSoon(t, func() error {
-			if !repl.OwnsValidLease(db1.Clock().Now()) {
+			if !repl.OwnsValidLease(ctx, db1.Clock().Now()) {
 				return errors.Errorf("don't yet have the lease")
 			}
 			return nil

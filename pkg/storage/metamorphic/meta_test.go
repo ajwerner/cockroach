@@ -22,7 +22,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
@@ -152,17 +152,15 @@ func runMetaTest(run testRun) {
 	}
 }
 
-// TestRocksPebbleEquivalence runs the MVCC Metamorphic test suite, and checks
-// for matching outputs by the test suite between RocksDB and Pebble.
-func TestRocksPebbleEquivalence(t *testing.T) {
+// TestPebbleEquivalence runs the MVCC Metamorphic test suite, and checks
+// for matching outputs by the test suite between different options of Pebble.
+func TestPebbleEquivalence(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
-	if util.RaceEnabled {
-		// This test times out with the race detector enabled.
-		return
-	}
+	// This test times out with the race detector enabled.
+	skip.UnderRace(t)
 
 	// Have one fixed seed, one user-specified seed, and one random seed.
 	seeds := []int64{123, *seed, rand.Int63()}
@@ -175,7 +173,6 @@ func TestRocksPebbleEquivalence(t *testing.T) {
 				seed:     seed,
 				restarts: false,
 				engineSequences: [][]engineImpl{
-					{engineImplRocksDB},
 					{engineImplPebble},
 					{engineImplPebbleManySSTs},
 					{engineImplPebbleVarOpts},
@@ -186,18 +183,16 @@ func TestRocksPebbleEquivalence(t *testing.T) {
 	}
 }
 
-// TestRocksPebbleRestarts runs the MVCC Metamorphic test suite with restarts
+// TestPebbleRestarts runs the MVCC Metamorphic test suite with restarts
 // enabled, and ensures that the output remains the same across different
 // engine sequences with restarts in between.
-func TestRocksPebbleRestarts(t *testing.T) {
+func TestPebbleRestarts(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	// This test times out with the race detector enabled.
+	skip.UnderRace(t)
 
 	ctx := context.Background()
-	if util.RaceEnabled {
-		// This test times out with the race detector enabled.
-		return
-	}
 
 	// Have one fixed seed, one user-specified seed, and one random seed.
 	seeds := []int64{123, *seed, rand.Int63()}
@@ -210,10 +205,9 @@ func TestRocksPebbleRestarts(t *testing.T) {
 				seed:     seed,
 				restarts: true,
 				engineSequences: [][]engineImpl{
-					{engineImplRocksDB},
 					{engineImplPebble},
-					{engineImplRocksDB, engineImplPebble},
-					{engineImplRocksDB, engineImplPebbleManySSTs, engineImplPebbleVarOpts},
+					{engineImplPebble, engineImplPebble},
+					{engineImplPebble, engineImplPebbleManySSTs, engineImplPebbleVarOpts},
 				},
 			}
 			runMetaTest(run)
@@ -221,9 +215,9 @@ func TestRocksPebbleRestarts(t *testing.T) {
 	}
 }
 
-// TestRocksPebbleCheck checks whether the output file specified with --check has
+// TestPebbleCheck checks whether the output file specified with --check has
 // matching behavior across rocks/pebble.
-func TestRocksPebbleCheck(t *testing.T) {
+func TestPebbleCheck(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
@@ -240,9 +234,7 @@ func TestRocksPebbleCheck(t *testing.T) {
 			checkFile: *check,
 			restarts:  true,
 			engineSequences: [][]engineImpl{
-				{engineImplRocksDB},
 				{engineImplPebble},
-				{engineImplRocksDB, engineImplPebble},
 			},
 		}
 		runMetaTest(run)

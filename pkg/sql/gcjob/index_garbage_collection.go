@@ -17,7 +17,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -28,22 +30,27 @@ import (
 func gcIndexes(
 	ctx context.Context,
 	execCfg *sql.ExecutorConfig,
-	parentID sqlbase.ID,
+	parentID descpb.ID,
 	progress *jobspb.SchemaChangeGCProgress,
-) (bool, error) {
-	didGC := false
+) error {
 	droppedIndexes := progress.Indexes
 	if log.V(2) {
 		log.Infof(ctx, "GC is being considered on table %d for indexes indexes: %+v", parentID, droppedIndexes)
 	}
 
-	var parentTable *sqlbase.TableDescriptor
-	if err := execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		var err error
-		parentTable, err = sqlbase.GetTableDescFromID(ctx, txn, execCfg.Codec, parentID)
+	// Before deleting any indexes, ensure that old versions of the table descriptor
+	// are no longer in use. This is necessary in the case of truncate, where we
+	// schedule a GC Job in the transaction that commits the truncation.
+	if err := sql.WaitToUpdateLeases(ctx, execCfg.LeaseManager, parentID); err != nil {
+		return err
+	}
+
+	var parentTable *tabledesc.Immutable
+	if err := execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
+		parentTable, err = catalogkv.MustGetTableDescByID(ctx, txn, execCfg.Codec, parentID)
 		return err
 	}); err != nil {
-		return false, errors.Wrapf(err, "fetching parent table %d", parentID)
+		return errors.Wrapf(err, "fetching parent table %d", parentID)
 	}
 
 	for _, index := range droppedIndexes {
@@ -51,35 +58,32 @@ func gcIndexes(
 			continue
 		}
 
-		indexDesc := sqlbase.IndexDescriptor{ID: index.IndexID}
+		indexDesc := descpb.IndexDescriptor{ID: index.IndexID}
 		if err := clearIndex(ctx, execCfg, parentTable, indexDesc); err != nil {
-			return false, errors.Wrapf(err, "clearing index %d", indexDesc.ID)
+			return errors.Wrapf(err, "clearing index %d", indexDesc.ID)
 		}
 
 		// All the data chunks have been removed. Now also removed the
 		// zone configs for the dropped indexes, if any.
 		if err := execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-			return sql.RemoveIndexZoneConfigs(ctx, txn, execCfg, parentTable.GetID(), []sqlbase.IndexDescriptor{indexDesc})
+			return sql.RemoveIndexZoneConfigs(ctx, txn, execCfg, parentTable.GetID(), []descpb.IndexDescriptor{indexDesc})
 		}); err != nil {
-			return false, errors.Wrapf(err, "removing index %d zone configs", indexDesc.ID)
+			return errors.Wrapf(err, "removing index %d zone configs", indexDesc.ID)
 		}
 
 		if err := completeDroppedIndex(ctx, execCfg, parentTable, index.IndexID, progress); err != nil {
-			return false, err
+			return err
 		}
-
-		didGC = true
 	}
-
-	return didGC, nil
+	return nil
 }
 
 // clearIndexes issues Clear Range requests over all specified indexes.
 func clearIndex(
 	ctx context.Context,
 	execCfg *sql.ExecutorConfig,
-	tableDesc *sqlbase.TableDescriptor,
-	index sqlbase.IndexDescriptor,
+	tableDesc *tabledesc.Immutable,
+	index descpb.IndexDescriptor,
 ) error {
 	log.Infof(ctx, "clearing index %d from table %d", index.ID, tableDesc.ID)
 	if index.IsInterleaved() {
@@ -105,11 +109,11 @@ func clearIndex(
 func completeDroppedIndex(
 	ctx context.Context,
 	execCfg *sql.ExecutorConfig,
-	table *sqlbase.TableDescriptor,
-	indexID sqlbase.IndexID,
+	table *tabledesc.Immutable,
+	indexID descpb.IndexID,
 	progress *jobspb.SchemaChangeGCProgress,
 ) error {
-	if err := updateDescriptorGCMutations(ctx, execCfg, table, indexID); err != nil {
+	if err := updateDescriptorGCMutations(ctx, execCfg, table.ID, indexID); err != nil {
 		return errors.Wrapf(err, "updating GC mutations")
 	}
 

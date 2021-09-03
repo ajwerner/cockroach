@@ -18,7 +18,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
 )
 
@@ -35,7 +34,7 @@ func NoopContainer() *Container {
 	return &Container{
 		Config: Config{
 			Settings: cluster.MakeTestingClusterSettings(),
-			Stopper:  stop.NewStopper(),
+			Stopper:  nil,
 			Clock: func(roachpb.NodeID) (hlc.Timestamp, ctpb.Epoch, error) {
 				return hlc.Timestamp{}, 0, errors.New("closed timestamps disabled for testing")
 			},
@@ -61,6 +60,9 @@ func (noopEverything) Close(
 }
 func (noopEverything) Track(ctx context.Context) (hlc.Timestamp, closedts.ReleaseFunc) {
 	return hlc.Timestamp{}, func(context.Context, ctpb.Epoch, roachpb.RangeID, ctpb.LAI) {}
+}
+func (noopEverything) FailedCloseAttempts() int64 {
+	return 0
 }
 func (noopEverything) VisitAscending(roachpb.NodeID, func(ctpb.Entry) (done bool))  {}
 func (noopEverything) VisitDescending(roachpb.NodeID, func(ctpb.Entry) (done bool)) {}

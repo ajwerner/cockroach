@@ -229,9 +229,7 @@ func TestOutboxInbox(t *testing.T) {
 
 		inboxMemAcc := testMemMonitor.MakeBoundAccount()
 		defer inboxMemAcc.Close(ctx)
-		inbox, err := NewInbox(
-			colmem.NewAllocator(ctx, &inboxMemAcc, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0),
-		)
+		inbox, err := NewInbox(ctx, colmem.NewAllocator(ctx, &inboxMemAcc, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0))
 		require.NoError(t, err)
 
 		streamHandlerErrCh := handleStream(serverStream.Context(), inbox, serverStream, func() { close(serverStreamNotification.Donec) })
@@ -288,7 +286,7 @@ func TestOutboxInbox(t *testing.T) {
 				if outputBatch == coldata.ZeroBatch {
 					outputBatches.Add(coldata.ZeroBatch, typs)
 				} else {
-					batchCopy := testAllocator.NewMemBatchWithSize(typs, outputBatch.Length())
+					batchCopy := testAllocator.NewMemBatchWithFixedCapacity(typs, outputBatch.Length())
 					testAllocator.PerformOperation(batchCopy.ColVecs(), func() {
 						for i := range typs {
 							batchCopy.ColVec(i).Append(
@@ -505,10 +503,7 @@ func TestOutboxInboxMetadataPropagation(t *testing.T) {
 
 			inboxMemAcc := testMemMonitor.MakeBoundAccount()
 			defer inboxMemAcc.Close(ctx)
-			inbox, err := NewInbox(
-				colmem.NewAllocator(ctx, &inboxMemAcc, coldata.StandardColumnFactory),
-				typs, execinfrapb.StreamID(0),
-			)
+			inbox, err := NewInbox(ctx, colmem.NewAllocator(ctx, &inboxMemAcc, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0))
 			require.NoError(t, err)
 
 			var (
@@ -565,7 +560,7 @@ func BenchmarkOutboxInbox(b *testing.B) {
 
 	typs := []*types.T{types.Int}
 
-	batch := testAllocator.NewMemBatch(typs)
+	batch := testAllocator.NewMemBatchWithMaxCapacity(typs)
 	batch.SetLength(coldata.BatchSize())
 
 	input := colexecbase.NewRepeatableBatchSource(testAllocator, batch, typs)
@@ -578,9 +573,7 @@ func BenchmarkOutboxInbox(b *testing.B) {
 
 	inboxMemAcc := testMemMonitor.MakeBoundAccount()
 	defer inboxMemAcc.Close(ctx)
-	inbox, err := NewInbox(
-		colmem.NewAllocator(ctx, &inboxMemAcc, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0),
-	)
+	inbox, err := NewInbox(ctx, colmem.NewAllocator(ctx, &inboxMemAcc, coldata.StandardColumnFactory), typs, execinfrapb.StreamID(0))
 	require.NoError(b, err)
 
 	var wg sync.WaitGroup
@@ -628,7 +621,7 @@ func TestOutboxStreamIDPropagation(t *testing.T) {
 
 	nextDone := make(chan struct{})
 	input := &colexecbase.CallbackOperator{NextCb: func(ctx context.Context) coldata.Batch {
-		b := testAllocator.NewMemBatchWithSize(typs, 0)
+		b := testAllocator.NewMemBatchWithFixedCapacity(typs, 0)
 		b.SetLength(0)
 		inTags = logtags.FromContext(ctx)
 		nextDone <- struct{}{}
@@ -649,7 +642,8 @@ func TestOutboxStreamIDPropagation(t *testing.T) {
 			roachpb.NodeID(0),
 			execinfrapb.FlowID{UUID: uuid.MakeV4()},
 			outboxStreamID,
-			nil,
+			nil, /* cancelFn */
+			0,   /* connectionTimeout */
 		)
 		outboxDone <- struct{}{}
 	}()
@@ -702,7 +696,7 @@ func TestInboxCtxStreamIDTagging(t *testing.T) {
 
 			typs := []*types.T{types.Int}
 
-			inbox, err := NewInbox(testAllocator, typs, streamID)
+			inbox, err := NewInbox(ctx, testAllocator, typs, streamID)
 			require.NoError(t, err)
 
 			ctxExtract := make(chan struct{})

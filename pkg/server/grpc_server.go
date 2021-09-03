@@ -32,9 +32,9 @@ type grpcServer struct {
 func newGRPCServer(rpcCtx *rpc.Context) *grpcServer {
 	s := &grpcServer{}
 	s.mode.set(modeInitializing)
-	s.Server = rpc.NewServerWithInterceptor(rpcCtx, func(path string) error {
+	s.Server = rpc.NewServer(rpcCtx, rpc.WithInterceptor(func(path string) error {
 		return s.intercept(path)
-	})
+	}))
 	return s
 }
 

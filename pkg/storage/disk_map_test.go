@@ -17,7 +17,6 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"os"
-	"sort"
 	"strings"
 	"testing"
 
@@ -25,18 +24,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/diskmap"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
-	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/pebble"
 )
-
-// put gives a quick interface for writing a KV pair to a rocksDBMap in tests.
-func (r *rocksDBMap) put(k []byte, v []byte) error {
-	return r.store.Put(r.makeKeyWithTimestamp(k), v)
-}
 
 // Helper function to run a datadriven test for a provided diskMap
 func runTestForEngine(ctx context.Context, t *testing.T, filename string, engine diskmap.Factory) {
@@ -49,20 +43,6 @@ func runTestForEngine(ctx context.Context, t *testing.T, filename string, engine
 			// creation and usage code involves too much test-specific code, so use
 			// a type switch with implementation-specific code instead.
 			switch e := engine.(type) {
-			case *rocksDBTempEngine:
-				iter := e.db.NewIterator(IterOptions{UpperBound: roachpb.KeyMax})
-				defer iter.Close()
-
-				for iter.SeekGE(NilKey); ; iter.Next() {
-					valid, err := iter.Valid()
-					if valid && err == nil {
-						keyCount++
-					} else if err != nil {
-						return fmt.Sprintf("err=%v\n", err)
-					} else {
-						break
-					}
-				}
 			case *pebbleTempEngine:
 				iter := e.db.NewIter(&pebble.IterOptions{UpperBound: roachpb.KeyMax})
 
@@ -187,213 +167,6 @@ func runTestForEngine(ctx context.Context, t *testing.T, filename string, engine
 	})
 }
 
-func TestRocksDBMap(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-	e := newRocksDBInMem(roachpb.Attributes{}, 1<<20)
-	defer e.Close()
-
-	runTestForEngine(ctx, t, "testdata/diskmap", &rocksDBTempEngine{db: e})
-}
-
-func TestRocksDBMultiMap(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-	e := newRocksDBInMem(roachpb.Attributes{}, 1<<20)
-	defer e.Close()
-
-	runTestForEngine(ctx, t, "testdata/diskmap_duplicates", &rocksDBTempEngine{db: e})
-}
-
-func TestRocksDBMapClose(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-	ctx := context.Background()
-	e := newRocksDBInMem(roachpb.Attributes{}, 1<<20)
-	defer e.Close()
-
-	decodeKey := func(v []byte) []byte {
-		var err error
-		v, _, err = encoding.DecodeUvarintAscending(v)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return v
-	}
-
-	getSSTables := func() string {
-		ssts := e.GetSSTables()
-		sort.Slice(ssts, func(i, j int) bool {
-			a, b := ssts[i], ssts[j]
-			if a.Level < b.Level {
-				return true
-			}
-			if a.Level > b.Level {
-				return false
-			}
-			return a.Start.Less(b.Start)
-		})
-		var buf bytes.Buffer
-		fmt.Fprintf(&buf, "\n")
-		for i := range ssts {
-			fmt.Fprintf(&buf, "%d: %s - %s\n",
-				ssts[i].Level, decodeKey(ssts[i].Start.Key), decodeKey(ssts[i].End.Key))
-		}
-		return buf.String()
-	}
-
-	verifySSTables := func(expected string) {
-		actual := getSSTables()
-		if expected != actual {
-			t.Fatalf("expected%sgot%s", expected, actual)
-		}
-		if testing.Verbose() {
-			fmt.Printf("%s", actual)
-		}
-	}
-
-	diskMap := newRocksDBMap(e, false /* allowDuplicates */)
-
-	// Put a small amount of data into the disk map.
-	const letters = "abcdefghijklmnopqrstuvwxyz"
-	for i := range letters {
-		k := []byte{letters[i]}
-		if err := diskMap.put(k, k); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Force the data to disk.
-	if err := e.Flush(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Force it to a lower-level. This is done so as to avoid the automatic
-	// compactions out of L0 that would normally occur.
-	if err := e.Compact(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify we have a single sstable.
-	verifySSTables(`
-6: a - z
-`)
-
-	// Close the disk map. This should both delete the data, and initiate
-	// compactions for the deleted data.
-	diskMap.Close(ctx)
-
-	// Wait for the data stored in the engine to disappear.
-	testutils.SucceedsSoon(t, func() error {
-		actual := getSSTables()
-		if testing.Verbose() {
-			fmt.Printf("%s", actual)
-		}
-		if actual != "\n" {
-			return fmt.Errorf("%s", actual)
-		}
-		return nil
-	})
-}
-
-func BenchmarkRocksDBMapWrite(b *testing.B) {
-	dir, err := ioutil.TempDir("", "BenchmarkRocksDBMapWrite")
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer func() {
-		if err := os.RemoveAll(dir); err != nil {
-			b.Fatal(err)
-		}
-	}()
-	ctx := context.Background()
-	tempEngine, _, err := NewRocksDBTempEngine(base.TempStorageConfig{Path: dir}, base.DefaultTestStoreSpec)
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer tempEngine.Close()
-
-	rng := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
-
-	for _, inputSize := range []int{1 << 12, 1 << 14, 1 << 16, 1 << 18, 1 << 20} {
-		b.Run(fmt.Sprintf("InputSize%d", inputSize), func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
-				func() {
-					diskMap := tempEngine.NewSortedDiskMap()
-					defer diskMap.Close(ctx)
-					batchWriter := diskMap.NewBatchWriter()
-					// This Close() flushes writes.
-					defer func() {
-						if err := batchWriter.Close(ctx); err != nil {
-							b.Fatal(err)
-						}
-					}()
-					for j := 0; j < inputSize; j++ {
-						k := fmt.Sprintf("%d", rng.Int())
-						v := fmt.Sprintf("%d", rng.Int())
-						if err := batchWriter.Put([]byte(k), []byte(v)); err != nil {
-							b.Fatal(err)
-						}
-					}
-				}()
-			}
-		})
-	}
-}
-
-func BenchmarkRocksDBMapIteration(b *testing.B) {
-	if testing.Short() {
-		b.Skip("short flag")
-	}
-	dir, err := ioutil.TempDir("", "BenchmarkRocksDBMapIteration")
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer func() {
-		if err := os.RemoveAll(dir); err != nil {
-			b.Fatal(err)
-		}
-	}()
-	tempEngine, _, err := NewRocksDBTempEngine(base.TempStorageConfig{Path: dir}, base.DefaultTestStoreSpec)
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer tempEngine.Close()
-
-	diskMap := tempEngine.NewSortedDiskMap().(*rocksDBMap)
-	defer diskMap.Close(context.Background())
-
-	rng := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
-
-	for _, inputSize := range []int{1 << 12, 1 << 14, 1 << 16, 1 << 18, 1 << 20} {
-		for i := 0; i < inputSize; i++ {
-			k := fmt.Sprintf("%d", rng.Int())
-			v := fmt.Sprintf("%d", rng.Int())
-			if err := diskMap.put([]byte(k), []byte(v)); err != nil {
-				b.Fatal(err)
-			}
-		}
-
-		b.Run(fmt.Sprintf("InputSize%d", inputSize), func(b *testing.B) {
-			for j := 0; j < b.N; j++ {
-				i := diskMap.NewIterator()
-				for i.Rewind(); ; i.Next() {
-					if ok, err := i.Valid(); err != nil {
-						b.Fatal(err)
-					} else if !ok {
-						break
-					}
-					i.UnsafeKey()
-					i.UnsafeValue()
-				}
-				i.Close()
-			}
-		})
-	}
-}
-
 func TestPebbleMap(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -440,37 +213,6 @@ func TestPebbleMapClose(t *testing.T) {
 	}
 	defer e.Close()
 
-	decodeKey := func(v []byte) []byte {
-		var err error
-		v, _, err = encoding.DecodeUvarintAscending(v)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return v
-	}
-
-	getSSTables := func() string {
-		var buf bytes.Buffer
-		fmt.Fprintf(&buf, "\n")
-		for l, ssts := range e.db.SSTables() {
-			for _, sst := range ssts {
-				fmt.Fprintf(&buf, "%d: %s - %s\n",
-					l, decodeKey(sst.Smallest.UserKey), decodeKey(sst.Largest.UserKey))
-			}
-		}
-		return buf.String()
-	}
-
-	verifySSTables := func(expected string) {
-		actual := getSSTables()
-		if expected != actual {
-			t.Fatalf("expected%sgot%s", expected, actual)
-		}
-		if testing.Verbose() {
-			fmt.Printf("%s", actual)
-		}
-	}
-
 	diskMap := newPebbleMap(e.db, false /* allowDuplicates */)
 
 	// Put a small amount of data into the disk map.
@@ -498,22 +240,66 @@ func TestPebbleMapClose(t *testing.T) {
 	}
 
 	// Verify we have a single sstable.
-	verifySSTables(`
-6: a - z
-`)
+	var buf bytes.Buffer
+	fileNums := map[pebble.FileNum]bool{}
+	sstInfos, err := e.db.SSTables()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for l, ssts := range sstInfos {
+		for _, sst := range ssts {
+			sm := bytes.TrimPrefix(sst.Smallest.UserKey, diskMap.prefix)
+			la := bytes.TrimPrefix(sst.Largest.UserKey, diskMap.prefix)
+			fmt.Fprintf(&buf, "%d: %s - %s\n", l, sm, la)
+			fileNums[sst.FileNum] = true
+		}
+	}
+	const expected = "6: a - z\n"
+	actual := buf.String()
+	if expected != actual {
+		t.Fatalf("expected\n%sgot\n%s", expected, actual)
+	}
+	if testing.Verbose() {
+		fmt.Printf("%s", actual)
+	}
 
 	// Close the disk map. This should both delete the data, and initiate
 	// compactions for the deleted data.
 	diskMap.Close(ctx)
 
-	// Wait for the data stored in the engine to disappear.
+	// Wait for the previously-observed sstables to be removed. We can't
+	// assert that the LSM is completely empty because the range tombstone's
+	// sstable will not necessarily be compacted.
+	var lsmBuf bytes.Buffer
+	var stillExistBuf bytes.Buffer
 	testutils.SucceedsSoon(t, func() error {
-		actual := getSSTables()
-		if testing.Verbose() {
-			fmt.Printf("%s", actual)
+		lsmBuf.Reset()
+		stillExistBuf.Reset()
+		sstInfos, err := e.db.SSTables()
+		if err != nil {
+			return err
 		}
-		if actual != "\n" {
-			return fmt.Errorf("%s", actual)
+		for l, ssts := range sstInfos {
+			if len(ssts) == 0 {
+				continue
+			}
+
+			fmt.Fprintf(&lsmBuf, "L%d:\n", l)
+			for _, sst := range ssts {
+				if fileNums[sst.FileNum] {
+					fmt.Fprintf(&stillExistBuf, "%s\n", sst.FileNum)
+				}
+				fmt.Fprintf(&lsmBuf, "  %s: %d bytes, %x (%s) - %x (%s)\n", sst.FileNum, sst.Size,
+					sst.Smallest.UserKey, bytes.TrimPrefix(sst.Smallest.UserKey, diskMap.prefix),
+					sst.Largest.UserKey, bytes.TrimPrefix(sst.Largest.UserKey, diskMap.prefix))
+			}
+		}
+
+		if testing.Verbose() {
+			fmt.Println(buf.String())
+		}
+		if stillExist := stillExistBuf.String(); stillExist != "" {
+			return fmt.Errorf("%s", stillExist)
 		}
 		return nil
 	})
@@ -565,9 +351,7 @@ func BenchmarkPebbleMapWrite(b *testing.B) {
 }
 
 func BenchmarkPebbleMapIteration(b *testing.B) {
-	if testing.Short() {
-		b.Skip("short flag")
-	}
+	skip.UnderShort(b)
 	dir, err := ioutil.TempDir("", "BenchmarkPebbleMapIteration")
 	if err != nil {
 		b.Fatal(err)

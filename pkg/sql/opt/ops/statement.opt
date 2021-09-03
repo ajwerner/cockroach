@@ -37,10 +37,11 @@ define CreateView {
 define CreateViewPrivate {
     # Schema is the ID of the catalog schema into which the new table goes.
     Schema SchemaID
-    ViewName string
-    Temporary bool
+    ViewName TableName
+    Persistence Persistence
     IfNotExists bool
     Replace bool
+    Materialized bool
 
     # ViewQuery contains the query for the view; data sources are always fully
     # qualified.
@@ -205,6 +206,22 @@ define ControlJobsPrivate {
     # expression.
     Props PhysProps
     Command JobCommand
+}
+
+# ControlSchedules represents a `PAUSE/CANCEL/RESUME SCHEDULES` statement.
+[Relational]
+define ControlSchedules {
+    # The input expression returns schedule IDs (as integers).
+    Input RelExpr
+    _ ControlSchedulesPrivate
+}
+
+[Private]
+define ControlSchedulesPrivate {
+    # Props stores the required physical properties for the input
+    # expression.
+    Props PhysProps
+    Command ScheduleCommand
 }
 
 # CancelQueries represents a `CANCEL QUERIES` statement.

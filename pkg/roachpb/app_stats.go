@@ -13,8 +13,33 @@ package roachpb
 import (
 	"math"
 
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/util"
 )
+
+// StmtID is the type of a Statement ID.
+type StmtID uint64
+
+// ConstructStatementID constructs an ID by hashing an anonymized query, it's
+// failure status, and if it was part of an implicit txn. At the time of writing,
+// these are the axis' we use to bucket queries for stats collection
+// (see stmtKey).
+func ConstructStatementID(anonymizedStmt string, failed bool, implicitTxn bool) StmtID {
+	fnv := util.MakeFNV64()
+	for _, c := range anonymizedStmt {
+		fnv.Add(uint64(c))
+	}
+	if failed {
+		fnv.Add('F')
+	} else {
+		fnv.Add('S')
+	}
+	if implicitTxn {
+		fnv.Add('I')
+	} else {
+		fnv.Add('E')
+	}
+	return StmtID(fnv.Sum())
+}
 
 // GetVariance retrieves the variance of the values.
 func (l *NumericStat) GetVariance(count int64) float64 {
@@ -60,7 +85,10 @@ func AddNumericStats(a, b NumericStat, countA, countB int64) NumericStat {
 // reg cluster.
 func (si SensitiveInfo) GetScrubbedCopy() SensitiveInfo {
 	output := SensitiveInfo{}
-	output.LastErr = errors.Redact(si.LastErr)
+	// TODO(knz): This should really use si.LastErrorRedacted, however
+	// this does not exist yet.
+	// See: https://github.com/cockroachdb/cockroach/issues/53191
+	output.LastErr = "<redacted>"
 	// Not copying over MostRecentPlanDescription until we have an algorithm to scrub plan nodes.
 	return output
 }
@@ -71,6 +99,20 @@ func (s *TxnStats) Add(other TxnStats) {
 	s.TxnCount += other.TxnCount
 	s.ImplicitCount += other.ImplicitCount
 	s.CommittedCount += other.CommittedCount
+}
+
+// Add combines other into TransactionStatistics.
+func (t *TransactionStatistics) Add(other *TransactionStatistics) {
+	if other.MaxRetries > t.MaxRetries {
+		t.MaxRetries = other.MaxRetries
+	}
+
+	t.CommitLat.Add(other.CommitLat, t.Count, other.Count)
+	t.RetryLat.Add(other.RetryLat, t.Count, other.Count)
+	t.ServiceLat.Add(other.ServiceLat, t.Count, other.Count)
+	t.NumRows.Add(other.NumRows, t.Count, other.Count)
+
+	t.Count += other.Count
 }
 
 // Add combines other into this StatementStatistics.
@@ -85,6 +127,8 @@ func (s *StatementStatistics) Add(other *StatementStatistics) {
 	s.RunLat.Add(other.RunLat, s.Count, other.Count)
 	s.ServiceLat.Add(other.ServiceLat, s.Count, other.Count)
 	s.OverheadLat.Add(other.OverheadLat, s.Count, other.Count)
+	s.BytesRead.Add(other.BytesRead, s.Count, other.Count)
+	s.RowsRead.Add(other.RowsRead, s.Count, other.Count)
 
 	if other.SensitiveInfo.LastErr != "" {
 		s.SensitiveInfo.LastErr = other.SensitiveInfo.LastErr
@@ -94,8 +138,6 @@ func (s *StatementStatistics) Add(other *StatementStatistics) {
 		s.SensitiveInfo = other.SensitiveInfo
 	}
 
-	s.BytesRead += other.BytesRead
-	s.RowsRead += other.RowsRead
 	s.Count += other.Count
 }
 
@@ -112,6 +154,6 @@ func (s *StatementStatistics) AlmostEqual(other *StatementStatistics, eps float6
 		s.ServiceLat.AlmostEqual(other.ServiceLat, eps) &&
 		s.OverheadLat.AlmostEqual(other.OverheadLat, eps) &&
 		s.SensitiveInfo.Equal(other.SensitiveInfo) &&
-		s.BytesRead == other.BytesRead &&
-		s.RowsRead == other.RowsRead
+		s.BytesRead.AlmostEqual(other.BytesRead, eps) &&
+		s.RowsRead.AlmostEqual(other.RowsRead, eps)
 }

@@ -78,7 +78,7 @@ func (n *NodeIDContainer) Reset(val roachpb.NodeID) {
 // A SQLInstanceID is an ephemeral ID assigned to a running instance of the SQL
 // server. This is distinct from a NodeID, which is a long-lived identifier
 // assigned to a node in the KV layer which is unique across all KV nodes in the
-// cluster and persists across restarts. Instead, a SQLInstance is similar to a
+// cluster and persists across restarts. Instead, a Instance is similar to a
 // process ID from the unix world: an integer assigned to the SQL server
 // on process start which is unique across all SQL server processes running
 // on behalf of the tenant, while the SQL server is running.
@@ -100,21 +100,14 @@ type SQLIDContainer struct {
 	sqlInstanceID SQLInstanceID
 }
 
-// NewSQLIDContainer sets up an SQLIDContainer wrapping the (positive) SQLInstanceID
-// and a NodeID. See errorutil.TenantSQLDeprecatedWrapper for an explanation of
-// the nodeIDExposed parameter.
+// NewSQLIDContainer sets up an SQLIDContainer. It is handed either a positive SQLInstanceID
+// (on tenants) or a positive NodeID, but not both.
 //
-// As a special case, a zero sqlInstanceID in conjunction with
-// nodeIDExposed==true falls back to the NodeID in SQLInstanceID(). This is used
-// in single-tenant deployments.
-func NewSQLIDContainer(
-	sqlInstanceID SQLInstanceID, nodeID *NodeIDContainer, nodeIDExposed bool,
-) *SQLIDContainer {
-	if !nodeIDExposed && sqlInstanceID == 0 {
-		panic("sqlInstanceID must not be zero")
-	}
+// A zero sqlInstanceID falls back to the NodeID in SQLInstanceID().
+// This is used in single-tenant deployments.
+func NewSQLIDContainer(sqlInstanceID SQLInstanceID, nodeID *NodeIDContainer) *SQLIDContainer {
 	return &SQLIDContainer{
-		w:             errorutil.MakeTenantSQLDeprecatedWrapper(nodeID, nodeIDExposed),
+		w:             errorutil.MakeTenantSQLDeprecatedWrapper(nodeID, nodeID != nil),
 		sqlInstanceID: sqlInstanceID,
 	}
 }
@@ -131,20 +124,12 @@ func (c *SQLIDContainer) OptionalNodeID() (roachpb.NodeID, bool) {
 
 // OptionalNodeIDErr is like OptionalNodeID, but returns an error (referring to
 // the optionally supplied Github issues) if the ID is not present.
-func (c *SQLIDContainer) OptionalNodeIDErr(issueNos ...int) (roachpb.NodeID, error) {
-	v, err := c.w.OptionalErr(issueNos...)
+func (c *SQLIDContainer) OptionalNodeIDErr(issue int) (roachpb.NodeID, error) {
+	v, err := c.w.OptionalErr(issue)
 	if err != nil {
 		return 0, err
 	}
 	return v.(*NodeIDContainer).Get(), nil
-}
-
-// DeprecatedNodeID returns the NodeID. This call is deprecated: removal of all
-// call sites is the goal, at which point this method will be removed. Calls to
-// this method reflect essential functionality which needs to be reworked in
-// order to enable multi-tenancy.
-func (c *SQLIDContainer) DeprecatedNodeID(issueNo int) roachpb.NodeID {
-	return c.w.Deprecated(issueNo).(*NodeIDContainer).Get()
 }
 
 // SQLInstanceID returns the wrapped SQLInstanceID.
@@ -155,22 +140,10 @@ func (c *SQLIDContainer) SQLInstanceID() SQLInstanceID {
 	return c.sqlInstanceID
 }
 
-// Get is a temporary method to aid refactoring.
-//
-// TODO(tbg): remove.
-func (c *SQLIDContainer) Get() roachpb.NodeID {
-	// Silence staticcheck.
-	var _ = (*SQLIDContainer)(nil).OptionalNodeID
-	var _ = (*SQLIDContainer)(nil).OptionalNodeIDErr
-	var _ = (*SQLIDContainer)(nil).SQLInstanceID
-	return c.DeprecatedNodeID(-12131415)
-
-}
-
 // TestingIDContainer is an SQLIDContainer with hard-coded SQLInstanceID of 10 and
 // NodeID of 1.
 var TestingIDContainer = func() *SQLIDContainer {
 	var c NodeIDContainer
 	c.Set(context.Background(), 1)
-	return NewSQLIDContainer(10, &c, true /* exposed */)
+	return NewSQLIDContainer(10, &c)
 }()

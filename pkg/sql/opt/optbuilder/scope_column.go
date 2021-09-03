@@ -14,6 +14,7 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
@@ -39,9 +40,16 @@ type scopeColumn struct {
 	// included.
 	hidden bool
 
+	// tableOrdinal is set to the table ordinal corresponding to this column, if
+	// this is a column from a scan.
+	tableOrdinal int
+
 	// mutation is true if the column is in the process of being dropped or added
 	// to the table. It should not be visible to variable references.
 	mutation bool
+
+	// kind of the table column, if this is a column from a scan.
+	kind cat.ColumnKind
 
 	// descending indicates whether this column is sorted in descending order.
 	// This field is only used for ordering columns.

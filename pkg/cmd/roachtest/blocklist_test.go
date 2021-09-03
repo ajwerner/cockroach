@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/google/go-github/github"
 	"golang.org/x/oauth2"
 )
@@ -28,18 +29,19 @@ const runBlocklistEnv = "RUN_BLOCKLIST_TEST"
 
 func TestBlocklists(t *testing.T) {
 	if _, ok := os.LookupEnv(runBlocklistEnv); !ok {
-		t.Skipf("Blocklist test is only run if %s is set", runBlocklistEnv)
+		skip.IgnoreLintf(t, "Blocklist test is only run if %s is set", runBlocklistEnv)
 	}
 
 	blocklists := map[string]blocklist{
-		"hibernate":  hibernateBlockList20_1,
-		"pgjdbc":     pgjdbcBlockList20_1,
-		"psycopg":    psycopgBlockList20_1,
-		"django":     djangoBlocklist20_1,
-		"sqlAlchemy": sqlAlchemyBlocklist20_1,
-		"libpq":      libPQBlocklist20_1,
-		"gopg":       gopgBlockList20_1,
-		"pgx":        pgxBlocklist20_1,
+		"hibernate":    hibernateBlockList20_2,
+		"pgjdbc":       pgjdbcBlockList20_2,
+		"psycopg":      psycopgBlockList20_2,
+		"django":       djangoBlocklist20_2,
+		"sqlAlchemy":   sqlAlchemyBlocklist20_2,
+		"libpq":        libPQBlocklist20_2,
+		"gopg":         gopgBlockList20_2,
+		"pgx":          pgxBlocklist20_2,
+		"activerecord": activeRecordBlockList20_2,
 	}
 	type reasonCount struct {
 		reason string

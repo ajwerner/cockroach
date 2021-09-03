@@ -13,8 +13,9 @@ package sql
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 )
 
 type invertedJoinNode struct {
@@ -22,29 +23,23 @@ type invertedJoinNode struct {
 	table *scanNode
 
 	// joinType is one of INNER, LEFT_OUTER, LEFT_SEMI, LEFT_ANTI.
-	joinType sqlbase.JoinType
+	joinType descpb.JoinType
 
 	// The inverted expression to evaluate.
 	invertedExpr tree.TypedExpr
 
-	// inputCol identifies the column from the input to be used for the
-	// inverted join.
-	inputCol int32
-
 	// columns are the produced columns, namely the input columns and (unless the
-	// join type is semi or anti join) the columns in the table scanNode.
-	columns sqlbase.ResultColumns
+	// join type is semi or anti join) the columns in the table scanNode. It can
+	// include an additional continuation column for paired joins.
+	columns colinfo.ResultColumns
 
 	// onExpr is any ON condition to be used in conjunction with the inverted
 	// expression.
 	onExpr tree.TypedExpr
-}
 
-// CanParallelize indicates whether the fetchers can parallelize the
-// batches of lookups that can be performed. This should be kept in
-// sync with the behavior of invertedJoiner scan behavior.
-func (ij *invertedJoinNode) CanParallelize() bool {
-	return true
+	isFirstJoinInPairedJoiner bool
+
+	reqOrdering ReqOrdering
 }
 
 func (ij *invertedJoinNode) startExec(params runParams) error {

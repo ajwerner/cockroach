@@ -27,6 +27,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	_ "github.com/cockroachdb/cockroach/pkg/testutils/buildutil"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/errors"
 	"github.com/ghemawat/stream"
 	"github.com/jordanlewis/gcassert"
@@ -348,7 +349,7 @@ func TestLint(t *testing.T) {
 	t.Run("TestOptfmt", func(t *testing.T) {
 		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
 		if pkgSpecified {
-			t.Skip("PKG specified")
+			skip.IgnoreLint(t, "PKG specified")
 		}
 
 		cmd, stderr, filter, err := dirCmd(pkgDir, "git", "ls-files", "*.opt", ":!*/testdata/*")
@@ -439,8 +440,11 @@ func TestLint(t *testing.T) {
 					":!acceptance",
 					":!ccl/acceptanceccl/backup_test.go",
 					":!ccl/backupccl/backup_cloud_test.go",
+					// KMS requires AWS credentials from environment variables.
+					":!ccl/backupccl/backup_test.go",
 					":!storage/cloudimpl",
 					":!ccl/workloadccl/fixture_test.go",
+					":!internal/gopath/gopath.go",
 					":!cmd",
 					":!nightly",
 					":!testutils/lint",
@@ -711,7 +715,7 @@ func TestLint(t *testing.T) {
 			":!util/timeutil/time.go",
 			":!util/timeutil/now_unix.go",
 			":!util/timeutil/now_windows.go",
-			":!util/tracing/tracer_span.go",
+			":!util/tracing/span.go",
 			":!util/tracing/tracer.go",
 		)
 		if err != nil {
@@ -789,6 +793,7 @@ func TestLint(t *testing.T) {
 			":!rpc/nodedialer/nodedialer_test.go",
 			":!util/grpcutil/grpc_util_test.go",
 			":!cli/systembench/network_test_server.go",
+			":!server/testserver.go",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -884,6 +889,47 @@ func TestLint(t *testing.T) {
 		}
 	})
 
+	t.Run("TestTSkipNotUsed", func(t *testing.T) {
+		cmd, stderr, filter, err := dirCmd(
+			pkgDir,
+			"git",
+			"grep",
+			"-nE",
+			// Search for benchmarks and tests that run testing.TB.Skip. The
+			// convention is to use t or b for the test variable, but sometimes people
+			// use something like `testingT` as their variable name, so include the
+			// capital letters as well. This isn't foolproof, but searching for
+			// any users of a .Skip method isn't great because there are other, non
+			// testing methods called Skip out there.
+			`[tTbB]\.Skipf?\(`,
+			"--",
+			"*.go",
+			":!testutils/skip/skip.go",
+			":!cmd/roachtest/*.go",
+			":!acceptance/compose/*.go",
+			":!util/syncutil/*.go",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := stream.ForEach(filter, func(s string) {
+			t.Errorf("\n%s <- t.Skip banned: please use skip.WithIssue, skip.IgnoreLint, etc", s)
+		}); err != nil {
+			t.Error(err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			if out := stderr.String(); len(out) > 0 {
+				t.Fatalf("err=%s, stderr=%s", err, out)
+			}
+		}
+	})
+
 	t.Run("TestProtoMarshal", func(t *testing.T) {
 		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
 		cmd, stderr, filter, err := dirCmd(
@@ -936,6 +982,7 @@ func TestLint(t *testing.T) {
 			":!*.pb.go",
 			":!util/protoutil/marshal.go",
 			":!util/protoutil/marshaler.go",
+			":!util/encoding/encoding.go",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -961,6 +1008,42 @@ func TestLint(t *testing.T) {
 		}
 	})
 
+	// TestProtoEqual forbids use of proto's Equal() function. It panics
+	// on types which alias the Go string type.
+	t.Run("TestProtoEqual", func(t *testing.T) {
+		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
+		cmd, stderr, filter, err := dirCmd(
+			pkgDir,
+			"git",
+			"grep",
+			"-nEw",
+			`proto\.Equal`,
+			"--",
+			"*.go",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := stream.ForEach(stream.Sequence(
+			filter,
+		), func(s string) {
+			t.Errorf("\n%s <- forbidden; use '.Equal()' method instead or  reflect.DeepEqual()", s)
+		}); err != nil {
+			t.Error(err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			if out := stderr.String(); len(out) > 0 {
+				t.Fatalf("err=%s, stderr=%s", err, out)
+			}
+		}
+	})
+
 	t.Run("TestProtoMessage", func(t *testing.T) {
 		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
 		cmd, stderr, filter, err := dirCmd(
@@ -973,13 +1056,15 @@ func TestLint(t *testing.T) {
 			"*.go",
 			":!*.pb.go",
 			":!*.pb.gw.go",
+			":!sql/pgwire/pgerror/constraint_name.go",
 			":!sql/pgwire/pgerror/severity.go",
 			":!sql/pgwire/pgerror/with_candidate_code.go",
+			":!sql/pgwire/pgwirebase/too_big_error.go",
 			":!sql/colexecbase/colexecerror/error.go",
 			":!util/protoutil/jsonpb_marshal.go",
 			":!util/protoutil/marshal.go",
 			":!util/protoutil/marshaler.go",
-			":!util/tracing/tracer_span.go",
+			":!util/tracing/span.go",
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -1058,7 +1143,7 @@ func TestLint(t *testing.T) {
 	t.Run("TestMisspell", func(t *testing.T) {
 		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
 		if pkgSpecified {
-			t.Skip("PKG specified")
+			skip.IgnoreLint(t, "PKG specified")
 		}
 		cmd, stderr, filter, err := dirCmd(pkgDir, "git", "ls-files")
 		if err != nil {
@@ -1079,9 +1164,11 @@ func TestLint(t *testing.T) {
 			filter,
 			stream.GrepNot(`.*\.lock`),
 			stream.GrepNot(`^storage\/rocksdb_error_dict\.go$`),
+			stream.GrepNot(`^workload/geospatial/geospatial.go$`),
 			stream.GrepNot(`^workload/tpcds/tpcds.go$`),
 			stream.GrepNot(`^geo/geoprojbase/projections.go$`),
 			stream.GrepNot(`^sql/logictest/testdata/logic_test/pg_extension$`),
+			stream.GrepNot(`^sql/opt/testutils/opttester/testfixtures/.*`),
 			stream.Map(func(s string) string {
 				return filepath.Join(pkgDir, s)
 			}),
@@ -1102,7 +1189,7 @@ func TestLint(t *testing.T) {
 	t.Run("TestGofmtSimplify", func(t *testing.T) {
 		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
 		if pkgSpecified {
-			t.Skip("PKG specified")
+			skip.IgnoreLint(t, "PKG specified")
 		}
 
 		cmd, stderr, filter, err := dirCmd(pkgDir, "git", "ls-files", "*.go", ":!*/testdata/*", ":!*_generated.go")
@@ -1142,7 +1229,7 @@ func TestLint(t *testing.T) {
 	t.Run("TestCrlfmt", func(t *testing.T) {
 		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
 		if pkgSpecified {
-			t.Skip("PKG specified")
+			skip.IgnoreLint(t, "PKG specified")
 		}
 		ignore := `\.(pb(\.gw)?)|(\.[eo]g)\.go|/testdata/|^sql/parser/sql\.go$|_generated\.go$`
 		cmd, stderr, filter, err := dirCmd(pkgDir, "crlfmt", "-fast", "-ignore", ignore, "-tab", "2", ".")
@@ -1319,9 +1406,7 @@ func TestLint(t *testing.T) {
 	// TODO(tamird): replace this with errcheck.NewChecker() when
 	// https://github.com/dominikh/go-tools/issues/57 is fixed.
 	t.Run("TestErrCheck", func(t *testing.T) {
-		if testing.Short() {
-			t.Skip("short flag")
-		}
+		skip.UnderShort(t)
 		excludesPath, err := filepath.Abs(filepath.Join("testdata", "errcheck_excludes.txt"))
 		if err != nil {
 			t.Fatal(err)
@@ -1356,9 +1441,7 @@ func TestLint(t *testing.T) {
 	})
 
 	t.Run("TestReturnCheck", func(t *testing.T) {
-		if testing.Short() {
-			t.Skip("short flag")
-		}
+		skip.UnderShort(t)
 		// returncheck uses 2GB of ram (as of 2017-07-13), so don't parallelize it.
 		cmd, stderr, filter, err := dirCmd(crdb.Dir, "returncheck", pkgScope)
 		if err != nil {
@@ -1414,9 +1497,7 @@ func TestLint(t *testing.T) {
 
 	t.Run("TestStaticCheck", func(t *testing.T) {
 		// staticcheck uses 2.4GB of ram (as of 2019-05-10), so don't parallelize it.
-		if testing.Short() {
-			t.Skip("short flag")
-		}
+		skip.UnderShort(t)
 		cmd, stderr, filter, err := dirCmd(
 			crdb.Dir,
 			"staticcheck",
@@ -1446,8 +1527,10 @@ func TestLint(t *testing.T) {
 				stream.GrepNot(`pkg/sql/pgwire/pgcode/codes.go:.* var .* is unused`),
 				// The methods in exprgen.customFuncs are used via reflection.
 				stream.GrepNot(`pkg/sql/opt/optgen/exprgen/custom_funcs.go:.* func .* is unused`),
-				// Using deprecated method to COPY.
+				// Using deprecated method to COPY because the copyin driver does not
+				// implement StmtExecContext as of 07/06/2020.
 				stream.GrepNot(`pkg/cli/nodelocal.go:.* stmt.Exec is deprecated: .*`),
+				stream.GrepNot(`pkg/cli/userfile.go:.* stmt.Exec is deprecated: .*`),
 				// Cause is a method used by pkg/cockroachdb/errors (through an unnamed
 				// interface).
 				stream.GrepNot(`pkg/.*.go:.* func .*\.Cause is unused`),
@@ -1519,11 +1602,11 @@ func TestLint(t *testing.T) {
 			"-nE",
 			// We prohibit usage of:
 			// - coldata.NewMemBatch
-			// - coldata.NewMemBatchWithSize
+			// - coldata.NewMemBatchWithCapacity
 			// - coldata.NewMemColumn
 			// - coldata.Batch.AppendCol
 			// TODO(yuzefovich): prohibit call to coldata.NewMemBatchNoCols.
-			fmt.Sprintf(`(coldata\.NewMem(Batch|BatchWithSize|Column)|\.AppendCol)\(`),
+			fmt.Sprintf(`(coldata\.NewMem(Batch|BatchWithCapacity|Column)|\.AppendCol)\(`),
 			"--",
 			// TODO(yuzefovich): prohibit calling coldata.* methods from other
 			// sql/col* packages.
@@ -1541,6 +1624,42 @@ func TestLint(t *testing.T) {
 
 		if err := stream.ForEach(filter, func(s string) {
 			t.Errorf("\n%s <- forbidden; use colmem.Allocator object instead", s)
+		}); err != nil {
+			t.Error(err)
+		}
+
+		if err := cmd.Wait(); err != nil {
+			if out := stderr.String(); len(out) > 0 {
+				t.Fatalf("err=%s, stderr=%s", err, out)
+			}
+		}
+	})
+
+	t.Run("TestVectorizedDynamicBatches", func(t *testing.T) {
+		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
+		cmd, stderr, filter, err := dirCmd(
+			pkgDir,
+			"git",
+			"grep",
+			"-nE",
+			// We prohibit usage of colmem.Allocator.NewMemBatchWithMaxCapacity
+			// in order to remind us to think whether we want the dynamic batch
+			// size behavior or not.
+			fmt.Sprintf(`\.NewMemBatchWithMaxCapacity\(`),
+			"--",
+			"sql/col*",
+			":!sql/col*_test.go",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := stream.ForEach(filter, func(s string) {
+			t.Errorf("\n%s <- forbidden; either use ResetMaybeReallocate or NewMemBatchWithFixedCapacity", s)
 		}); err != nil {
 			t.Error(err)
 		}
@@ -1624,6 +1743,8 @@ func TestLint(t *testing.T) {
 	})
 
 	t.Run("TestGCAssert", func(t *testing.T) {
+		skip.UnderShort(t)
+
 		// t.Parallel() // Disabled due to CI not parsing failure from parallel tests correctly. Can be re-enabled on Go 1.15 (see: https://github.com/golang/go/issues/38458).
 		var buf strings.Builder
 		if err := gcassert.GCAssert(&buf, "../../col/coldata", "../../sql/colexec"); err != nil {
@@ -1670,9 +1791,7 @@ func TestLint(t *testing.T) {
 	// RoachVet includes all of the passes of `go vet` plus first-party additions.
 	// See pkg/cmd/roachvet.
 	t.Run("TestRoachVet", func(t *testing.T) {
-		if testing.Short() {
-			t.Skip("short flag")
-		}
+		skip.UnderShort(t)
 		// The -printfuncs functionality is interesting and
 		// under-documented. It checks two things:
 		//
@@ -1740,6 +1859,10 @@ func TestLint(t *testing.T) {
 			// Ignore types that can change by system.
 			stream.GrepNot(`pkg/util/sysutil/sysutil_unix.go:`),
 
+			// Ignore jemalloc issues warnings.
+			stream.GrepNot(`In file included from.*(start|runtime)_jemalloc\.go`),
+			stream.GrepNot(`include/jemalloc/jemalloc\.h`),
+
 			stream.GrepNot(`declaration of "?(pE|e)rr"? shadows`),
 			stream.GrepNot(`\.pb\.gw\.go:[0-9:]+: declaration of "?ctx"? shadows`),
 			stream.GrepNot(`\.[eo]g\.go:[0-9:]+: declaration of ".*" shadows`),
@@ -1761,6 +1884,8 @@ func TestLint(t *testing.T) {
 			// error encode/decode, it can be dropped from the linter
 			// exception as well.
 			stream.GrepNot(`pkg/roachpb/errors\.go:.*invalid direct cast on error object`),
+			// Cast in decode handler.
+			stream.GrepNot(`pkg/sql/pgwire/pgerror/constraint_name\.go:.*invalid direct cast on error object`),
 			// pgerror's pgcode logic uses its own custom cause recursion
 			// algorithm and thus cannot use errors.If() which mandates a
 			// different recursion order.

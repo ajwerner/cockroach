@@ -23,8 +23,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
+	"github.com/cockroachdb/redact"
 )
 
 var errNoInboundStreamConnection = errors.New("no inbound stream connection")
@@ -152,7 +153,7 @@ func (fr *FlowRegistry) releaseEntryLocked(id execinfrapb.FlowID) {
 		entry.refCount--
 	} else {
 		if entry.refCount != 1 {
-			panic(fmt.Sprintf("invalid refCount: %d", entry.refCount))
+			panic(errors.AssertionFailedf("invalid refCount: %d", entry.refCount))
 		}
 		delete(fr.flows, id)
 		fr.flowDone.Signal()
@@ -245,7 +246,7 @@ func (fr *FlowRegistry) RegisterFlow(
 				// The span in the context might be finished by the time this runs. In
 				// principle, we could ForkCtxSpan() beforehand, but we don't want to
 				// create the extra span every time.
-				timeoutCtx := opentracing.ContextWithSpan(ctx, nil)
+				timeoutCtx := tracing.ContextWithSpan(ctx, nil)
 				log.Errorf(
 					timeoutCtx,
 					"flow id:%s : %d inbound streams timed out after %s; propagated error throughout flow",
@@ -362,7 +363,9 @@ func (fr *FlowRegistry) waitForFlowLocked(
 // been done by the time this call returns. See the explanation in
 // pkg/server/drain.go for details.
 func (fr *FlowRegistry) Drain(
-	flowDrainWait time.Duration, minFlowDrainWait time.Duration, reporter func(int, string),
+	flowDrainWait time.Duration,
+	minFlowDrainWait time.Duration,
+	reporter func(int, redact.SafeString),
 ) {
 	allFlowsDone := make(chan struct{}, 1)
 	start := timeutil.Now()

@@ -905,7 +905,7 @@ func (r *Replica) tick(livenessMap IsLiveMap) (bool, error) {
 		return false, nil
 	}
 
-	r.maybeTransferRaftLeadershipLocked(ctx)
+	r.maybeTransferRaftLeadershipToLeaseholderLocked(ctx)
 
 	// For followers, we update lastUpdateTimes when we step a message from them
 	// into the local Raft group. The leader won't hit that path, so we update
@@ -949,7 +949,6 @@ const (
 	// proposed whose proposal we still consider to be inflight. These commands
 	// will never receive a response through the regular channel.
 	reasonSnapshotApplied
-	reasonReplicaIDChanged
 	reasonTicks
 )
 
@@ -1047,6 +1046,7 @@ func (r *Replica) maybeCoalesceHeartbeat(
 	msg raftpb.Message,
 	toReplica, fromReplica roachpb.ReplicaDescriptor,
 	quiesce bool,
+	lagging laggingReplicaSet,
 ) bool {
 	var hbMap map[roachpb.StoreIdent][]RaftHeartbeat
 	switch msg.Type {
@@ -1060,13 +1060,14 @@ func (r *Replica) maybeCoalesceHeartbeat(
 		return false
 	}
 	beat := RaftHeartbeat{
-		RangeID:       r.RangeID,
-		ToReplicaID:   toReplica.ReplicaID,
-		FromReplicaID: fromReplica.ReplicaID,
-		Term:          msg.Term,
-		Commit:        msg.Commit,
-		Quiesce:       quiesce,
-		ToIsLearner:   toReplica.GetType() == roachpb.LEARNER,
+		RangeID:                           r.RangeID,
+		ToReplicaID:                       toReplica.ReplicaID,
+		FromReplicaID:                     fromReplica.ReplicaID,
+		Term:                              msg.Term,
+		Commit:                            msg.Commit,
+		Quiesce:                           quiesce,
+		LaggingFollowersOnQuiesce:         lagging,
+		LaggingFollowersOnQuiesceAccurate: quiesce,
 	}
 	if log.V(4) {
 		log.Infof(ctx, "coalescing beat: %+v", beat)
@@ -1173,7 +1174,7 @@ func (r *Replica) sendRaftMessage(ctx context.Context, msg raftpb.Message) {
 		return
 	}
 
-	if r.maybeCoalesceHeartbeat(ctx, msg, toReplica, fromReplica, false) {
+	if r.maybeCoalesceHeartbeat(ctx, msg, toReplica, fromReplica, false, nil) {
 		return
 	}
 
@@ -1442,7 +1443,7 @@ func shouldCampaignOnWake(
 	leaseStatus kvserverpb.LeaseStatus,
 	lease roachpb.Lease,
 	storeID roachpb.StoreID,
-	raftStatus raft.Status,
+	raftStatus raft.BasicStatus,
 ) bool {
 	// When waking up a range, campaign unless we know that another
 	// node holds a valid lease (this is most important after a split,
@@ -1469,8 +1470,8 @@ func (r *Replica) maybeCampaignOnWakeLocked(ctx context.Context) {
 		return
 	}
 
-	leaseStatus := r.leaseStatus(*r.mu.state.Lease, r.store.Clock().Now(), r.mu.minLeaseProposedTS)
-	raftStatus := r.mu.internalRaftGroup.Status()
+	leaseStatus := r.leaseStatus(ctx, *r.mu.state.Lease, r.store.Clock().Now(), r.mu.minLeaseProposedTS)
+	raftStatus := r.mu.internalRaftGroup.BasicStatus()
 	if shouldCampaignOnWake(leaseStatus, *r.mu.state.Lease, r.store.StoreID(), raftStatus) {
 		log.VEventf(ctx, 3, "campaigning")
 		if err := r.mu.internalRaftGroup.Campaign(); err != nil {
@@ -1566,17 +1567,6 @@ func (r *Replica) maybeAcquireSnapshotMergeLock(
 		subsumedRepls = append(subsumedRepls, sRepl)
 		endKey = sRepl.Desc().EndKey
 	}
-	// TODO(benesch): we may be unnecessarily forcing another Raft snapshot here
-	// by subsuming too much. Consider the case where [a, b) and [c, e) first
-	// merged into [a, e), then split into [a, d) and [d, e), and we're applying a
-	// snapshot that spans this merge and split. The bounds of this snapshot will
-	// be [a, d), so we'll subsume [c, e). But we're still a member of [d, e)!
-	// We'll currently be forced to get a Raft snapshot to catch up. Ideally, we'd
-	// subsume only half of [c, e) and synthesize a new RHS [d, e), effectively
-	// applying both the split and merge during snapshot application. This isn't a
-	// huge deal, though: we're probably behind enough that the RHS would need to
-	// get caught up with a Raft snapshot anyway, even if we synthesized it
-	// properly.
 	return subsumedRepls, func() {
 		for _, sr := range subsumedRepls {
 			sr.raftMu.Unlock()
@@ -1606,9 +1596,9 @@ func (r *Replica) acquireSplitLock(
 	ctx context.Context, split *roachpb.SplitTrigger,
 ) (func(), error) {
 	rightReplDesc, _ := split.RightDesc.GetReplicaDescriptor(r.StoreID())
-	rightRepl, _, err := r.store.getOrCreateReplica(ctx, split.RightDesc.RangeID,
-		rightReplDesc.ReplicaID, nil, /* creatingReplica */
-		rightReplDesc.GetType() == roachpb.LEARNER)
+	rightRepl, _, err := r.store.getOrCreateReplica(
+		ctx, split.RightDesc.RangeID, rightReplDesc.ReplicaID, nil, /* creatingReplica */
+	)
 	// If getOrCreateReplica returns RaftGroupDeletedError we know that the RHS
 	// has already been removed. This case is handled properly in splitPostApply.
 	if errors.HasType(err, (*roachpb.RaftGroupDeletedError)(nil)) {
@@ -1636,18 +1626,10 @@ func (r *Replica) acquireMergeLock(
 	// for the right-hand range will block on raftMu, waiting for the merge to
 	// complete, after which the replica will realize it has been destroyed and
 	// reject the snapshot.
-	//
-	// These guarantees would not be held if we were catching up from a preemptive
-	// snapshot and were not part of the range. That scenario, however, never
-	// arises because prior to 19.2 we would ensure that a preemptive snapshot had
-	// been applied before adding a store to the range which would fail if the
-	// range had merged another range and in 19.2 we detect if the raft messages
-	// we're processing are for a learner and our current state is due to a
-	// preemptive snapshot and remove the preemptive snapshot.
 	rightReplDesc, _ := merge.RightDesc.GetReplicaDescriptor(r.StoreID())
-	rightRepl, _, err := r.store.getOrCreateReplica(ctx, merge.RightDesc.RangeID,
-		rightReplDesc.ReplicaID, nil, /* creatingReplica */
-		rightReplDesc.GetType() == roachpb.LEARNER)
+	rightRepl, _, err := r.store.getOrCreateReplica(
+		ctx, merge.RightDesc.RangeID, rightReplDesc.ReplicaID, nil, /* creatingReplica */
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1757,7 +1739,7 @@ func ComputeRaftLogSize(
 ) (int64, error) {
 	prefix := keys.RaftLogPrefix(rangeID)
 	prefixEnd := prefix.PrefixEnd()
-	iter := reader.NewIterator(storage.IterOptions{
+	iter := reader.NewMVCCIterator(storage.MVCCKeyIterKind, storage.IterOptions{
 		LowerBound: prefix,
 		UpperBound: prefixEnd,
 	})

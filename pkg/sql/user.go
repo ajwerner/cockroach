@@ -16,8 +16,9 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -26,6 +27,9 @@ import (
 
 // GetUserHashedPassword determines if the given user exists and
 // also returns a password retrieval function.
+//
+// The caller is responsible for normalizing the username.
+// (CockroachDB has case-insensitive usernames, unlike PostgreSQL.)
 //
 // The function is tolerant of unavailable clusters (or unavailable
 // system.user) as follows:
@@ -51,7 +55,7 @@ import (
 //   via the cluster setting.
 //
 func GetUserHashedPassword(
-	ctx context.Context, ie *InternalExecutor, username string,
+	ctx context.Context, ie *InternalExecutor, username security.SQLUsername,
 ) (
 	exists bool,
 	canLogin bool,
@@ -59,15 +63,14 @@ func GetUserHashedPassword(
 	validUntilFn func(ctx context.Context) (timestamp *tree.DTimestamp, err error),
 	err error,
 ) {
-	normalizedUsername := tree.Name(username).Normalize()
-	isRoot := normalizedUsername == security.RootUser
+	isRoot := username.IsRootUser()
 
 	if isRoot {
 		// As explained above, for root we report that the user exists
 		// immediately, and delay retrieving the password until strictly
 		// necessary.
 		rootFn := func(ctx context.Context) ([]byte, error) {
-			_, _, hashedPassword, _, err := retrieveUserAndPassword(ctx, ie, isRoot, normalizedUsername)
+			_, _, hashedPassword, _, err := retrieveUserAndPassword(ctx, ie, isRoot, username)
 			return hashedPassword, err
 		}
 
@@ -80,7 +83,7 @@ func GetUserHashedPassword(
 
 	// Other users must reach for system.users no matter what, because
 	// only that contains the truth about whether the user exists.
-	exists, canLogin, hashedPassword, validUntil, err := retrieveUserAndPassword(ctx, ie, isRoot, normalizedUsername)
+	exists, canLogin, hashedPassword, validUntil, err := retrieveUserAndPassword(ctx, ie, isRoot, username)
 	return exists, canLogin,
 		func(ctx context.Context) ([]byte, error) { return hashedPassword, nil },
 		func(ctx context.Context) (*tree.DTimestamp, error) { return validUntil, nil },
@@ -88,7 +91,7 @@ func GetUserHashedPassword(
 }
 
 func retrieveUserAndPassword(
-	ctx context.Context, ie *InternalExecutor, isRoot bool, normalizedUsername string,
+	ctx context.Context, ie *InternalExecutor, isRoot bool, normalizedUsername security.SQLUsername,
 ) (exists bool, canLogin bool, hashedPassword []byte, validUntil *tree.DTimestamp, err error) {
 	// We may be operating with a timeout.
 	timeout := userLoginTimeout.Get(&ie.s.cfg.Settings.SV)
@@ -112,7 +115,7 @@ func retrieveUserAndPassword(
 			`WHERE username=$1`
 		values, err := ie.QueryRowEx(
 			ctx, "get-hashed-pwd", nil, /* txn */
-			sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 			getHashedPassword, normalizedUsername)
 		if err != nil {
 			return errors.Wrapf(err, "error looking up user %s", normalizedUsername)
@@ -133,7 +136,7 @@ func retrieveUserAndPassword(
 
 		loginDependencies, err := ie.QueryEx(
 			ctx, "get-login-dependencies", nil, /* txn */
-			sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 			getLoginDependencies,
 			normalizedUsername,
 		)
@@ -173,7 +176,7 @@ func retrieveUserAndPassword(
 	if err != nil {
 		// Failed to retrieve the user account. Report in logs for later investigation.
 		log.Warningf(ctx, "user lookup for %q failed: %v", normalizedUsername, err)
-		err = errors.HandledWithMessage(err, "internal error while retrieving user account")
+		err = errors.Wrap(errors.Handled(err), "internal error while retrieving user account")
 	}
 	return exists, canLogin, hashedPassword, validUntil, err
 }
@@ -185,22 +188,38 @@ var userLoginTimeout = settings.RegisterPublicNonNegativeDurationSetting(
 )
 
 // GetAllRoles returns a "set" (map) of Roles -> true.
-func (p *planner) GetAllRoles(ctx context.Context) (map[string]bool, error) {
+func (p *planner) GetAllRoles(ctx context.Context) (map[security.SQLUsername]bool, error) {
 	query := `SELECT username FROM system.users`
 	rows, err := p.ExtendedEvalContext().ExecCfg.InternalExecutor.QueryEx(
 		ctx, "read-users", p.txn,
-		sqlbase.InternalExecutorSessionDataOverride{User: security.RootUser},
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		query)
 	if err != nil {
 		return nil, err
 	}
 
-	users := make(map[string]bool)
+	users := make(map[security.SQLUsername]bool)
 	for _, row := range rows {
 		username := tree.MustBeDString(row[0])
-		users[string(username)] = true
+		// The usernames in system.users are already normalized.
+		users[security.MakeSQLUsernameFromPreNormalizedString(string(username))] = true
 	}
 	return users, nil
+}
+
+// RoleExists returns true if the role exists.
+func (p *planner) RoleExists(ctx context.Context, role security.SQLUsername) (bool, error) {
+	query := `SELECT username FROM system.users WHERE username = $1`
+	row, err := p.ExtendedEvalContext().ExecCfg.InternalExecutor.QueryRowEx(
+		ctx, "read-users", p.txn,
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
+		query, role,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	return row != nil, nil
 }
 
 var roleMembersTableName = tree.MakeTableName("system", "role_members")
@@ -214,6 +233,6 @@ func (p *planner) BumpRoleMembershipTableVersion(ctx context.Context) error {
 	}
 
 	return p.writeSchemaChange(
-		ctx, tableDesc, sqlbase.InvalidMutationID, "updating version for role membership table",
+		ctx, tableDesc, descpb.InvalidMutationID, "updating version for role membership table",
 	)
 }

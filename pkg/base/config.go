@@ -42,8 +42,8 @@ const (
 
 	// NB: net.JoinHostPort is not a constant.
 	defaultAddr     = ":" + DefaultPort
-	defaultHTTPAddr = ":" + DefaultHTTPPort
 	defaultSQLAddr  = ":" + DefaultPort
+	defaultHTTPAddr = ":" + DefaultHTTPPort
 
 	// NetworkTimeout is the timeout used for network operations.
 	NetworkTimeout = 3 * time.Second
@@ -61,6 +61,11 @@ const (
 	// NB: this can't easily become a variable as the UI hard-codes it to 10s.
 	// See https://github.com/cockroachdb/cockroach/issues/20310.
 	DefaultMetricsSampleInterval = 10 * time.Second
+
+	// defaultRaftHeartbeatIntervalTicks is the default value for
+	// RaftHeartbeatIntervalTicks, which determines the number of ticks between
+	// each heartbeat.
+	defaultRaftHeartbeatIntervalTicks = 5
 
 	// defaultRPCHeartbeatInterval is the default value of RPCHeartbeatInterval
 	// used by the rpc context.
@@ -122,7 +127,7 @@ var (
 	// is responsible for ensuring the raft log doesn't grow without bound by
 	// making sure the leader doesn't get too far ahead.
 	defaultRaftLogTruncationThreshold = envutil.EnvOrDefaultInt64(
-		"COCKROACH_RAFT_LOG_TRUNCATION_THRESHOLD", 8<<20 /* 8 MB */)
+		"COCKROACH_RAFT_LOG_TRUNCATION_THRESHOLD", 16<<20 /* 16 MB */)
 
 	// defaultRaftMaxSizePerMsg specifies the maximum aggregate byte size of Raft
 	// log entries that a leader will send to followers in a single MsgApp.
@@ -144,9 +149,18 @@ var (
 // Config is embedded by server.Config. A base config is not meant to be used
 // directly, but embedding configs should call cfg.InitDefaults().
 type Config struct {
-	// Insecure specifies whether to use SSL or not.
+	// Insecure specifies whether to disable security checks throughout
+	// the code base.
 	// This is really not recommended.
+	// See: https://github.com/cockroachdb/cockroach/issues/53404
 	Insecure bool
+
+	// AcceptSQLWithoutTLS, when set, makes it possible for SQL
+	// clients to authenticate without TLS on a secure cluster.
+	//
+	// Authentication is, as usual, subject to the HBA configuration: in
+	// the default case, password authentication is still mandatory.
+	AcceptSQLWithoutTLS bool
 
 	// SSLCAKey is used to sign new certs.
 	SSLCAKey string
@@ -155,7 +169,7 @@ type Config struct {
 
 	// User running this process. It could be the user under which
 	// the server is running or the user passed in client calls.
-	User string
+	User security.SQLUsername
 
 	// Addr is the address the server is listening on.
 	Addr string
@@ -208,6 +222,15 @@ type Config struct {
 	// Enables the use of an PTP hardware clock user space API for HLC current time.
 	// This contains the path to the device to be used (i.e. /dev/ptp0)
 	ClockDevicePath string
+
+	// AutoInitializeCluster, if set, causes the server to bootstrap the
+	// cluster. Note that if two nodes are started with this flag set
+	// and also configured to join each other, each node will bootstrap
+	// its own unique cluster and the join will fail.
+	//
+	// The flag exists mostly for the benefit of tests, and for
+	// `cockroach start-single-node`.
+	AutoInitializeCluster bool
 }
 
 // HistogramWindowInterval is used to determine the approximate length of time
@@ -232,7 +255,7 @@ func (*Config) HistogramWindowInterval() time.Duration {
 // This is also used in tests to reset global objects.
 func (cfg *Config) InitDefaults() {
 	cfg.Insecure = defaultInsecure
-	cfg.User = defaultUser
+	cfg.User = security.MakeSQLUsernameFromPreNormalizedString(defaultUser)
 	cfg.Addr = defaultAddr
 	cfg.AdvertiseAddr = cfg.Addr
 	cfg.HTTPAddr = defaultHTTPAddr
@@ -246,6 +269,7 @@ func (cfg *Config) InitDefaults() {
 	cfg.ClusterName = ""
 	cfg.DisableClusterNameVerification = false
 	cfg.ClockDevicePath = ""
+	cfg.AcceptSQLWithoutTLS = false
 }
 
 // HTTPRequestScheme returns "http" or "https" based on the value of
@@ -274,6 +298,9 @@ type RaftConfig struct {
 	// previous election expires. This value is inherited by individual stores
 	// unless overridden.
 	RaftElectionTimeoutTicks int
+
+	// RaftHeartbeatIntervalTicks is the number of ticks that pass between heartbeats.
+	RaftHeartbeatIntervalTicks int
 
 	// RangeLeaseRaftElectionTimeoutMultiplier specifies what multiple the leader
 	// lease active duration should be of the raft election timeout.
@@ -338,6 +365,9 @@ func (cfg *RaftConfig) SetDefaults() {
 	}
 	if cfg.RaftElectionTimeoutTicks == 0 {
 		cfg.RaftElectionTimeoutTicks = defaultRaftElectionTimeoutTicks
+	}
+	if cfg.RaftHeartbeatIntervalTicks == 0 {
+		cfg.RaftHeartbeatIntervalTicks = defaultRaftHeartbeatIntervalTicks
 	}
 	if cfg.RangeLeaseRaftElectionTimeoutMultiplier == 0 {
 		cfg.RangeLeaseRaftElectionTimeoutMultiplier = defaultRangeLeaseRaftElectionTimeoutMultiplier
@@ -499,10 +529,14 @@ type TempStorageConfig struct {
 	Mon *mon.BytesMonitor
 	// Spec stores the StoreSpec this TempStorageConfig will use.
 	Spec StoreSpec
+	// Settings stores the cluster.Settings this TempStoreConfig will use.
+	Settings *cluster.Settings
 }
 
 // ExternalIODirConfig describes various configuration options pertaining
 // to external storage implementations.
+// TODO(adityamaru): Rename ExternalIODirConfig to ExternalIOConfig because it
+// is now used to configure both ExternalStorage and KMS.
 type ExternalIODirConfig struct {
 	// Disables the use of external HTTP endpoints.
 	// This turns off http:// external storage as well as any custom
@@ -546,6 +580,7 @@ func TempStorageConfigFromEnv(
 		InMemory: inMem,
 		Mon:      monitor,
 		Spec:     useStore,
+		Settings: st,
 	}
 }
 

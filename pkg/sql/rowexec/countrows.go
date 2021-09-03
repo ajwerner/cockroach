@@ -15,11 +15,10 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/opentracing/opentracing-go"
 )
 
 // countAggregator is a simple processor that counts the number of rows it
@@ -48,7 +47,7 @@ func newCountAggregator(
 	ag := &countAggregator{}
 	ag.input = input
 
-	if sp := opentracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(flowCtx.EvalCtx.Ctx()); sp != nil && tracing.IsRecording(sp) {
 		ag.input = newInputStatCollector(input)
 		ag.FinishTrace = ag.outputStatsToTrace
 	}
@@ -76,7 +75,7 @@ func (ag *countAggregator) Start(ctx context.Context) context.Context {
 	return ag.StartInternal(ctx, countRowsProcName)
 }
 
-func (ag *countAggregator) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (ag *countAggregator) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	for ag.State == execinfra.StateRunning {
 		row, meta := ag.input.Next()
 		if meta != nil {
@@ -87,8 +86,8 @@ func (ag *countAggregator) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMet
 			return nil, meta
 		}
 		if row == nil {
-			ret := make(sqlbase.EncDatumRow, 1)
-			ret[0] = sqlbase.EncDatum{Datum: tree.NewDInt(tree.DInt(ag.count))}
+			ret := make(rowenc.EncDatumRow, 1)
+			ret[0] = rowenc.EncDatum{Datum: tree.NewDInt(tree.DInt(ag.count))}
 			rendered, _, err := ag.Out.ProcessRow(ag.Ctx, ret)
 			// We're done as soon as we process our one output row, so we
 			// transition into draining state. We will, however, return non-nil
@@ -104,10 +103,6 @@ func (ag *countAggregator) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMet
 	return nil, ag.DrainHelper()
 }
 
-func (ag *countAggregator) ConsumerDone() {
-	ag.MoveToDraining(nil /* err */)
-}
-
 func (ag *countAggregator) ConsumerClosed() {
 	ag.InternalClose()
 }
@@ -119,7 +114,7 @@ func (ag *countAggregator) outputStatsToTrace() {
 	if !ok {
 		return
 	}
-	if sp := opentracing.SpanFromContext(ag.Ctx); sp != nil {
+	if sp := tracing.SpanFromContext(ag.Ctx); sp != nil {
 		tracing.SetSpanStats(
 			sp, &AggregatorStats{InputStats: is},
 		)

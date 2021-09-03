@@ -15,10 +15,17 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -30,35 +37,44 @@ func TestDescriptorsMatchingTargets(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	// TODO(ajwerner): There should be a constructor for an ImmutableTableDescriptor
+	// TODO(ajwerner): There should be a constructor for an Immutable
 	// and really all of the leasable descriptor types which includes its initial
 	// DescriptorMeta. This refactoring precedes the actual adoption of
 	// DescriptorMeta.
-	var descriptors []sqlbase.Descriptor
+	var descriptors []catalog.Descriptor
 	{
 		// Make shorthand type names for syntactic sugar.
-		type tbDesc = sqlbase.TableDescriptor
-		type typDesc = sqlbase.TypeDescriptor
+		type scDesc = descpb.SchemaDescriptor
+		type tbDesc = descpb.TableDescriptor
+		type typDesc = descpb.TypeDescriptor
 		ts1 := hlc.Timestamp{WallTime: 1}
-		mkTable := func(descriptor tbDesc) sqlbase.Descriptor {
-			desc := sqlbase.NewImmutableTableDescriptor(descriptor)
+		mkTable := func(descriptor tbDesc) *tabledesc.Immutable {
+			desc := tabledesc.NewImmutable(descriptor)
 			desc.ModificationTime = ts1
-			return *desc.DescriptorProto()
+			return desc
 		}
-		mkDB := func(id sqlbase.ID, name string) sqlbase.Descriptor {
-			return *sqlbase.NewInitialDatabaseDescriptor(id, name).DescriptorProto()
+		mkDB := func(id descpb.ID, name string) *dbdesc.Immutable {
+			return &dbdesc.NewInitial(id, name, security.AdminRoleName()).Immutable
 		}
-		mkTyp := func(desc typDesc) sqlbase.Descriptor {
-			return *sqlbase.NewImmutableTypeDescriptor(desc).DescriptorProto()
+		mkTyp := func(desc typDesc) *typedesc.Immutable {
+			// Set a default parent schema for the type descriptors.
+			if desc.ParentSchemaID == descpb.InvalidID {
+				desc.ParentSchemaID = keys.PublicSchemaID
+			}
+			return typedesc.NewImmutable(desc)
 		}
-		typeExpr := "'hello'::@15 = 'hello'::@15"
-		typeArrExpr := "'hello'::@16 = 'hello'::@16"
-		descriptors = []sqlbase.Descriptor{
+		mkSchema := func(desc scDesc) *schemadesc.Immutable {
+			return schemadesc.NewImmutable(desc)
+		}
+		toOid := typedesc.TypeIDToOID
+		typeExpr := "'hello'::@100015 = 'hello'::@100015"
+		typeArrExpr := "'hello'::@100016 = 'hello'::@100016"
+		descriptors = []catalog.Descriptor{
 			mkDB(0, "system"),
 			mkTable(tbDesc{ID: 1, Name: "foo", ParentID: 0}),
 			mkTable(tbDesc{ID: 2, Name: "bar", ParentID: 0}),
 			mkTable(tbDesc{ID: 4, Name: "baz", ParentID: 3}),
-			mkTable(tbDesc{ID: 6, Name: "offline", ParentID: 0, State: sqlbase.TableDescriptor_OFFLINE}),
+			mkTable(tbDesc{ID: 6, Name: "offline", ParentID: 0, State: descpb.DescriptorState_OFFLINE}),
 			mkDB(3, "data"),
 			mkDB(5, "empty"),
 			// Create some user defined types and tables that reference them.
@@ -70,22 +86,22 @@ func TestDescriptorsMatchingTargets(t *testing.T) {
 			// Every user defined type also has an ALIAS type that represents an
 			// array of the user defined type, and that is tracked by the ArrayTypeID
 			// field on the type descriptor.
-			mkTyp(sqlbase.TypeDescriptor{ParentID: 7, ID: 8, Name: "enum1", ArrayTypeID: 9, Kind: sqlbase.TypeDescriptor_ENUM}),
-			mkTyp(sqlbase.TypeDescriptor{ParentID: 7, ID: 9, Name: "_enum1", Kind: sqlbase.TypeDescriptor_ALIAS, Alias: types.MakeEnum(8, 9)}),
-			mkTable(sqlbase.TableDescriptor{ParentID: 7, ID: 10, Name: "enum_tbl", Columns: []sqlbase.ColumnDescriptor{{ID: 0, Type: types.MakeEnum(8, 9)}}}),
-			mkTable(sqlbase.TableDescriptor{ParentID: 7, ID: 11, Name: "enum_arr_tbl", Columns: []sqlbase.ColumnDescriptor{{ID: 0, Type: types.MakeArray(types.MakeEnum(8, 9))}}}),
-			mkTyp(sqlbase.TypeDescriptor{ParentID: 7, ID: 12, Name: "enum2", ArrayTypeID: 13, Kind: sqlbase.TypeDescriptor_ENUM}),
-			mkTyp(sqlbase.TypeDescriptor{ParentID: 7, ID: 13, Name: "_enum2", Kind: sqlbase.TypeDescriptor_ALIAS, Alias: types.MakeEnum(12, 13)}),
+			mkTyp(descpb.TypeDescriptor{ParentID: 7, ID: 8, Name: "enum1", ArrayTypeID: 9, Kind: descpb.TypeDescriptor_ENUM}),
+			mkTyp(descpb.TypeDescriptor{ParentID: 7, ID: 9, Name: "_enum1", Kind: descpb.TypeDescriptor_ALIAS, Alias: types.MakeEnum(toOid(8), toOid(9))}),
+			mkTable(descpb.TableDescriptor{ParentID: 7, ID: 10, Name: "enum_tbl", Columns: []descpb.ColumnDescriptor{{ID: 0, Type: types.MakeEnum(toOid(8), toOid(9))}}}),
+			mkTable(descpb.TableDescriptor{ParentID: 7, ID: 11, Name: "enum_arr_tbl", Columns: []descpb.ColumnDescriptor{{ID: 0, Type: types.MakeArray(types.MakeEnum(toOid(8), toOid(9)))}}}),
+			mkTyp(descpb.TypeDescriptor{ParentID: 7, ID: 12, Name: "enum2", ArrayTypeID: 13, Kind: descpb.TypeDescriptor_ENUM}),
+			mkTyp(descpb.TypeDescriptor{ParentID: 7, ID: 13, Name: "_enum2", Kind: descpb.TypeDescriptor_ALIAS, Alias: types.MakeEnum(toOid(12), toOid(13))}),
 			// Create some user defined types that are used in table expressions.
 			mkDB(14, "udts_expr"),
-			mkTyp(sqlbase.TypeDescriptor{ParentID: 14, ID: 15, Name: "enum1", ArrayTypeID: 16, Kind: sqlbase.TypeDescriptor_ENUM}),
-			mkTyp(sqlbase.TypeDescriptor{ParentID: 14, ID: 16, Name: "_enum1", Kind: sqlbase.TypeDescriptor_ALIAS, Alias: types.MakeEnum(15, 16)}),
+			mkTyp(descpb.TypeDescriptor{ParentID: 14, ID: 15, Name: "enum1", ArrayTypeID: 16, Kind: descpb.TypeDescriptor_ENUM}),
+			mkTyp(descpb.TypeDescriptor{ParentID: 14, ID: 16, Name: "_enum1", Kind: descpb.TypeDescriptor_ALIAS, Alias: types.MakeEnum(toOid(15), toOid(16))}),
 			// Create a table with a default expression.
 			mkTable(tbDesc{
 				ID:       17,
 				Name:     "def",
 				ParentID: 14,
-				Columns: []sqlbase.ColumnDescriptor{
+				Columns: []descpb.ColumnDescriptor{
 					{
 						Name:        "a",
 						DefaultExpr: &typeExpr,
@@ -98,7 +114,7 @@ func TestDescriptorsMatchingTargets(t *testing.T) {
 				ID:       18,
 				Name:     "comp",
 				ParentID: 14,
-				Columns: []sqlbase.ColumnDescriptor{
+				Columns: []descpb.ColumnDescriptor{
 					{
 						Name:        "a",
 						DefaultExpr: &typeExpr,
@@ -111,7 +127,7 @@ func TestDescriptorsMatchingTargets(t *testing.T) {
 				ID:       19,
 				Name:     "pi",
 				ParentID: 14,
-				Indexes: []sqlbase.IndexDescriptor{
+				Indexes: []descpb.IndexDescriptor{
 					{
 						Name:      "idx",
 						Predicate: typeExpr,
@@ -123,7 +139,7 @@ func TestDescriptorsMatchingTargets(t *testing.T) {
 				ID:       20,
 				Name:     "checks",
 				ParentID: 14,
-				Checks: []*sqlbase.TableDescriptor_CheckConstraint{
+				Checks: []*descpb.TableDescriptor_CheckConstraint{
 					{
 						Expr: typeExpr,
 					},
@@ -133,7 +149,7 @@ func TestDescriptorsMatchingTargets(t *testing.T) {
 				ID:       21,
 				Name:     "def_arr",
 				ParentID: 14,
-				Columns: []sqlbase.ColumnDescriptor{
+				Columns: []descpb.ColumnDescriptor{
 					{
 						Name:        "a",
 						DefaultExpr: &typeArrExpr,
@@ -141,6 +157,9 @@ func TestDescriptorsMatchingTargets(t *testing.T) {
 					},
 				},
 			}),
+			mkDB(22, "uds"),
+			mkSchema(scDesc{ParentID: 22, ID: 23, Name: "sc"}),
+			mkTable(tbDesc{ParentID: 22, UnexposedParentSchemaID: 23, ID: 24, Name: "tb1"}),
 		}
 	}
 
@@ -222,6 +241,9 @@ func TestDescriptorsMatchingTargets(t *testing.T) {
 		{"", "TABLE udts_expr.comp", []string{"udts_expr", "enum1", "_enum1", "comp"}, nil, ``},
 		{"", "TABLE udts_expr.pi", []string{"udts_expr", "enum1", "_enum1", "pi"}, nil, ``},
 		{"", "TABLE udts_expr.checks", []string{"udts_expr", "enum1", "_enum1", "checks"}, nil, ``},
+		// Test that the user defined schema shows up in the descriptors.
+		{"", "DATABASE uds", []string{"uds", "sc", "tb1"}, []string{"uds"}, ``},
+		{"", "TABLE uds.sc.tb1", []string{"uds", "sc", "tb1"}, nil, ``},
 	}
 	searchPath := sessiondata.MakeSearchPath([]string{"public", "pg_catalog"})
 	for i, test := range tests {

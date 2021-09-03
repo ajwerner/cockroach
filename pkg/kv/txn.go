@@ -311,10 +311,18 @@ func (txn *Txn) ProvisionalCommitTimestamp() hlc.Timestamp {
 }
 
 // SetSystemConfigTrigger sets the system db trigger to true on this transaction.
-// This will impact the EndTxnRequest.
-func (txn *Txn) SetSystemConfigTrigger() error {
+// This will impact the EndTxnRequest. Note that this method takes a boolean
+// argument indicating whether this transaction is intended for the system
+// tenant. Only transactions for the system tenant need to set the system config
+// trigger which is used to gossip updates to the system config to KV servers.
+// The KV servers need access to an up-to-date system config in order to
+// determine split points and zone configurations.
+func (txn *Txn) SetSystemConfigTrigger(forSystemTenant bool) error {
 	if txn.typ != RootTxn {
 		return errors.AssertionFailedf("SetSystemConfigTrigger() called on leaf txn")
+	}
+	if !forSystemTenant {
+		return nil
 	}
 
 	txn.mu.Lock()
@@ -1191,10 +1199,6 @@ func (txn *Txn) ManualRestart(ctx context.Context, ts hlc.Timestamp) {
 // operation (usually, but not exclusively, by a high-priority txn with
 // conflicting writes).
 func (txn *Txn) IsSerializablePushAndRefreshNotPossible() bool {
-	if txn.typ != RootTxn {
-		panic(
-			errors.AssertionFailedf("IsSerializablePushAndRefreshNotPossible() called on leaf txn"))
-	}
 	return txn.mu.sender.IsSerializablePushAndRefreshNotPossible()
 }
 
@@ -1238,10 +1242,6 @@ func (txn *Txn) Active() bool {
 // In step-wise execution, reads operate at a snapshot established at
 // the last step, instead of the latest write if not yet enabled.
 func (txn *Txn) Step(ctx context.Context) error {
-	if txn.typ != RootTxn {
-		return errors.WithContextTags(
-			errors.AssertionFailedf("txn.Step() only allowed in RootTxn"), ctx)
-	}
 	txn.mu.Lock()
 	defer txn.mu.Unlock()
 	return txn.mu.sender.Step(ctx)
@@ -1250,10 +1250,6 @@ func (txn *Txn) Step(ctx context.Context) error {
 // ConfigureStepping configures step-wise execution in the
 // transaction.
 func (txn *Txn) ConfigureStepping(ctx context.Context, mode SteppingMode) (prevMode SteppingMode) {
-	if txn.typ != RootTxn {
-		panic(errors.WithContextTags(
-			errors.AssertionFailedf("txn.ConfigureStepping() only allowed in RootTxn"), ctx))
-	}
 	txn.mu.Lock()
 	defer txn.mu.Unlock()
 	return txn.mu.sender.ConfigureStepping(ctx, mode)

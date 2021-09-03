@@ -20,11 +20,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/gogo/protobuf/proto"
+	"github.com/stretchr/testify/require"
 )
 
 // TODO(benesch): Don't reinvent the key encoding here.
@@ -62,8 +65,9 @@ func sqlKV(tableID uint32, indexID, descID uint64) roachpb.KeyValue {
 }
 
 func descriptor(descID uint64) roachpb.KeyValue {
-	k := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, sqlbase.ID(descID))
-	v := sqlbase.TableDescriptor{}
+	id := descpb.ID(descID)
+	k := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, id)
+	v := tabledesc.NewImmutable(descpb.TableDescriptor{ID: id})
 	kv := roachpb.KeyValue{Key: k}
 	if err := kv.Value.SetProto(v.DescriptorProto()); err != nil {
 		panic(err)
@@ -135,7 +139,7 @@ func TestGet(t *testing.T) {
 	cfg := config.NewSystemConfig(zonepb.DefaultZoneConfigRef())
 	for tcNum, tc := range testCases {
 		cfg.Values = tc.values
-		if val := cfg.GetValue([]byte(tc.key)); !proto.Equal(val, tc.value) {
+		if val := cfg.GetValue([]byte(tc.key)); !val.Equal(tc.value) {
 			t.Errorf("#%d: expected=%s, found=%s", tcNum, tc.value, val)
 		}
 	}
@@ -200,12 +204,12 @@ func TestGetLargestID(t *testing.T) {
 
 		// Real SQL layout.
 		func() testCase {
-			ms := sqlbase.MakeMetadataSchema(keys.SystemSQLCodec, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef())
+			ms := bootstrap.MakeMetadataSchema(keys.SystemSQLCodec, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef())
 			descIDs := ms.DescriptorIDs()
 			maxDescID := config.SystemTenantObjectID(descIDs[len(descIDs)-1])
 			kvs, _ /* splits */ := ms.GetInitialValues()
 			pseudoIDs := keys.PseudoTableIDs
-			const pseudoIDIsMax = true // NOTE: will change as new system objects are added
+			const pseudoIDIsMax = false // NOTE: change to false if adding new system not pseudo objects.
 			if pseudoIDIsMax {
 				maxDescID = config.SystemTenantObjectID(keys.MaxPseudoTableID)
 			}
@@ -323,7 +327,7 @@ func TestComputeSplitKeySystemRanges(t *testing.T) {
 	}
 
 	cfg := config.NewSystemConfig(zonepb.DefaultZoneConfigRef())
-	kvs, _ /* splits */ := sqlbase.MakeMetadataSchema(
+	kvs, _ /* splits */ := bootstrap.MakeMetadataSchema(
 		keys.SystemSQLCodec, cfg.DefaultZoneConfig, zonepb.DefaultSystemZoneConfigRef(),
 	).GetInitialValues()
 	cfg.SystemConfigEntries = config.SystemConfigEntries{
@@ -355,7 +359,7 @@ func TestComputeSplitKeyTableIDs(t *testing.T) {
 	// separately above.
 	minKey := roachpb.RKey(keys.TimeseriesPrefix.PrefixEnd())
 
-	schema := sqlbase.MakeMetadataSchema(
+	schema := bootstrap.MakeMetadataSchema(
 		keys.SystemSQLCodec, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef(),
 	)
 	// Real system tables only.
@@ -461,7 +465,7 @@ func TestComputeSplitKeyTenantBoundaries(t *testing.T) {
 	minKey := tkey(keys.MinUserDescID)
 	minTenID, maxTenID := roachpb.MinTenantID.ToUint64(), roachpb.MaxTenantID.ToUint64()
 
-	schema := sqlbase.MakeMetadataSchema(
+	schema := bootstrap.MakeMetadataSchema(
 		keys.SystemSQLCodec, zonepb.DefaultZoneConfigRef(), zonepb.DefaultSystemZoneConfigRef(),
 	)
 	// Real system tenant only.
@@ -595,7 +599,7 @@ func TestGetZoneConfigForKey(t *testing.T) {
 	}()
 	cfg := config.NewSystemConfig(zonepb.DefaultZoneConfigRef())
 
-	kvs, _ /* splits */ := sqlbase.MakeMetadataSchema(
+	kvs, _ /* splits */ := bootstrap.MakeMetadataSchema(
 		keys.SystemSQLCodec, cfg.DefaultZoneConfig, zonepb.DefaultSystemZoneConfigRef(),
 	).GetInitialValues()
 	cfg.SystemConfigEntries = config.SystemConfigEntries{
@@ -617,4 +621,31 @@ func TestGetZoneConfigForKey(t *testing.T) {
 			t.Errorf("#%d: GetZoneConfigForKey(%v) got %d; want %d", tcNum, tc.key, objectID, tc.expectedID)
 		}
 	}
+}
+
+func TestSystemConfigMask(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	entries := config.SystemConfigEntries{Values: []roachpb.KeyValue{
+		plainKV("k1", "v1"),
+		plainKV("k2", "v2"),
+		plainKV("k3", "v3"),
+		plainKV("k4", "v4"),
+		plainKV("k5", "v5"),
+		plainKV("k6", "v6"),
+		plainKV("k7", "v7"),
+	}}
+	mask := config.MakeSystemConfigMask(
+		[]byte("k1"),
+		[]byte("k6"),
+		[]byte("k3"),
+	)
+
+	exp := config.SystemConfigEntries{Values: []roachpb.KeyValue{
+		plainKV("k1", "v1"),
+		plainKV("k3", "v3"),
+		plainKV("k6", "v6"),
+	}}
+	res := mask.Apply(entries)
+	require.Equal(t, exp, res)
 }

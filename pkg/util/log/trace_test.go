@@ -18,7 +18,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/logtags"
-	opentracing "github.com/opentracing/opentracing-go"
 	"golang.org/x/net/trace"
 )
 
@@ -69,7 +68,7 @@ func TestTrace(t *testing.T) {
 	tracer.SetForceRealSpans(true)
 	sp := tracer.StartSpan("s")
 	tracing.StartRecording(sp, tracing.SingleNodeRecording)
-	ctxWithSpan := opentracing.ContextWithSpan(ctx, sp)
+	ctxWithSpan := tracing.ContextWithSpan(ctx, sp)
 	Event(ctxWithSpan, "test1")
 	VEvent(ctxWithSpan, noLogV(), "test2")
 	VErrEvent(ctxWithSpan, noLogV(), "testerr")
@@ -81,7 +80,7 @@ func TestTrace(t *testing.T) {
 	sp.Finish()
 
 	if err := tracing.TestingCheckRecordedSpans(tracing.GetRecording(sp), `
-		span s:
+		Span s:
 		  event: test1
 		  event: test2
 		  event: testerr
@@ -98,7 +97,7 @@ func TestTraceWithTags(t *testing.T) {
 	tracer := tracing.NewTracer()
 	tracer.SetForceRealSpans(true)
 	sp := tracer.StartSpan("s")
-	ctxWithSpan := opentracing.ContextWithSpan(ctx, sp)
+	ctxWithSpan := tracing.ContextWithSpan(ctx, sp)
 	tracing.StartRecording(sp, tracing.SingleNodeRecording)
 
 	Event(ctxWithSpan, "test1")
@@ -108,7 +107,7 @@ func TestTraceWithTags(t *testing.T) {
 
 	sp.Finish()
 	if err := tracing.TestingCheckRecordedSpans(tracing.GetRecording(sp), `
-		span s:
+		Span s:
 		  event: [tag=1] test1
 		  event: [tag=1] test2
 		  event: [tag=1] testerr
@@ -186,7 +185,7 @@ func TestEventLogAndTrace(t *testing.T) {
 	tracer.SetForceRealSpans(true)
 	sp := tracer.StartSpan("s")
 	tracing.StartRecording(sp, tracing.SingleNodeRecording)
-	ctxWithBoth := opentracing.ContextWithSpan(ctxWithEventLog, sp)
+	ctxWithBoth := tracing.ContextWithSpan(ctxWithEventLog, sp)
 	// Events should only go to the trace.
 	Event(ctxWithBoth, "test3")
 	VEventf(ctxWithBoth, noLogV(), "test4")
@@ -199,7 +198,7 @@ func TestEventLogAndTrace(t *testing.T) {
 	el.Finish()
 
 	if err := tracing.TestingCheckRecordedSpans(tracing.GetRecording(sp), `
-		span s:
+		Span s:
 		  event: test3
 		  event: test4
 		  event: test5err

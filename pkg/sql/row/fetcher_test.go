@@ -21,18 +21,25 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/stretchr/testify/assert"
 )
 
 type initFetcherArgs struct {
-	tableDesc       *sqlbase.ImmutableTableDescriptor
+	tableDesc       *tabledesc.Immutable
 	indexIdx        int
 	valNeededForCol util.FastIntSet
 	spans           roachpb.Spans
@@ -42,7 +49,7 @@ func makeFetcherArgs(entries []initFetcherArgs) []FetcherTableArgs {
 	fetcherArgs := make([]FetcherTableArgs, len(entries))
 
 	for i, entry := range entries {
-		var index *sqlbase.IndexDescriptor
+		var index *descpb.IndexDescriptor
 		var isSecondaryIndex bool
 
 		if entry.indexIdx > 0 {
@@ -66,7 +73,7 @@ func makeFetcherArgs(entries []initFetcherArgs) []FetcherTableArgs {
 }
 
 func initFetcher(
-	entries []initFetcherArgs, reverseScan bool, alloc *sqlbase.DatumAlloc,
+	entries []initFetcherArgs, reverseScan bool, alloc *rowenc.DatumAlloc, memMon *mon.BytesMonitor,
 ) (fetcher *Fetcher, err error) {
 	fetcher = &Fetcher{}
 
@@ -74,12 +81,14 @@ func initFetcher(
 	fetcherArgs := makeFetcherArgs(entries)
 
 	if err := fetcher.Init(
+		context.Background(),
 		fetcherCodec,
 		reverseScan,
-		sqlbase.ScanLockingStrength_FOR_NONE,
-		false, /* returnRangeInfo */
+		descpb.ScanLockingStrength_FOR_NONE,
+		descpb.ScanLockingWaitPolicy_BLOCK,
 		false, /* isCheck */
 		alloc,
+		memMon,
 		fetcherArgs...,
 	); err != nil {
 		return nil, err
@@ -143,12 +152,12 @@ func TestNextRowSingle(t *testing.T) {
 		)
 	}
 
-	alloc := &sqlbase.DatumAlloc{}
+	alloc := &rowenc.DatumAlloc{}
 
 	// We try to read rows from each table.
 	for tableName, table := range tables {
 		t.Run(tableName, func(t *testing.T) {
-			tableDesc := sqlbase.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, tableName)
+			tableDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, tableName)
 
 			var valNeededForCol util.FastIntSet
 			valNeededForCol.AddRange(0, table.nCols-1)
@@ -161,7 +170,7 @@ func TestNextRowSingle(t *testing.T) {
 				},
 			}
 
-			rf, err := initFetcher(args, false /*reverseScan*/, alloc)
+			rf, err := initFetcher(args, false /*reverseScan*/, alloc, nil /* memMon */)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -191,11 +200,11 @@ func TestNextRowSingle(t *testing.T) {
 
 				count++
 
-				if desc.ID != tableDesc.ID || index.ID != tableDesc.PrimaryIndex.ID {
+				if desc.GetID() != tableDesc.ID || index.ID != tableDesc.PrimaryIndex.ID {
 					t.Fatalf(
 						"unexpected row retrieved from fetcher.\nnexpected:  table %s - index %s\nactual: table %s - index %s",
 						tableDesc.Name, tableDesc.PrimaryIndex.Name,
-						desc.Name, index.Name,
+						desc.GetName(), index.Name,
 					)
 				}
 
@@ -263,12 +272,12 @@ func TestNextRowBatchLimiting(t *testing.T) {
 		)
 	}
 
-	alloc := &sqlbase.DatumAlloc{}
+	alloc := &rowenc.DatumAlloc{}
 
 	// We try to read rows from each table.
 	for tableName, table := range tables {
 		t.Run(tableName, func(t *testing.T) {
-			tableDesc := sqlbase.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, tableName)
+			tableDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, tableName)
 
 			var valNeededForCol util.FastIntSet
 			valNeededForCol.AddRange(0, table.nCols-1)
@@ -281,7 +290,7 @@ func TestNextRowBatchLimiting(t *testing.T) {
 				},
 			}
 
-			rf, err := initFetcher(args, false /*reverseScan*/, alloc)
+			rf, err := initFetcher(args, false /*reverseScan*/, alloc, nil /*memMon*/)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -311,11 +320,11 @@ func TestNextRowBatchLimiting(t *testing.T) {
 
 				count++
 
-				if desc.ID != tableDesc.ID || index.ID != tableDesc.PrimaryIndex.ID {
+				if desc.GetID() != tableDesc.ID || index.ID != tableDesc.PrimaryIndex.ID {
 					t.Fatalf(
 						"unexpected row retrieved from fetcher.\nnexpected:  table %s - index %s\nactual: table %s - index %s",
 						tableDesc.Name, tableDesc.PrimaryIndex.Name,
-						desc.Name, index.Name,
+						desc.GetName(), index.Name,
 					)
 				}
 
@@ -341,6 +350,71 @@ func TestNextRowBatchLimiting(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRowFetcherMemoryLimits(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
+
+	oneMegString := make([]byte, 1<<20)
+	for i := range oneMegString {
+		oneMegString[i] = '!'
+	}
+
+	s, sqlDB, kvDB := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop(ctx)
+
+	tableName := "wide_table"
+	sqlutils.CreateTable(
+		t, sqlDB, tableName,
+		"k INT PRIMARY KEY, v STRING",
+		10,
+		func(i int) []tree.Datum {
+			return []tree.Datum{
+				tree.NewDInt(tree.DInt(i)),
+				tree.NewDString(string(oneMegString)),
+			}
+		})
+
+	tableDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, tableName)
+
+	var valNeededForCol util.FastIntSet
+	valNeededForCol.AddRange(0, 1)
+
+	args := []initFetcherArgs{
+		{
+			tableDesc:       tableDesc,
+			indexIdx:        0,
+			valNeededForCol: valNeededForCol,
+		},
+	}
+
+	alloc := &rowenc.DatumAlloc{}
+
+	settings := cluster.MakeTestingClusterSettings()
+
+	// Give a 1 megabyte limit to the memory monitor, so that
+	// we can test whether scans of wide tables are prevented if
+	// we have insufficient memory to do them.
+	memMon := mon.NewMonitor("test", mon.MemoryResource, nil, nil, -1, 1000, settings)
+	memMon.Start(ctx, nil, mon.MakeStandaloneBudget(1<<20))
+	defer memMon.Stop(ctx)
+	rf, err := initFetcher(args, false /*reverseScan*/, alloc, memMon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rf.Close(ctx)
+
+	err = rf.StartScan(
+		context.Background(),
+		kv.NewTxn(ctx, kvDB, 0),
+		roachpb.Spans{tableDesc.IndexSpan(keys.SystemSQLCodec, tableDesc.PrimaryIndex.ID)},
+		false, /*limitBatches*/
+		0,     /*limitHint*/
+		false, /*traceKV*/
+	)
+	assert.Error(t, err)
+	assert.Equal(t, pgerror.GetPGCode(err), pgcode.OutOfMemory)
 }
 
 // Regression test for #29374. Ensure that RowFetcher can handle multi-span
@@ -378,9 +452,9 @@ INDEX(c)
 		),
 	)
 
-	alloc := &sqlbase.DatumAlloc{}
+	alloc := &rowenc.DatumAlloc{}
 
-	tableDesc := sqlbase.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, tableName)
+	tableDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, tableName)
 
 	var valNeededForCol util.FastIntSet
 	valNeededForCol.AddRange(0, table.nCols-1)
@@ -393,7 +467,7 @@ INDEX(c)
 		},
 	}
 
-	rf, err := initFetcher(args, false /*reverseScan*/, alloc)
+	rf, err := initFetcher(args, false /*reverseScan*/, alloc, nil /*memMon*/)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,11 +629,11 @@ func TestNextRowSecondaryIndex(t *testing.T) {
 		table.nRows += nNulls
 	}
 
-	alloc := &sqlbase.DatumAlloc{}
+	alloc := &rowenc.DatumAlloc{}
 	// We try to read rows from each index.
 	for tableName, table := range tables {
 		t.Run(tableName, func(t *testing.T) {
-			tableDesc := sqlbase.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, tableName)
+			tableDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, tableName)
 
 			var valNeededForCol util.FastIntSet
 			valNeededForCol.AddRange(0, table.nVals-1)
@@ -573,7 +647,7 @@ func TestNextRowSecondaryIndex(t *testing.T) {
 				},
 			}
 
-			rf, err := initFetcher(args, false /*reverseScan*/, alloc)
+			rf, err := initFetcher(args, false /*reverseScan*/, alloc, nil /*memMon*/)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -603,11 +677,11 @@ func TestNextRowSecondaryIndex(t *testing.T) {
 
 				count++
 
-				if desc.ID != tableDesc.ID || index.ID != tableDesc.Indexes[0].ID {
+				if desc.GetID() != tableDesc.ID || index.ID != tableDesc.Indexes[0].ID {
 					t.Fatalf(
 						"unexpected row retrieved from fetcher.\nnexpected:  table %s - index %s\nactual: table %s - index %s",
 						tableDesc.Name, tableDesc.Indexes[0].Name,
-						desc.Name, index.Name,
+						desc.GetName(), index.Name,
 					)
 				}
 
@@ -886,7 +960,7 @@ func TestNextRowInterleaved(t *testing.T) {
 		}
 	}
 
-	alloc := &sqlbase.DatumAlloc{}
+	alloc := &rowenc.DatumAlloc{}
 	// Retrieve rows from every non-empty subset of the tables/indexes.
 	for _, idxs := range generateIdxSubsets(len(interleaveEntries)-1, nil) {
 		// Initialize our subset of tables/indexes.
@@ -912,8 +986,8 @@ func TestNextRowInterleaved(t *testing.T) {
 			// RowFetcher.
 			idLookups := make(map[uint64]*fetcherEntryArgs, len(entries))
 			for i, entry := range entries {
-				tableDesc := sqlbase.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, entry.tableName)
-				var indexID sqlbase.IndexID
+				tableDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, entry.tableName)
+				var indexID descpb.IndexID
 				if entry.indexIdx == 0 {
 					indexID = tableDesc.PrimaryIndex.ID
 				} else {
@@ -935,7 +1009,7 @@ func TestNextRowInterleaved(t *testing.T) {
 
 			lookupSpans, _ = roachpb.MergeSpans(lookupSpans)
 
-			rf, err := initFetcher(args, false /*reverseScan*/, alloc)
+			rf, err := initFetcher(args, false /*reverseScan*/, alloc, nil /*memMon*/)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -963,11 +1037,11 @@ func TestNextRowInterleaved(t *testing.T) {
 					break
 				}
 
-				entry, found := idLookups[idLookupKey(desc.ID, index.ID)]
+				entry, found := idLookups[idLookupKey(desc.GetID(), index.ID)]
 				if !found {
 					t.Fatalf(
 						"unexpected row from table %s - index %s",
-						desc.Name, index.Name,
+						desc.GetName(), index.Name,
 					)
 				}
 
@@ -1031,7 +1105,7 @@ func TestRowFetcherReset(t *testing.T) {
 		0,
 		sqlutils.ToRowFn(sqlutils.RowIdxFn, sqlutils.RowModuloFn(1)),
 	)
-	tableDesc := sqlbase.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, "foo")
+	tableDesc := catalogkv.TestingGetImmutableTableDescriptor(kvDB, keys.SystemSQLCodec, sqlutils.TestDB, "foo")
 	var valNeededForCol util.FastIntSet
 	valNeededForCol.AddRange(0, 1)
 	args := []initFetcherArgs{
@@ -1041,13 +1115,13 @@ func TestRowFetcherReset(t *testing.T) {
 			valNeededForCol: valNeededForCol,
 		},
 	}
-	da := sqlbase.DatumAlloc{}
-	fetcher, err := initFetcher(args, false, &da)
+	da := rowenc.DatumAlloc{}
+	fetcher, err := initFetcher(args, false, &da, nil /*memMon*/)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	resetFetcher, err := initFetcher(args, false, &da)
+	resetFetcher, err := initFetcher(args, false /*reverseScan*/, &da, nil /*memMon*/)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1062,7 +1136,15 @@ func TestRowFetcherReset(t *testing.T) {
 
 	fetcherArgs := makeFetcherArgs(args)
 	if err := resetFetcher.Init(
-		keys.SystemSQLCodec, false /*reverse*/, 0 /* todo */, false /* returnRangeInfo */, false /* isCheck */, &da, fetcherArgs...,
+		ctx,
+		keys.SystemSQLCodec,
+		false, /*reverse*/
+		descpb.ScanLockingStrength_FOR_NONE,
+		descpb.ScanLockingWaitPolicy_BLOCK,
+		false, /* isCheck */
+		&da,
+		nil, /* memMonitor */
+		fetcherArgs...,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1073,15 +1155,13 @@ func TestRowFetcherReset(t *testing.T) {
 
 }
 
-func idLookupKey(tableID sqlbase.ID, indexID sqlbase.IndexID) uint64 {
+func idLookupKey(tableID descpb.ID, indexID descpb.IndexID) uint64 {
 	return (uint64(tableID) << 32) | uint64(indexID)
 }
 
 func TestFetcherUninitialized(t *testing.T) {
-	// Regression test for #39013: make sure it's okay to call GetRangesInfo and
-	// GetBytesReader even before the fetcher was fully initialized.
+	// Regression test for #39013: make sure it's okay to call GetBytesReader even
+	// before the fetcher was fully initialized.
 	var fetcher Fetcher
-
-	assert.Nil(t, fetcher.GetRangesInfo())
 	assert.Zero(t, fetcher.GetBytesRead())
 }

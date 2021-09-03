@@ -16,6 +16,7 @@ import (
 	"math"
 	"math/rand"
 	"regexp"
+	"strconv"
 	"testing"
 	"time"
 
@@ -1147,36 +1148,228 @@ func TestEncodeDecodeTimeTZ(t *testing.T) {
 	}
 }
 
-func TestEncodeDecodeGeo(t *testing.T) {
-	testCases := []string{
-		"SRID=4326;POINT(1.0 1.0)",
-		"POINT(2.0 2.0)",
+func TestEncodeDecodeBox2D(t *testing.T) {
+	testCases := []struct {
+		ordered []geo.CartesianBoundingBox
+	}{
+		{
+			ordered: []geo.CartesianBoundingBox{
+				{BoundingBox: geopb.BoundingBox{LoX: -100, HiX: 99, LoY: -100, HiY: 100}},
+				{BoundingBox: geopb.BoundingBox{LoX: -100, HiX: 100, LoY: -100, HiY: 100}},
+				{BoundingBox: geopb.BoundingBox{LoX: -50, HiX: 100, LoY: -100, HiY: 100}},
+				{BoundingBox: geopb.BoundingBox{LoX: 0, HiX: 100, LoY: 0, HiY: 100}},
+				{BoundingBox: geopb.BoundingBox{LoX: 0, HiX: 100, LoY: 50, HiY: 100}},
+				{BoundingBox: geopb.BoundingBox{LoX: 10, HiX: 100, LoY: -100, HiY: 100}},
+				{BoundingBox: geopb.BoundingBox{LoX: 10, HiX: 100, LoY: -10, HiY: 50}},
+				{BoundingBox: geopb.BoundingBox{LoX: 10, HiX: 100, LoY: -10, HiY: 100}},
+			},
+		},
 	}
-	for _, tc := range testCases {
-		t.Run(tc, func(t *testing.T) {
+	for i, tc := range testCases {
+		t.Run(strconv.Itoa(i+1), func(t *testing.T) {
 			for _, dir := range []Direction{Ascending, Descending} {
 				t.Run(fmt.Sprintf("dir:%d", dir), func(t *testing.T) {
-					parsed, err := geo.ParseGeometry(tc)
-					require.NoError(t, err)
-					spatialObject := parsed.SpatialObject()
+					var lastEncoded []byte
+					for j := range tc.ordered {
+						var b []byte
+						var err error
+						var decoded geo.CartesianBoundingBox
 
-					var b []byte
-					var decoded geopb.SpatialObject
-					if dir == Ascending {
-						b, err = EncodeGeoAscending(b, &spatialObject)
-						require.NoError(t, err)
-						_, decoded, err = DecodeGeoAscending(b)
-						require.NoError(t, err)
-					} else {
-						b, err = EncodeGeoDescending(b, &spatialObject)
-						require.NoError(t, err)
-						_, decoded, err = DecodeGeoDescending(b)
-						require.NoError(t, err)
+						if dir == Ascending {
+							b, err = EncodeBox2DAscending(b, tc.ordered[j])
+							require.NoError(t, err)
+							_, decoded, err = DecodeBox2DAscending(b)
+							require.NoError(t, err)
+						} else {
+							b, err = EncodeBox2DDescending(b, tc.ordered[j])
+							require.NoError(t, err)
+							_, decoded, err = DecodeBox2DDescending(b)
+							require.NoError(t, err)
+						}
+						require.Equal(t, tc.ordered[j], decoded)
+						testPeekLength(t, b)
+
+						if j > 0 {
+							if dir == Ascending {
+								assert.Truef(t, bytes.Compare(b, lastEncoded) > 0, "expected %s > %s", tc.ordered[j], tc.ordered[j-1])
+							} else {
+								assert.Truef(t, bytes.Compare(b, lastEncoded) < 0, "expected %s < %s", tc.ordered[j], tc.ordered[j-1])
+							}
+						}
+
+						lastEncoded = b
 					}
-					require.Equal(t, spatialObject, decoded)
-					testPeekLength(t, b)
 				})
 			}
+		})
+	}
+}
+
+func TestEncodeDecodeGeometry(t *testing.T) {
+	testCases := []struct {
+		orderedWKTs []string
+	}{
+		{
+			orderedWKTs: []string{
+				"SRID=4326;POLYGON EMPTY",
+				"SRID=4326;POINT EMPTY",
+				"SRID=4326;LINESTRING(0 0, -90 -80)",
+				"SRID=4326;POINT(-80 80)",
+				"SRID=4326;POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+			},
+		},
+	}
+	for i, tc := range testCases {
+		t.Run(strconv.Itoa(i+1), func(t *testing.T) {
+			for _, dir := range []Direction{Ascending, Descending} {
+				t.Run(fmt.Sprintf("dir:%d", dir), func(t *testing.T) {
+					var lastEncoded []byte
+					for j, wkt := range tc.orderedWKTs {
+						parsed, err := geo.ParseGeometry(wkt)
+						require.NoError(t, err)
+						spatialObject := parsed.SpatialObject()
+
+						var b []byte
+						var decoded geopb.SpatialObject
+						if dir == Ascending {
+							b, err = EncodeGeoAscending(b, parsed.SpaceCurveIndex(), &spatialObject)
+							require.NoError(t, err)
+							_, err = DecodeGeoAscending(b, &decoded)
+							require.NoError(t, err)
+						} else {
+							b, err = EncodeGeoDescending(b, parsed.SpaceCurveIndex(), &spatialObject)
+							require.NoError(t, err)
+							_, err = DecodeGeoDescending(b, &decoded)
+							require.NoError(t, err)
+						}
+						require.Equal(t, spatialObject, decoded)
+						testPeekLength(t, b)
+
+						if j > 0 {
+							if dir == Ascending {
+								assert.Truef(t, bytes.Compare(b, lastEncoded) > 0, "expected %s > %s", tc.orderedWKTs[j], tc.orderedWKTs[j-1])
+							} else {
+								assert.Truef(t, bytes.Compare(b, lastEncoded) < 0, "expected %s < %s", tc.orderedWKTs[j], tc.orderedWKTs[j-1])
+							}
+						}
+
+						lastEncoded = b
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestEncodeDecodeGeography(t *testing.T) {
+	testCases := []struct {
+		orderedWKTs []string
+	}{
+		{
+			orderedWKTs: []string{
+				"SRID=4326;POLYGON EMPTY",
+				"SRID=4326;POINT EMPTY",
+				"SRID=4326;POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+				"SRID=4326;POINT(-80 80)",
+				"SRID=4326;LINESTRING(0 0, -90 -80)",
+			},
+		},
+	}
+	for i, tc := range testCases {
+		t.Run(strconv.Itoa(i+1), func(t *testing.T) {
+			for _, dir := range []Direction{Ascending, Descending} {
+				t.Run(fmt.Sprintf("dir:%d", dir), func(t *testing.T) {
+					var lastEncoded []byte
+					for j, wkt := range tc.orderedWKTs {
+						parsed, err := geo.ParseGeography(wkt)
+						require.NoError(t, err)
+						spatialObject := parsed.SpatialObject()
+
+						var b []byte
+						var decoded geopb.SpatialObject
+						if dir == Ascending {
+							b, err = EncodeGeoAscending(b, parsed.SpaceCurveIndex(), &spatialObject)
+							require.NoError(t, err)
+							_, err = DecodeGeoAscending(b, &decoded)
+							require.NoError(t, err)
+						} else {
+							b, err = EncodeGeoDescending(b, parsed.SpaceCurveIndex(), &spatialObject)
+							require.NoError(t, err)
+							_, err = DecodeGeoDescending(b, &decoded)
+							require.NoError(t, err)
+						}
+						require.Equal(t, spatialObject, decoded)
+						testPeekLength(t, b)
+
+						if j > 0 {
+							if dir == Ascending {
+								assert.Truef(t, bytes.Compare(b, lastEncoded) > 0, "expected %s > %s", tc.orderedWKTs[j], tc.orderedWKTs[j-1])
+							} else {
+								assert.Truef(t, bytes.Compare(b, lastEncoded) < 0, "expected %s < %s", tc.orderedWKTs[j], tc.orderedWKTs[j-1])
+							}
+						}
+
+						lastEncoded = b
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestEncodeDecodeGeoInvertedIndex(t *testing.T) {
+	testCases := []struct {
+		shape          string
+		cellID         uint64
+		expectedLength int
+	}{
+		{
+			shape:          "SRID=4326;LINESTRING(0 0, -90 -80)",
+			cellID:         0,
+			expectedLength: 35,
+		},
+		{
+			shape:          "SRID=4326;LINESTRING(0 0, -90 -80)",
+			cellID:         math.MaxUint64,
+			expectedLength: 43,
+		},
+		{
+			shape:          "SRID=4326;POINT(-80 80)",
+			cellID:         0,
+			expectedLength: 19,
+		},
+		{
+			shape:          "SRID=4326;POINT(-80 80)",
+			cellID:         math.MaxUint64,
+			expectedLength: 27,
+		},
+		{
+			shape:          "SRID=4326;POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+			cellID:         10000,
+			expectedLength: 37,
+		},
+		{
+			shape:          "SRID=4326;POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+			cellID:         math.MaxUint32,
+			expectedLength: 39,
+		},
+	}
+	for i, tc := range testCases {
+		t.Run(strconv.Itoa(i+1), func(t *testing.T) {
+			parsed, err := geo.ParseGeometry(tc.shape)
+			require.NoError(t, err)
+			var b []byte
+			b = EncodeGeoInvertedAscending(b)
+			b = EncodeUvarintAscending(b, tc.cellID)
+			bbox := parsed.BoundingBoxRef()
+			require.NotNil(t, bbox)
+			b = EncodeGeoInvertedBBox(b, bbox.LoX, bbox.LoY, bbox.HiX, bbox.HiY)
+			require.Equal(t, tc.expectedLength, len(b))
+			var dBBox geopb.BoundingBox
+			dBBox.LoX, dBBox.LoY, dBBox.HiX, dBBox.HiY, b, err = DecodeGeoInvertedKey(b)
+			require.NoError(t, err)
+			require.Equal(t, *bbox, dBBox)
+			require.Equal(t, 0, len(b))
 		})
 	}
 }
@@ -1259,9 +1452,9 @@ func TestPeekType(t *testing.T) {
 	require.NoError(t, err)
 	encodedDurationDescending, err := EncodeDurationDescending(nil, duration.Duration{})
 	require.NoError(t, err)
-	encodedGeoAscending, err := EncodeGeoAscending(nil, &geopb.SpatialObject{})
+	encodedGeoAscending, err := EncodeGeoAscending(nil, 0, &geopb.SpatialObject{})
 	require.NoError(t, err)
-	encodedGeoDescending, err := EncodeGeoDescending(nil, &geopb.SpatialObject{})
+	encodedGeoDescending, err := EncodeGeoDescending(nil, 0, &geopb.SpatialObject{})
 	require.NoError(t, err)
 	testCases := []struct {
 		enc []byte
@@ -1309,7 +1502,7 @@ func BenchmarkPeekType(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		typ = PeekType(buf)
 	}
-	sink = string(typ)
+	sink = fmt.Sprint(typ)
 }
 
 type randData struct {
@@ -1878,7 +2071,7 @@ func TestValueEncodeDecodeDuration(t *testing.T) {
 }
 
 func BenchmarkEncodeNonsortingVarint(b *testing.B) {
-	bytes := make([]byte, 0, b.N*NonsortingVarintMaxLen)
+	bytes := make([]byte, 0, b.N*MaxNonsortingVarintLen)
 	rng, _ := randutil.NewPseudoRand()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -1887,7 +2080,7 @@ func BenchmarkEncodeNonsortingVarint(b *testing.B) {
 }
 
 func BenchmarkDecodeNonsortingVarint(b *testing.B) {
-	buf := make([]byte, 0, b.N*NonsortingVarintMaxLen)
+	buf := make([]byte, 0, b.N*MaxNonsortingVarintLen)
 	rng, _ := randutil.NewPseudoRand()
 	for i := 0; i < b.N; i++ {
 		buf = EncodeNonsortingStdlibVarint(buf, rng.Int63())
@@ -1991,7 +2184,7 @@ func TestPeekLengthNonsortingUVarint(t *testing.T) {
 }
 
 func BenchmarkEncodeNonsortingUvarint(b *testing.B) {
-	buf := make([]byte, 0, b.N*NonsortingUvarintMaxLen)
+	buf := make([]byte, 0, b.N*MaxNonsortingUvarintLen)
 	rng, _ := randutil.NewPseudoRand()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -2000,7 +2193,7 @@ func BenchmarkEncodeNonsortingUvarint(b *testing.B) {
 }
 
 func BenchmarkDecodeNonsortingUvarint(b *testing.B) {
-	buf := make([]byte, 0, b.N*NonsortingUvarintMaxLen)
+	buf := make([]byte, 0, b.N*MaxNonsortingUvarintLen)
 	rng, _ := randutil.NewPseudoRand()
 	for i := 0; i < b.N; i++ {
 		buf = EncodeNonsortingUvarint(buf, uint64(rng.Int63()))
@@ -2016,7 +2209,7 @@ func BenchmarkDecodeNonsortingUvarint(b *testing.B) {
 }
 
 func BenchmarkDecodeOneByteNonsortingUvarint(b *testing.B) {
-	buf := make([]byte, 0, b.N*NonsortingUvarintMaxLen)
+	buf := make([]byte, 0, b.N*MaxNonsortingUvarintLen)
 	rng, _ := randutil.NewPseudoRand()
 	for i := 0; i < b.N; i++ {
 		buf = EncodeNonsortingUvarint(buf, uint64(rng.Int63()%(1<<7)))
@@ -2032,7 +2225,7 @@ func BenchmarkDecodeOneByteNonsortingUvarint(b *testing.B) {
 }
 
 func BenchmarkPeekLengthNonsortingUvarint(b *testing.B) {
-	buf := make([]byte, 0, b.N*NonsortingUvarintMaxLen)
+	buf := make([]byte, 0, b.N*MaxNonsortingUvarintLen)
 	rng, _ := randutil.NewPseudoRand()
 	for i := 0; i < b.N; i++ {
 		buf = EncodeNonsortingUvarint(buf, uint64(rng.Int63()))

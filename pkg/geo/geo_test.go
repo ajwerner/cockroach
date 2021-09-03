@@ -13,12 +13,14 @@ package geo
 import (
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strconv"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/geo/geopb"
 	"github.com/cockroachdb/errors"
 	"github.com/golang/geo/s2"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/twpayne/go-geom"
 )
@@ -94,9 +96,9 @@ func mustDecodeEWKBFromString(t *testing.T, h string) geopb.EWKB {
 	return geopb.EWKB(decoded)
 }
 
-func TestGeospatialTypeFitsColumnMetadata(t *testing.T) {
+func TestSpatialObjectFitsColumnMetadata(t *testing.T) {
 	testCases := []struct {
-		t             GeospatialType
+		t             Geometry
 		srid          geopb.SRID
 		shape         geopb.ShapeType
 		errorContains string
@@ -111,7 +113,7 @@ func TestGeospatialTypeFitsColumnMetadata(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(fmt.Sprintf("%#v_fits_%d_%s", tc.t, tc.srid, tc.shape), func(t *testing.T) {
-			err := GeospatialTypeFitsColumnMetadata(tc.t, tc.srid, tc.shape)
+			err := SpatialObjectFitsColumnMetadata(tc.t.SpatialObject(), tc.srid, tc.shape)
 			if tc.errorContains != "" {
 				require.Error(t, err)
 				require.Contains(t, err.Error(), tc.errorContains)
@@ -561,6 +563,143 @@ func TestGeographyAsS2(t *testing.T) {
 	}
 }
 
+func TestGeographySpaceCurveIndex(t *testing.T) {
+	orderedTestCases := []struct {
+		orderedWKTs []string
+		srid        geopb.SRID
+	}{
+		{
+			[]string{
+				"POINT EMPTY",
+				"POLYGON EMPTY",
+				"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+				"POINT(-80 80)",
+				"LINESTRING(0 0, -90 -80)",
+			},
+			4326,
+		},
+		{
+			[]string{
+				"POINT EMPTY",
+				"POLYGON EMPTY",
+				"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+				"POINT(-80 80)",
+				"LINESTRING(0 0, -90 -80)",
+			},
+			4004,
+		},
+	}
+	for i, tc := range orderedTestCases {
+		t.Run(strconv.Itoa(i+1), func(t *testing.T) {
+			previous := uint64(0)
+			for _, wkt := range tc.orderedWKTs {
+				t.Run(wkt, func(t *testing.T) {
+					g, err := ParseGeography(wkt)
+					require.NoError(t, err)
+					g, err = g.CloneWithSRID(tc.srid)
+					require.NoError(t, err)
+
+					h := g.SpaceCurveIndex()
+					assert.GreaterOrEqual(t, h, previous)
+					previous = h
+				})
+			}
+		})
+	}
+}
+
+func TestGeometrySpaceCurveIndex(t *testing.T) {
+	valueTestCases := []struct {
+		wkt      string
+		expected uint64
+	}{
+		{
+			wkt:      "POINT EMPTY",
+			expected: 0,
+		},
+		{
+			wkt:      "SRID=4326;POINT EMPTY",
+			expected: 0,
+		},
+		{
+			wkt:      "POINT (100 80)",
+			expected: 9223372036854787504,
+		},
+		{
+			wkt:      "SRID=4326;POINT(100 80)",
+			expected: 11895367802890724441,
+		},
+		{
+			wkt:      "POINT (1000 800)",
+			expected: 9223372036855453930,
+		},
+		{
+			wkt:      "SRID=4326;POINT(1000 800)",
+			expected: math.MaxUint64,
+		},
+	}
+
+	for _, tc := range valueTestCases {
+		t.Run(tc.wkt, func(t *testing.T) {
+			g, err := ParseGeometry(tc.wkt)
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, g.SpaceCurveIndex())
+		})
+	}
+
+	orderedTestCases := []struct {
+		orderedWKTs []string
+		srid        geopb.SRID
+	}{
+		{
+			[]string{
+				"POINT EMPTY",
+				"POLYGON EMPTY",
+				"LINESTRING(0 0, -90 -80)",
+				"POINT(-80 80)",
+				"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+			},
+			4326,
+		},
+		{
+			[]string{
+				"POINT EMPTY",
+				"POLYGON EMPTY",
+				"LINESTRING(0 0, -90 -80)",
+				"POINT(-80 80)",
+				"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+			},
+			3857,
+		},
+		{
+			[]string{
+				"POINT EMPTY",
+				"POLYGON EMPTY",
+				"LINESTRING(0 0, -90 -80)",
+				"POINT(-80 80)",
+				"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))",
+			},
+			0,
+		},
+	}
+	for i, tc := range orderedTestCases {
+		t.Run(strconv.Itoa(i+1), func(t *testing.T) {
+			previous := uint64(0)
+			for _, wkt := range tc.orderedWKTs {
+				t.Run(wkt, func(t *testing.T) {
+					g, err := ParseGeometry(wkt)
+					require.NoError(t, err)
+					g, err = g.CloneWithSRID(tc.srid)
+					require.NoError(t, err)
+					h := g.SpaceCurveIndex()
+					assert.GreaterOrEqual(t, h, previous)
+					previous = h
+				})
+			}
+		})
+	}
+}
+
 func TestGeometryAsGeography(t *testing.T) {
 	for _, tc := range []struct {
 		geom string
@@ -717,6 +856,126 @@ func TestValidateGeomT(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestIsLinearRingCCW(t *testing.T) {
+	testCases := []struct {
+		desc     string
+		ring     *geom.LinearRing
+		expected bool
+	}{
+		{
+			desc: "flat linear ring",
+			ring: geom.NewLinearRingFlat(geom.XY, []float64{
+				0, 0,
+				0, 0,
+				0, 0,
+				0, 0,
+			}),
+			expected: false,
+		},
+		{
+			desc: "invalid linear ring with duplicate points at end deemed CW",
+			ring: geom.NewLinearRingFlat(geom.XY, []float64{
+				0, 0,
+				0, 0,
+				0, 0,
+				0, 0,
+				1, 0,
+				1, 0,
+				1, 0,
+			}),
+			expected: false,
+		},
+		{
+			desc: "invalid linear ring with duplicate points at start deemed CW",
+			ring: geom.NewLinearRingFlat(geom.XY, []float64{
+				0, 0,
+				0, 0,
+				0, 0,
+				0, 0,
+				-1, 1,
+				-1, 1,
+				-1, 1,
+				0, 0,
+			}),
+			expected: false,
+		},
+
+		{
+			desc: "CW linear ring",
+			ring: geom.NewLinearRingFlat(geom.XY, []float64{
+				0, 0,
+				1, 1,
+				1, 0,
+				0, 0,
+			}),
+			expected: false,
+		},
+		{
+			desc: "CW linear ring, first point is bottom right",
+			ring: geom.NewLinearRingFlat(geom.XY, []float64{
+				1, 0,
+				0, 0,
+				1, 1,
+				1, 0,
+			}),
+			expected: false,
+		},
+		{
+			desc: "CW linear ring, duplicate points for bottom right",
+			ring: geom.NewLinearRingFlat(geom.XY, []float64{
+				0, 0,
+				1, 1,
+				1, 0,
+				1, 0,
+				1, 0,
+				0, 0,
+			}),
+			expected: false,
+		},
+		{
+			desc: "CCW linear ring",
+			ring: geom.NewLinearRingFlat(geom.XY, []float64{
+				0, 0,
+				1, 0,
+				1, 1,
+				0, 0,
+			}),
+			expected: true,
+		},
+		{
+			desc: "CCW linear ring, duplicate points for bottom right",
+			ring: geom.NewLinearRingFlat(geom.XY, []float64{
+				0, 0,
+				1, 0,
+				1, 0,
+				1, 0,
+				1, 0,
+				1, 0,
+				1, 1,
+				0, 0,
+			}),
+			expected: true,
+		},
+		{
+			desc: "CCW linear ring, first point is bottom right",
+			ring: geom.NewLinearRingFlat(geom.XY, []float64{
+				1, 0,
+				1, 0,
+				1, 1,
+				0, 0,
+				1, 0,
+			}),
+			expected: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			require.Equal(t, tc.expected, IsLinearRingCCW(tc.ring))
 		})
 	}
 }

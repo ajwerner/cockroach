@@ -27,7 +27,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -101,16 +102,16 @@ func TestCloudStorageSink(t *testing.T) {
 	require.NoError(t, err)
 
 	clientFactory := blobs.TestBlobServiceClient(settings.ExternalIODir)
-	externalStorageFromURI := func(ctx context.Context, uri, user string) (cloud.ExternalStorage,
+	externalStorageFromURI := func(ctx context.Context, uri string, user security.SQLUsername) (cloud.ExternalStorage,
 		error) {
 		return cloudimpl.ExternalStorageFromURI(ctx, uri, base.ExternalIODirConfig{}, settings,
 			clientFactory, user, nil, nil)
 	}
 
-	user := security.RootUser
+	user := security.RootUserName()
 
 	t.Run(`golden`, func(t *testing.T) {
-		t1 := &sqlbase.TableDescriptor{Name: `t1`}
+		t1 := tabledesc.NewImmutable(descpb.TableDescriptor{Name: `t1`})
 		testSpan := roachpb.Span{Key: []byte("a"), EndKey: []byte("b")}
 		sf := span.MakeFrontier(testSpan)
 		timestampOracle := &changeAggregatorLowerBoundOracle{sf: sf}
@@ -145,8 +146,8 @@ func TestCloudStorageSink(t *testing.T) {
 		for _, compression := range []string{"", "gzip"} {
 			opts[changefeedbase.OptCompression] = compression
 			t.Run("compress="+compression, func(t *testing.T) {
-				t1 := &sqlbase.TableDescriptor{Name: `t1`}
-				t2 := &sqlbase.TableDescriptor{Name: `t2`}
+				t1 := tabledesc.NewImmutable(descpb.TableDescriptor{Name: `t1`})
+				t2 := tabledesc.NewImmutable(descpb.TableDescriptor{Name: `t2`})
 
 				testSpan := roachpb.Span{Key: []byte("a"), EndKey: []byte("b")}
 				sf := span.MakeFrontier(testSpan)
@@ -221,7 +222,7 @@ func TestCloudStorageSink(t *testing.T) {
 	})
 
 	t.Run(`multi-node`, func(t *testing.T) {
-		t1 := &sqlbase.TableDescriptor{Name: `t1`}
+		t1 := tabledesc.NewImmutable(descpb.TableDescriptor{Name: `t1`})
 
 		testSpan := roachpb.Span{Key: []byte("a"), EndKey: []byte("b")}
 		sf := span.MakeFrontier(testSpan)
@@ -302,7 +303,7 @@ func TestCloudStorageSink(t *testing.T) {
 	// This test is also sufficient for verifying the behavior of a multi-node
 	// changefeed using this sink. Ditto job restarts.
 	t.Run(`zombie`, func(t *testing.T) {
-		t1 := &sqlbase.TableDescriptor{Name: `t1`}
+		t1 := tabledesc.NewImmutable(descpb.TableDescriptor{Name: `t1`})
 		testSpan := roachpb.Span{Key: []byte("a"), EndKey: []byte("b")}
 		sf := span.MakeFrontier(testSpan)
 		timestampOracle := &changeAggregatorLowerBoundOracle{sf: sf}
@@ -343,7 +344,7 @@ func TestCloudStorageSink(t *testing.T) {
 	})
 
 	t.Run(`bucketing`, func(t *testing.T) {
-		t1 := &sqlbase.TableDescriptor{Name: `t1`}
+		t1 := tabledesc.NewImmutable(descpb.TableDescriptor{Name: `t1`})
 		testSpan := roachpb.Span{Key: []byte("a"), EndKey: []byte("b")}
 		sf := span.MakeFrontier(testSpan)
 		timestampOracle := &changeAggregatorLowerBoundOracle{sf: sf}
@@ -431,7 +432,7 @@ func TestCloudStorageSink(t *testing.T) {
 	})
 
 	t.Run(`file-ordering`, func(t *testing.T) {
-		t1 := &sqlbase.TableDescriptor{Name: `t1`}
+		t1 := tabledesc.NewImmutable(descpb.TableDescriptor{Name: `t1`})
 		testSpan := roachpb.Span{Key: []byte("a"), EndKey: []byte("b")}
 		sf := span.MakeFrontier(testSpan)
 		timestampOracle := &changeAggregatorLowerBoundOracle{sf: sf}
@@ -490,7 +491,7 @@ func TestCloudStorageSink(t *testing.T) {
 	})
 
 	t.Run(`ordering-among-schema-versions`, func(t *testing.T) {
-		t1 := &sqlbase.TableDescriptor{Name: `t1`}
+		t1 := tabledesc.NewImmutable(descpb.TableDescriptor{Name: `t1`})
 		testSpan := roachpb.Span{Key: []byte("a"), EndKey: []byte("b")}
 		sf := span.MakeFrontier(testSpan)
 		timestampOracle := &changeAggregatorLowerBoundOracle{sf: sf}

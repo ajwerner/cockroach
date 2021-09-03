@@ -27,6 +27,15 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
+// Workaround for bazel auto-generated code. goimports does not automatically
+// pick up the right packages when run within the bazel sandbox.
+var (
+	_ apd.Context
+	_ coldataext.Datum
+	_ duration.Duration
+	_ tree.AggType
+)
+
 // OrderedDistinctColsToOperators is a utility function that given an input and
 // a slice of columns, creates a chain of distinct operators and returns the
 // last distinct operator in that chain as well as its output column.
@@ -51,7 +60,7 @@ func OrderedDistinctColsToOperators(
 		}
 	}
 	if r, ok = input.(ResettableOperator); !ok {
-		colexecerror.InternalError("unexpectedly an ordered distinct is not a resetter")
+		colexecerror.InternalError(errors.AssertionFailedf("unexpectedly an ordered distinct is not a resetter"))
 	}
 	distinctChain := &distinctChainOps{
 		ResettableOperator: r,

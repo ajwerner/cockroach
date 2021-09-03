@@ -17,6 +17,7 @@ import (
 )
 
 var pgjdbcReleaseTagRegex = regexp.MustCompile(`^REL(?P<major>\d+)\.(?P<minor>\d+)\.(?P<point>\d+)$`)
+var supportedPGJDBCTag = "REL42.2.9"
 
 // This test runs pgjdbc's full test suite against a single cockroach node.
 
@@ -82,7 +83,7 @@ func registerPgjdbc(r *testRegistry) {
 			c,
 			"https://github.com/pgjdbc/pgjdbc.git",
 			"/mnt/data1/pgjdbc",
-			"REL42.2.9",
+			supportedPGJDBCTag,
 			node,
 		); err != nil {
 			t.Fatal(err)
@@ -173,14 +174,14 @@ func registerPgjdbc(r *testRegistry) {
 
 		parseAndSummarizeJavaORMTestsResults(
 			ctx, t, c, node, "pgjdbc" /* ormName */, output,
-			blocklistName, expectedFailures, ignorelist, version, latestTag,
+			blocklistName, expectedFailures, ignorelist, version, supportedPGJDBCTag,
 		)
 	}
 
 	r.Add(testSpec{
 		MinVersion: "v2.1.0",
 		Name:       "pgjdbc",
-		Owner:      OwnerAppDev,
+		Owner:      OwnerSQLExperience,
 		Cluster:    makeClusterSpec(1),
 		Tags:       []string{`default`, `driver`},
 		Run: func(ctx context.Context, t *test, c *cluster) {

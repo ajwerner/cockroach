@@ -16,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
@@ -66,6 +67,10 @@ type Builder struct {
 	// mutation itself. See canAutoCommit().
 	allowAutoCommit bool
 
+	// initialAllowAutoCommit saves the allowAutoCommit value passed to New; used
+	// for EXPLAIN.
+	initialAllowAutoCommit bool
+
 	allowInsertFastPath bool
 
 	// forceForUpdateLocking is conditionally passed through to factory methods
@@ -78,6 +83,14 @@ type Builder struct {
 
 	// IsDDL is set to true if the statement contains DDL.
 	IsDDL bool
+
+	// containsFullTableScan is set to true if the statement contains a primary
+	// index scan.
+	ContainsFullTableScan bool
+
+	// containsFullIndexScan is set to true if the statement contains a secondary
+	// index scan.
+	ContainsFullIndexScan bool
 }
 
 // New constructs an instance of the execution node builder using the
@@ -85,16 +98,27 @@ type Builder struct {
 // node tree from the given optimized expression tree.
 //
 // catalog is only needed if the statement contains an EXPLAIN (OPT, CATALOG).
+//
+// If allowAutoCommit is true, mutation operators can pass the auto commit flag
+// to the factory (when the optimizer determines it is correct to do so). It
+// should be false if the statement is executed as part of an explicit
+// transaction.
 func New(
-	factory exec.Factory, mem *memo.Memo, catalog cat.Catalog, e opt.Expr, evalCtx *tree.EvalContext,
+	factory exec.Factory,
+	mem *memo.Memo,
+	catalog cat.Catalog,
+	e opt.Expr,
+	evalCtx *tree.EvalContext,
+	allowAutoCommit bool,
 ) *Builder {
 	b := &Builder{
-		factory:         factory,
-		mem:             mem,
-		catalog:         catalog,
-		e:               e,
-		evalCtx:         evalCtx,
-		allowAutoCommit: true,
+		factory:                factory,
+		mem:                    mem,
+		catalog:                catalog,
+		e:                      e,
+		evalCtx:                evalCtx,
+		allowAutoCommit:        allowAutoCommit,
+		initialAllowAutoCommit: allowAutoCommit,
 	}
 	if evalCtx != nil {
 		if evalCtx.SessionData.SaveTablesPrefix != "" {
@@ -137,20 +161,28 @@ func (b *Builder) build(e opt.Expr) (_ execPlan, err error) {
 		)
 	}
 
-	b.allowAutoCommit = b.allowAutoCommit && b.canAutoCommit(rel)
+	canAutoCommit := b.canAutoCommit(rel)
+	b.allowAutoCommit = b.allowAutoCommit && canAutoCommit
+
+	// First condition from ConstructFastPathInsert:
+	//  - there are no other mutations in the statement, and the output of the
+	//    insert is not processed through side-effecting expressions (i.e. we can
+	//    auto-commit).
+	b.allowInsertFastPath = b.allowInsertFastPath && canAutoCommit
 
 	return b.buildRelational(rel)
 }
 
-// BuildScalar converts a scalar expression to a TypedExpr. Variables are mapped
-// according to the IndexedVarHelper.
-func (b *Builder) BuildScalar(ivh *tree.IndexedVarHelper) (tree.TypedExpr, error) {
+// BuildScalar converts a scalar expression to a TypedExpr.
+func (b *Builder) BuildScalar() (tree.TypedExpr, error) {
 	scalar, ok := b.e.(opt.ScalarExpr)
 	if !ok {
 		return nil, errors.AssertionFailedf("BuildScalar cannot be called for non-scalar operator %s", log.Safe(b.e.Op()))
 	}
-	ctx := buildScalarCtx{ivh: *ivh}
-	for i := 0; i < ivh.NumVars(); i++ {
+	var ctx buildScalarCtx
+	md := b.mem.Metadata()
+	ctx.ivh = tree.MakeIndexedVarHelper(&mdVarContainer{md: md}, md.NumColumns())
+	for i := 0; i < md.NumColumns(); i++ {
 		ctx.ivarMap.Set(i+1, i)
 	}
 	return b.buildScalar(&ctx, scalar)
@@ -167,12 +199,10 @@ type builtWithExpr struct {
 	// outputCols maps the output ColumnIDs of the With expression to the ordinal
 	// positions they are output to. See execPlan.outputCols for more details.
 	outputCols opt.ColMap
-	bufferNode exec.BufferNode
+	bufferNode exec.Node
 }
 
-func (b *Builder) addBuiltWithExpr(
-	id opt.WithID, outputCols opt.ColMap, bufferNode exec.BufferNode,
-) {
+func (b *Builder) addBuiltWithExpr(id opt.WithID, outputCols opt.ColMap, bufferNode exec.Node) {
 	b.withExprs = append(b.withExprs, builtWithExpr{
 		id:         id,
 		outputCols: outputCols,
@@ -186,5 +216,28 @@ func (b *Builder) findBuiltWithExpr(id opt.WithID) *builtWithExpr {
 			return &b.withExprs[i]
 		}
 	}
+	return nil
+}
+
+// mdVarContainer is an IndexedVarContainer implementation used by BuildScalar -
+// it maps indexed vars to columns in the metadata.
+type mdVarContainer struct {
+	md *opt.Metadata
+}
+
+var _ tree.IndexedVarContainer = &mdVarContainer{}
+
+// IndexedVarEval is part of the IndexedVarContainer interface.
+func (c *mdVarContainer) IndexedVarEval(idx int, ctx *tree.EvalContext) (tree.Datum, error) {
+	return nil, errors.AssertionFailedf("no eval allowed in mdVarContainer")
+}
+
+// IndexedVarResolvedType is part of the IndexedVarContainer interface.
+func (c *mdVarContainer) IndexedVarResolvedType(idx int) *types.T {
+	return c.md.ColumnMeta(opt.ColumnID(idx + 1)).Type
+}
+
+// IndexedVarNodeFormatter is part of the IndexedVarContainer interface.
+func (c *mdVarContainer) IndexedVarNodeFormatter(idx int) tree.NodeFormatter {
 	return nil
 }

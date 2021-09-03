@@ -12,26 +12,21 @@ package execinfrapb
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
-	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 )
 
 // ConvertToColumnOrdering converts an Ordering type (as defined in data.proto)
 // to a sqlbase.ColumnOrdering type.
-func ConvertToColumnOrdering(specOrdering Ordering) sqlbase.ColumnOrdering {
-	ordering := make(sqlbase.ColumnOrdering, len(specOrdering.Columns))
+func ConvertToColumnOrdering(specOrdering Ordering) colinfo.ColumnOrdering {
+	ordering := make(colinfo.ColumnOrdering, len(specOrdering.Columns))
 	for i, c := range specOrdering.Columns {
 		ordering[i].ColIdx = int(c.ColIdx)
 		if c.Direction == Ordering_Column_ASC {
@@ -45,7 +40,7 @@ func ConvertToColumnOrdering(specOrdering Ordering) sqlbase.ColumnOrdering {
 
 // ConvertToSpecOrdering converts a sqlbase.ColumnOrdering type
 // to an Ordering type (as defined in data.proto).
-func ConvertToSpecOrdering(columnOrdering sqlbase.ColumnOrdering) Ordering {
+func ConvertToSpecOrdering(columnOrdering colinfo.ColumnOrdering) Ordering {
 	return ConvertToMappedSpecOrdering(columnOrdering, nil)
 }
 
@@ -53,7 +48,7 @@ func ConvertToSpecOrdering(columnOrdering sqlbase.ColumnOrdering) Ordering {
 // to an Ordering type (as defined in data.proto), using the column
 // indices contained in planToStreamColMap.
 func ConvertToMappedSpecOrdering(
-	columnOrdering sqlbase.ColumnOrdering, planToStreamColMap []int,
+	columnOrdering colinfo.ColumnOrdering, planToStreamColMap []int,
 ) Ordering {
 	specOrdering := Ordering{}
 	specOrdering.Columns = make([]Ordering_Column, len(columnOrdering))
@@ -62,7 +57,7 @@ func ConvertToMappedSpecOrdering(
 		if planToStreamColMap != nil {
 			colIdx = planToStreamColMap[c.ColIdx]
 			if colIdx == -1 {
-				panic(fmt.Sprintf("column %d in sort ordering not available", c.ColIdx))
+				panic(errors.AssertionFailedf("column %d in sort ordering not available", c.ColIdx))
 			}
 		}
 		specOrdering.Columns[i].ColIdx = uint32(colIdx)
@@ -75,60 +70,6 @@ func ConvertToMappedSpecOrdering(
 	return specOrdering
 }
 
-// DistSQLTypeResolver implements tree.ResolvableTypeReference for accessing
-// type information during DistSQL query evaluation.
-type DistSQLTypeResolver struct {
-	EvalContext *tree.EvalContext
-	// TODO (rohany): This struct should locally cache id -> types.T here
-	//  so that repeated lookups do not incur additional KV operations.
-}
-
-// ResolveType implements tree.ResolvableTypeReference.
-func (tr *DistSQLTypeResolver) ResolveType(
-	context.Context, *tree.UnresolvedObjectName,
-) (*types.T, error) {
-	return nil, errors.AssertionFailedf("cannot resolve types in DistSQL by name")
-}
-
-func makeTypeLookupFunc(
-	ctx context.Context, txn *kv.Txn, codec keys.SQLCodec,
-) sqlbase.TypeLookupFunc {
-	return func(id sqlbase.ID) (*tree.TypeName, sqlbase.TypeDescriptorInterface, error) {
-		return resolver.ResolveTypeDescByID(ctx, txn, codec, id, tree.ObjectLookupFlags{})
-	}
-}
-
-// ResolveTypeByID implements tree.ResolvableTypeReference.
-func (tr *DistSQLTypeResolver) ResolveTypeByID(ctx context.Context, id uint32) (*types.T, error) {
-	// TODO (rohany): This should eventually look into the set of cached type
-	//  descriptors before attempting to access it here.
-	lookup := makeTypeLookupFunc(ctx, tr.EvalContext.Txn, tr.EvalContext.Codec)
-	name, typDesc, err := lookup(sqlbase.ID(id))
-	if err != nil {
-		return nil, err
-	}
-	return typDesc.MakeTypesT(name, lookup)
-}
-
-// HydrateTypeSlice hydrates all user defined types in an input slice of types.
-func HydrateTypeSlice(evalCtx *tree.EvalContext, typs []*types.T) error {
-	// TODO (rohany): This should eventually look into the set of cached type
-	//  descriptors before attempting to access it here.
-	lookup := makeTypeLookupFunc(evalCtx.Context, evalCtx.Txn, evalCtx.Codec)
-	for _, t := range typs {
-		if t.UserDefined() {
-			name, typDesc, err := lookup(sqlbase.ID(t.StableTypeID()))
-			if err != nil {
-				return err
-			}
-			if err := typDesc.HydrateTypeInfoWithName(t, name, lookup); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 // ExprFmtCtxBase produces a FmtCtx used for serializing expressions; a proper
 // IndexedVar formatting function needs to be added on. It replaces placeholders
 // with their values.
@@ -138,7 +79,7 @@ func ExprFmtCtxBase(evalCtx *tree.EvalContext) *tree.FmtCtx {
 		func(fmtCtx *tree.FmtCtx, p *tree.Placeholder) {
 			d, err := p.Eval(evalCtx)
 			if err != nil {
-				panic(fmt.Sprintf("failed to serialize placeholder: %s", err))
+				panic(errors.AssertionFailedf("failed to serialize placeholder: %s", err))
 			}
 			d.Format(fmtCtx)
 		})
@@ -238,7 +179,7 @@ type ProducerMetadata struct {
 	// TODO(vivek): change to type Error
 	Err error
 	// TraceData is sent if snowball tracing is enabled.
-	TraceData []tracing.RecordedSpan
+	TraceData []tracingpb.RecordedSpan
 	// LeafTxnFinalState contains the final state of the LeafTxn to be
 	// sent from leaf flows to the RootTxn held by the flow's ultimate
 	// receiver.

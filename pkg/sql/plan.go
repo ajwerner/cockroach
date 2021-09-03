@@ -12,16 +12,21 @@ package sql
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 // runParams is a struct containing all parameters passed to planNode.Next() and
@@ -136,8 +141,10 @@ type planNodeReadingOwnWrites interface {
 }
 
 var _ planNode = &alterIndexNode{}
+var _ planNode = &alterSchemaNode{}
 var _ planNode = &alterSequenceNode{}
 var _ planNode = &alterTableNode{}
+var _ planNode = &alterTableSetSchemaNode{}
 var _ planNode = &alterTypeNode{}
 var _ planNode = &bufferNode{}
 var _ planNode = &cancelQueriesNode{}
@@ -157,6 +164,7 @@ var _ planNode = &deleteRangeNode{}
 var _ planNode = &distinctNode{}
 var _ planNode = &dropDatabaseNode{}
 var _ planNode = &dropIndexNode{}
+var _ planNode = &dropSchemaNode{}
 var _ planNode = &dropSequenceNode{}
 var _ planNode = &dropTableNode{}
 var _ planNode = &dropTypeNode{}
@@ -164,7 +172,6 @@ var _ planNode = &DropRoleNode{}
 var _ planNode = &dropViewNode{}
 var _ planNode = &errorIfRowsNode{}
 var _ planNode = &explainDistSQLNode{}
-var _ planNode = &explainPlanNode{}
 var _ planNode = &explainVecNode{}
 var _ planNode = &filterNode{}
 var _ planNode = &GrantRoleNode{}
@@ -178,12 +185,15 @@ var _ planNode = &limitNode{}
 var _ planNode = &max1RowNode{}
 var _ planNode = &ordinalityNode{}
 var _ planNode = &projectSetNode{}
+var _ planNode = &reassignOwnedByNode{}
+var _ planNode = &refreshMaterializedViewNode{}
 var _ planNode = &recursiveCTENode{}
 var _ planNode = &relocateNode{}
 var _ planNode = &renameColumnNode{}
 var _ planNode = &renameDatabaseNode{}
 var _ planNode = &renameIndexNode{}
 var _ planNode = &renameTableNode{}
+var _ planNode = &reparentDatabaseNode{}
 var _ planNode = &renderNode{}
 var _ planNode = &RevokeRoleNode{}
 var _ planNode = &rowCountNode{}
@@ -213,8 +223,10 @@ var _ planNodeFastPath = &rowCountNode{}
 var _ planNodeFastPath = &serializeNode{}
 var _ planNodeFastPath = &setZoneConfigNode{}
 var _ planNodeFastPath = &controlJobsNode{}
+var _ planNodeFastPath = &controlSchedulesNode{}
 
 var _ planNodeReadingOwnWrites = &alterIndexNode{}
+var _ planNodeReadingOwnWrites = &alterSchemaNode{}
 var _ planNodeReadingOwnWrites = &alterSequenceNode{}
 var _ planNodeReadingOwnWrites = &alterTableNode{}
 var _ planNodeReadingOwnWrites = &alterTypeNode{}
@@ -224,7 +236,10 @@ var _ planNodeReadingOwnWrites = &createTableNode{}
 var _ planNodeReadingOwnWrites = &createTypeNode{}
 var _ planNodeReadingOwnWrites = &createViewNode{}
 var _ planNodeReadingOwnWrites = &changePrivilegesNode{}
+var _ planNodeReadingOwnWrites = &dropSchemaNode{}
 var _ planNodeReadingOwnWrites = &dropTypeNode{}
+var _ planNodeReadingOwnWrites = &refreshMaterializedViewNode{}
+var _ planNodeReadingOwnWrites = &reparentDatabaseNode{}
 var _ planNodeReadingOwnWrites = &setZoneConfigNode{}
 
 // planNodeRequireSpool serves as marker for nodes whose parent must
@@ -269,6 +284,9 @@ type planTop struct {
 	mem     *memo.Memo
 	catalog *optCatalog
 
+	// codec is populated during planning.
+	codec keys.SQLCodec
+
 	// auditEvents becomes non-nil if any of the descriptors used by
 	// current statement is causing an auditing event. See exec_log.go.
 	auditEvents []auditEvent
@@ -283,10 +301,21 @@ type planTop struct {
 	// results.
 	avoidBuffering bool
 
-	instrumentation planInstrumentation
-
 	// If we are collecting query diagnostics, flow diagrams are saved here.
 	distSQLDiagrams []execinfrapb.FlowDiagram
+
+	// If savePlanForStats is true, an ExplainTreePlanNode tree will be saved in
+	// planForStats when the plan is closed.
+	savePlanForStats bool
+	// appStats is used to populate savePlanForStats.
+	appStats     *appStats
+	planForStats *roachpb.ExplainTreePlanNode
+
+	// If savePlanString is set to true, an EXPLAIN (VERBOSE)-style plan string
+	// will be saved in planString when the plan is closed.
+	savePlanString bool
+	planString     string
+	explainPlan    *explain.Plan
 }
 
 // physicalPlanTop is a utility wrapper around PhysicalPlan that allows for
@@ -318,42 +347,20 @@ type planMaybePhysical struct {
 	physPlan *physicalPlanTop
 }
 
+func makePlanMaybePhysical(physPlan *PhysicalPlan, planNodesToClose []planNode) planMaybePhysical {
+	return planMaybePhysical{
+		physPlan: &physicalPlanTop{
+			PhysicalPlan:     physPlan,
+			planNodesToClose: planNodesToClose,
+		},
+	}
+}
+
 func (p *planMaybePhysical) isPhysicalPlan() bool {
 	return p.physPlan != nil
 }
 
-func (p *planMaybePhysical) isPartiallyDistributed() bool {
-	// By default, we assume that the plan is "local" (it doesn't matter
-	// whether the plan is actually "distributed" or not, only that is not
-	// "partially distributed").
-	distribution := physicalplan.LocalPlan
-	// Next we check all possible scenarios in which we might have partially
-	// distributed plans.
-	if p.isPhysicalPlan() {
-		distribution = p.physPlan.Distribution
-	} else {
-		// Even when the whole plan is not physical, we might have EXPLAIN
-		// planNodes that themselves contain a physical plan, so we need to
-		// peek inside of those.
-		switch n := p.planNode.(type) {
-		case *explainPlanNode:
-			if n.plan.main.isPhysicalPlan() {
-				distribution = n.plan.main.physPlan.Distribution
-			}
-		case *explainDistSQLNode:
-			if n.plan.main.isPhysicalPlan() {
-				distribution = n.plan.main.physPlan.Distribution
-			}
-		case *explainVecNode:
-			if n.plan.isPhysicalPlan() {
-				distribution = n.plan.physPlan.Distribution
-			}
-		}
-	}
-	return distribution == physicalplan.PartiallyDistributedPlan
-}
-
-func (p *planMaybePhysical) planColumns() sqlbase.ResultColumns {
+func (p *planMaybePhysical) planColumns() colinfo.ResultColumns {
 	if p.isPhysicalPlan() {
 		return p.physPlan.ResultColumns
 	}
@@ -419,19 +426,54 @@ func (p *planComponents) close(ctx context.Context) {
 
 // init resets planTop to point to a given statement; used at the start of the
 // planning process.
-func (p *planTop) init(stmt *Statement, appStats *appStats) {
-	*p = planTop{stmt: stmt}
-	p.instrumentation.init(appStats)
+func (p *planTop) init(stmt *Statement, appStats *appStats, savePlanString bool) {
+	*p = planTop{
+		stmt:           stmt,
+		appStats:       appStats,
+		savePlanString: savePlanString,
+	}
 }
 
 // close ensures that the plan's resources have been deallocated.
 func (p *planTop) close(ctx context.Context) {
-	if p.main.planNode != nil {
-		// TODO(yuzefovich): update this once we support creating table reader
-		// specs directly in the optimizer (see #47474).
-		p.instrumentation.savePlanInfo(ctx, p)
+	if p.explainPlan != nil && p.flags.IsSet(planFlagExecDone) {
+		p.savePlanInfo(ctx)
 	}
 	p.planComponents.close(ctx)
+}
+
+// savePlanInfo uses p.explainPlan to populate the plan string and/or tree.
+func (p *planTop) savePlanInfo(ctx context.Context) {
+	vectorized := p.flags.IsSet(planFlagVectorized)
+	distribution := physicalplan.LocalPlan
+	if p.flags.IsSet(planFlagFullyDistributed) {
+		distribution = physicalplan.FullyDistributedPlan
+	} else if p.flags.IsSet(planFlagPartiallyDistributed) {
+		distribution = physicalplan.PartiallyDistributedPlan
+	}
+
+	if p.savePlanForStats {
+		ob := explain.NewOutputBuilder(explain.Flags{
+			HideValues: true,
+		})
+		if err := emitExplain(ob, p.codec, p.explainPlan, distribution, vectorized); err != nil {
+			log.Warningf(ctx, "unable to emit explain plan tree: %v", err)
+		} else {
+			p.planForStats = ob.BuildProtoTree()
+		}
+	}
+
+	if p.savePlanString {
+		ob := explain.NewOutputBuilder(explain.Flags{
+			Verbose:   true,
+			ShowTypes: true,
+		})
+		if err := emitExplain(ob, p.codec, p.explainPlan, distribution, vectorized); err != nil {
+			p.planString = fmt.Sprintf("error emitting plan: %v", err)
+		} else {
+			p.planString = ob.BuildString()
+		}
+	}
 }
 
 // formatOptPlan returns a visual representation of the optimizer plan that was
@@ -456,7 +498,7 @@ func startExec(params runParams, plan planNode) error {
 	o := planObserver{
 		enterNode: func(ctx context.Context, _ string, p planNode) (bool, error) {
 			switch p.(type) {
-			case *explainPlanNode, *explainDistSQLNode, *explainVecNode:
+			case *explainDistSQLNode, *explainVecNode:
 				// Do not recurse: we're not starting the plan if we just show its structure with EXPLAIN.
 				return false, nil
 			case *showTraceNode:
@@ -505,12 +547,13 @@ func (p *planner) maybePlanHook(ctx context.Context, stmt tree.Statement) (planN
 
 // Mark transaction as operating on the system DB if the descriptor id
 // is within the SystemConfig range.
-func (p *planner) maybeSetSystemConfig(id sqlbase.ID) error {
-	if !sqlbase.IsSystemConfigID(id) {
+func (p *planner) maybeSetSystemConfig(id descpb.ID) error {
+	if !descpb.IsSystemConfigID(id) {
 		return nil
 	}
 	// Mark transaction as operating on the system DB.
-	return p.txn.SetSystemConfigTrigger()
+	// Only the system tenant marks the SystemConfigTrigger.
+	return p.txn.SetSystemConfigTrigger(p.execCfg.Codec.ForSystemTenant())
 }
 
 // planFlags is used throughout the planning code to keep track of various
@@ -526,13 +569,16 @@ const (
 	// did not find one.
 	planFlagOptCacheMiss
 
-	// planFlagDistributed is set if the plan is for the DistSQL engine, in
-	// distributed mode.
-	planFlagDistributed
+	// planFlagFullyDistributed is set if the query execution is is fully
+	// distributed.
+	planFlagFullyDistributed
 
-	// planFlagDistSQLLocal is set if the plan is for the DistSQL engine,
-	// but in local mode.
-	planFlagDistSQLLocal
+	// planFlagPartiallyDistributed is set if the query execution is is partially
+	// distributed (see physicalplan.PartiallyDistributedPlan).
+	planFlagPartiallyDistributed
+
+	// planFlagNotDistributed is set if the query execution is not distributed.
+	planFlagNotDistributed
 
 	// planFlagExecDone marks that execution has been completed.
 	planFlagExecDone
@@ -547,6 +593,17 @@ const (
 	// planFlagVectorized is set if the plan is executed via the vectorized
 	// engine.
 	planFlagVectorized
+
+	// planFlagTenant is set if the plan is executed on behalf of a tenant.
+	planFlagTenant
+
+	// planFlagContainsFullTableScan is set if the plan involves an unconstrained
+	// scan on (the primary key of) a table.
+	planFlagContainsFullTableScan
+
+	// planFlagContainsFullIndexScan is set if the plan involves an unconstrained
+	// secondary index scan.
+	planFlagContainsFullIndexScan
 )
 
 func (pf planFlags) IsSet(flag planFlags) bool {
@@ -557,38 +614,8 @@ func (pf *planFlags) Set(flag planFlags) {
 	*pf |= flag
 }
 
-// planInstrumentation handles collection of plan information before the plan is
-// closed.
-type planInstrumentation struct {
-	appStats          *appStats
-	savedPlanForStats *roachpb.ExplainTreePlanNode
-
-	// If savePlanString is set to true, an EXPLAIN (VERBOSE)-style plan string
-	// will be saved in planString.
-	savePlanString bool
-	planString     string
-}
-
-func (pi *planInstrumentation) init(appStats *appStats) {
-	pi.appStats = appStats
-}
-
-// savePlanInfo is called before the plan is closed.
-func (pi *planInstrumentation) savePlanInfo(ctx context.Context, curPlan *planTop) {
-	if !curPlan.flags.IsSet(planFlagExecDone) {
-		return
-	}
-	if pi.appStats != nil && pi.appStats.shouldSaveLogicalPlanDescription(
-		curPlan.stmt,
-		curPlan.flags.IsSet(planFlagDistributed),
-		curPlan.flags.IsSet(planFlagVectorized),
-		curPlan.flags.IsSet(planFlagImplicitTxn),
-		curPlan.execErr,
-	) {
-		pi.savedPlanForStats = planToTree(ctx, curPlan)
-	}
-
-	if pi.savePlanString {
-		pi.planString = planToString(ctx, curPlan)
-	}
+// IsDistributed returns true if either the fully or the partially distributed
+// flags is set.
+func (pf planFlags) IsDistributed() bool {
+	return pf.IsSet(planFlagFullyDistributed) || pf.IsSet(planFlagPartiallyDistributed)
 }

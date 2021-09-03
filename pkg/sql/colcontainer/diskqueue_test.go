@@ -21,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/colcontainerutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
@@ -58,7 +59,7 @@ func TestDiskQueue(t *testing.T) {
 					dequeuedProbabilityBeforeAllEnqueuesAreDone = 0
 					prefix, suffix = "Rewindable/", ""
 				}
-				numBatches := 1 + rng.Intn(1024)
+				numBatches := 1 + rng.Intn(16)
 				t.Run(fmt.Sprintf("%sDiskQueueCacheMode=%d/AlwaysCompress=%t%s/NumBatches=%d",
 					prefix, diskQueueCacheMode, alwaysCompress, suffix, numBatches), func(t *testing.T) {
 					// Create random input.
@@ -176,9 +177,7 @@ var (
 
 // BenchmarkDiskQueue benchmarks a queue with parameters provided through flags.
 func BenchmarkDiskQueue(b *testing.B) {
-	if testing.Short() {
-		b.Skip("short flag")
-	}
+	skip.UnderShort(b)
 
 	bufSize, err := humanizeutil.ParseBytes(*bufferSizeBytes)
 	if err != nil {

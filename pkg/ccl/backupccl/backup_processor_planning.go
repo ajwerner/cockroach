@@ -11,14 +11,18 @@ package backupccl
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 )
 
@@ -33,7 +37,7 @@ func distBackup(
 	pkIDs map[uint64]bool,
 	defaultURI string,
 	urisByLocalityKV map[string]string,
-	encryption *roachpb.FileEncryptionOptions,
+	encryption *jobspb.BackupEncryptionOptions,
 	mvccFilter roachpb.MVCCFilter,
 	startTime, endTime hlc.Timestamp,
 	progCh chan *execinfrapb.RemoteProducerMetadata_BulkProcessorProgress,
@@ -61,6 +65,7 @@ func distBackup(
 		encryption,
 		startTime, endTime,
 		phs.User(),
+		phs.ExecCfg(),
 	)
 	if err != nil {
 		return err
@@ -130,9 +135,10 @@ func makeBackupDataProcessorSpecs(
 	defaultURI string,
 	urisByLocalityKV map[string]string,
 	mvccFilter roachpb.MVCCFilter,
-	encryption *roachpb.FileEncryptionOptions,
+	encryption *jobspb.BackupEncryptionOptions,
 	startTime, endTime hlc.Timestamp,
-	user string,
+	user security.SQLUsername,
+	execCfg *sql.ExecutorConfig,
 ) (map[roachpb.NodeID]*execinfrapb.BackupDataSpec, error) {
 	var spanPartitions []sql.SpanPartition
 	var introducedSpanPartitions []sql.SpanPartition
@@ -150,6 +156,29 @@ func makeBackupDataProcessorSpecs(
 		}
 	}
 
+	if encryption != nil && encryption.Mode == jobspb.EncryptionMode_KMS {
+		kms, err := cloud.KMSFromURI(encryption.KMSInfo.Uri, &backupKMSEnv{
+			settings: execCfg.Settings,
+			conf:     &execCfg.ExternalIODirConfig,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		encryption.Key, err = kms.Decrypt(planCtx.EvalContext().Context,
+			encryption.KMSInfo.EncryptedDataKey)
+		if err != nil {
+			return nil, errors.Wrap(err,
+				"failed to decrypt data key before starting BackupDataProcessor")
+		}
+	}
+	// Wrap the relevant BackupEncryptionOptions to be used by the Backup
+	// processor and KV ExportRequest.
+	var fileEncryption *roachpb.FileEncryptionOptions
+	if encryption != nil {
+		fileEncryption = &roachpb.FileEncryptionOptions{Key: encryption.Key}
+	}
+
 	// First construct spans based on span partitions. Then add on
 	// introducedSpans based on how those partition.
 	nodeToSpec := make(map[roachpb.NodeID]*execinfrapb.BackupDataSpec)
@@ -159,11 +188,11 @@ func makeBackupDataProcessorSpecs(
 			DefaultURI:       defaultURI,
 			URIsByLocalityKV: urisByLocalityKV,
 			MVCCFilter:       mvccFilter,
-			Encryption:       encryption,
+			Encryption:       fileEncryption,
 			PKIDs:            pkIDs,
 			BackupStartTime:  startTime,
 			BackupEndTime:    endTime,
-			User:             user,
+			UserProto:        user.EncodeProto(),
 		}
 		nodeToSpec[partition.Node] = spec
 	}
@@ -180,11 +209,11 @@ func makeBackupDataProcessorSpecs(
 				DefaultURI:       defaultURI,
 				URIsByLocalityKV: urisByLocalityKV,
 				MVCCFilter:       mvccFilter,
-				Encryption:       encryption,
+				Encryption:       fileEncryption,
 				PKIDs:            pkIDs,
 				BackupStartTime:  startTime,
 				BackupEndTime:    endTime,
-				User:             user,
+				UserProto:        user.EncodeProto(),
 			}
 			nodeToSpec[partition.Node] = spec
 		}

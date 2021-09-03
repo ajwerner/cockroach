@@ -13,11 +13,13 @@ package sql
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
@@ -31,45 +33,67 @@ import (
 
 // renameDatabase implements the DatabaseDescEditor interface.
 func (p *planner) renameDatabase(
-	ctx context.Context, oldDesc *sqlbase.ImmutableDatabaseDescriptor, newName string,
+	ctx context.Context, desc *dbdesc.Mutable, newName string, stmt string,
 ) error {
-	oldName := oldDesc.GetName()
-	newDesc := sqlbase.NewMutableExistingDatabaseDescriptor(*oldDesc.DatabaseDesc())
-	newDesc.Version++
-	newDesc.SetName(newName)
-	if err := newDesc.Validate(); err != nil {
-		return err
-	}
+	oldName := desc.GetName()
+	desc.SetName(newName)
 
-	if exists, _, err := sqlbase.LookupDatabaseID(ctx, p.txn, p.ExecCfg().Codec, newName); err == nil && exists {
+	if exists, _, err := catalogkv.LookupDatabaseID(ctx, p.txn, p.ExecCfg().Codec, newName); err == nil && exists {
 		return pgerror.Newf(pgcode.DuplicateDatabase,
 			"the new database name %q already exists", newName)
 	} else if err != nil {
 		return err
 	}
 
-	newKey := sqlbase.MakeDatabaseNameKey(ctx, p.ExecCfg().Settings, newName).Key(p.ExecCfg().Codec)
-
-	descID := newDesc.GetID()
-	descKey := sqlbase.MakeDescMetadataKey(p.ExecCfg().Codec, descID)
-	descDesc := newDesc.DescriptorProto()
-
 	b := &kv.Batch{}
+	newKey := catalogkv.MakeDatabaseNameKey(ctx, p.ExecCfg().Settings, newName).Key(p.ExecCfg().Codec)
+	descID := desc.GetID()
 	if p.ExtendedEvalContext().Tracing.KVTracingEnabled() {
 		log.VEventf(ctx, 2, "CPut %s -> %d", newKey, descID)
-		log.VEventf(ctx, 2, "Put %s -> %s", descKey, descDesc)
 	}
 	b.CPut(newKey, descID, nil)
-	b.Put(descKey, descDesc)
-	err := sqlbase.RemoveDatabaseNamespaceEntry(
-		ctx, p.txn, p.ExecCfg().Codec, oldName, p.ExtendedEvalContext().Tracing.KVTracingEnabled(),
-	)
-	if err != nil {
+
+	desc.DrainingNames = append(desc.DrainingNames, descpb.NameInfo{
+		ParentID:       keys.RootNamespaceID,
+		ParentSchemaID: keys.RootNamespaceID,
+		Name:           oldName,
+	})
+	if err := p.writeNonDropDatabaseChange(ctx, desc, stmt); err != nil {
 		return err
 	}
 
-	p.Tables().AddUncommittedDatabase(oldName, descID, descs.DBDropped)
-	p.Tables().AddUncommittedDatabase(newName, descID, descs.DBCreated)
-
 	return p.txn.Run(ctx, b)
+}
+
+// writeNonDropDatabaseChange writes an updated database descriptor, and can
+// only be called when database descriptor leasing is enabled. See
+// writeDatabaseChangeToBatch. Also queues a job to complete the schema change.
+func (p *planner) writeNonDropDatabaseChange(
+	ctx context.Context, desc *dbdesc.Mutable, jobDesc string,
+) error {
+	if err := p.createNonDropDatabaseChangeJob(ctx, desc.ID, jobDesc); err != nil {
+		return err
+	}
+	b := p.Txn().NewBatch()
+	if err := p.writeDatabaseChangeToBatch(ctx, desc, b); err != nil {
+		return err
+	}
+	return p.Txn().Run(ctx, b)
+}
+
+// writeDatabaseChangeToBatch writes an updated database descriptor, and
+// can only be called when database descriptor leasing is enabled. Does not
+// queue a job to complete the schema change.
+func (p *planner) writeDatabaseChangeToBatch(
+	ctx context.Context, desc *dbdesc.Mutable, b *kv.Batch,
+) error {
+	if err := desc.Validate(); err != nil {
+		return err
+	}
+	return p.Descriptors().WriteDescToBatch(
+		ctx,
+		p.extendedEvalCtx.Tracing.KVTracingEnabled(),
+		desc,
+		b,
+	)
 }

@@ -14,17 +14,20 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowcontainer"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
+	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/opentracing/opentracing-go"
+	"github.com/cockroachdb/errors"
 )
 
 // hashJoinerInitialBufferSize controls the size of the initial buffering phase
@@ -102,7 +105,7 @@ type hashJoiner struct {
 	// probingRowState is state used when hjProbingRow.
 	probingRowState struct {
 		// row is the row being probed with.
-		row sqlbase.EncDatumRow
+		row rowenc.EncDatumRow
 		// iter is an iterator over the bucket that matches row on the equality
 		// columns.
 		iter rowcontainer.RowMarkerIterator
@@ -117,7 +120,7 @@ type hashJoiner struct {
 	}
 
 	// Context cancellation checker.
-	cancelChecker *sqlbase.CancelChecker
+	cancelChecker *cancelchecker.CancelChecker
 }
 
 var _ execinfra.Processor = &hashJoiner{}
@@ -145,10 +148,6 @@ func newHashJoiner(
 		rightSource:       rightSource,
 	}
 
-	numMergedColumns := 0
-	if spec.MergedColumns {
-		numMergedColumns = len(spec.LeftEqColumns)
-	}
 	if err := h.joinerBase.init(
 		h,
 		flowCtx,
@@ -159,7 +158,6 @@ func newHashJoiner(
 		spec.OnExpr,
 		spec.LeftEqColumns,
 		spec.RightEqColumns,
-		uint32(numMergedColumns),
 		post,
 		output,
 		execinfra.ProcStateOpts{
@@ -193,20 +191,20 @@ func newHashJoiner(
 	}
 
 	// If the trace is recording, instrument the hashJoiner to collect stats.
-	if sp := opentracing.SpanFromContext(ctx); sp != nil && tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(ctx); sp != nil && tracing.IsRecording(sp) {
 		h.leftSource = newInputStatCollector(h.leftSource)
 		h.rightSource = newInputStatCollector(h.rightSource)
 		h.FinishTrace = h.outputStatsToTrace
 	}
 
 	h.rows[leftSide].InitWithMon(
-		nil /* ordering */, h.leftSource.OutputTypes(), h.EvalCtx, h.MemMonitor, 0, /* rowCapacity */
+		nil /* ordering */, h.leftSource.OutputTypes(), h.EvalCtx, h.MemMonitor,
 	)
 	h.rows[rightSide].InitWithMon(
-		nil /* ordering */, h.rightSource.OutputTypes(), h.EvalCtx, h.MemMonitor, 0, /* rowCapacity */
+		nil /* ordering */, h.rightSource.OutputTypes(), h.EvalCtx, h.MemMonitor,
 	)
 
-	if h.joinType == sqlbase.IntersectAllJoin || h.joinType == sqlbase.ExceptAllJoin {
+	if h.joinType == descpb.IntersectAllJoin || h.joinType == descpb.ExceptAllJoin {
 		h.nullEquality = true
 	}
 
@@ -218,15 +216,15 @@ func (h *hashJoiner) Start(ctx context.Context) context.Context {
 	h.leftSource.Start(ctx)
 	h.rightSource.Start(ctx)
 	ctx = h.StartInternal(ctx, hashJoinerProcName)
-	h.cancelChecker = sqlbase.NewCancelChecker(ctx)
+	h.cancelChecker = cancelchecker.NewCancelChecker(ctx)
 	h.runningState = hjBuilding
 	return ctx
 }
 
 // Next is part of the RowSource interface.
-func (h *hashJoiner) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (h *hashJoiner) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	for h.State == execinfra.StateRunning {
-		var row sqlbase.EncDatumRow
+		var row rowenc.EncDatumRow
 		var meta *execinfrapb.ProducerMetadata
 		switch h.runningState {
 		case hjBuilding:
@@ -261,13 +259,13 @@ func (h *hashJoiner) ConsumerClosed() {
 	h.close()
 }
 
-func (h *hashJoiner) build() (hashJoinerState, sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (h *hashJoiner) build() (hashJoinerState, rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	// setStoredSideTransition is a helper function that sets storedSide on the
 	// hashJoiner and performs initialization before a transition to
 	// hjConsumingStoredSide.
 	setStoredSideTransition := func(
 		side joinSide,
-	) (hashJoinerState, sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+	) (hashJoinerState, rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 		h.storedSide = side
 		if err := h.initStoredRows(); err != nil {
 			h.MoveToDraining(err)
@@ -314,9 +312,9 @@ func (h *hashJoiner) build() (hashJoinerState, sqlbase.EncDatumRow, *execinfrapb
 			// This side has been fully consumed, it is the shortest side.
 			// If storedSide is empty, we might be able to short-circuit.
 			if h.rows[side].Len() == 0 &&
-				(h.joinType == sqlbase.InnerJoin ||
-					(h.joinType == sqlbase.LeftOuterJoin && side == leftSide) ||
-					(h.joinType == sqlbase.RightOuterJoin && side == rightSide)) {
+				(h.joinType == descpb.InnerJoin ||
+					(h.joinType == descpb.LeftOuterJoin && side == leftSide) ||
+					(h.joinType == descpb.RightOuterJoin && side == rightSide)) {
 				h.MoveToDraining(nil /* err */)
 				return hjStateUnknown, nil, h.DrainHelper()
 			}
@@ -331,7 +329,7 @@ func (h *hashJoiner) build() (hashJoinerState, sqlbase.EncDatumRow, *execinfrapb
 		if err := h.rows[side].AddRow(h.Ctx, row); err != nil {
 			// If this error is a memory limit error, move to hjConsumingStoredSide.
 			h.storedSide = side
-			if sqlbase.IsOutOfMemoryError(err) {
+			if sqlerrors.IsOutOfMemoryError(err) {
 				if h.disableTempStorage {
 					err = pgerror.Wrapf(err, pgcode.OutOfMemory,
 						"error while attempting hashJoiner disk spill: temp storage disabled")
@@ -358,7 +356,7 @@ func (h *hashJoiner) build() (hashJoinerState, sqlbase.EncDatumRow, *execinfrapb
 // h.initStoredRows().
 func (h *hashJoiner) consumeStoredSide() (
 	hashJoinerState,
-	sqlbase.EncDatumRow,
+	rowenc.EncDatumRow,
 	*execinfrapb.ProducerMetadata,
 ) {
 	side := h.storedSide
@@ -409,16 +407,16 @@ func (h *hashJoiner) consumeStoredSide() (
 
 func (h *hashJoiner) readProbeSide() (
 	hashJoinerState,
-	sqlbase.EncDatumRow,
+	rowenc.EncDatumRow,
 	*execinfrapb.ProducerMetadata,
 ) {
 	side := otherSide(h.storedSide)
 
-	var row sqlbase.EncDatumRow
+	var row rowenc.EncDatumRow
 	// First process the rows that were already buffered.
 	if h.rows[side].Len() > 0 {
 		row = h.rows[side].EncRow(0)
-		h.rows[side].PopFirst()
+		h.rows[side].PopFirst(h.Ctx)
 	} else {
 		var meta *execinfrapb.ProducerMetadata
 		var emitDirectly bool
@@ -475,7 +473,7 @@ func (h *hashJoiner) readProbeSide() (
 
 func (h *hashJoiner) probeRow() (
 	hashJoinerState,
-	sqlbase.EncDatumRow,
+	rowenc.EncDatumRow,
 	*execinfrapb.ProducerMetadata,
 ) {
 	i := h.probingRowState.iter
@@ -511,7 +509,7 @@ func (h *hashJoiner) probeRow() (
 	}
 	defer i.Next()
 
-	var renderedRow sqlbase.EncDatumRow
+	var renderedRow rowenc.EncDatumRow
 	if h.storedSide == rightSide {
 		renderedRow, err = h.render(row, otherRow)
 	} else {
@@ -528,7 +526,7 @@ func (h *hashJoiner) probeRow() (
 	}
 
 	h.probingRowState.matched = true
-	shouldEmit := h.joinType != sqlbase.LeftAntiJoin && h.joinType != sqlbase.ExceptAllJoin
+	shouldEmit := h.joinType != descpb.LeftAntiJoin && h.joinType != descpb.ExceptAllJoin
 	if shouldMark(h.storedSide, h.joinType) {
 		// Matched rows are marked on the stored side for 2 reasons.
 		// 1: For outer joins, anti joins, and EXCEPT ALL to iterate through
@@ -542,11 +540,11 @@ func (h *hashJoiner) probeRow() (
 		// TODO(peter): figure out a way to reduce this special casing below.
 		if i.IsMarked(h.Ctx) {
 			switch h.joinType {
-			case sqlbase.LeftSemiJoin:
+			case descpb.LeftSemiJoin:
 				shouldEmit = false
-			case sqlbase.IntersectAllJoin:
+			case descpb.IntersectAllJoin:
 				shouldEmit = false
-			case sqlbase.ExceptAllJoin:
+			case descpb.ExceptAllJoin:
 				// We want to mark a stored row if possible, so move on to the next
 				// match. Reset h.probingRowState.matched in case we don't find any more
 				// matches and want to emit this row.
@@ -563,7 +561,7 @@ func (h *hashJoiner) probeRow() (
 		nextState = hjReadingProbeSide
 	}
 	if shouldEmit {
-		if h.joinType == sqlbase.IntersectAllJoin {
+		if h.joinType == descpb.IntersectAllJoin {
 			// We found a match, so we are done with this row.
 			return hjReadingProbeSide, renderedRow, nil
 		}
@@ -575,7 +573,7 @@ func (h *hashJoiner) probeRow() (
 
 func (h *hashJoiner) emitUnmatched() (
 	hashJoinerState,
-	sqlbase.EncDatumRow,
+	rowenc.EncDatumRow,
 	*execinfrapb.ProducerMetadata,
 ) {
 	i := h.emittingUnmatchedState.iter
@@ -640,7 +638,7 @@ func (h *hashJoiner) close() {
 // returned row may be emitted directly.
 func (h *hashJoiner) receiveNext(
 	side joinSide,
-) (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata, bool, error) {
+) (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata, bool, error) {
 	source := h.leftSource
 	if side == rightSide {
 		source = h.rightSource
@@ -724,8 +722,8 @@ func (h *hashJoiner) receiveNext(
 // match. If this is the case, a rendered row ready for emitting is returned as
 // well.
 func (h *hashJoiner) shouldEmitUnmatched(
-	row sqlbase.EncDatumRow, side joinSide,
-) (sqlbase.EncDatumRow, bool) {
+	row rowenc.EncDatumRow, side joinSide,
+) (rowenc.EncDatumRow, bool) {
 	if !shouldEmitUnmatchedRow(side, h.joinType) {
 		return nil, false
 	}
@@ -744,7 +742,7 @@ func (h *hashJoiner) initStoredRows() error {
 		)
 		h.storedRows = hrc
 	} else {
-		hrc := rowcontainer.MakeHashMemRowContainer(&h.rows[h.storedSide])
+		hrc := rowcontainer.MakeHashMemRowContainer(&h.rows[h.storedSide], h.MemMonitor)
 		h.storedRows = &hrc
 	}
 	return h.storedRows.Init(
@@ -805,7 +803,7 @@ func (h *hashJoiner) outputStatsToTrace() {
 	if !ok {
 		return
 	}
-	if sp := opentracing.SpanFromContext(h.Ctx); sp != nil {
+	if sp := tracing.SpanFromContext(h.Ctx); sp != nil {
 		tracing.SetSpanStats(
 			sp,
 			&HashJoinerStats{
@@ -820,15 +818,15 @@ func (h *hashJoiner) outputStatsToTrace() {
 }
 
 // Some types of joins need to mark rows that matched.
-func shouldMark(storedSide joinSide, joinType sqlbase.JoinType) bool {
+func shouldMark(storedSide joinSide, joinType descpb.JoinType) bool {
 	switch {
-	case joinType == sqlbase.LeftSemiJoin && storedSide == leftSide:
+	case joinType == descpb.LeftSemiJoin && storedSide == leftSide:
 		return true
-	case joinType == sqlbase.LeftAntiJoin && storedSide == leftSide:
+	case joinType == descpb.LeftAntiJoin && storedSide == leftSide:
 		return true
-	case joinType == sqlbase.ExceptAllJoin:
+	case joinType == descpb.ExceptAllJoin:
 		return true
-	case joinType == sqlbase.IntersectAllJoin:
+	case joinType == descpb.IntersectAllJoin:
 		return true
 	case shouldEmitUnmatchedRow(storedSide, joinType):
 		return true
@@ -840,11 +838,11 @@ func shouldMark(storedSide joinSide, joinType sqlbase.JoinType) bool {
 // Some types of joins only need to know of the existence of a matching row in
 // the storedSide, depending on the storedSide, and don't need to know all the
 // rows. These can 'short circuit' to avoid iterating through them all.
-func shouldShortCircuit(storedSide joinSide, joinType sqlbase.JoinType) bool {
+func shouldShortCircuit(storedSide joinSide, joinType descpb.JoinType) bool {
 	switch joinType {
-	case sqlbase.LeftSemiJoin:
+	case descpb.LeftSemiJoin:
 		return storedSide == rightSide
-	case sqlbase.ExceptAllJoin:
+	case descpb.ExceptAllJoin:
 		return true
 	default:
 		return false
@@ -875,6 +873,6 @@ func (h *hashJoiner) Child(nth int, verbose bool) execinfra.OpNode {
 		}
 		panic("right input to hashJoiner is not an execinfra.OpNode")
 	default:
-		panic(fmt.Sprintf("invalid index %d", nth))
+		panic(errors.AssertionFailedf("invalid index %d", nth))
 	}
 }

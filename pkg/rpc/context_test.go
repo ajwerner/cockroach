@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -93,6 +94,7 @@ func newTestContextWithKnobs(
 	clock *hlc.Clock, stopper *stop.Stopper, knobs ContextTestingKnobs,
 ) *Context {
 	return NewContext(ContextOptions{
+		TenantID:   roachpb.SystemTenantID,
 		AmbientCtx: log.AmbientContext{Tracer: tracing.NewTracer()},
 		Config:     testutils.NewNodeTestBaseContext(),
 		Clock:      clock,
@@ -160,6 +162,62 @@ func TestHeartbeatCB(t *testing.T) {
 	})
 }
 
+// TestPingInterceptors checks that OnOutgoingPing and OnIncomingPing can inject errors.
+func TestPingInterceptors(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ctx := context.Background()
+
+	const (
+		blockedTargetNodeID = 5
+		blockedOriginNodeID = 123
+	)
+
+	errBoomSend := errors.Handled(errors.New("boom due to onSendPing"))
+	errBoomRecv := status.Error(codes.FailedPrecondition, "boom due to onHandlePing")
+	opts := ContextOptions{
+		TenantID:   roachpb.SystemTenantID,
+		AmbientCtx: log.AmbientContext{Tracer: tracing.NewTracer()},
+		Config:     testutils.NewNodeTestBaseContext(),
+		Clock:      hlc.NewClock(hlc.UnixNano, 500*time.Millisecond),
+		Stopper:    stop.NewStopper(),
+		Settings:   cluster.MakeTestingClusterSettings(),
+		OnOutgoingPing: func(req *PingRequest) error {
+			if req.TargetNodeID == blockedTargetNodeID {
+				return errBoomSend
+			}
+			return nil
+		},
+		OnIncomingPing: func(req *PingRequest) error {
+			if req.OriginNodeID == blockedOriginNodeID {
+				return errBoomRecv
+			}
+			return nil
+		},
+	}
+	defer opts.Stopper.Stop(ctx)
+
+	rpcCtx := NewContext(opts)
+	{
+		_, err := rpcCtx.GRPCDialNode("unused:1234", 5, SystemClass).Connect(ctx)
+		require.Equal(t, errBoomSend, errors.Cause(err))
+	}
+
+	s := newTestServer(t, rpcCtx)
+	RegisterHeartbeatServer(s, rpcCtx.NewHeartbeatService())
+	rpcCtx.NodeID.Set(ctx, blockedOriginNodeID)
+	ln, err := netutil.ListenAndServeGRPC(rpcCtx.Stopper, s, util.TestAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteAddr := ln.Addr().String()
+	{
+		_, err := rpcCtx.GRPCDialNode(remoteAddr, blockedOriginNodeID, SystemClass).Connect(ctx)
+		require.Equal(t, errBoomRecv, errors.Cause(err))
+	}
+}
+
+var _ roachpb.InternalServer = &internalServer{}
+
 type internalServer struct{}
 
 func (*internalServer) Batch(
@@ -168,9 +226,27 @@ func (*internalServer) Batch(
 	return nil, nil
 }
 
+func (*internalServer) RangeLookup(
+	context.Context, *roachpb.RangeLookupRequest,
+) (*roachpb.RangeLookupResponse, error) {
+	panic("unimplemented")
+}
+
 func (*internalServer) RangeFeed(
-	_ *roachpb.RangeFeedRequest, _ roachpb.Internal_RangeFeedServer,
+	*roachpb.RangeFeedRequest, roachpb.Internal_RangeFeedServer,
 ) error {
+	panic("unimplemented")
+}
+
+func (*internalServer) GossipSubscription(
+	*roachpb.GossipSubscriptionRequest, roachpb.Internal_GossipSubscriptionServer,
+) error {
+	panic("unimplemented")
+}
+
+func (*internalServer) Join(
+	context.Context, *roachpb.JoinNodeRequest,
+) (*roachpb.JoinNodeResponse, error) {
 	panic("unimplemented")
 }
 
@@ -919,7 +995,7 @@ func TestRemoteOffsetUnhealthy(t *testing.T) {
 // its response stream even if it doesn't get any new requests.
 func TestGRPCKeepaliveFailureFailsInflightRPCs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	t.Skip("Takes too long given https://github.com/grpc/grpc-go/pull/2642")
+	skip.WithIssue(t, 51800, "Takes too long given https://github.com/grpc/grpc-go/pull/2642")
 
 	sc := log.Scope(t)
 	defer sc.Close(t)
@@ -1714,9 +1790,7 @@ func TestRunHeartbeatSetsHeartbeatStateWhenExitingBeforeFirstHeartbeat(t *testin
 }
 
 func BenchmarkGRPCDial(b *testing.B) {
-	if testing.Short() {
-		b.Skip("TODO: fix benchmark")
-	}
+	skip.UnderShort(b, "TODO: fix benchmark")
 	stopper := stop.NewStopper()
 	defer stopper.Stop(context.Background())
 

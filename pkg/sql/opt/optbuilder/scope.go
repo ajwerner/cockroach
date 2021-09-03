@@ -16,21 +16,20 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
+	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
-
-// scopeOrdinal identifies an ordinal position with a list of scope columns.
-type scopeOrdinal int
 
 // scope is used for the build process and maintains the variables that have
 // been bound within the current scope as columnProps. Variables bound in the
@@ -115,7 +114,6 @@ type cteSource struct {
 	name         tree.AliasClause
 	cols         physical.Presentation
 	originalExpr tree.Statement
-	bindingProps *props.Relational
 	expr         memo.RelExpr
 	mtr          tree.MaterializeClause
 	// If set, this function is called when a CTE is referenced. It can throw an
@@ -221,15 +219,18 @@ func (s *scope) appendColumnsFromScope(src *scope) {
 	}
 }
 
-// appendColumnsFromTable adds all columns from the given table metadata to this
-// scope.
-func (s *scope) appendColumnsFromTable(tabMeta *opt.TableMeta, alias *tree.TableName) {
+// appendOrdinaryColumnsFromTable adds all non-mutation and non-system columns from the
+// given table metadata to this scope.
+func (s *scope) appendOrdinaryColumnsFromTable(tabMeta *opt.TableMeta, alias *tree.TableName) {
 	tab := tabMeta.Table
 	if s.cols == nil {
 		s.cols = make([]scopeColumn, 0, tab.ColumnCount())
 	}
 	for i, n := 0, tab.ColumnCount(); i < n; i++ {
 		tabCol := tab.Column(i)
+		if tabCol.Kind() != cat.Ordinary {
+			continue
+		}
 		s.cols = append(s.cols, scopeColumn{
 			name:   tabCol.ColName(),
 			table:  *alias,
@@ -310,6 +311,17 @@ func (s *scope) getColumn(col opt.ColumnID) *scopeColumn {
 	for i := range s.extraCols {
 		if s.extraCols[i].id == col {
 			return &s.extraCols[i]
+		}
+	}
+	return nil
+}
+
+// getColumnForTableOrdinal returns the column with a specific tableOrdinal
+// value, or nil if it doesn't exist.
+func (s *scope) getColumnForTableOrdinal(tabOrd int) *scopeColumn {
+	for i := range s.cols {
+		if s.cols[i].tableOrdinal == tabOrd {
+			return &s.cols[i]
 		}
 	}
 	return nil
@@ -598,7 +610,7 @@ func (s *scope) findExistingCol(expr tree.TypedExpr, allowSideEffects bool) *sco
 // will be transferred to the correct scope by buildAggregateFunction.
 func (s *scope) startAggFunc() *scope {
 	if s.inAgg {
-		panic(sqlbase.NewAggInAggError())
+		panic(sqlerrors.NewAggInAggError())
 	}
 	s.inAgg = true
 
@@ -640,6 +652,10 @@ func (s *scope) endAggFunc(cols opt.ColSet) (g *groupby) {
 // verifyAggregateContext checks that the current scope is allowed to contain
 // aggregate functions.
 func (s *scope) verifyAggregateContext() {
+	if s.inAgg {
+		panic(sqlerrors.NewAggInAggError())
+	}
+
 	switch s.context {
 	case exprKindLateralJoin:
 		panic(pgerror.Newf(pgcode.Grouping,
@@ -762,7 +778,7 @@ func (s *scope) FindSourceProvidingColumn(
 	if reportBackfillError {
 		return nil, nil, -1, makeBackfillError(tmpName)
 	}
-	return nil, nil, -1, sqlbase.NewUndefinedColumnError(tree.ErrString(&tmpName))
+	return nil, nil, -1, colinfo.NewUndefinedColumnError(tree.ErrString(&tmpName))
 }
 
 // FindSourceMatchingName is part of the tree.ColumnItemResolver interface.
@@ -850,7 +866,7 @@ func (s *scope) Resolve(
 		}
 	}
 
-	return nil, sqlbase.NewUndefinedColumnError(tree.ErrString(tree.NewColumnItem(prefix, colName)))
+	return nil, colinfo.NewUndefinedColumnError(tree.ErrString(tree.NewColumnItem(prefix, colName)))
 }
 
 func makeUntypedTuple(labels []string, texprs []tree.TypedExpr) *tree.Tuple {
@@ -1080,6 +1096,12 @@ func (s *scope) replaceAggregate(f *tree.FuncExpr, def *tree.FunctionDefinition)
 
 	expr := fCopy.Walk(s)
 
+	// Update this scope to indicate that we are now inside an aggregate function
+	// so that any nested aggregates referencing this scope from a subquery will
+	// return an appropriate error. The returned tempScope will be used for
+	// building aggregate function arguments below in buildAggregateFunction.
+	tempScope := s.startAggFunc()
+
 	// We need to do this check here to ensure that we check the usage of special
 	// functions with the right error message.
 	if f.Filter != nil {
@@ -1111,7 +1133,7 @@ func (s *scope) replaceAggregate(f *tree.FuncExpr, def *tree.FunctionDefinition)
 		Overload:   f.ResolvedOverload(),
 	}
 
-	return s.builder.buildAggregateFunction(f, &private, s)
+	return s.builder.buildAggregateFunction(f, &private, tempScope, s)
 }
 
 func (s *scope) lookupWindowDef(name tree.Name) *tree.WindowDef {

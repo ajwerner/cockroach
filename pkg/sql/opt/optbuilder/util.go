@@ -11,6 +11,7 @@
 package optbuilder
 
 import (
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/cat"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/memo"
@@ -19,7 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/errors"
@@ -256,7 +257,7 @@ func (b *Builder) addColumn(scope *scope, alias string, expr tree.TypedExpr) *sc
 	return &scope.cols[len(scope.cols)-1]
 }
 
-func (b *Builder) synthesizeResultColumns(scope *scope, cols sqlbase.ResultColumns) {
+func (b *Builder) synthesizeResultColumns(scope *scope, cols colinfo.ResultColumns) {
 	for i := range cols {
 		c := b.synthesizeColumn(scope, cols[i].Name, cols[i].Typ, nil /* expr */, nil /* scalar */)
 		if cols[i].Hidden {
@@ -446,13 +447,13 @@ func (b *Builder) resolveAndBuildScalar(
 // In Postgres, qualifying an object name with pg_temp is equivalent to explicitly
 // specifying TEMP/TEMPORARY in the CREATE syntax. resolveTemporaryStatus returns
 // true if either(or both) of these conditions are true.
-func resolveTemporaryStatus(name *tree.TableName, explicitTemp bool) bool {
+func resolveTemporaryStatus(name *tree.TableName, persistence tree.Persistence) bool {
 	// An explicit schema can only be provided in the CREATE TEMP TABLE statement
 	// iff it is pg_temp.
-	if explicitTemp && name.ExplicitSchema && name.SchemaName != sessiondata.PgTempSchemaName {
+	if persistence.IsTemporary() && name.ExplicitSchema && name.SchemaName != sessiondata.PgTempSchemaName {
 		panic(pgerror.New(pgcode.InvalidTableDefinition, "cannot create temporary relation in non-temporary schema"))
 	}
-	return name.SchemaName == sessiondata.PgTempSchemaName || explicitTemp
+	return name.SchemaName == sessiondata.PgTempSchemaName || persistence.IsTemporary()
 }
 
 // resolveSchemaForCreate returns the schema that will contain a newly created
@@ -474,12 +475,6 @@ func (b *Builder) resolveSchemaForCreate(name *tree.TableName) (cat.Schema, cat.
 			panic(newErr)
 		}
 		panic(err)
-	}
-
-	// Only allow creation of objects in the public schema.
-	if resName.Schema() != tree.PublicSchema {
-		panic(pgerror.Newf(pgcode.InvalidName,
-			"schema cannot be modified: %q", tree.ErrString(&resName)))
 	}
 
 	if err := b.catalog.CheckPrivilege(b.ctx, sch, privilege.CREATE); err != nil {
@@ -540,6 +535,11 @@ func (b *Builder) resolveTableForMutation(
 		alias = *outerAlias
 	}
 
+	// We can't mutate materialized views.
+	if tab.IsMaterializedView() {
+		panic(pgerror.Newf(pgcode.WrongObjectType, "cannot mutate materialized view %q", tab.Name()))
+	}
+
 	return tab, depName, alias, columns
 }
 
@@ -552,7 +552,7 @@ func (b *Builder) resolveTable(
 	ds, resName := b.resolveDataSource(tn, priv)
 	tab, ok := ds.(cat.Table)
 	if !ok {
-		panic(sqlbase.NewWrongObjectTypeError(tn, "table"))
+		panic(sqlerrors.NewWrongObjectTypeError(tn, "table"))
 	}
 	return tab, resName
 }
@@ -564,7 +564,7 @@ func (b *Builder) resolveTableRef(ref *tree.TableRef, priv privilege.Kind) cat.T
 	ds := b.resolveDataSourceRef(ref, priv)
 	tab, ok := ds.(cat.Table)
 	if !ok {
-		panic(sqlbase.NewWrongObjectTypeError(ref, "table"))
+		panic(sqlerrors.NewWrongObjectTypeError(ref, "table"))
 	}
 	return tab
 }
@@ -634,4 +634,78 @@ func (b *Builder) checkPrivilege(name opt.MDDepName, ds cat.DataSource, priv pri
 	// Add dependency on this object to the metadata, so that the metadata can be
 	// cached and later checked for freshness.
 	b.factory.Metadata().AddDependency(name, ds, priv)
+}
+
+// resolveNumericColumnRefs converts a list of tree.ColumnIDs from a
+// tree.TableRef to a list of ordinal positions within the given table. Mutation
+// columns are not visible. See tree.Table for more information on column
+// ordinals.
+func resolveNumericColumnRefs(tab cat.Table, columns []tree.ColumnID) (ordinals []int) {
+	ordinals = make([]int, len(columns))
+	for i, c := range columns {
+		ord := 0
+		cnt := tab.ColumnCount()
+		for ord < cnt {
+			col := tab.Column(ord)
+			if col.IsSelectable() && col.ColID() == cat.StableID(c) {
+				break
+			}
+			ord++
+		}
+		if ord >= cnt {
+			panic(pgerror.Newf(pgcode.UndefinedColumn, "column [%d] does not exist", c))
+		}
+		ordinals[i] = ord
+	}
+	return ordinals
+}
+
+// findPublicTableColumnByName returns the ordinal of the non-mutation column
+// having the given name, if one exists in the given table. Otherwise, it
+// returns -1.
+func findPublicTableColumnByName(tab cat.Table, name tree.Name) int {
+	for ord, n := 0, tab.ColumnCount(); ord < n; ord++ {
+		col := tab.Column(ord)
+		if col.ColName() == name && !col.IsMutation() {
+			return ord
+		}
+	}
+	return -1
+}
+
+type columnKinds struct {
+	// If true, include columns being added or dropped from the table. These
+	// are currently required by the execution engine as "fetch columns", when
+	// performing mutation DML statements (INSERT, UPDATE, UPSERT, DELETE).
+	includeMutations bool
+
+	// If true, include system columns.
+	includeSystem bool
+
+	// If true, include virtual inverted index columns.
+	includeVirtualInverted bool
+
+	// If true, include virtual computed columns.
+	includeVirtualComputed bool
+}
+
+// tableOrdinals returns a slice of ordinals that correspond to table columns of
+// the desired kinds.
+func tableOrdinals(tab cat.Table, k columnKinds) []int {
+	n := tab.ColumnCount()
+	shouldInclude := [...]bool{
+		cat.Ordinary:        true,
+		cat.WriteOnly:       k.includeMutations,
+		cat.DeleteOnly:      k.includeMutations,
+		cat.System:          k.includeSystem,
+		cat.VirtualInverted: k.includeVirtualInverted,
+		cat.VirtualComputed: k.includeVirtualComputed,
+	}
+	ordinals := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		if shouldInclude[tab.Column(i).Kind()] {
+			ordinals = append(ordinals, i)
+		}
+	}
+	return ordinals
 }

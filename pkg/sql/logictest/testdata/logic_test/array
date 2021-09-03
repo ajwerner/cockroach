@@ -240,6 +240,10 @@ SELECT ARRAY['a', 'b', 'c'][0]
 ----
 NULL
 
+# Regression test for #52134: make sure this is not an internal error.
+query error cannot subscript type string because it is not an array
+SELECT '{a,b,c}'[0]
+
 query T
 SELECT (ARRAY['a', 'b', 'c'])[2]
 ----
@@ -460,10 +464,10 @@ CREATE TABLE a (b INT ARRAY)
 query TT
 SHOW CREATE TABLE a
 ----
-a  CREATE TABLE a (
-     b INT8[] NULL,
-     FAMILY "primary" (b, rowid)
-   )
+a  CREATE TABLE public.a (
+   b INT8[] NULL,
+   FAMILY "primary" (b, rowid)
+)
 
 statement ok
 DROP TABLE a
@@ -519,10 +523,10 @@ SELECT * FROM a
 query TT
 SHOW CREATE TABLE a
 ----
-a  CREATE TABLE a (
-     b INT8[] NULL,
-     FAMILY "primary" (b, rowid)
-   )
+a  CREATE TABLE public.a (
+   b INT8[] NULL,
+   FAMILY "primary" (b, rowid)
+)
 
 statement error could not parse "foo" as type int
 INSERT INTO a VALUES (ARRAY['foo'])
@@ -590,7 +594,7 @@ CREATE TABLE a (b SMALLINT[])
 query TT
 SHOW CREATE TABLE a
 ----
-a  CREATE TABLE a (
+a  CREATE TABLE public.a (
    b INT2[] NULL,
    FAMILY "primary" (b, rowid)
 )
@@ -1737,3 +1741,38 @@ SELECT x FROM t GROUP BY x
 {1,2}
 {NULL,NULL}
 {1,2,NULL,4,NULL}
+
+# Regression test for #53395: cast between tuples.
+query T
+SELECT CASE
+  WHEN NULL THEN (('1':::INT8, ARRAY[]:::INT2[]))
+  ELSE ('2':::INT8, ARRAY[(-23791):::INT8])
+END
+----
+(2,{-23791})
+
+# Test that string literals can be implicitly casted to array types
+statement ok
+DROP TABLE t;
+CREATE TABLE t (
+  a INT[],
+  b DECIMAL[],
+  c UUID[],
+  d STRING[],
+  e TIMESTAMPTZ[],
+  f DATE[],
+  g INTERVAL[],
+  h INET[],
+  i VARBIT[],
+  j FLOAT[]);
+INSERT INTO t VALUES (
+  '{1, 2}',
+  '{1.1, 2.2}',
+  '{18e7b17e-4ead-4e27-bfd5-bb6d11261bb6, 18e7b17e-4ead-4e27-bfd5-bb6d11261bb7}',
+  '{cat, dog}',
+  '{2010-09-28 12:00:00.1, 2010-09-29 12:00:00.1}',
+  '{2010-09-28, 2010-09-29}',
+  '{PT12H2M, -23:00:00}',
+  '{192.168.100.128, ::ffff:10.4.3.2}',
+  '{0101, 11}',
+  '{12.34, 45.67}');

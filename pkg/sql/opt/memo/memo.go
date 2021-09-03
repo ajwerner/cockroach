@@ -131,13 +131,13 @@ type Memo struct {
 
 	// The following are selected fields from SessionData which can affect
 	// planning. We need to cross-check these before reusing a cached memo.
-	reorderJoinsLimit int
-	zigzagJoinEnabled bool
-	useHistograms     bool
-	useMultiColStats  bool
-	safeUpdates       bool
-	saveTablesPrefix  string
-	insertFastPath    bool
+	reorderJoinsLimit       int
+	zigzagJoinEnabled       bool
+	useHistograms           bool
+	useMultiColStats        bool
+	safeUpdates             bool
+	preferLookupJoinsForFKs bool
+	saveTablesPrefix        string
 
 	// curID is the highest currently in-use scalar expression ID.
 	curID opt.ScalarID
@@ -169,8 +169,8 @@ func (m *Memo) Init(evalCtx *tree.EvalContext) {
 	m.useHistograms = evalCtx.SessionData.OptimizerUseHistograms
 	m.useMultiColStats = evalCtx.SessionData.OptimizerUseMultiColStats
 	m.safeUpdates = evalCtx.SessionData.SafeUpdates
+	m.preferLookupJoinsForFKs = evalCtx.SessionData.PreferLookupJoinsForFKs
 	m.saveTablesPrefix = evalCtx.SessionData.SaveTablesPrefix
-	m.insertFastPath = evalCtx.SessionData.InsertFastPath
 
 	m.curID = 0
 	m.curWithID = 0
@@ -276,8 +276,8 @@ func (m *Memo) IsStale(
 		m.useHistograms != evalCtx.SessionData.OptimizerUseHistograms ||
 		m.useMultiColStats != evalCtx.SessionData.OptimizerUseMultiColStats ||
 		m.safeUpdates != evalCtx.SessionData.SafeUpdates ||
-		m.saveTablesPrefix != evalCtx.SessionData.SaveTablesPrefix ||
-		m.insertFastPath != evalCtx.SessionData.InsertFastPath {
+		m.preferLookupJoinsForFKs != evalCtx.SessionData.PreferLookupJoinsForFKs ||
+		m.saveTablesPrefix != evalCtx.SessionData.SaveTablesPrefix {
 		return true, nil
 	}
 

@@ -17,10 +17,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/abortspan"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/spanset"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
@@ -109,6 +111,12 @@ func (rec *SpanSetReplicaEvalContext) GetLeaseAppliedIndex() uint64 {
 	return rec.i.GetLeaseAppliedIndex()
 }
 
+// GetTracker returns the min prop tracker that keeps tabs over ongoing command
+// evaluations for the closed timestamp subsystem.
+func (rec *SpanSetReplicaEvalContext) GetTracker() closedts.TrackerI {
+	return rec.i.GetTracker()
+}
+
 // IsFirstRange returns true iff the replica belongs to the first range.
 func (rec *SpanSetReplicaEvalContext) IsFirstRange() bool {
 	return rec.i.IsFirstRange()
@@ -193,6 +201,17 @@ func (rec SpanSetReplicaEvalContext) GetLease() (roachpb.Lease, roachpb.Lease) {
 	return rec.i.GetLease()
 }
 
+// GetDescAndLease is part of the EvalContext interface.
+func (rec SpanSetReplicaEvalContext) GetDescAndLease(
+	ctx context.Context,
+) (roachpb.RangeDescriptor, roachpb.Lease) {
+	// Do the latching checks and ignore the results.
+	rec.Desc()
+	rec.GetLease()
+
+	return rec.i.GetDescAndLease(ctx)
+}
+
 // GetLimiters returns the per-store limiters.
 func (rec *SpanSetReplicaEvalContext) GetLimiters() *batcheval.Limiters {
 	return rec.i.GetLimiters()
@@ -208,7 +227,7 @@ func (rec *SpanSetReplicaEvalContext) GetExternalStorage(
 
 // GetExternalStorageFromURI returns an ExternalStorage object, based on the given URI.
 func (rec *SpanSetReplicaEvalContext) GetExternalStorageFromURI(
-	ctx context.Context, uri string, user string,
+	ctx context.Context, uri string, user security.SQLUsername,
 ) (cloud.ExternalStorage, error) {
 	return rec.i.GetExternalStorageFromURI(ctx, uri, user)
 }

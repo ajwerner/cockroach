@@ -105,7 +105,7 @@ SET CLUSTER SETTING sql.defaults.reorder_joins_limit = 6
 sql.plan.reorder-joins.set-limit-6
 
 feature-usage
-SET CLUSTER SETTING sql.defaults.reorder_joins_limit = 20 
+SET CLUSTER SETTING sql.defaults.reorder_joins_limit = 20
 ----
 sql.plan.reorder-joins.set-limit-more
 
@@ -137,8 +137,6 @@ sql.plan.stats.created
 # Test various planning counters.
 feature-allowlist
 sql.plan.cte.*
-sql.plan.lateral-join
-sql.plan.subquery.*
 ----
 
 feature-usage
@@ -151,6 +149,11 @@ WITH RECURSIVE a AS (SELECT 1 UNION ALL SELECT * FROM a WHERE false) SELECT * FR
 ----
 sql.plan.cte
 sql.plan.cte.recursive
+
+feature-allowlist
+sql.plan.lateral-join
+sql.plan.subquery.*
+----
 
 feature-usage
 SELECT * FROM (VALUES (1), (2)) AS a(x), LATERAL (SELECT a.x+1)
@@ -219,3 +222,25 @@ NATURAL INNER MERGE JOIN (SELECT * FROM x WHERE a > 0) AS x2
 ----
 sql.plan.opt.node.join.algo.merge
 sql.plan.opt.node.join.type.inner
+
+# Tests for partial index counters.
+
+feature-allowlist
+sql.plan.opt.partial-index.scan
+sql.plan.opt.partial-index.lookup-join
+----
+
+exec
+CREATE INDEX i ON x (a) WHERE a > 0
+----
+
+feature-usage
+SELECT a FROM x@i WHERE a > 0
+----
+sql.plan.opt.partial-index.scan
+
+feature-usage
+SELECT x1.a FROM x x1 INNER LOOKUP JOIN x x2 ON x1.a = x2.a WHERE x2.a > 0
+----
+sql.plan.opt.partial-index.lookup-join
+sql.plan.opt.partial-index.scan

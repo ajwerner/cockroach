@@ -85,7 +85,7 @@
 )
 
 # EliminateJoinUnderGroupByRight is symmetric with
-# EliminateJoinUnderGroupByLeft, except that it only matches on InnerJoins.
+# EliminateJoinUnderGroupByLeft, except that it matches on InnerJoins.
 [EliminateJoinUnderGroupByRight, Normalize]
 (GroupBy | ScalarGroupBy | DistinctOn
     $input:(InnerJoin * $right:*)

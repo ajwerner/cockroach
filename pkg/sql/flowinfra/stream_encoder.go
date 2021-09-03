@@ -13,15 +13,17 @@ package flowinfra
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 )
 
 // PreferredEncoding is the encoding used for EncDatums that don't already have
 // an encoding available.
-const PreferredEncoding = sqlbase.DatumEncoding_ASCENDING_KEY
+const PreferredEncoding = descpb.DatumEncoding_ASCENDING_KEY
 
 // StreamEncoder converts EncDatum rows into a sequence of ProducerMessage.
 //
@@ -52,7 +54,7 @@ type StreamEncoder struct {
 	// typingSent is set after the first message that contains any rows has been
 	// sent.
 	typingSent bool
-	alloc      sqlbase.DatumAlloc
+	alloc      rowenc.DatumAlloc
 
 	// Preallocated structures to avoid allocations.
 	msg    execinfrapb.ProducerMessage
@@ -91,7 +93,7 @@ func (se *StreamEncoder) AddMetadata(ctx context.Context, meta execinfrapb.Produ
 }
 
 // AddRow encodes a message.
-func (se *StreamEncoder) AddRow(row sqlbase.EncDatumRow) error {
+func (se *StreamEncoder) AddRow(row rowenc.EncDatumRow) error {
 	if se.infos == nil {
 		panic("Init not called")
 	}
@@ -106,10 +108,10 @@ func (se *StreamEncoder) AddRow(row sqlbase.EncDatumRow) error {
 				enc = PreferredEncoding
 			}
 			sType := se.infos[i].Type
-			if enc != sqlbase.DatumEncoding_VALUE &&
-				(sqlbase.HasCompositeKeyEncoding(sType) || sqlbase.MustBeValueEncoded(sType)) {
+			if enc != descpb.DatumEncoding_VALUE &&
+				(colinfo.HasCompositeKeyEncoding(sType) || colinfo.MustBeValueEncoded(sType)) {
 				// Force VALUE encoding for composite types (key encodings may lose data).
-				enc = sqlbase.DatumEncoding_VALUE
+				enc = descpb.DatumEncoding_VALUE
 			}
 			se.infos[i].Encoding = enc
 		}

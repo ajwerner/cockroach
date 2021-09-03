@@ -148,6 +148,10 @@ func (r *Replica) shouldApplyCommand(
 	return cmd.forcedErr == nil
 }
 
+// noopOnEmptyRaftCommandErr is returned from checkForcedErr when an empty raft
+// command is received. See the comment near its use.
+var noopOnEmptyRaftCommandErr = roachpb.NewErrorf("no-op on empty Raft entry")
+
 // checkForcedErr determines whether or not a command should be applied to the
 // replicated state machine after it has been committed to the Raft log. This
 // decision is deterministic on all replicas, such that a command that is
@@ -185,7 +189,7 @@ func checkForcedErr(
 		// Nothing to do here except making sure that the corresponding batch
 		// (which is bogus) doesn't get executed (for it is empty and so
 		// properties like key range are undefined).
-		return leaseIndex, proposalNoReevaluation, roachpb.NewErrorf("no-op on empty Raft entry")
+		return leaseIndex, proposalNoReevaluation, noopOnEmptyRaftCommandErr
 	}
 
 	// Verify the lease matches the proposer's expectation. We rely on
@@ -648,6 +652,15 @@ func (b *replicaAppBatch) runPreApplyTriggersAfterStagingWriteBatch(
 		// its unlock method in cmd.splitMergeUnlock.
 		rhsRepl.raftMu.AssertHeld()
 
+		// We mark the replica as destroyed so that new commands are not
+		// accepted. This destroy status will be detected after the batch
+		// commits by handleMergeResult() to finish the removal.
+		rhsRepl.mu.Lock()
+		rhsRepl.mu.destroyStatus.Set(
+			roachpb.NewRangeNotFoundError(rhsRepl.RangeID, rhsRepl.store.StoreID()),
+			destroyReasonRemoved)
+		rhsRepl.mu.Unlock()
+
 		// Use math.MaxInt32 (mergedTombstoneReplicaID) as the nextReplicaID as an
 		// extra safeguard against creating new replicas of the RHS. This isn't
 		// required for correctness, since the merge protocol should guarantee that
@@ -722,11 +735,11 @@ func (b *replicaAppBatch) runPreApplyTriggersAfterStagingWriteBatch(
 		!b.r.store.TestingKnobs().DisableEagerReplicaRemoval {
 
 		// We mark the replica as destroyed so that new commands are not
-		// accepted. This destroy status will be detected after the batch commits
-		// by Replica.handleChangeReplicasTrigger() to finish the removal.
+		// accepted. This destroy status will be detected after the batch
+		// commits by handleChangeReplicasResult() to finish the removal.
 		//
-		// NB: we must be holding the raftMu here because we're in the
-		// midst of application.
+		// NB: we must be holding the raftMu here because we're in the midst of
+		// application.
 		b.r.mu.Lock()
 		b.r.mu.destroyStatus.Set(
 			roachpb.NewRangeNotFoundError(b.r.RangeID, b.r.store.StoreID()),
@@ -884,12 +897,13 @@ func (b *replicaAppBatch) ApplyToStateMachine(ctx context.Context) error {
 	needsSplitBySize := r.needsSplitBySizeRLocked()
 	needsMergeBySize := r.needsMergeBySizeRLocked()
 	needsTruncationByLogSize := r.needsRaftLogTruncationLocked()
+	tenantID := r.mu.tenantID
 	r.mu.Unlock()
 
 	// Record the stats delta in the StoreMetrics.
 	deltaStats := *b.state.Stats
 	deltaStats.Subtract(prevStats)
-	r.store.metrics.addMVCCStats(deltaStats)
+	r.store.metrics.addMVCCStats(ctx, tenantID, deltaStats)
 
 	// Record the write activity, passing a 0 nodeID because replica.writeStats
 	// intentionally doesn't track the origin of the writes.
@@ -1039,8 +1053,10 @@ func (sm *replicaStateMachine) ApplySideEffects(
 	clearTrivialReplicatedEvalResultFields(cmd.replicatedResult())
 	if !cmd.IsTrivial() {
 		shouldAssert, isRemoved := sm.handleNonTrivialReplicatedEvalResult(ctx, cmd.replicatedResult())
-
 		if isRemoved {
+			// The proposal must not have been local, because we don't allow a
+			// proposing replica to remove itself from the Range.
+			cmd.FinishNonLocal(ctx)
 			return nil, apply.ErrRemoved
 		}
 		// NB: Perform state assertion before acknowledging the client.

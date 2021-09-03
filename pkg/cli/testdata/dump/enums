@@ -1,5 +1,4 @@
 sql
-SET experimental_enable_enums = true;
 CREATE DATABASE d;
 CREATE TYPE d.t AS ENUM ('dump', 'cli');
 CREATE TABLE d.tt (
@@ -16,17 +15,16 @@ INSERT 2
 dump d
 ----
 ----
-SET experimental_enable_enums = true;
 CREATE TYPE public.t AS ENUM ('dump', 'cli');
 
-CREATE TABLE tt (
+CREATE TABLE public.tt (
 	x public.t NULL,
 	y public.t[] NULL,
 	z INT8 NULL,
 	FAMILY "primary" (x, y, z, rowid)
 );
 
-INSERT INTO tt (x, y, z) VALUES
+INSERT INTO public.tt (x, y, z) VALUES
 	('dump', ARRAY['dump'], 1),
 	('cli', ARRAY['cli'], 2);
 ----
@@ -38,14 +36,14 @@ dump d tt
 noroundtrip
 ----
 ----
-CREATE TABLE tt (
+CREATE TABLE public.tt (
 	x public.t NULL,
 	y public.t[] NULL,
 	z INT8 NULL,
 	FAMILY "primary" (x, y, z, rowid)
 );
 
-INSERT INTO tt (x, y, z) VALUES
+INSERT INTO public.tt (x, y, z) VALUES
 	('dump', ARRAY['dump'], 1),
 	('cli', ARRAY['cli'], 2);
 ----
@@ -56,7 +54,7 @@ noroundtrip
 ----
 ----
 
-INSERT INTO tt (x, y, z) VALUES
+INSERT INTO public.tt (x, y, z) VALUES
 	('dump', ARRAY['dump'], 1),
 	('cli', ARRAY['cli'], 2);
 ----

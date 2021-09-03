@@ -27,6 +27,8 @@
 </span></td></tr>
 <tr><td><a name="array_agg"></a><code>array_agg(arg1: <a href="uuid.html">uuid</a>) &rarr; <a href="uuid.html">uuid</a>[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
 </span></td></tr>
+<tr><td><a name="array_agg"></a><code>array_agg(arg1: box2d) &rarr; box2d[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
+</span></td></tr>
 <tr><td><a name="array_agg"></a><code>array_agg(arg1: geography) &rarr; geography[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
 </span></td></tr>
 <tr><td><a name="array_agg"></a><code>array_agg(arg1: geometry) &rarr; geometry[]</code></td><td><span class="funcdesc"><p>Aggregates the selected values into an array.</p>
@@ -109,9 +111,11 @@
 </span></td></tr>
 <tr><td><a name="max"></a><code>max(arg1: <a href="uuid.html">uuid</a>) &rarr; <a href="uuid.html">uuid</a></code></td><td><span class="funcdesc"><p>Identifies the maximum selected value.</p>
 </span></td></tr>
-<tr><td><a name="max"></a><code>max(arg1: anyenum) &rarr; anyelement</code></td><td><span class="funcdesc"><p>Identifies the maximum selected value.</p>
+<tr><td><a name="max"></a><code>max(arg1: anyenum) &rarr; anyenum</code></td><td><span class="funcdesc"><p>Identifies the maximum selected value.</p>
 </span></td></tr>
-<tr><td><a name="max"></a><code>max(arg1: collatedstring{*}) &rarr; anyelement</code></td><td><span class="funcdesc"><p>Identifies the maximum selected value.</p>
+<tr><td><a name="max"></a><code>max(arg1: box2d) &rarr; box2d</code></td><td><span class="funcdesc"><p>Identifies the maximum selected value.</p>
+</span></td></tr>
+<tr><td><a name="max"></a><code>max(arg1: collatedstring{*}) &rarr; collatedstring{*}</code></td><td><span class="funcdesc"><p>Identifies the maximum selected value.</p>
 </span></td></tr>
 <tr><td><a name="max"></a><code>max(arg1: geography) &rarr; geography</code></td><td><span class="funcdesc"><p>Identifies the maximum selected value.</p>
 </span></td></tr>
@@ -151,9 +155,11 @@
 </span></td></tr>
 <tr><td><a name="min"></a><code>min(arg1: <a href="uuid.html">uuid</a>) &rarr; <a href="uuid.html">uuid</a></code></td><td><span class="funcdesc"><p>Identifies the minimum selected value.</p>
 </span></td></tr>
-<tr><td><a name="min"></a><code>min(arg1: anyenum) &rarr; anyelement</code></td><td><span class="funcdesc"><p>Identifies the minimum selected value.</p>
+<tr><td><a name="min"></a><code>min(arg1: anyenum) &rarr; anyenum</code></td><td><span class="funcdesc"><p>Identifies the minimum selected value.</p>
 </span></td></tr>
-<tr><td><a name="min"></a><code>min(arg1: collatedstring{*}) &rarr; anyelement</code></td><td><span class="funcdesc"><p>Identifies the minimum selected value.</p>
+<tr><td><a name="min"></a><code>min(arg1: box2d) &rarr; box2d</code></td><td><span class="funcdesc"><p>Identifies the minimum selected value.</p>
+</span></td></tr>
+<tr><td><a name="min"></a><code>min(arg1: collatedstring{*}) &rarr; collatedstring{*}</code></td><td><span class="funcdesc"><p>Identifies the minimum selected value.</p>
 </span></td></tr>
 <tr><td><a name="min"></a><code>min(arg1: geography) &rarr; geography</code></td><td><span class="funcdesc"><p>Identifies the minimum selected value.</p>
 </span></td></tr>
@@ -185,11 +191,29 @@
 </span></td></tr>
 <tr><td><a name="sqrdiff"></a><code>sqrdiff(arg1: <a href="int.html">int</a>) &rarr; <a href="decimal.html">decimal</a></code></td><td><span class="funcdesc"><p>Calculates the sum of squared differences from the mean of the selected values.</p>
 </span></td></tr>
+<tr><td><a name="st_collect"></a><code>st_collect(arg1: geometry) &rarr; geometry</code></td><td><span class="funcdesc"><p>Collects geometries into a GeometryCollection or multi-type as appropriate.</p>
+</span></td></tr>
+<tr><td><a name="st_extent"></a><code>st_extent(arg1: geometry) &rarr; box2d</code></td><td><span class="funcdesc"><p>Forms a Box2D that encapsulates all provided geometries.</p>
+</span></td></tr>
+<tr><td><a name="st_makeline"></a><code>st_makeline(arg1: geometry) &rarr; geometry</code></td><td><span class="funcdesc"><p>Forms a LineString from Point, MultiPoint or LineStrings. Other shapes will be ignored.</p>
+</span></td></tr>
+<tr><td><a name="st_memcollect"></a><code>st_memcollect(arg1: geometry) &rarr; geometry</code></td><td><span class="funcdesc"><p>Collects geometries into a GeometryCollection or multi-type as appropriate.</p>
+</span></td></tr>
+<tr><td><a name="st_memunion"></a><code>st_memunion(arg1: geometry) &rarr; geometry</code></td><td><span class="funcdesc"><p>Applies a spatial union to the geometries provided.</p>
+</span></td></tr>
+<tr><td><a name="st_union"></a><code>st_union(arg1: geometry) &rarr; geometry</code></td><td><span class="funcdesc"><p>Applies a spatial union to the geometries provided.</p>
+</span></td></tr>
 <tr><td><a name="stddev"></a><code>stddev(arg1: <a href="decimal.html">decimal</a>) &rarr; <a href="decimal.html">decimal</a></code></td><td><span class="funcdesc"><p>Calculates the standard deviation of the selected values.</p>
 </span></td></tr>
 <tr><td><a name="stddev"></a><code>stddev(arg1: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the standard deviation of the selected values.</p>
 </span></td></tr>
 <tr><td><a name="stddev"></a><code>stddev(arg1: <a href="int.html">int</a>) &rarr; <a href="decimal.html">decimal</a></code></td><td><span class="funcdesc"><p>Calculates the standard deviation of the selected values.</p>
+</span></td></tr>
+<tr><td><a name="stddev_pop"></a><code>stddev_pop(arg1: <a href="decimal.html">decimal</a>) &rarr; <a href="decimal.html">decimal</a></code></td><td><span class="funcdesc"><p>Calculates the population standard deviation of the selected values.</p>
+</span></td></tr>
+<tr><td><a name="stddev_pop"></a><code>stddev_pop(arg1: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the population standard deviation of the selected values.</p>
+</span></td></tr>
+<tr><td><a name="stddev_pop"></a><code>stddev_pop(arg1: <a href="int.html">int</a>) &rarr; <a href="decimal.html">decimal</a></code></td><td><span class="funcdesc"><p>Calculates the population standard deviation of the selected values.</p>
 </span></td></tr>
 <tr><td><a name="stddev_samp"></a><code>stddev_samp(arg1: <a href="decimal.html">decimal</a>) &rarr; <a href="decimal.html">decimal</a></code></td><td><span class="funcdesc"><p>Calculates the standard deviation of the selected values.</p>
 </span></td></tr>
@@ -210,6 +234,12 @@
 <tr><td><a name="sum"></a><code>sum(arg1: <a href="interval.html">interval</a>) &rarr; <a href="interval.html">interval</a></code></td><td><span class="funcdesc"><p>Calculates the sum of the selected values.</p>
 </span></td></tr>
 <tr><td><a name="sum_int"></a><code>sum_int(arg1: <a href="int.html">int</a>) &rarr; <a href="int.html">int</a></code></td><td><span class="funcdesc"><p>Calculates the sum of the selected values.</p>
+</span></td></tr>
+<tr><td><a name="var_pop"></a><code>var_pop(arg1: <a href="decimal.html">decimal</a>) &rarr; <a href="decimal.html">decimal</a></code></td><td><span class="funcdesc"><p>Calculates the population variance of the selected values.</p>
+</span></td></tr>
+<tr><td><a name="var_pop"></a><code>var_pop(arg1: <a href="float.html">float</a>) &rarr; <a href="float.html">float</a></code></td><td><span class="funcdesc"><p>Calculates the population variance of the selected values.</p>
+</span></td></tr>
+<tr><td><a name="var_pop"></a><code>var_pop(arg1: <a href="int.html">int</a>) &rarr; <a href="decimal.html">decimal</a></code></td><td><span class="funcdesc"><p>Calculates the population variance of the selected values.</p>
 </span></td></tr>
 <tr><td><a name="var_samp"></a><code>var_samp(arg1: <a href="decimal.html">decimal</a>) &rarr; <a href="decimal.html">decimal</a></code></td><td><span class="funcdesc"><p>Calculates the variance of the selected values.</p>
 </span></td></tr>

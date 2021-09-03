@@ -15,21 +15,21 @@ import (
 	"context"
 	"io"
 	"sync/atomic"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/colserde"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
-	"google.golang.org/grpc"
 )
 
 // flowStreamClient is a utility interface used to mock out the RPC layer.
@@ -37,13 +37,6 @@ type flowStreamClient interface {
 	Send(*execinfrapb.ProducerMessage) error
 	Recv() (*execinfrapb.ConsumerSignal, error)
 	CloseSend() error
-}
-
-// Dialer is used for dialing based on node IDs. It extracts out the single
-// method that Outbox.Run needs from nodedialer.Dialer so that we can mock it
-// in tests outside of this package.
-type Dialer interface {
-	Dial(context.Context, roachpb.NodeID, rpc.ConnectionClass) (*grpc.ClientConn, error)
 }
 
 // Outbox is used to push data from local flows to a remote endpoint. Run may
@@ -63,7 +56,7 @@ type Outbox struct {
 	draining        uint32
 	metadataSources []execinfrapb.MetadataSource
 	// closers is a slice of Closers that need to be Closed on termination.
-	closers colexec.Closers
+	closers colexecbase.Closers
 
 	scratch struct {
 		buf *bytes.Buffer
@@ -81,7 +74,7 @@ func NewOutbox(
 	input colexecbase.Operator,
 	typs []*types.T,
 	metadataSources []execinfrapb.MetadataSource,
-	toClose []colexec.Closer,
+	toClose []colexecbase.Closer,
 ) (*Outbox, error) {
 	c, err := colserde.NewArrowBatchConverter(typs)
 	if err != nil {
@@ -130,11 +123,12 @@ func (o *Outbox) close(ctx context.Context) {
 //    Outbox goes through the same steps as 1).
 func (o *Outbox) Run(
 	ctx context.Context,
-	dialer Dialer,
+	dialer execinfra.Dialer,
 	nodeID roachpb.NodeID,
 	flowID execinfrapb.FlowID,
 	streamID execinfrapb.StreamID,
 	cancelFn context.CancelFunc,
+	connectionTimeout time.Duration,
 ) {
 	o.runnerCtx = ctx
 	ctx = logtags.AddTag(ctx, "streamID", streamID)
@@ -142,7 +136,7 @@ func (o *Outbox) Run(
 
 	var stream execinfrapb.DistSQL_FlowStreamClient
 	if err := func() error {
-		conn, err := dialer.Dial(ctx, nodeID, rpc.DefaultClass)
+		conn, err := execinfra.GetConnForOutbox(ctx, dialer, nodeID, connectionTimeout)
 		if err != nil {
 			log.Warningf(
 				ctx,
@@ -231,52 +225,44 @@ func (o *Outbox) moveToDraining(ctx context.Context) {
 //    will be called in this case.
 func (o *Outbox) sendBatches(
 	ctx context.Context, stream flowStreamClient, cancelFn context.CancelFunc,
-) (terminatedGracefully bool, _ error) {
-	nextBatch := func() {
-		if o.runnerCtx == nil {
-			o.runnerCtx = ctx
-		}
-		o.batch = o.Input().Next(o.runnerCtx)
+) (terminatedGracefully bool, errToSend error) {
+	if o.runnerCtx == nil {
+		o.runnerCtx = ctx
 	}
-	serializeBatch := func() {
-		o.scratch.buf.Reset()
-		d, err := o.converter.BatchToArrow(o.batch)
-		if err != nil {
-			colexecerror.InternalError(errors.Wrap(err, "Outbox BatchToArrow data serialization error"))
-		}
-		if _, _, err := o.serializer.Serialize(o.scratch.buf, d); err != nil {
-			colexecerror.InternalError(errors.Wrap(err, "Outbox Serialize data error"))
-		}
-	}
-	for {
-		if atomic.LoadUint32(&o.draining) == 1 {
-			return true, nil
-		}
-
-		if err := colexecerror.CatchVectorizedRuntimeError(nextBatch); err != nil {
-			if log.V(1) {
-				log.Warningf(ctx, "Outbox Next error: %+v", err)
+	errToSend = colexecerror.CatchVectorizedRuntimeError(func() {
+		o.Input().Init()
+		for {
+			if atomic.LoadUint32(&o.draining) == 1 {
+				terminatedGracefully = true
+				return
 			}
-			return false, err
-		}
-		if o.batch.Length() == 0 {
-			return true, nil
-		}
 
-		if err := colexecerror.CatchVectorizedRuntimeError(serializeBatch); err != nil {
-			log.Errorf(ctx, "%+v", err)
-			return false, err
-		}
-		o.scratch.msg.Data.RawBytes = o.scratch.buf.Bytes()
+			o.batch = o.Input().Next(o.runnerCtx)
+			if o.batch.Length() == 0 {
+				terminatedGracefully = true
+				return
+			}
 
-		// o.scratch.msg can be reused as soon as Send returns since it returns as
-		// soon as the message is written to the control buffer. The message is
-		// marshaled (bytes are copied) before writing.
-		if err := stream.Send(o.scratch.msg); err != nil {
-			o.handleStreamErr(ctx, "Send (batches)", err, cancelFn)
-			return false, nil
+			o.scratch.buf.Reset()
+			d, err := o.converter.BatchToArrow(o.batch)
+			if err != nil {
+				colexecerror.InternalError(errors.Wrap(err, "Outbox BatchToArrow data serialization error"))
+			}
+			if _, _, err := o.serializer.Serialize(o.scratch.buf, d); err != nil {
+				colexecerror.InternalError(errors.Wrap(err, "Outbox Serialize data error"))
+			}
+			o.scratch.msg.Data.RawBytes = o.scratch.buf.Bytes()
+
+			// o.scratch.msg can be reused as soon as Send returns since it returns as
+			// soon as the message is written to the control buffer. The message is
+			// marshaled (bytes are copied) before writing.
+			if err := stream.Send(o.scratch.msg); err != nil {
+				o.handleStreamErr(ctx, "Send (batches)", err, cancelFn)
+				return
+			}
 		}
-	}
+	})
+	return terminatedGracefully, errToSend
 }
 
 // sendMetadata drains the Outbox.metadataSources and sends the metadata over
@@ -305,8 +291,6 @@ func (o *Outbox) sendMetadata(ctx context.Context, stream flowStreamClient, errT
 func (o *Outbox) runWithStream(
 	ctx context.Context, stream flowStreamClient, cancelFn context.CancelFunc,
 ) {
-	o.Input().Init()
-
 	waitCh := make(chan struct{})
 	go func() {
 		for {

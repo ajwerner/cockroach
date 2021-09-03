@@ -24,6 +24,8 @@ const (
 	_ ShowTelemetryType = iota
 	// Ranges represents the SHOW RANGES command.
 	Ranges
+	// Regions represents the SHOW REGIONS command.
+	Regions
 	// Partitions represents the SHOW PARTITIONS command.
 	Partitions
 	// Locality represents the SHOW LOCALITY command.
@@ -42,6 +44,8 @@ const (
 	Jobs
 	// Roles represents the SHOW ROLES command.
 	Roles
+	// Schedules represents the SHOW SCHEDULE command.
+	Schedules
 )
 
 var showTelemetryNameMap = map[ShowTelemetryType]string{
@@ -50,11 +54,13 @@ var showTelemetryNameMap = map[ShowTelemetryType]string{
 	Locality:    "locality",
 	Create:      "create",
 	RangeForRow: "rangeforrow",
+	Regions:     "regions",
 	Queries:     "queries",
 	Indexes:     "indexes",
 	Constraints: "constraints",
 	Jobs:        "jobs",
 	Roles:       "roles",
+	Schedules:   "schedules",
 }
 
 func (s ShowTelemetryType) String() string {

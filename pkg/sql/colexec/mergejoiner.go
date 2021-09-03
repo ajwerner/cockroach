@@ -12,17 +12,16 @@ package colexec
 
 import (
 	"context"
-	"math"
 	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/colcontainer"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
@@ -239,7 +238,7 @@ func NewMergeJoinOp(
 	memoryLimit int64,
 	diskQueueCfg colcontainer.DiskQueueCfg,
 	fdSemaphore semaphore.Semaphore,
-	joinType sqlbase.JoinType,
+	joinType descpb.JoinType,
 	left colexecbase.Operator,
 	right colexecbase.Operator,
 	leftTypes []*types.T,
@@ -248,30 +247,127 @@ func NewMergeJoinOp(
 	rightOrdering []execinfrapb.Ordering_Column,
 	diskAcc *mon.BoundAccount,
 ) (ResettableOperator, error) {
+	// Merge joiner only supports the case when the physical types in the
+	// equality columns in both inputs are the same. We, however, also need to
+	// support joining on numeric columns of different types or widths. If we
+	// encounter such mismatch, we need to cast one of the vectors to another
+	// and use the cast vector for equality check.
+
+	// Make a copy of types and orderings to be sure that we don't modify
+	// anything unwillingly.
+	actualLeftTypes, actualRightTypes := append([]*types.T{}, leftTypes...), append([]*types.T{}, rightTypes...)
+	actualLeftOrdering := make([]execinfrapb.Ordering_Column, len(leftOrdering))
+	actualRightOrdering := make([]execinfrapb.Ordering_Column, len(rightOrdering))
+	copy(actualLeftOrdering, leftOrdering)
+	copy(actualRightOrdering, rightOrdering)
+
+	// Iterate over each equality column and check whether a cast is needed. If
+	// it is needed for some column, then a cast operator is planned on top of
+	// the input from the corresponding side and the types and ordering are
+	// adjusted accordingly. We will also need to project out that temporary
+	// column, so a simple project will be planned below.
+	var needProjection bool
+	var err error
+	for i := range leftOrdering {
+		leftColIdx := leftOrdering[i].ColIdx
+		rightColIdx := rightOrdering[i].ColIdx
+		leftType := leftTypes[leftColIdx]
+		rightType := rightTypes[rightColIdx]
+		if !leftType.Identical(rightType) && leftType.IsNumeric() && rightType.IsNumeric() {
+			// The types are different and both are numeric, so we need to plan
+			// a cast. There is a hierarchy of valid casts:
+			//   INT2 -> INT4 -> INT8 -> FLOAT -> DECIMAL
+			// and the cast is valid if 'fromType' is mentioned before 'toType'
+			// in this chain.
+			castLeftToRight := false
+			switch leftType.Family() {
+			case types.IntFamily:
+				switch leftType.Width() {
+				case 16:
+					castLeftToRight = true
+				case 32:
+					castLeftToRight = !rightType.Identical(types.Int2)
+				default:
+					castLeftToRight = rightType.Family() != types.IntFamily
+				}
+			case types.FloatFamily:
+				castLeftToRight = rightType.Family() == types.DecimalFamily
+			}
+			if castLeftToRight {
+				castColumnIdx := len(actualLeftTypes)
+				left, err = GetCastOperator(unlimitedAllocator, left, int(leftColIdx), castColumnIdx, leftType, rightType)
+				if err != nil {
+					return nil, err
+				}
+				actualLeftTypes = append(actualLeftTypes, rightType)
+				actualLeftOrdering[i].ColIdx = uint32(castColumnIdx)
+			} else {
+				castColumnIdx := len(actualRightTypes)
+				right, err = GetCastOperator(unlimitedAllocator, right, int(rightColIdx), castColumnIdx, rightType, leftType)
+				if err != nil {
+					return nil, err
+				}
+				actualRightTypes = append(actualRightTypes, leftType)
+				actualRightOrdering[i].ColIdx = uint32(castColumnIdx)
+			}
+			needProjection = true
+		}
+	}
 	base, err := newMergeJoinBase(
-		unlimitedAllocator, memoryLimit, diskQueueCfg, fdSemaphore, joinType,
-		left, right, leftTypes, rightTypes, leftOrdering, rightOrdering, diskAcc,
+		unlimitedAllocator, memoryLimit, diskQueueCfg, fdSemaphore, joinType, left, right,
+		actualLeftTypes, actualRightTypes, actualLeftOrdering, actualRightOrdering, diskAcc,
 	)
+	if err != nil {
+		return nil, err
+	}
+	var mergeJoinerOp ResettableOperator
 	switch joinType {
-	case sqlbase.InnerJoin:
-		return &mergeJoinInnerOp{base}, err
-	case sqlbase.LeftOuterJoin:
-		return &mergeJoinLeftOuterOp{base}, err
-	case sqlbase.RightOuterJoin:
-		return &mergeJoinRightOuterOp{base}, err
-	case sqlbase.FullOuterJoin:
-		return &mergeJoinFullOuterOp{base}, err
-	case sqlbase.LeftSemiJoin:
-		return &mergeJoinLeftSemiOp{base}, err
-	case sqlbase.LeftAntiJoin:
-		return &mergeJoinLeftAntiOp{base}, err
-	case sqlbase.IntersectAllJoin:
-		return &mergeJoinIntersectAllOp{base}, err
-	case sqlbase.ExceptAllJoin:
-		return &mergeJoinExceptAllOp{base}, err
+	case descpb.InnerJoin:
+		mergeJoinerOp = &mergeJoinInnerOp{base}
+	case descpb.LeftOuterJoin:
+		mergeJoinerOp = &mergeJoinLeftOuterOp{base}
+	case descpb.RightOuterJoin:
+		mergeJoinerOp = &mergeJoinRightOuterOp{base}
+	case descpb.FullOuterJoin:
+		mergeJoinerOp = &mergeJoinFullOuterOp{base}
+	case descpb.LeftSemiJoin:
+		mergeJoinerOp = &mergeJoinLeftSemiOp{base}
+	case descpb.LeftAntiJoin:
+		mergeJoinerOp = &mergeJoinLeftAntiOp{base}
+	case descpb.IntersectAllJoin:
+		mergeJoinerOp = &mergeJoinIntersectAllOp{base}
+	case descpb.ExceptAllJoin:
+		mergeJoinerOp = &mergeJoinExceptAllOp{base}
 	default:
 		return nil, errors.AssertionFailedf("merge join of type %s not supported", joinType)
 	}
+	if !needProjection {
+		// We didn't add any cast operators, so we can just return the operator
+		// right away.
+		return mergeJoinerOp, nil
+	}
+	// We need to add a projection to remove all the cast columns we have added
+	// above. Note that all extra columns were appended to the corresponding
+	// types slices, so we simply need to include first len(leftTypes) from the
+	// left and first len(rightTypes) from the right (the latter are included
+	// depending on the join type).
+	numRightTypes := len(rightTypes)
+	if !joinType.ShouldIncludeRightColsInOutput() {
+		numRightTypes = 0
+	}
+	projection := make([]uint32, 0, len(leftTypes)+numRightTypes)
+	for i := range leftTypes {
+		projection = append(projection, uint32(i))
+	}
+	for i := 0; i < numRightTypes; i++ {
+		// Merge joiner outputs all columns from both sides, and the columns
+		// from the right have indices in [len(actualLeftTypes),
+		// len(actualLeftTypes) + len(actualRightColumns)) range.
+		projection = append(projection, uint32(len(actualLeftTypes)+i))
+	}
+	return NewSimpleProjectOp(
+		mergeJoinerOp, len(actualLeftTypes)+len(actualRightTypes), projection,
+	).(ResettableOperator), nil
 }
 
 // Const declarations for the merge joiner cross product (MJCP) zero state.
@@ -307,7 +403,7 @@ func newMergeJoinBase(
 	memoryLimit int64,
 	diskQueueCfg colcontainer.DiskQueueCfg,
 	fdSemaphore semaphore.Semaphore,
-	joinType sqlbase.JoinType,
+	joinType descpb.JoinType,
 	left colexecbase.Operator,
 	right colexecbase.Operator,
 	leftTypes []*types.T,
@@ -380,13 +476,13 @@ type mergeJoinBase struct {
 	memoryLimit        int64
 	diskQueueCfg       colcontainer.DiskQueueCfg
 	fdSemaphore        semaphore.Semaphore
-	joinType           sqlbase.JoinType
+	joinType           descpb.JoinType
 	left               mergeJoinInput
 	right              mergeJoinInput
 
 	// Output buffer definition.
-	output          coldata.Batch
-	outputBatchSize int
+	output      coldata.Batch
+	outputTypes []*types.T
 	// outputReady is a flag to indicate that merge joiner is ready to emit an
 	// output batch.
 	outputReady bool
@@ -397,26 +493,12 @@ type mergeJoinBase struct {
 	state        mjState
 	proberState  mjProberState
 	builderState mjBuilderState
-	scratch      struct {
-		// tempVecs are temporary vectors that can be used during a cast
-		// operation in the probing phase. These vectors should *not* be
-		// exposed outside of the merge joiner.
-		tempVecs []coldata.Vec
-		// lBufferedGroupBatch and rBufferedGroupBatch are scratch batches that are
-		// used to select out the tuples that belong to the buffered batch before
-		// enqueueing them into corresponding mjBufferedGroups. These are lazily
-		// instantiated.
-		// TODO(yuzefovich): uncomment when spillingQueue actually copies the
-		// enqueued batches when those are kept in memory.
-		//lBufferedGroupBatch coldata.Batch
-		//rBufferedGroupBatch coldata.Batch
-	}
 
 	diskAcc *mon.BoundAccount
 }
 
 var _ resetter = &mergeJoinBase{}
-var _ Closer = &mergeJoinBase{}
+var _ colexecbase.Closer = &mergeJoinBase{}
 
 func (o *mergeJoinBase) reset(ctx context.Context) {
 	if r, ok := o.left.source.(resetter); ok {
@@ -442,40 +524,26 @@ func (o *mergeJoinBase) InternalMemoryUsage() int {
 }
 
 func (o *mergeJoinBase) Init() {
-	o.initWithOutputBatchSize(coldata.BatchSize())
-}
-
-func (o *mergeJoinBase) initWithOutputBatchSize(outBatchSize int) {
-	outputTypes := append([]*types.T{}, o.left.sourceTypes...)
+	o.outputTypes = append([]*types.T{}, o.left.sourceTypes...)
 	if o.joinType.ShouldIncludeRightColsInOutput() {
-		outputTypes = append(outputTypes, o.right.sourceTypes...)
+		o.outputTypes = append(o.outputTypes, o.right.sourceTypes...)
 	}
-	o.output = o.unlimitedAllocator.NewMemBatchWithSize(outputTypes, outBatchSize)
 	o.left.source.Init()
 	o.right.source.Init()
-	o.outputBatchSize = outBatchSize
-	// If there are no output columns, then the operator is for a COUNT query,
-	// in which case we treat the output batch size as the max int.
-	if o.output.Width() == 0 {
-		o.outputBatchSize = math.MaxInt64
-	}
-
 	o.proberState.lBufferedGroup.spillingQueue = newSpillingQueue(
 		o.unlimitedAllocator, o.left.sourceTypes, o.memoryLimit,
-		o.diskQueueCfg, o.fdSemaphore, coldata.BatchSize(), o.diskAcc,
+		o.diskQueueCfg, o.fdSemaphore, o.diskAcc,
 	)
-	o.proberState.lBufferedGroup.firstTuple = make([]coldata.Vec, len(o.left.sourceTypes))
-	for colIdx, t := range o.left.sourceTypes {
-		o.proberState.lBufferedGroup.firstTuple[colIdx] = o.unlimitedAllocator.NewMemColumn(t, 1)
-	}
+	o.proberState.lBufferedGroup.firstTuple = o.unlimitedAllocator.NewMemBatchWithFixedCapacity(
+		o.left.sourceTypes, 1, /* capacity */
+	).ColVecs()
 	o.proberState.rBufferedGroup.spillingQueue = newRewindableSpillingQueue(
 		o.unlimitedAllocator, o.right.sourceTypes, o.memoryLimit,
-		o.diskQueueCfg, o.fdSemaphore, coldata.BatchSize(), o.diskAcc,
+		o.diskQueueCfg, o.fdSemaphore, o.diskAcc,
 	)
-	o.proberState.rBufferedGroup.firstTuple = make([]coldata.Vec, len(o.right.sourceTypes))
-	for colIdx, t := range o.right.sourceTypes {
-		o.proberState.rBufferedGroup.firstTuple[colIdx] = o.unlimitedAllocator.NewMemColumn(t, 1)
-	}
+	o.proberState.rBufferedGroup.firstTuple = o.unlimitedAllocator.NewMemBatchWithFixedCapacity(
+		o.right.sourceTypes, 1, /* capacity */
+	).ColVecs()
 
 	o.builderState.lGroups = make([]group, 1)
 	o.builderState.rGroups = make([]group, 1)
@@ -506,29 +574,18 @@ func (o *mergeJoinBase) appendToBufferedGroup(
 	}
 	var (
 		bufferedGroup *mjBufferedGroup
-		scratchBatch  coldata.Batch
 		sourceTypes   []*types.T
 	)
 	if input == &o.left {
 		sourceTypes = o.left.sourceTypes
 		bufferedGroup = &o.proberState.lBufferedGroup
-		// TODO(yuzefovich): uncomment when spillingQueue actually copies the
-		// enqueued batches when those are kept in memory.
-		//if o.scratch.lBufferedGroupBatch == nil {
-		//	o.scratch.lBufferedGroupBatch = o.unlimitedAllocator.NewMemBatch(o.left.sourceTypes)
-		//}
-		//scratchBatch = o.scratch.lBufferedGroupBatch
 	} else {
 		sourceTypes = o.right.sourceTypes
 		bufferedGroup = &o.proberState.rBufferedGroup
-		// TODO(yuzefovich): uncomment when spillingQueue actually copies the
-		// enqueued batches when those are kept in memory.
-		//if o.scratch.rBufferedGroupBatch == nil {
-		//	o.scratch.rBufferedGroupBatch = o.unlimitedAllocator.NewMemBatch(o.right.sourceTypes)
-		//}
-		//scratchBatch = o.scratch.rBufferedGroupBatch
 	}
-	scratchBatch = o.unlimitedAllocator.NewMemBatchWithSize(sourceTypes, groupLength)
+	// TODO(yuzefovich): reuse the same scratch batches when spillingQueue
+	// actually copies the enqueued batch when those are kept in memory.
+	scratchBatch := o.unlimitedAllocator.NewMemBatchWithFixedCapacity(sourceTypes, groupLength)
 	if bufferedGroup.numTuples == 0 {
 		o.unlimitedAllocator.PerformOperation(bufferedGroup.firstTuple, func() {
 			for colIdx := range sourceTypes {
@@ -713,7 +770,7 @@ func (o *mergeJoinBase) Close(ctx context.Context) error {
 	}
 	var lastErr error
 	for _, op := range []colexecbase.Operator{o.left.source, o.right.source} {
-		if c, ok := op.(Closer); ok {
+		if c, ok := op.(colexecbase.Closer); ok {
 			if err := c.Close(ctx); err != nil {
 				lastErr = err
 			}

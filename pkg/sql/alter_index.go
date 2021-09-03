@@ -14,18 +14,18 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/errors"
-	"github.com/gogo/protobuf/proto"
 )
 
 type alterIndexNode struct {
 	n         *tree.AlterIndex
-	tableDesc *sqlbase.MutableTableDescriptor
-	indexDesc *sqlbase.IndexDescriptor
+	tableDesc *tabledesc.Mutable
+	indexDesc *descpb.IndexDescriptor
 }
 
 // AlterIndex applies a schema change on an index.
@@ -69,13 +69,10 @@ func (n *alterIndexNode) startExec(params runParams) error {
 			if err != nil {
 				return err
 			}
-			descriptorChanged = !proto.Equal(
-				&n.indexDesc.Partitioning,
-				&partitioning,
-			)
+			descriptorChanged = !n.indexDesc.Partitioning.Equal(&partitioning)
 			err = deleteRemovedPartitionZoneConfigs(
 				params.ctx, params.p.txn,
-				n.tableDesc.TableDesc(), n.indexDesc,
+				n.tableDesc, n.indexDesc,
 				&n.indexDesc.Partitioning, &partitioning,
 				params.extendedEvalCtx.ExecCfg,
 			)
@@ -89,7 +86,7 @@ func (n *alterIndexNode) startExec(params runParams) error {
 		}
 	}
 
-	if err := n.tableDesc.AllocateIDs(); err != nil {
+	if err := n.tableDesc.AllocateIDs(params.ctx); err != nil {
 		return err
 	}
 
@@ -98,7 +95,7 @@ func (n *alterIndexNode) startExec(params runParams) error {
 		// Nothing to be done
 		return nil
 	}
-	mutationID := sqlbase.InvalidMutationID
+	mutationID := descpb.InvalidMutationID
 	if addedMutations {
 		mutationID = n.tableDesc.ClusterVersion.NextMutationID
 	}
@@ -125,7 +122,7 @@ func (n *alterIndexNode) startExec(params runParams) error {
 			MutationID uint32
 		}{
 			n.n.Index.Table.FQString(), n.indexDesc.Name, n.n.String(),
-			params.SessionData().User, uint32(mutationID),
+			params.SessionData().User().Normalized(), uint32(mutationID),
 		},
 	)
 }

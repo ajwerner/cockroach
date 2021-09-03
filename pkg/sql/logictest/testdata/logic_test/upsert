@@ -120,9 +120,6 @@ INSERT INTO kv VALUES (4, 10) ON CONFLICT (k) DO UPDATE SET v = v + 1
 statement count 1
 INSERT INTO kv VALUES (4, 10) ON CONFLICT (k) DO UPDATE SET v = kv.v + 20
 
-statement error there is no unique or exclusion constraint matching the ON CONFLICT specification
-INSERT INTO kv VALUES (4, 10) ON CONFLICT DO UPDATE SET v = kv.v + 20
-
 statement error duplicate key value \(k\)=\(3\) violates unique constraint "primary"
 INSERT INTO kv VALUES (2, 10) ON CONFLICT (k) DO UPDATE SET k = 3, v = 10
 
@@ -636,7 +633,7 @@ BEGIN; ALTER TABLE t29494 ADD COLUMN y INT NOT NULL DEFAULT 123
 query T
 SELECT create_statement FROM [SHOW CREATE t29494]
 ----
-CREATE TABLE t29494 (
+CREATE TABLE public.t29494 (
    x INT8 NULL,
    FAMILY "primary" (x, rowid)
 )
@@ -1213,3 +1210,40 @@ DROP TABLE source
 
 statement ok
 DROP TABLE target
+
+# Regression test for UPSERT batching logic (#51391).
+statement ok
+SET CLUSTER SETTING kv.raft.command.max_size='4MiB';
+CREATE TABLE src (s STRING);
+CREATE TABLE dest (s STRING);
+INSERT INTO src
+SELECT
+	'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+FROM
+	generate_series(1, 50000)
+
+# This statement produces a raft command of about 6.6 MiB in size, so if the
+# batching logic is incorrect, we'll encounter "command is too large" error.
+statement ok
+UPSERT INTO dest (s) (SELECT s FROM src)
+
+statement ok
+RESET CLUSTER SETTING kv.raft.command.max_size;
+DROP TABLE src;
+DROP TABLE dest
+
+# Regression test for finishing UPSERT too early (#54456).
+statement ok
+CREATE TABLE t54456 (c INT PRIMARY KEY);
+UPSERT INTO t54456 SELECT i FROM generate_series(1, 25000) AS i
+
+query I
+SELECT count(*) FROM t54456
+----
+25000
+
+# Regression test for clearing up upserted rows too early (#54465).
+query I
+WITH cte(c) AS (UPSERT INTO t54456 SELECT i FROM generate_series(25001, 40000) AS i RETURNING c) SELECT count(*) FROM cte
+----
+15000

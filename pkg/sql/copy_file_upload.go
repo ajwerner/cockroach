@@ -14,26 +14,28 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
+	"strings"
 	"sync"
 
-	"github.com/cockroachdb/cockroach/pkg/blobs"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq"
 )
 
 const (
-	fileUploadTable = "file_upload"
-	copyOptionDest  = "destination"
+	// NodelocalFileUploadTable is used internally to identify a COPY initiated by
+	// nodelocal upload.
+	NodelocalFileUploadTable = "nodelocal_file_upload"
+	// UserFileUploadTable is used internally to identify a COPY initiated by
+	// userfile upload.
+	UserFileUploadTable = "user_file_upload"
 )
-
-var copyFileOptionExpectValues = map[string]KVStringOptValidate{
-	copyOptionDest: KVStringOptRequireValue,
-}
 
 var _ copyMachineInterface = &fileUploadMachine{}
 
@@ -42,6 +44,37 @@ type fileUploadMachine struct {
 	writeToFile    *io.PipeWriter
 	wg             *sync.WaitGroup
 	failureCleanup func()
+}
+
+var _ io.ReadSeeker = &noopReadSeeker{}
+
+type noopReadSeeker struct {
+	*io.PipeReader
+}
+
+func (n *noopReadSeeker) Seek(int64, int) (int64, error) {
+	return 0, errors.New("illegal seek")
+}
+
+func checkIfFileExists(ctx context.Context, c *copyMachine, dest, copyTargetTable string) error {
+	if copyTargetTable == UserFileUploadTable {
+		dest = strings.TrimSuffix(dest, ".tmp")
+	}
+	store, err := c.p.execCfg.DistSQLSrv.ExternalStorageFromURI(ctx, dest, c.p.User())
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	_, err = store.ReadFile(ctx, "")
+	if err == nil {
+		// Can ignore this parse error as it would have been caught when creating a
+		// new ExternalStorage above and so we never expect it to non-nil.
+		uri, _ := url.Parse(dest)
+		return errors.Newf("destination file already exists for %s", uri.Path)
+	}
+
+	return nil
 }
 
 func newFileUploadMachine(
@@ -57,7 +90,7 @@ func newFileUploadMachine(
 	c := &copyMachine{
 		conn: conn,
 		// The planner will be prepared before use.
-		p: planner{execCfg: execCfg, alloc: &sqlbase.DatumAlloc{}},
+		p: planner{execCfg: execCfg, alloc: &rowenc.DatumAlloc{}},
 	}
 	f = &fileUploadMachine{
 		c:  c,
@@ -72,32 +105,38 @@ func newFileUploadMachine(
 	}()
 	c.parsingEvalCtx = c.p.EvalContext()
 
-	if err := c.p.RequireAdminRole(ctx, "upload to nodelocal"); err != nil {
-		return nil, err
+	if n.Table.Table() == NodelocalFileUploadTable {
+		if err := c.p.RequireAdminRole(ctx, "upload to nodelocal"); err != nil {
+			return nil, err
+		}
 	}
 
-	optsFn, err := f.c.p.TypeAsStringOpts(ctx, n.Options, copyFileOptionExpectValues)
+	if n.Options.Destination == nil {
+		return nil, errors.Newf("destination required")
+	}
+	destFn, err := f.c.p.TypeAsString(ctx, n.Options.Destination, "COPY")
 	if err != nil {
 		return nil, err
 	}
-	opts, err := optsFn()
+	dest, err := destFn()
 	if err != nil {
 		return nil, err
 	}
 
 	pr, pw := io.Pipe()
-	localStorage, err := blobs.NewLocalStorage(c.p.execCfg.Settings.ExternalIODir)
+	store, err := c.p.execCfg.DistSQLSrv.ExternalStorageFromURI(ctx, dest, c.p.User())
 	if err != nil {
 		return nil, err
 	}
-	// Check that the file does not already exist
-	_, err = localStorage.Stat(opts[copyOptionDest])
-	if err == nil {
-		return nil, fmt.Errorf("destination file already exists for %s", opts[copyOptionDest])
+
+	err = checkIfFileExists(ctx, c, dest, n.Table.Table())
+	if err != nil {
+		return nil, err
 	}
+
 	f.wg.Add(1)
 	go func() {
-		err := localStorage.WriteFile(opts[copyOptionDest], pr)
+		err := store.WriteFile(ctx, "", &noopReadSeeker{pr})
 		if err != nil {
 			_ = pr.CloseWithError(err)
 		}
@@ -107,15 +146,16 @@ func newFileUploadMachine(
 	f.failureCleanup = func() {
 		// Ignoring this error because deletion would only fail
 		// if the file was not created in the first place.
-		_ = localStorage.Delete(opts[copyOptionDest])
+		_ = store.Delete(ctx, "")
 	}
 
-	c.resultColumns = make(sqlbase.ResultColumns, 1)
-	c.resultColumns[0] = sqlbase.ResultColumn{Typ: types.Bytes}
+	c.resultColumns = make(colinfo.ResultColumns, 1)
+	c.resultColumns[0] = colinfo.ResultColumn{Typ: types.Bytes}
 	c.parsingEvalCtx = c.p.EvalContext()
 	c.rowsMemAcc = c.p.extendedEvalCtx.Mon.MakeBoundAccount()
 	c.bufMemAcc = c.p.extendedEvalCtx.Mon.MakeBoundAccount()
 	c.processRows = f.writeFile
+	c.forceNotNull = true
 	return
 }
 

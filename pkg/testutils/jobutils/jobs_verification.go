@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +24,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
@@ -129,6 +129,7 @@ func verifySystemJob(
 	var statusString string
 	var runningStatus gosql.NullString
 	var runningStatusString string
+	var usernameString string
 	// We have to query for the nth job created rather than filtering by ID,
 	// because job-generating SQL queries (e.g. BACKUP) do not currently return
 	// the job ID.
@@ -138,15 +139,16 @@ func verifySystemJob(
 		filterType.String(),
 		offset,
 	).Scan(
-		&actual.Description, &actual.Username, &rawDescriptorIDs,
+		&actual.Description, &usernameString, &rawDescriptorIDs,
 		&statusString, &runningStatus,
 	)
+	actual.Username = security.MakeSQLUsernameFromPreNormalizedString(usernameString)
 	if runningStatus.Valid {
 		runningStatusString = runningStatus.String
 	}
 
 	for _, id := range rawDescriptorIDs {
-		actual.DescriptorIDs = append(actual.DescriptorIDs, sqlbase.ID(id))
+		actual.DescriptorIDs = append(actual.DescriptorIDs, descpb.ID(id))
 	}
 	sort.Sort(actual.DescriptorIDs)
 	sort.Sort(expected.DescriptorIDs)
@@ -190,34 +192,6 @@ func VerifySystemJob(
 	expected jobs.Record,
 ) error {
 	return verifySystemJob(t, db, offset, filterType, string(expectedStatus), "", expected)
-}
-
-// GetJobFormatVersion returns the format version of a schema change job.
-// Will fail the test if the jobID does not reference a schema change job.
-func GetJobFormatVersion(
-	t testing.TB, db *sqlutils.SQLRunner,
-) jobspb.SchemaChangeDetailsFormatVersion {
-	rows := db.QueryStr(t, "SELECT * FROM [SHOW JOBS] WHERE job_type = 'SCHEMA CHANGE' AND description <> 'updating privileges' ORDER BY created DESC LIMIT 1")
-	if len(rows) != 1 {
-		t.Fatal("expected exactly one row when checking the format version")
-	}
-	jobID, err := strconv.Atoi(rows[0][0])
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var payloadBytes []byte
-	db.QueryRow(t, `SELECT payload FROM system.jobs WHERE id = $1`, jobID).Scan(&payloadBytes)
-
-	payload := &jobspb.Payload{}
-	if err := protoutil.Unmarshal(payloadBytes, payload); err != nil {
-		t.Fatal(err)
-	}
-	// Lease is always nil in 19.2.
-	payload.Lease = nil
-
-	details := payload.GetSchemaChange()
-	return details.FormatVersion
 }
 
 // GetJobID gets a particular job's ID.

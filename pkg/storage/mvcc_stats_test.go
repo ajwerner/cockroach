@@ -44,7 +44,7 @@ func assertEq(t *testing.T, rw ReadWriter, debug string, ms, expMS *enginepb.MVC
 		t.Errorf("%s: diff(ms, expMS) nontrivial", debug)
 	}
 
-	it := rw.NewIterator(IterOptions{UpperBound: roachpb.KeyMax})
+	it := rw.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: roachpb.KeyMax})
 	defer it.Close()
 
 	for _, mvccStatsTest := range mvccStatsTests {
@@ -1326,17 +1326,17 @@ func TestMVCCStatsSysPutPut(t *testing.T) {
 
 var mvccStatsTests = []struct {
 	name string
-	fn   func(Iterator, roachpb.Key, roachpb.Key, int64) (enginepb.MVCCStats, error)
+	fn   func(MVCCIterator, roachpb.Key, roachpb.Key, int64) (enginepb.MVCCStats, error)
 }{
 	{
 		name: "ComputeStats",
-		fn: func(iter Iterator, start, end roachpb.Key, nowNanos int64) (enginepb.MVCCStats, error) {
+		fn: func(iter MVCCIterator, start, end roachpb.Key, nowNanos int64) (enginepb.MVCCStats, error) {
 			return iter.ComputeStats(start, end, nowNanos)
 		},
 	},
 	{
 		name: "ComputeStatsGo",
-		fn: func(iter Iterator, start, end roachpb.Key, nowNanos int64) (enginepb.MVCCStats, error) {
+		fn: func(iter MVCCIterator, start, end roachpb.Key, nowNanos int64) (enginepb.MVCCStats, error) {
 			return ComputeStatsGo(iter, start, end, nowNanos)
 		},
 	},
@@ -1597,7 +1597,7 @@ func TestMVCCComputeStatsError(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			iter := engine.NewIterator(IterOptions{UpperBound: roachpb.KeyMax})
+			iter := engine.NewMVCCIterator(MVCCKeyAndIntentsIterKind, IterOptions{UpperBound: roachpb.KeyMax})
 			defer iter.Close()
 			for _, mvccStatsTest := range mvccStatsTests {
 				t.Run(mvccStatsTest.name, func(t *testing.T) {

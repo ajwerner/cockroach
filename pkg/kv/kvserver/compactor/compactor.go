@@ -286,7 +286,10 @@ func (c *Compactor) processSuggestions(ctx context.Context) (bool, error) {
 func (c *Compactor) fetchSuggestions(
 	ctx context.Context,
 ) (suggestions []kvserverpb.SuggestedCompaction, totalBytes int64, err error) {
-	dataIter := c.eng.NewIterator(storage.IterOptions{
+	// dataIter is only used to confirm that a suggested compaction range has no
+	// keys that can be read from the store, so it is sufficient to ignore
+	// intents (if there is an intent, there must also be a provisional value).
+	dataIter := c.eng.NewMVCCIterator(storage.MVCCKeyIterKind, storage.IterOptions{
 		UpperBound: roachpb.KeyMax, // refined before every seek
 	})
 	defer dataIter.Close()
@@ -294,48 +297,44 @@ func (c *Compactor) fetchSuggestions(
 	delBatch := c.eng.NewBatch()
 	defer delBatch.Close()
 
-	err = c.eng.Iterate(
-		keys.LocalStoreSuggestedCompactionsMin,
-		keys.LocalStoreSuggestedCompactionsMax,
-		func(kv storage.MVCCKeyValue) (bool, error) {
-			var sc kvserverpb.SuggestedCompaction
-			var err error
-			sc.StartKey, sc.EndKey, err = keys.DecodeStoreSuggestedCompactionKey(kv.Key.Key)
-			if err != nil {
-				return false, errors.Wrapf(err, "failed to decode suggested compaction key")
-			}
-			if err := protoutil.Unmarshal(kv.Value, &sc.Compaction); err != nil {
-				return false, err
-			}
+	err = c.eng.MVCCIterate(keys.LocalStoreSuggestedCompactionsMin, keys.LocalStoreSuggestedCompactionsMax, storage.MVCCKeyIterKind, func(kv storage.MVCCKeyValue) error {
+		var sc kvserverpb.SuggestedCompaction
+		var err error
+		sc.StartKey, sc.EndKey, err = keys.DecodeStoreSuggestedCompactionKey(kv.Key.Key)
+		if err != nil {
+			return errors.Wrapf(err, "failed to decode suggested compaction key")
+		}
+		if err := protoutil.Unmarshal(kv.Value, &sc.Compaction); err != nil {
+			return err
+		}
 
-			dataIter.SetUpperBound(sc.EndKey)
-			dataIter.SeekGE(storage.MakeMVCCMetadataKey(sc.StartKey))
-			if ok, err := dataIter.Valid(); err != nil {
-				return false, err
-			} else if ok && dataIter.UnsafeKey().Less(storage.MakeMVCCMetadataKey(sc.EndKey)) {
-				// The suggested compaction span has live keys remaining. This is a
-				// strong indicator that compacting this range will be significantly
-				// more expensive than we expected when the compaction was suggested, as
-				// compactions are only suggested when a ClearRange request has removed
-				// all the keys in the span. Perhaps a replica was rebalanced away then
-				// back?
-				//
-				// Since we can't guarantee that this compaction will be an easy win,
-				// purge it to avoid bogging down the compaction queue.
-				log.Infof(ctx, "purging suggested compaction for range %s - %s that contains live data",
-					sc.StartKey, sc.EndKey)
-				if err := delBatch.Clear(kv.Key); err != nil {
-					log.Fatalf(ctx, "%v", err) // should never happen on a batch
-				}
-				c.Metrics.BytesSkipped.Inc(sc.Bytes)
-			} else {
-				suggestions = append(suggestions, sc)
-				totalBytes += sc.Bytes
+		dataIter.SetUpperBound(sc.EndKey)
+		dataIter.SeekGE(storage.MakeMVCCMetadataKey(sc.StartKey))
+		if ok, err := dataIter.Valid(); err != nil {
+			return err
+		} else if ok && dataIter.UnsafeKey().Less(storage.MakeMVCCMetadataKey(sc.EndKey)) {
+			// The suggested compaction span has live keys remaining. This is a
+			// strong indicator that compacting this range will be significantly
+			// more expensive than we expected when the compaction was suggested, as
+			// compactions are only suggested when a ClearRange request has removed
+			// all the keys in the span. Perhaps a replica was rebalanced away then
+			// back?
+			//
+			// Since we can't guarantee that this compaction will be an easy win,
+			// purge it to avoid bogging down the compaction queue.
+			log.Infof(ctx, "purging suggested compaction for range %s - %s that contains live data",
+				sc.StartKey, sc.EndKey)
+			if err := delBatch.Clear(kv.Key); err != nil {
+				log.Fatalf(ctx, "%v", err) // should never happen on a batch
 			}
+			c.Metrics.BytesSkipped.Inc(sc.Bytes)
+		} else {
+			suggestions = append(suggestions, sc)
+			totalBytes += sc.Bytes
+		}
 
-			return false, nil // continue iteration
-		},
-	)
+		return nil // continue iteration
+	})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -462,18 +461,14 @@ func (c *Compactor) aggregateCompaction(
 // BytesQueued gauge.
 func (c *Compactor) examineQueue(ctx context.Context) (int64, error) {
 	var totalBytes int64
-	if err := c.eng.Iterate(
-		keys.LocalStoreSuggestedCompactionsMin,
-		keys.LocalStoreSuggestedCompactionsMax,
-		func(kv storage.MVCCKeyValue) (bool, error) {
-			var c kvserverpb.Compaction
-			if err := protoutil.Unmarshal(kv.Value, &c); err != nil {
-				return false, err
-			}
-			totalBytes += c.Bytes
-			return false, nil // continue iteration
-		},
-	); err != nil {
+	if err := c.eng.MVCCIterate(keys.LocalStoreSuggestedCompactionsMin, keys.LocalStoreSuggestedCompactionsMax, storage.MVCCKeyIterKind, func(kv storage.MVCCKeyValue) error {
+		var c kvserverpb.Compaction
+		if err := protoutil.Unmarshal(kv.Value, &c); err != nil {
+			return err
+		}
+		totalBytes += c.Bytes
+		return nil // continue iteration
+	}); err != nil {
 		return 0, err
 	}
 	c.Metrics.BytesQueued.Update(totalBytes)
@@ -488,8 +483,8 @@ func (c *Compactor) Suggest(ctx context.Context, sc kvserverpb.SuggestedCompacti
 	// Check whether a suggested compaction already exists for this key span.
 	key := keys.StoreSuggestedCompactionKey(sc.StartKey, sc.EndKey)
 	var existing kvserverpb.Compaction
-	//lint:ignore SA1019 historical usage of deprecated c.eng.GetProto is OK
-	ok, _, _, err := c.eng.GetProto(storage.MVCCKey{Key: key}, &existing)
+	//lint:ignore SA1019 historical usage of deprecated c.eng.MVCCGetProto is OK
+	ok, _, _, err := c.eng.MVCCGetProto(storage.MVCCKey{Key: key}, &existing)
 	if err != nil {
 		log.VErrEventf(ctx, 2, "unable to record suggested compaction: %s", err)
 		return

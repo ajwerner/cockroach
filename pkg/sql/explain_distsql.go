@@ -71,26 +71,13 @@ type distSQLExplainable interface {
 // *only* be used in EXPLAIN variants.
 func getPlanDistributionForExplainPurposes(
 	ctx context.Context,
+	p *planner,
 	nodeID *base.SQLIDContainer,
 	distSQLMode sessiondata.DistSQLExecMode,
 	plan planMaybePhysical,
 ) physicalplan.PlanDistribution {
 	if plan.isPhysicalPlan() {
 		return plan.physPlan.Distribution
-	}
-	switch p := plan.planNode.(type) {
-	case *explainDistSQLNode:
-		if p.plan.main.isPhysicalPlan() {
-			return p.plan.main.physPlan.Distribution
-		}
-	case *explainVecNode:
-		if p.plan.isPhysicalPlan() {
-			return p.plan.physPlan.Distribution
-		}
-	case *explainPlanNode:
-		if p.plan.main.isPhysicalPlan() {
-			return p.plan.main.physPlan.Distribution
-		}
 	}
 	if _, ok := plan.planNode.(distSQLExplainable); ok {
 		// This is a special case for plans that will be actually distributed
@@ -99,13 +86,13 @@ func getPlanDistributionForExplainPurposes(
 		// for setting up the correct DistSQL infrastructure).
 		return physicalplan.FullyDistributedPlan
 	}
-	return getPlanDistribution(ctx, nodeID, distSQLMode, plan)
+	return getPlanDistribution(ctx, p, nodeID, distSQLMode, plan)
 }
 
 func (n *explainDistSQLNode) startExec(params runParams) error {
 	distSQLPlanner := params.extendedEvalCtx.DistSQLPlanner
 	distribution := getPlanDistributionForExplainPurposes(
-		params.ctx, params.extendedEvalCtx.ExecCfg.NodeID,
+		params.ctx, params.p, params.extendedEvalCtx.ExecCfg.NodeID,
 		params.extendedEvalCtx.SessionData.DistSQLMode, n.plan.main,
 	)
 	willDistribute := distribution.WillDistribute()
@@ -152,7 +139,6 @@ func (n *explainDistSQLNode) startExec(params runParams) error {
 			params.extendedEvalCtx.copy,
 			n.plan.subqueryPlans,
 			recv,
-			willDistribute,
 		) {
 			if err := rw.Err(); err != nil {
 				return err
@@ -177,8 +163,8 @@ func (n *explainDistSQLNode) startExec(params runParams) error {
 		// recording because we don't currently have a good way to ask for a
 		// separate recording for the child such that it's also guaranteed that we
 		// don't get a noopSpan.
-		var sp opentracing.Span
-		if parentSp := opentracing.SpanFromContext(params.ctx); parentSp != nil &&
+		var sp *tracing.Span
+		if parentSp := tracing.SpanFromContext(params.ctx); parentSp != nil &&
 			!tracing.IsRecording(parentSp) {
 			tracer := parentSp.Tracer()
 			sp = tracer.StartSpan(
@@ -192,7 +178,7 @@ func (n *explainDistSQLNode) startExec(params runParams) error {
 				tracing.LogTagsFromCtx(params.ctx))
 		}
 		tracing.StartRecording(sp, tracing.SnowballRecording)
-		ctx := opentracing.ContextWithSpan(params.ctx, sp)
+		ctx := tracing.ContextWithSpan(params.ctx, sp)
 		planCtx.ctx = ctx
 		// Make a copy of the evalContext with the recording span in it; we can't
 		// change the original.
@@ -276,7 +262,6 @@ func (n *explainDistSQLNode) startExec(params runParams) error {
 			params.extendedEvalCtx.copy,
 			&n.plan,
 			recv,
-			willDistribute,
 		) {
 			if err := rw.Err(); err != nil {
 				return err

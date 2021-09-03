@@ -28,9 +28,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
@@ -46,7 +46,7 @@ type verifyColOperatorArgs struct {
 	// with caution and leave a comment that justifies using this knob.
 	colIdxsToCheckForEquality []int
 	inputTypes                [][]*types.T
-	inputs                    []sqlbase.EncDatumRows
+	inputs                    []rowenc.EncDatumRows
 	outputTypes               []*types.T
 	pspec                     *execinfrapb.ProcessorSpec
 	// forceDiskSpill, if set, will force the operator to spill to disk.
@@ -76,7 +76,6 @@ func verifyColOperator(args verifyColOperatorArgs) error {
 	}
 	if rng.Float64() < 0.5 {
 		randomBatchSize := 1 + rng.Intn(3)
-		fmt.Printf("coldata.BatchSize() is set to %d\n", randomBatchSize)
 		if err := coldata.SetBatchSizeForTests(randomBatchSize); err != nil {
 			return err
 		}
@@ -84,7 +83,7 @@ func verifyColOperator(args verifyColOperatorArgs) error {
 
 	ctx := context.Background()
 	st := cluster.MakeTestingClusterSettings()
-	tempEngine, tempFS, err := storage.NewTempEngine(ctx, storage.DefaultStorageEngine, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
+	tempEngine, tempFS, err := storage.NewTempEngine(ctx, base.DefaultTestTempStorageConfig(st), base.DefaultTestStoreSpec)
 	if err != nil {
 		return err
 	}
@@ -172,7 +171,7 @@ func verifyColOperator(args verifyColOperatorArgs) error {
 		args.outputTypes,
 		nil, /* output */
 		result.MetadataSources,
-		nil, /* toClose */
+		result.ToClose,
 		nil, /* outputStatsToTrace */
 		nil, /* cancelFlow */
 	)
@@ -185,7 +184,7 @@ func verifyColOperator(args verifyColOperatorArgs) error {
 	defer outProc.ConsumerClosed()
 	defer outColOp.ConsumerClosed()
 
-	printRowForChecking := func(r sqlbase.EncDatumRow) []string {
+	printRowForChecking := func(r rowenc.EncDatumRow) []string {
 		res := make([]string, len(args.outputTypes))
 		for i, col := range r {
 			res[i] = col.String(args.outputTypes[i])
@@ -241,7 +240,7 @@ func verifyColOperator(args verifyColOperatorArgs) error {
 		colOpErr := colOpMetas[0].Err.Error()
 		if procErr != colOpErr {
 			return errors.Errorf("different errors returned:\n"+
-				"processor return\n%+v\ncolumnar operator returned\n%+v",
+				"processor returned\n%+v\ncolumnar operator returned\n%+v",
 				procMetas[0].Err, colOpMetas[0].Err)
 		}
 		// The errors are the same, so the rows that were returned do not matter.

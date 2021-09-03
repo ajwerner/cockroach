@@ -20,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cli/cliflags"
 	"github.com/cockroachdb/cockroach/pkg/geo/geos"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -57,8 +56,6 @@ environment variable "COCKROACH_SKIP_ENABLING_DIAGNOSTIC_REPORTING" to true.
 const demoOrg = "Cockroach Demo"
 
 const defaultGeneratorName = "movr"
-
-const defaultRootPassword = "admin"
 
 var defaultGenerator workload.Generator
 
@@ -252,6 +249,12 @@ func checkDemoConfiguration(
 }
 
 func runDemo(cmd *cobra.Command, gen workload.Generator) (err error) {
+	cmdIn, closeFn, err := getInputFile()
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+
 	if gen, err = checkDemoConfiguration(cmd, gen); err != nil {
 		return err
 	}
@@ -260,25 +263,29 @@ func runDemo(cmd *cobra.Command, gen workload.Generator) (err error) {
 
 	ctx := context.Background()
 
+	var c transientCluster
+	if err := c.checkConfigAndSetupLogging(ctx, cmd); err != nil {
+		return err
+	}
+	defer c.cleanup(ctx)
+
 	if err := checkTzDatabaseAvailability(ctx); err != nil {
 		return err
 	}
 
 	loc, err := geos.EnsureInit(geos.EnsureInitErrorDisplayPrivate, startCtx.geoLibsDir)
 	if err != nil {
-		log.Infof(ctx, "could not initialize GEOS - geospatial functions may not be available: %v", err)
+		log.Infof(ctx, "could not initialize GEOS - spatial functions may not be available: %v", err)
 	} else {
 		log.Infof(ctx, "GEOS loaded from directory %s", loc)
 	}
 
-	c, err := setupTransientCluster(ctx, cmd, gen)
-	defer c.cleanup(ctx)
-	if err != nil {
+	if err := c.start(ctx, cmd, gen); err != nil {
 		return checkAndMaybeShout(err)
 	}
 	demoCtx.transientCluster = &c
 
-	checkInteractive()
+	checkInteractive(cmdIn)
 
 	if cliCtx.isInteractive {
 		fmt.Printf(`#
@@ -327,8 +334,8 @@ func runDemo(cmd *cobra.Command, gen workload.Generator) (err error) {
 		if !demoCtx.insecure {
 			fmt.Printf(
 				"# The user %q with password %q has been created. Use it to access the Web UI!\n#\n",
-				security.RootUser,
-				defaultRootPassword,
+				c.adminUser,
+				c.adminPassword,
 			)
 		}
 		// If we didn't launch a workload, we still need to inform the
@@ -354,7 +361,7 @@ func runDemo(cmd *cobra.Command, gen workload.Generator) (err error) {
 	conn := makeSQLConn(c.connURL)
 	defer conn.Close()
 
-	return runClient(cmd, conn)
+	return runClient(cmd, conn, cmdIn)
 }
 
 func waitForLicense(licenseDone <-chan error) error {

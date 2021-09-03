@@ -21,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/colmem"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -47,6 +48,7 @@ type Inbox struct {
 	colexecbase.ZeroInputNode
 	typs []*types.T
 
+	allocator  *colmem.Allocator
 	converter  *colserde.ArrowBatchConverter
 	serializer *colserde.RecordBatchSerializer
 
@@ -90,6 +92,20 @@ type Inbox struct {
 	// only the Next/DrainMeta goroutine may access it.
 	stream flowStreamServer
 
+	// flowCtx is a temporary field that captures a flow's context during
+	// initialization. This is so that RunWithStream can listen for cancellation
+	// even in the case in which Next is not called (e.g. in cases where the Inbox
+	// is the left side of a HashJoiner). The best solution for this problem would
+	// be to refactor Operator.Init to accept a context since that must be called
+	// regardless of whether or not Next is called.
+	flowCtx context.Context
+
+	// rowsRead contains the total number of rows Inbox has read so far.
+	rowsRead int64
+
+	// bytesRead contains the number of bytes sent to the Inbox.
+	bytesRead int64
+
 	scratch struct {
 		data []*array.Data
 		b    coldata.Batch
@@ -97,10 +113,11 @@ type Inbox struct {
 }
 
 var _ colexecbase.Operator = &Inbox{}
+var _ execinfra.IOReader = &Inbox{}
 
 // NewInbox creates a new Inbox.
 func NewInbox(
-	allocator *colmem.Allocator, typs []*types.T, streamID execinfrapb.StreamID,
+	ctx context.Context, allocator *colmem.Allocator, typs []*types.T, streamID execinfrapb.StreamID,
 ) (*Inbox, error) {
 	c, err := colserde.NewArrowBatchConverter(typs)
 	if err != nil {
@@ -112,6 +129,7 @@ func NewInbox(
 	}
 	i := &Inbox{
 		typs:       typs,
+		allocator:  allocator,
 		converter:  c,
 		serializer: s,
 		streamID:   streamID,
@@ -119,9 +137,9 @@ func NewInbox(
 		contextCh:  make(chan context.Context, 1),
 		timeoutCh:  make(chan error, 1),
 		errCh:      make(chan error, 1),
+		flowCtx:    ctx,
 	}
 	i.scratch.data = make([]*array.Data, len(typs))
-	i.scratch.b = allocator.NewMemBatch(typs)
 	return i, nil
 }
 
@@ -190,6 +208,8 @@ func (i *Inbox) RunWithStream(streamCtx context.Context, stream flowStreamServer
 		log.VEvent(streamCtx, 2, "Inbox reader arrived")
 	case <-streamCtx.Done():
 		return fmt.Errorf("%s: streamCtx while waiting for reader (remote client canceled)", streamCtx.Err())
+	case <-i.flowCtx.Done():
+		return fmt.Errorf("%s: flowCtx while waiting for reader (local server canceled)", i.flowCtx.Err())
 	}
 
 	// Now wait for one of the events described in the method comment. If a
@@ -233,7 +253,7 @@ func (i *Inbox) Next(ctx context.Context) coldata.Batch {
 		// during normal termination.
 		if err := recover(); err != nil {
 			i.close()
-			colexecerror.InternalError(err)
+			colexecerror.InternalError(log.PanicAsError(0, err))
 		}
 	}()
 
@@ -255,6 +275,12 @@ func (i *Inbox) Next(ctx context.Context) coldata.Batch {
 				i.close()
 				return coldata.ZeroBatch
 			}
+			// Note that here err can be stream's context cancellation. If it
+			// was caused by the internal cancellation of the parallel
+			// unordered synchronizer, it'll get swallowed by the synchronizer
+			// goroutine. Regardless of the cause we want to propagate such
+			// error in all cases so that the caller could decide on how to
+			// handle it.
 			i.errCh <- err
 			colexecerror.ExpectedError(err)
 		}
@@ -279,15 +305,32 @@ func (i *Inbox) Next(ctx context.Context) coldata.Batch {
 			// Protect against Deserialization panics by skipping empty messages.
 			continue
 		}
+		i.bytesRead += int64(len(m.Data.RawBytes))
 		i.scratch.data = i.scratch.data[:0]
 		if err := i.serializer.Deserialize(&i.scratch.data, m.Data.RawBytes); err != nil {
 			colexecerror.InternalError(err)
 		}
+		i.scratch.b, _ = i.allocator.ResetMaybeReallocate(
+			// We don't support type-less schema, so len(i.scratch.data) is
+			// always at least 1.
+			i.typs, i.scratch.b, i.scratch.data[0].Len(),
+		)
 		if err := i.converter.ArrowToBatch(i.scratch.data, i.scratch.b); err != nil {
 			colexecerror.InternalError(err)
 		}
+		i.rowsRead += int64(i.scratch.b.Length())
 		return i.scratch.b
 	}
+}
+
+// GetBytesRead is part of the execinfra.IOReader interface.
+func (i *Inbox) GetBytesRead() int64 {
+	return i.bytesRead
+}
+
+// GetRowsRead is part of the execinfra.IOReader interface.
+func (i *Inbox) GetRowsRead() int64 {
+	return i.rowsRead
 }
 
 func (i *Inbox) sendDrainSignal(ctx context.Context) error {

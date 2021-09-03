@@ -58,7 +58,7 @@ type ProposalData struct {
 
 	// An optional tracing span bound to the proposal. Will be cleaned
 	// up when the proposal finishes.
-	sp opentracing.Span
+	sp *tracing.Span
 
 	// idKey uniquely identifies this proposal.
 	// TODO(andreimatei): idKey is legacy at this point: We could easily key
@@ -307,7 +307,7 @@ A file preventing this node from restarting was placed at:
 // forward sequence number jump (i.e. a skipped lease). This behavior can
 // be disabled by passing permitJump as true.
 func (r *Replica) leasePostApply(ctx context.Context, newLease roachpb.Lease, permitJump bool) {
-	r.mu.Lock()
+	r.mu.RLock()
 	replicaID := r.mu.replicaID
 	// Pull out the last lease known to this Replica. It's possible that this is
 	// not actually the last lease in the Range's lease sequence because the
@@ -316,54 +316,7 @@ func (r *Replica) leasePostApply(ctx context.Context, newLease roachpb.Lease, pe
 	// lease update. All other forms of lease updates should be continuous
 	// without jumps (see permitJump).
 	prevLease := *r.mu.state.Lease
-	r.mu.Unlock()
-
-	iAmTheLeaseHolder := newLease.Replica.ReplicaID == replicaID
-	// NB: in the case in which a node restarts, minLeaseProposedTS forces it to
-	// get a new lease and we make sure it gets a new sequence number, thus
-	// causing the right half of the disjunction to fire so that we update the
-	// timestamp cache.
-	leaseChangingHands := prevLease.Replica.StoreID != newLease.Replica.StoreID || prevLease.Sequence != newLease.Sequence
-
-	if iAmTheLeaseHolder {
-		// Log lease acquisition whenever an Epoch-based lease changes hands (or verbose
-		// logging is enabled).
-		if newLease.Type() == roachpb.LeaseEpoch && leaseChangingHands || log.V(1) {
-			log.VEventf(ctx, 1, "new range lease %s following %s", newLease, prevLease)
-		}
-	}
-
-	if leaseChangingHands && iAmTheLeaseHolder {
-		// When taking over the lease, we need to check whether a merge is in
-		// progress, as only the old leaseholder would have been explicitly notified
-		// of the merge. If there is a merge in progress, maybeWatchForMerge will
-		// arrange to block all traffic to this replica unless the merge aborts.
-		if err := r.maybeWatchForMerge(ctx); err != nil {
-			// We were unable to determine whether a merge was in progress. We cannot
-			// safely proceed.
-			log.Fatalf(ctx, "failed checking for in-progress merge while installing new lease %s: %s",
-				newLease, err)
-		}
-
-		// If this replica is a new holder of the lease, update the low water
-		// mark of the timestamp cache. Note that clock offset scenarios are
-		// handled via a stasis period inherent in the lease which is documented
-		// in the Lease struct.
-		//
-		// The introduction of lease transfers implies that the previous lease
-		// may have been shortened and we are now applying a formally overlapping
-		// lease (since the old lease holder has promised not to serve any more
-		// requests, this is kosher). This means that we don't use the old
-		// lease's expiration but instead use the new lease's start to initialize
-		// the timestamp cache low water.
-		setTimestampCacheLowWaterMark(r.store.tsCache, r.Desc(), newLease.Start)
-
-		// Reset the request counts used to make lease placement decisions whenever
-		// starting a new lease.
-		if r.leaseholderStats != nil {
-			r.leaseholderStats.resetRequestCounts()
-		}
-	}
+	r.mu.RUnlock()
 
 	// Sanity check to make sure that the lease sequence is moving in the right
 	// direction.
@@ -390,6 +343,62 @@ func (r *Replica) leasePostApply(ctx context.Context, newLease roachpb.Lease, pe
 		}
 	}
 
+	iAmTheLeaseHolder := newLease.Replica.ReplicaID == replicaID
+	// NB: in the case in which a node restarts, minLeaseProposedTS forces it to
+	// get a new lease and we make sure it gets a new sequence number, thus
+	// causing the right half of the disjunction to fire so that we update the
+	// timestamp cache.
+	leaseChangingHands := prevLease.Replica.StoreID != newLease.Replica.StoreID || prevLease.Sequence != newLease.Sequence
+
+	if iAmTheLeaseHolder {
+		// Log lease acquisition whenever an Epoch-based lease changes hands (or verbose
+		// logging is enabled).
+		if newLease.Type() == roachpb.LeaseEpoch && leaseChangingHands || log.V(1) {
+			log.VEventf(ctx, 1, "new range lease %s following %s", newLease, prevLease)
+		}
+	}
+
+	if leaseChangingHands && iAmTheLeaseHolder {
+		// When taking over the lease, we need to check whether a merge is in
+		// progress, as only the old leaseholder would have been explicitly notified
+		// of the merge. If there is a merge in progress, maybeWatchForMerge will
+		// arrange to block all traffic to this replica unless the merge aborts.
+		// NB: If the subsumed range changes leaseholders after subsumption,
+		// `freezeStart` will be zero and we will effectively be blocking all read
+		// requests.
+		// TODO(aayush): In the future, if we permit co-operative lease transfers
+		// when a range is subsumed, it should be relatively straightforward to
+		// allow historical reads on the subsumed RHS after such lease transfers.
+		if err := r.maybeWatchForMerge(ctx, hlc.Timestamp{} /* freezeStart */); err != nil {
+			// We were unable to determine whether a merge was in progress. We cannot
+			// safely proceed.
+			log.Fatalf(ctx, "failed checking for in-progress merge while installing new lease %s: %s",
+				newLease, err)
+		}
+
+		// If this replica is a new holder of the lease, update the low water
+		// mark of the timestamp cache. Note that clock offset scenarios are
+		// handled via a stasis period inherent in the lease which is documented
+		// in the Lease struct.
+		//
+		// The introduction of lease transfers implies that the previous lease
+		// may have been shortened and we are now applying a formally overlapping
+		// lease (since the old lease holder has promised not to serve any more
+		// requests, this is kosher). This means that we don't use the old
+		// lease's expiration but instead use the new lease's start to initialize
+		// the timestamp cache low water.
+		setTimestampCacheLowWaterMark(r.store.tsCache, r.Desc(), newLease.Start)
+
+		// Reset the request counts used to make lease placement decisions whenever
+		// starting a new lease.
+		if r.leaseholderStats != nil {
+			r.leaseholderStats.resetRequestCounts()
+		}
+	}
+
+	// Inform the concurrency manager that the lease holder has been updated.
+	r.concMgr.OnRangeLeaseUpdated(newLease.Sequence, iAmTheLeaseHolder)
+
 	// Ordering is critical here. We only install the new lease after we've
 	// checked for an in-progress merge and updated the timestamp cache. If the
 	// ordering were reversed, it would be possible for requests to see the new
@@ -403,14 +412,14 @@ func (r *Replica) leasePostApply(ctx context.Context, newLease roachpb.Lease, pe
 	// Gossip the first range whenever its lease is acquired. We check to make
 	// sure the lease is active so that a trailing replica won't process an old
 	// lease request and attempt to gossip the first range.
-	if leaseChangingHands && iAmTheLeaseHolder && r.IsFirstRange() && r.IsLeaseValid(newLease, r.store.Clock().Now()) {
+	if leaseChangingHands && iAmTheLeaseHolder && r.IsFirstRange() && r.IsLeaseValid(ctx, newLease, r.store.Clock().Now()) {
 		r.gossipFirstRange(ctx)
 	}
 
 	// Whenever we first acquire an expiration-based lease, notify the lease
 	// renewer worker that we want it to keep proactively renewing the lease
 	// before it expires.
-	if leaseChangingHands && iAmTheLeaseHolder && expirationBasedLease && r.IsLeaseValid(newLease, r.store.Clock().Now()) {
+	if leaseChangingHands && iAmTheLeaseHolder && expirationBasedLease && r.IsLeaseValid(ctx, newLease, r.store.Clock().Now()) {
 		r.store.renewableLeases.Store(int64(r.RangeID), unsafe.Pointer(r))
 		select {
 		case r.store.renewableLeasesSignal <- struct{}{}:
@@ -421,7 +430,7 @@ func (r *Replica) leasePostApply(ctx context.Context, newLease roachpb.Lease, pe
 	// If we're the current raft leader, may want to transfer the leadership to
 	// the new leaseholder. Note that this condition is also checked periodically
 	// when ticking the replica.
-	r.maybeTransferRaftLeadership(ctx)
+	r.maybeTransferRaftLeadershipToLeaseholder(ctx)
 
 	// Notify the store that a lease change occurred and it may need to
 	// gossip the updated store descriptor (with updated capacity).
@@ -437,9 +446,6 @@ func (r *Replica) leasePostApply(ctx context.Context, newLease roachpb.Lease, pe
 			r.leaseholderStats.resetRequestCounts()
 		}
 	}
-
-	// Inform the concurrency manager that the lease holder has been updated.
-	r.concMgr.OnRangeLeaseUpdated(iAmTheLeaseHolder)
 
 	// Potentially re-gossip if the range contains system data (e.g. system
 	// config or node liveness). We need to perform this gossip at startup as
@@ -610,8 +616,8 @@ func (r *Replica) handleReadWriteLocalEvalResult(ctx context.Context, lResult re
 	if lResult.EndTxns != nil {
 		log.Fatalf(ctx, "LocalEvalResult.EndTxns should be nil: %+v", lResult.EndTxns)
 	}
-	if lResult.MaybeWatchForMerge {
-		log.Fatalf(ctx, "LocalEvalResult.MaybeWatchForMerge should be false")
+	if !lResult.FreezeStart.IsEmpty() {
+		log.Fatalf(ctx, "LocalEvalResult.FreezeStart should have been handled and reset: %s", lResult.FreezeStart)
 	}
 
 	if lResult.AcquiredLocks != nil {
@@ -811,6 +817,13 @@ func (r *Replica) evaluateProposal(
 			}
 		}
 
+		// If the cluster version doesn't track abort span size in MVCCStats, we
+		// zero it out to prevent inconsistencies in MVCCStats across nodes in a
+		// possibly mixed-version cluster.
+		if !r.ClusterSettings().Version.IsActive(ctx, clusterversion.VersionAbortSpanBytes) {
+			res.Replicated.Delta.AbortSpanBytes = 0
+		}
+
 		// If the RangeAppliedState key is not being used and the cluster version is
 		// high enough to guarantee that all current and future binaries will
 		// understand the key, we send the migration flag through Raft. Because
@@ -877,7 +890,7 @@ func (r *Replica) requestToProposal(
 
 // getTraceData extracts the SpanContext of the current span.
 func (r *Replica) getTraceData(ctx context.Context) opentracing.TextMapCarrier {
-	sp := opentracing.SpanFromContext(ctx)
+	sp := tracing.SpanFromContext(ctx)
 	if sp == nil {
 		return nil
 	}

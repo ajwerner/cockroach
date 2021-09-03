@@ -20,15 +20,16 @@ import (
 	"github.com/cockroachdb/apd/v2"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -44,7 +45,7 @@ func init() {
 	for i, f := range floats {
 		_, err := decs[i].SetFloat64(f)
 		if err != nil {
-			colexecerror.InternalError(fmt.Sprintf("%v", err))
+			colexecerror.InternalError(errors.AssertionFailedf("%v", err))
 		}
 	}
 
@@ -72,7 +73,7 @@ func init() {
 			leftOutCols:  []uint32{0},
 			rightOutCols: []uint32{0},
 
-			joinType:          sqlbase.FullOuterJoin,
+			joinType:          descpb.FullOuterJoin,
 			leftEqColsAreKey:  true,
 			rightEqColsAreKey: true,
 
@@ -103,7 +104,7 @@ func init() {
 			leftOutCols:  []uint32{0},
 			rightOutCols: []uint32{0},
 
-			joinType:         sqlbase.FullOuterJoin,
+			joinType:         descpb.FullOuterJoin,
 			leftEqColsAreKey: true,
 
 			expected: tuples{
@@ -135,7 +136,7 @@ func init() {
 			leftOutCols:  []uint32{0},
 			rightOutCols: []uint32{0},
 
-			joinType:          sqlbase.LeftOuterJoin,
+			joinType:          descpb.LeftOuterJoin,
 			leftEqColsAreKey:  true,
 			rightEqColsAreKey: true,
 
@@ -167,7 +168,7 @@ func init() {
 			leftOutCols:  []uint32{0},
 			rightOutCols: []uint32{0},
 
-			joinType:          sqlbase.RightOuterJoin,
+			joinType:          descpb.RightOuterJoin,
 			leftEqColsAreKey:  true,
 			rightEqColsAreKey: true,
 
@@ -200,7 +201,7 @@ func init() {
 			leftOutCols:  []uint32{0},
 			rightOutCols: []uint32{0},
 
-			joinType:          sqlbase.RightOuterJoin,
+			joinType:          descpb.RightOuterJoin,
 			rightEqColsAreKey: true,
 
 			expected: tuples{
@@ -380,22 +381,22 @@ func init() {
 
 			leftTuples: tuples{
 				{0},
-				{HashTableNumBuckets},
-				{HashTableNumBuckets},
-				{HashTableNumBuckets},
+				{coldata.BatchSize()},
+				{coldata.BatchSize()},
+				{coldata.BatchSize()},
 				{0},
-				{HashTableNumBuckets * 2},
+				{coldata.BatchSize() * 2},
 				{1},
 				{1},
-				{HashTableNumBuckets + 1},
+				{coldata.BatchSize() + 1},
 			},
 			rightTuples: tuples{
-				{HashTableNumBuckets},
-				{HashTableNumBuckets * 2},
-				{HashTableNumBuckets * 3},
+				{coldata.BatchSize()},
+				{coldata.BatchSize() * 2},
+				{coldata.BatchSize() * 3},
 				{0},
 				{1},
-				{HashTableNumBuckets + 1},
+				{coldata.BatchSize() + 1},
 			},
 
 			leftEqCols:   []uint32{0},
@@ -408,15 +409,15 @@ func init() {
 			rightEqColsAreKey: false,
 
 			expected: tuples{
-				{HashTableNumBuckets, HashTableNumBuckets},
-				{HashTableNumBuckets, HashTableNumBuckets},
-				{HashTableNumBuckets, HashTableNumBuckets},
-				{HashTableNumBuckets * 2, HashTableNumBuckets * 2},
+				{coldata.BatchSize(), coldata.BatchSize()},
+				{coldata.BatchSize(), coldata.BatchSize()},
+				{coldata.BatchSize(), coldata.BatchSize()},
+				{coldata.BatchSize() * 2, coldata.BatchSize() * 2},
 				{0, 0},
 				{0, 0},
 				{1, 1},
 				{1, 1},
-				{HashTableNumBuckets + 1, HashTableNumBuckets + 1},
+				{coldata.BatchSize() + 1, coldata.BatchSize() + 1},
 			},
 		},
 		{
@@ -501,14 +502,14 @@ func init() {
 			// hash to the same bucket.
 			leftTuples: tuples{
 				{0},
-				{HashTableNumBuckets},
-				{HashTableNumBuckets * 2},
-				{HashTableNumBuckets * 3},
+				{coldata.BatchSize()},
+				{coldata.BatchSize() * 2},
+				{coldata.BatchSize() * 3},
 			},
 			rightTuples: tuples{
 				{0},
-				{HashTableNumBuckets},
-				{HashTableNumBuckets * 3},
+				{coldata.BatchSize()},
+				{coldata.BatchSize() * 3},
 			},
 
 			leftEqCols:   []uint32{0},
@@ -521,8 +522,8 @@ func init() {
 
 			expected: tuples{
 				{0},
-				{HashTableNumBuckets},
-				{HashTableNumBuckets * 3},
+				{coldata.BatchSize()},
+				{coldata.BatchSize() * 3},
 			},
 		},
 		{
@@ -607,17 +608,17 @@ func init() {
 			// Test multiple column with values that hash to the same bucket.
 			leftTuples: tuples{
 				{10, 0, 0},
-				{20, 0, HashTableNumBuckets},
-				{40, HashTableNumBuckets, 0},
-				{50, HashTableNumBuckets, HashTableNumBuckets},
-				{60, HashTableNumBuckets * 2, 0},
-				{70, HashTableNumBuckets * 2, HashTableNumBuckets},
+				{20, 0, coldata.BatchSize()},
+				{40, coldata.BatchSize(), 0},
+				{50, coldata.BatchSize(), coldata.BatchSize()},
+				{60, coldata.BatchSize() * 2, 0},
+				{70, coldata.BatchSize() * 2, coldata.BatchSize()},
 			},
 			rightTuples: tuples{
-				{0, HashTableNumBuckets},
-				{HashTableNumBuckets * 2, HashTableNumBuckets},
+				{0, coldata.BatchSize()},
+				{coldata.BatchSize() * 2, coldata.BatchSize()},
 				{0, 0},
-				{0, HashTableNumBuckets * 2},
+				{0, coldata.BatchSize() * 2},
 			},
 
 			leftEqCols:   []uint32{1, 2},
@@ -629,8 +630,8 @@ func init() {
 			rightEqColsAreKey: true,
 
 			expected: tuples{
-				{20, 0, HashTableNumBuckets},
-				{70, HashTableNumBuckets * 2, HashTableNumBuckets},
+				{20, 0, coldata.BatchSize()},
+				{70, coldata.BatchSize() * 2, coldata.BatchSize()},
 				{10, 0, 0},
 			},
 		},
@@ -772,7 +773,7 @@ func init() {
 			leftTypes:   []*types.T{types.Int},
 			rightTypes:  []*types.T{types.Int},
 
-			joinType: sqlbase.LeftSemiJoin,
+			joinType: descpb.LeftSemiJoin,
 
 			leftTuples: tuples{
 				{0},
@@ -805,7 +806,7 @@ func init() {
 			leftTypes:   []*types.T{types.Int},
 			rightTypes:  []*types.T{types.Int},
 
-			joinType: sqlbase.LeftAntiJoin,
+			joinType: descpb.LeftAntiJoin,
 
 			leftTuples: tuples{
 				{0},
@@ -899,7 +900,7 @@ func init() {
 		},
 		{
 			description: "25",
-			joinType:    sqlbase.IntersectAllJoin,
+			joinType:    descpb.IntersectAllJoin,
 			leftTypes:   []*types.T{types.Int},
 			rightTypes:  []*types.T{types.Int},
 			leftTuples:  tuples{{1}, {1}, {2}, {2}, {2}, {3}, {3}},
@@ -911,7 +912,7 @@ func init() {
 		},
 		{
 			description: "26",
-			joinType:    sqlbase.ExceptAllJoin,
+			joinType:    descpb.ExceptAllJoin,
 			leftTypes:   []*types.T{types.Int},
 			rightTypes:  []*types.T{types.Int},
 			leftTuples:  tuples{{1}, {1}, {2}, {2}, {2}, {3}, {3}},
@@ -975,9 +976,8 @@ func runHashJoinTestCase(
 	} else {
 		runner = runTestsWithTyps
 	}
-	t.Run(tc.description, func(t *testing.T) {
-		runner(t, inputs, typs, tc.expected, unorderedVerifier, hjOpConstructor)
-	})
+	log.Infof(context.Background(), "%s", tc.description)
+	runner(t, inputs, typs, tc.expected, unorderedVerifier, hjOpConstructor)
 }
 
 func TestHashJoiner(t *testing.T) {
@@ -993,35 +993,24 @@ func TestHashJoiner(t *testing.T) {
 		Cfg:     &execinfra.ServerConfig{Settings: st},
 	}
 
-	for _, outputBatchSize := range []int{1, 17, coldata.BatchSize()} {
-		if outputBatchSize > coldata.BatchSize() {
-			// It is possible for varied coldata.BatchSize() to be smaller than
-			// requested outputBatchSize. Such configuration is invalid, and we skip
-			// it.
-			continue
-		}
-		for _, tcs := range [][]*joinTestCase{hjTestCases, mjTestCases} {
-			for _, tc := range tcs {
-				for _, tc := range tc.mutateTypes() {
-					runHashJoinTestCase(t, tc, func(sources []colexecbase.Operator) (colexecbase.Operator, error) {
-						spec := createSpecForHashJoiner(tc)
-						args := &NewColOperatorArgs{
-							Spec:                spec,
-							Inputs:              sources,
-							StreamingMemAccount: testMemAcc,
-						}
-						args.TestingKnobs.UseStreamingMemAccountForBuffering = true
-						args.TestingKnobs.DiskSpillingDisabled = true
-						result, err := TestNewColOperator(ctx, flowCtx, args)
-						if err != nil {
-							return nil, err
-						}
-						if hj, ok := result.Op.(*hashJoiner); ok {
-							hj.outputBatchSize = outputBatchSize
-						}
-						return result.Op, nil
-					})
-				}
+	for _, tcs := range [][]*joinTestCase{hjTestCases, mjTestCases} {
+		for _, tc := range tcs {
+			for _, tc := range tc.mutateTypes() {
+				runHashJoinTestCase(t, tc, func(sources []colexecbase.Operator) (colexecbase.Operator, error) {
+					spec := createSpecForHashJoiner(tc)
+					args := &NewColOperatorArgs{
+						Spec:                spec,
+						Inputs:              sources,
+						StreamingMemAccount: testMemAcc,
+					}
+					args.TestingKnobs.UseStreamingMemAccountForBuffering = true
+					args.TestingKnobs.DiskSpillingDisabled = true
+					result, err := TestNewColOperator(ctx, flowCtx, args)
+					if err != nil {
+						return nil, err
+					}
+					return result.Op, nil
+				})
 			}
 		}
 	}
@@ -1036,7 +1025,7 @@ func BenchmarkHashJoiner(b *testing.B) {
 		sourceTypes[colIdx] = types.Int
 	}
 
-	batch := testAllocator.NewMemBatch(sourceTypes)
+	batch := testAllocator.NewMemBatchWithMaxCapacity(sourceTypes)
 
 	for colIdx := 0; colIdx < nCols; colIdx++ {
 		col := batch.ColVec(colIdx).Int64()
@@ -1075,9 +1064,9 @@ func BenchmarkHashJoiner(b *testing.B) {
 									for i := 0; i < b.N; i++ {
 										leftSource := colexecbase.NewRepeatableBatchSource(testAllocator, batch, sourceTypes)
 										rightSource := newFiniteBatchSource(batch, sourceTypes, nBatches)
-										joinType := sqlbase.InnerJoin
+										joinType := descpb.InnerJoin
 										if fullOuter {
-											joinType = sqlbase.FullOuterJoin
+											joinType = descpb.FullOuterJoin
 										}
 										hjSpec, err := MakeHashJoinerSpec(
 											joinType,
@@ -1087,7 +1076,7 @@ func BenchmarkHashJoiner(b *testing.B) {
 										)
 										require.NoError(b, err)
 										hj := NewHashJoiner(
-											testAllocator, hjSpec,
+											testAllocator, testAllocator, hjSpec,
 											leftSource, rightSource,
 										)
 										hj.Init()

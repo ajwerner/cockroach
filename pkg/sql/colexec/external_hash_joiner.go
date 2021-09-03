@@ -12,7 +12,6 @@ package colexec
 
 import (
 	"context"
-	"fmt"
 	"math"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
@@ -371,8 +370,12 @@ func NewExternalHashJoiner(
 		partitionsToJoinUsingSortMerge: make([]int, 0),
 		leftJoinerInput:                leftJoinerInput,
 		rightJoinerInput:               rightJoinerInput,
+		// Note that the external hash joiner is responsible for making sure
+		// that partitions to join using in-memory hash joiner fit under the
+		// limit, so we use the same unlimited allocator for both
+		// buildSideAllocator and outputUnlimitedAllocator arguments.
 		inMemHashJoiner: NewHashJoiner(
-			unlimitedAllocator, spec, leftJoinerInput, rightJoinerInput,
+			unlimitedAllocator, unlimitedAllocator, spec, leftJoinerInput, rightJoinerInput,
 		).(*hashJoiner),
 		diskBackedSortMerge: diskBackedSortMerge,
 	}
@@ -387,8 +390,8 @@ func NewExternalHashJoiner(
 	if ehj.memState.maxRightPartitionSizeToJoin < externalHJMinimalMaxRightPartitionSize {
 		ehj.memState.maxRightPartitionSizeToJoin = externalHJMinimalMaxRightPartitionSize
 	}
-	ehj.scratch.leftBatch = unlimitedAllocator.NewMemBatch(spec.left.sourceTypes)
-	ehj.recursiveScratch.leftBatch = unlimitedAllocator.NewMemBatch(spec.left.sourceTypes)
+	ehj.scratch.leftBatch = unlimitedAllocator.NewMemBatchWithFixedCapacity(spec.left.sourceTypes, coldata.BatchSize())
+	ehj.recursiveScratch.leftBatch = unlimitedAllocator.NewMemBatchWithFixedCapacity(spec.left.sourceTypes, coldata.BatchSize())
 	sameSourcesSchema := len(spec.left.sourceTypes) == len(spec.right.sourceTypes)
 	for i, leftType := range spec.left.sourceTypes {
 		if i < len(spec.right.sourceTypes) && !leftType.Identical(spec.right.sourceTypes[i]) {
@@ -401,8 +404,8 @@ func NewExternalHashJoiner(
 		ehj.scratch.rightBatch = ehj.scratch.leftBatch
 		ehj.recursiveScratch.rightBatch = ehj.recursiveScratch.leftBatch
 	} else {
-		ehj.scratch.rightBatch = unlimitedAllocator.NewMemBatch(spec.right.sourceTypes)
-		ehj.recursiveScratch.rightBatch = unlimitedAllocator.NewMemBatch(spec.right.sourceTypes)
+		ehj.scratch.rightBatch = unlimitedAllocator.NewMemBatchWithFixedCapacity(spec.right.sourceTypes, coldata.BatchSize())
+		ehj.recursiveScratch.rightBatch = unlimitedAllocator.NewMemBatchWithFixedCapacity(spec.right.sourceTypes, coldata.BatchSize())
 	}
 	ehj.testingKnobs.numForcedRepartitions = numForcedRepartitions
 	ehj.testingKnobs.delegateFDAcquisitions = delegateFDAcquisitions
@@ -429,16 +432,14 @@ func (hj *externalHashJoiner) partitionBatch(
 		return
 	}
 	scratchBatch := hj.scratch.leftBatch
-	sourceSpec := hj.spec.left
+	eqCols := hj.spec.left.eqCols
 	partitioner := hj.leftPartitioner
 	if side == rightSide {
 		scratchBatch = hj.scratch.rightBatch
-		sourceSpec = hj.spec.right
+		eqCols = hj.spec.right.eqCols
 		partitioner = hj.rightPartitioner
 	}
-	selections := hj.tupleDistributor.distribute(
-		ctx, batch, sourceSpec.sourceTypes, sourceSpec.eqCols,
-	)
+	selections := hj.tupleDistributor.distribute(ctx, batch, eqCols)
 	for idx, sel := range selections {
 		partitionIdx := hj.partitionIdxOffset + idx
 		if len(sel) > 0 {
@@ -697,7 +698,7 @@ StateChanged:
 			}
 			return coldata.ZeroBatch
 		default:
-			colexecerror.InternalError(fmt.Sprintf("unexpected externalHashJoinerState %d", hj.state))
+			colexecerror.InternalError(errors.AssertionFailedf("unexpected externalHashJoinerState %d", hj.state))
 		}
 	}
 }
@@ -713,10 +714,8 @@ func (hj *externalHashJoiner) Close(ctx context.Context) error {
 	if err := hj.rightPartitioner.Close(ctx); err != nil && retErr == nil {
 		retErr = err
 	}
-	if c, ok := hj.diskBackedSortMerge.(Closer); ok {
-		if err := c.Close(ctx); err != nil && retErr == nil {
-			retErr = err
-		}
+	if err := hj.diskBackedSortMerge.(colexecbase.Closer).Close(ctx); err != nil && retErr == nil {
+		retErr = err
 	}
 	if !hj.testingKnobs.delegateFDAcquisitions && hj.fdState.acquiredFDs > 0 {
 		hj.fdState.fdSemaphore.Release(hj.fdState.acquiredFDs)

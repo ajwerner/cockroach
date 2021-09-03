@@ -13,11 +13,10 @@ package explain
 import (
 	"bytes"
 	"fmt"
-	"text/tabwriter"
 
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/treeprinter"
 )
 
@@ -55,13 +54,22 @@ func (e *entry) isNode() bool {
 	return e.level > 0
 }
 
+// fieldStr returns a "field" or "field: val" string; only used when this entry
+// is a field.
+func (e *entry) fieldStr() string {
+	if e.fieldVal == "" {
+		return e.field
+	}
+	return fmt.Sprintf("%s: %s", e.field, e.fieldVal)
+}
+
 // EnterNode creates a new node as a child of the current node.
 func (ob *OutputBuilder) EnterNode(
-	name string, columns sqlbase.ResultColumns, ordering sqlbase.ColumnOrdering,
+	name string, columns colinfo.ResultColumns, ordering colinfo.ColumnOrdering,
 ) {
 	var colStr, ordStr string
 	if ob.flags.Verbose {
-		colStr = columns.String(ob.flags.ShowTypes)
+		colStr = columns.String(ob.flags.ShowTypes, false /* showHidden */)
 		ordStr = ordering.String(columns)
 	}
 	ob.enterNode(name, colStr, ordStr)
@@ -94,17 +102,66 @@ func (ob *OutputBuilder) AddField(key, value string) {
 	ob.entries = append(ob.entries, entry{field: key, fieldVal: value})
 }
 
+// Attr adds an information field under the current node.
+func (ob *OutputBuilder) Attr(key string, value interface{}) {
+	ob.AddField(key, fmt.Sprint(value))
+}
+
+// VAttr adds an information field under the current node, if the Verbose flag
+// is set.
+func (ob *OutputBuilder) VAttr(key string, value interface{}) {
+	if ob.flags.Verbose {
+		ob.AddField(key, fmt.Sprint(value))
+	}
+}
+
+// Attrf is a formatter version of Attr.
+func (ob *OutputBuilder) Attrf(key, format string, args ...interface{}) {
+	ob.AddField(key, fmt.Sprintf(format, args...))
+}
+
+// Expr adds an information field with an expression. The expression's
+// IndexedVars refer to the given columns. If the expression is nil, nothing is
+// emitted.
+func (ob *OutputBuilder) Expr(key string, expr tree.TypedExpr, varColumns colinfo.ResultColumns) {
+	if expr == nil {
+		return
+	}
+	flags := tree.FmtSymbolicSubqueries
+	if ob.flags.ShowTypes {
+		flags |= tree.FmtShowTypes
+	}
+	if ob.flags.HideValues {
+		flags |= tree.FmtHideConstants
+	}
+	f := tree.NewFmtCtx(flags)
+	f.SetIndexedVarFormat(func(ctx *tree.FmtCtx, idx int) {
+		// Ensure proper quoting.
+		n := tree.Name(varColumns[idx].Name)
+		ctx.WriteString(n.String())
+	})
+	f.FormatNode(expr)
+	ob.AddField(key, f.CloseAndGetString())
+}
+
+// VExpr is a verbose-only variant of Expr.
+func (ob *OutputBuilder) VExpr(key string, expr tree.TypedExpr, varColumns colinfo.ResultColumns) {
+	if ob.flags.Verbose {
+		ob.Expr(key, expr, varColumns)
+	}
+}
+
 // buildTreeRows creates the treeprinter structure; returns one string for each
 // entry in ob.entries.
 func (ob *OutputBuilder) buildTreeRows() []string {
 	// We reconstruct the hierarchy using the levels.
-	// n keeps track of the current node on each level.
+	// stack keeps track of the current node on each level.
 	tp := treeprinter.New()
-	n := []treeprinter.Node{tp}
+	stack := []treeprinter.Node{tp}
 
 	for _, entry := range ob.entries {
 		if entry.isNode() {
-			n = append(n[:entry.level], n[entry.level-1].Child(entry.node))
+			stack = append(stack[:entry.level], stack[entry.level-1].Child(entry.node))
 		} else {
 			tp.AddEmptyLine()
 		}
@@ -158,16 +215,75 @@ func (ob *OutputBuilder) BuildExplainRows() []tree.Datums {
 // The output string always ends in a newline.
 func (ob *OutputBuilder) BuildString() string {
 	var buf bytes.Buffer
-	tw := tabwriter.NewWriter(&buf, 2, 1, 2, ' ', 0)
+	tp := treeprinter.NewWithStyle(treeprinter.BulletStyle)
+	stack := []treeprinter.Node{tp}
+	entries := ob.entries
 
-	treeRows := ob.buildTreeRows()
-	for i, e := range ob.entries {
-		fmt.Fprintf(tw, "%s\t%s\t%s", treeRows[i], e.field, e.fieldVal)
-		if ob.flags.Verbose {
-			fmt.Fprintf(tw, "\t%s\t%s", e.columns, e.ordering)
-		}
-		fmt.Fprintf(tw, "\n")
+	pop := func() *entry {
+		e := &entries[0]
+		entries = entries[1:]
+		return e
 	}
-	_ = tw.Flush()
-	return util.RemoveTrailingSpaces(buf.String())
+
+	popField := func() *entry {
+		if len(entries) > 0 && !entries[0].isNode() {
+			return pop()
+		}
+		return nil
+	}
+
+	// There may be some top-level non-node entries (like "distributed"). Print
+	// them separately, as they can't be part of the tree.
+	for e := popField(); e != nil; e = popField() {
+		buf.WriteString(e.fieldStr())
+		buf.WriteString("\n")
+	}
+	if buf.Len() > 0 {
+		buf.WriteString("\n")
+	}
+
+	for len(entries) > 0 {
+		entry := pop()
+		child := stack[entry.level-1].Child(entry.node)
+		stack = append(stack[:entry.level], child)
+		if entry.columns != "" {
+			child.AddLine(fmt.Sprintf("columns: %s", entry.columns))
+		}
+		if entry.ordering != "" {
+			child.AddLine(fmt.Sprintf("ordering: %s", entry.ordering))
+		}
+		// Add any fields for the node.
+		for entry = popField(); entry != nil; entry = popField() {
+			child.AddLine(entry.fieldStr())
+		}
+	}
+	buf.WriteString(tp.String())
+	return buf.String()
+}
+
+// BuildProtoTree creates a representation of the plan as a tree of
+// roachpb.ExplainTreePlanNodes.
+func (ob *OutputBuilder) BuildProtoTree() *roachpb.ExplainTreePlanNode {
+	// We reconstruct the hierarchy using the levels.
+	// stack keeps track of the current node on each level. We use a sentinel node
+	// for level 0.
+	sentinel := &roachpb.ExplainTreePlanNode{}
+	stack := []*roachpb.ExplainTreePlanNode{sentinel}
+
+	for _, entry := range ob.entries {
+		if entry.isNode() {
+			parent := stack[entry.level-1]
+			child := &roachpb.ExplainTreePlanNode{Name: entry.node}
+			parent.Children = append(parent.Children, child)
+			stack = append(stack[:entry.level], child)
+		} else {
+			node := stack[len(stack)-1]
+			node.Attrs = append(node.Attrs, &roachpb.ExplainTreePlanNode_Attr{
+				Key:   entry.field,
+				Value: entry.fieldVal,
+			})
+		}
+	}
+
+	return sentinel.Children[0]
 }

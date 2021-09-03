@@ -16,12 +16,16 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
 )
 
 // rowFetcher is an interface used to abstract a row fetcher so that a stat
@@ -42,55 +46,64 @@ type rowFetcher interface {
 	) error
 
 	NextRow(ctx context.Context) (
-		sqlbase.EncDatumRow, *sqlbase.TableDescriptor, *sqlbase.IndexDescriptor, error)
+		rowenc.EncDatumRow, catalog.TableDescriptor, *descpb.IndexDescriptor, error)
 
 	// PartialKey is not stat-related but needs to be supported.
 	PartialKey(int) (roachpb.Key, error)
 	Reset()
 	GetBytesRead() int64
-	GetRangesInfo() []roachpb.RangeInfo
-	NextRowWithErrors(context.Context) (sqlbase.EncDatumRow, error)
+	NextRowWithErrors(context.Context) (rowenc.EncDatumRow, error)
+	// Close releases any resources held by this fetcher.
+	Close(ctx context.Context)
 }
 
 // initRowFetcher initializes the fetcher.
 func initRowFetcher(
 	flowCtx *execinfra.FlowCtx,
 	fetcher *row.Fetcher,
-	desc *sqlbase.TableDescriptor,
+	desc *tabledesc.Immutable,
 	indexIdx int,
-	colIdxMap map[sqlbase.ColumnID]int,
+	colIdxMap map[descpb.ColumnID]int,
 	reverseScan bool,
 	valNeededForCol util.FastIntSet,
 	isCheck bool,
-	alloc *sqlbase.DatumAlloc,
+	mon *mon.BytesMonitor,
+	alloc *rowenc.DatumAlloc,
 	scanVisibility execinfrapb.ScanVisibility,
-	lockStr sqlbase.ScanLockingStrength,
-) (index *sqlbase.IndexDescriptor, isSecondaryIndex bool, err error) {
-	immutDesc := sqlbase.NewImmutableTableDescriptor(*desc)
-	index, isSecondaryIndex, err = immutDesc.FindIndexByIndexIdx(indexIdx)
+	lockStrength descpb.ScanLockingStrength,
+	lockWaitPolicy descpb.ScanLockingWaitPolicy,
+	systemColumns []descpb.ColumnDescriptor,
+) (index *descpb.IndexDescriptor, isSecondaryIndex bool, err error) {
+	index, isSecondaryIndex, err = desc.FindIndexByIndexIdx(indexIdx)
 	if err != nil {
 		return nil, false, err
 	}
 
-	cols := immutDesc.Columns
+	cols := desc.Columns
 	if scanVisibility == execinfra.ScanVisibilityPublicAndNotPublic {
-		cols = immutDesc.ReadableColumns
+		cols = desc.ReadableColumns
 	}
+	// Add on any requested system columns. We slice cols to avoid modifying
+	// the underlying table descriptor.
+	cols = append(cols[:len(cols):len(cols)], systemColumns...)
 	tableArgs := row.FetcherTableArgs{
-		Desc:             immutDesc,
+		Desc:             desc,
 		Index:            index,
 		ColIdxMap:        colIdxMap,
 		IsSecondaryIndex: isSecondaryIndex,
 		Cols:             cols,
 		ValNeededForCol:  valNeededForCol,
 	}
+
 	if err := fetcher.Init(
+		flowCtx.EvalCtx.Context,
 		flowCtx.Codec(),
 		reverseScan,
-		lockStr,
-		true, /* returnRangeInfo */
+		lockStrength,
+		lockWaitPolicy,
 		isCheck,
 		alloc,
+		mon,
 		tableArgs,
 	); err != nil {
 		return nil, false, err

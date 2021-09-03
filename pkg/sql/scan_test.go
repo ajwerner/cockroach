@@ -21,7 +21,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -126,62 +125,63 @@ func TestScanBatches(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	// The test will screw around with KVBatchSize; make sure to restore it at the end.
-	restore := row.TestingSetKVBatchSize(10)
-	defer restore()
-
-	s, db, _ := serverutils.StartServer(
-		t, base.TestServerArgs{UseDatabase: "test"})
-	defer s.Stopper().Stop(context.Background())
-
-	if _, err := db.Exec(`CREATE DATABASE IF NOT EXISTS test`); err != nil {
-		t.Fatal(err)
-	}
-
+	// The test sets up a table with a row for each pair of (a,b) values.
 	numAs := 5
 	numBs := 20
 
-	if _, err := db.Exec(`DROP TABLE IF EXISTS test.scan`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE test.scan (a INT, b INT, v STRING, PRIMARY KEY (a, b))`); err != nil {
-		t.Fatal(err)
-	}
-
-	var buf bytes.Buffer
-	buf.WriteString(`INSERT INTO test.scan VALUES `)
-	for a := 0; a < numAs; a++ {
-		for b := 0; b < numBs; b++ {
-			if a+b > 0 {
-				buf.WriteString(", ")
-			}
-			if (a+b)%2 == 0 {
-				fmt.Fprintf(&buf, "(%d, %d, 'str%d%d')", a, b, a, b)
-			} else {
-				// Every other row doesn't get the string value (to have NULLs).
-				fmt.Fprintf(&buf, "(%d, %d, NULL)", a, b)
-			}
-		}
-	}
-	if _, err := db.Exec(buf.String()); err != nil {
-		t.Fatal(err)
-	}
+	schema := `
+		CREATE DATABASE test;
+		CREATE TABLE test.scan (
+			a INT,
+			b INT,
+			v STRING,
+			PRIMARY KEY (a, b),
+			FAMILY (a),
+			FAMILY (b)
+		);`
 
 	// The table will have one key for the even rows, and two keys for the odd rows.
 	numKeys := 3 * numAs * numBs / 2
-	batchSizes := []int{1, 2, 3, 5, 10, 13, 100, numKeys - 1, numKeys, numKeys + 1}
-	numSpanValues := []int{0, 1, 2, 3}
+	batchSizes := []int{1, 2, 5, 13, 100, numKeys - 1, numKeys, numKeys + 1}
 
 	for _, batch := range batchSizes {
-		row.TestingSetKVBatchSize(int64(batch))
-		for _, numSpans := range numSpanValues {
-			testScanBatchQuery(t, db, numSpans, numAs, numBs, false)
-			testScanBatchQuery(t, db, numSpans, numAs, numBs, true)
-		}
-	}
+		// We must set up a separate server for each batch size, as we cannot change
+		// it while the server is running (#53002).
+		t.Run(fmt.Sprintf("%d", batch), func(t *testing.T) {
+			restore := row.TestingSetKVBatchSize(int64(batch))
+			defer restore()
+			s, db, _ := serverutils.StartServer(
+				t, base.TestServerArgs{UseDatabase: "test"})
+			defer s.Stopper().Stop(context.Background())
 
-	if _, err := db.Exec(`DROP TABLE test.scan`); err != nil {
-		t.Fatal(err)
+			if _, err := db.Exec(schema); err != nil {
+				t.Fatal(err)
+			}
+
+			var buf bytes.Buffer
+			buf.WriteString(`INSERT INTO test.scan VALUES `)
+			for a := 0; a < numAs; a++ {
+				for b := 0; b < numBs; b++ {
+					if a+b > 0 {
+						buf.WriteString(", ")
+					}
+					if (a+b)%2 == 0 {
+						fmt.Fprintf(&buf, "(%d, %d, 'str%d%d')", a, b, a, b)
+					} else {
+						// Every other row doesn't get the string value (to have NULLs).
+						fmt.Fprintf(&buf, "(%d, %d, NULL)", a, b)
+					}
+				}
+			}
+			if _, err := db.Exec(buf.String()); err != nil {
+				t.Fatal(err)
+			}
+
+			for numSpans := 0; numSpans < 4; numSpans++ {
+				testScanBatchQuery(t, db, numSpans, numAs, numBs, false /* reverse */)
+				testScanBatchQuery(t, db, numSpans, numAs, numBs, true /* reverse */)
+			}
+		})
 	}
 }
 
@@ -192,21 +192,17 @@ func TestKVLimitHint(t *testing.T) {
 	testCases := []struct {
 		hardLimit int64
 		softLimit int64
-		filter    tree.TypedExpr
 		expected  int64
 	}{
-		{hardLimit: 0, softLimit: 0, filter: nil, expected: 0},
-		{hardLimit: 0, softLimit: 1, filter: nil, expected: 2},
-		{hardLimit: 0, softLimit: 23, filter: nil, expected: 46},
-		{hardLimit: 0, softLimit: 1, filter: tree.DBoolFalse, expected: 2},
-		{hardLimit: 1, softLimit: 0, filter: nil, expected: 1},
-		{hardLimit: 1, softLimit: 23, filter: nil, expected: 1},
-		{hardLimit: 5, softLimit: 23, filter: nil, expected: 5},
-		{hardLimit: 1, softLimit: 23, filter: tree.DBoolTrue, expected: 1},
-		{hardLimit: 1, softLimit: 23, filter: tree.DBoolFalse, expected: 2},
+		{hardLimit: 0, softLimit: 0, expected: 0},
+		{hardLimit: 0, softLimit: 1, expected: 2},
+		{hardLimit: 0, softLimit: 23, expected: 46},
+		{hardLimit: 1, softLimit: 0, expected: 1},
+		{hardLimit: 1, softLimit: 23, expected: 1},
+		{hardLimit: 5, softLimit: 23, expected: 5},
 	}
 	for _, tc := range testCases {
-		sn := scanNode{hardLimit: tc.hardLimit, softLimit: tc.softLimit, filter: tc.filter}
+		sn := scanNode{hardLimit: tc.hardLimit, softLimit: tc.softLimit}
 		if limitHint := sn.limitHint(); limitHint != tc.expected {
 			t.Errorf("%+v: got %d", tc, limitHint)
 		}

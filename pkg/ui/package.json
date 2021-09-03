@@ -13,6 +13,7 @@
     "cypress:update-snapshots": "yarn cypress run --env updateSnapshots=true --spec 'cypress/integration/**/*.visual.spec.ts'"
   },
   "dependencies": {
+    "@cockroachlabs/admin-ui-components": "^0.1.21",
     "analytics-node": "^3.4.0-beta.1",
     "antd": "^3.25.2",
     "babel-polyfill": "^6.26.0",
@@ -21,7 +22,7 @@
     "connected-react-router": "^6.6.1",
     "create-react-context": "^0.3.0",
     "highlight.js": "^9.10.0",
-    "lodash": "^4.17.4",
+    "lodash": "^4.17.19",
     "long": "^4.0.0",
     "mini-create-react-context": "^0.3.2",
     "moment": "^2.19.3",
@@ -137,10 +138,15 @@
     "**/chokidar": "^2.0.0",
     "**/deep-extend": "^0.5.1",
     "**/extend": "^3.0.2",
-    "**/lodash": "4.17.15",
     "**/react-dom": "^16.12.0",
     "**/ua-parser-js": "0.7.20",
-    "**/url-parse": "^1.4.3"
+    "**/url-parse": "^1.4.3",
+    "elliptic": "~6.5.3",
+    "http-proxy": "~1.18.1",
+    "markdown-to-jsx": "~6.11.4",
+    "node-fetch": "~2.6.1",
+    "serialize-javascript": "~3.1.0",
+    "yargs-parser": "~13.1.2"
   },
   "engines": {
     "node": ">=12",

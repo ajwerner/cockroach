@@ -35,7 +35,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func checkGauge(t *testing.T, id string, g *metric.Gauge, e int64) {
+type gaugeValuer interface {
+	GetName() string
+	Value() int64
+}
+
+func checkGauge(t *testing.T, id string, g gaugeValuer, e int64) {
 	t.Helper()
 	if a := g.Value(); a != e {
 		t.Error(errors.Errorf("%s for store %s: gauge %d != computed %d", g.GetName(), id, a, e))
@@ -114,6 +119,7 @@ func verifyStats(t *testing.T, mtc *multiTestContext, storeIdxSlice ...int) {
 		checkGauge(t, idString, m.IntentCount, realStats.IntentCount)
 		checkGauge(t, idString, m.SysBytes, realStats.SysBytes)
 		checkGauge(t, idString, m.SysCount, realStats.SysCount)
+		checkGauge(t, idString, m.AbortSpanBytes, realStats.AbortSpanBytes)
 		// "Ages" will be different depending on how much time has passed. Even with
 		// a manual clock, this can be an issue in tests. Therefore, we do not
 		// verify them in this test.

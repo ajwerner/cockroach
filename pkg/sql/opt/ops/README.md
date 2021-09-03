@@ -51,6 +51,8 @@ Tags for scalar operators:
  - `ConstValue`: used for operators that represent a constant value.
  - `Aggregate`: used for operators that represent an aggregation function.
  - `Window`: used for operators that represent a window function.
+ - `CompositeInsensitive`: used for operators that only depend on the logical
+   value of composite value inputs (see memo.CanBeCompositeSensitive).
 
 Tags for relational operators:
  - `Join`: used for logical variations of join, including apply joins (but not
@@ -68,3 +70,7 @@ Tags for relational operators:
  - `DDL`: used for schema change operations; these operators cannot be executed
    following a mutation in the same transaction. Should always be used in
    conjunction with the `Mutation` tag.
+ - `WithBinding`: used for operators which associate a `WithID` with the
+   expression in the first child. Such expressions must implement a
+   `WithBindingID()` method.
+

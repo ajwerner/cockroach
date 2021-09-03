@@ -21,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/lib/pq/oid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTypes(t *testing.T) {
@@ -214,6 +215,15 @@ func TestTypes(t *testing.T) {
 				},
 			},
 			MakeGeometry(geopb.ShapeType_MultiPoint, 4325),
+		},
+		// BOX2D
+		{
+			Box2D,
+			&T{InternalType: InternalType{Family: Box2DFamily, Oid: oidext.T_box2d, Locale: &emptyLocale}},
+		},
+		{
+			Box2D,
+			MakeScalar(Box2DFamily, oidext.T_box2d, 0, 0, emptyLocale),
 		},
 
 		// INET
@@ -501,10 +511,9 @@ func TestTypes(t *testing.T) {
 		{MakeEnum(15210, 15213), &T{InternalType: InternalType{
 			Family: EnumFamily,
 			Locale: &emptyLocale,
-			Oid:    StableTypeIDToOID(15210),
+			Oid:    15210,
 			UDTMetadata: &PersistentUserDefinedTypeMetadata{
-				StableTypeID:      15210,
-				StableArrayTypeID: 15213,
+				ArrayTypeOID: 15213,
 			},
 		}}},
 	}
@@ -963,6 +972,14 @@ func TestOidSetDuringUpgrade(t *testing.T) {
 			err := input.upgradeType()
 			assert.NoError(t, err)
 			assert.Equal(t, Oid, input.Oid())
+		})
+	}
+}
+
+func TestSQLStandardName(t *testing.T) {
+	for _, typ := range Scalar {
+		t.Run(typ.Name(), func(t *testing.T) {
+			require.NotEmpty(t, typ.SQLStandardName())
 		})
 	}
 }

@@ -39,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/redact"
 )
 
 var (
@@ -114,6 +115,12 @@ var (
 		Measurement: "RPCs",
 		Unit:        metric.Unit_COUNT,
 	}
+	metaDistSenderErrCountTmpl = metric.Metadata{
+		Name:        "distsender.rpc.err.%s",
+		Help:        "Number of %s errors received",
+		Measurement: "Errors",
+		Unit:        metric.Unit_COUNT,
+	}
 )
 
 // CanSendToFollower is used by the DistSender to determine if it needs to look
@@ -128,9 +135,12 @@ var CanSendToFollower = func(
 
 const (
 	// The default limit for asynchronous senders.
-	defaultSenderConcurrency = 500
+	defaultSenderConcurrency = 1024
 	// The maximum number of range descriptors to prefetch during range lookups.
 	rangeLookupPrefetchCount = 8
+	// The maximum number of times a replica is retried when it repeatedly returns
+	// stale lease info.
+	sameReplicaRetryLimit = 10
 )
 
 var rangeDescriptorCacheSize = settings.RegisterIntSetting(
@@ -142,7 +152,7 @@ var rangeDescriptorCacheSize = settings.RegisterIntSetting(
 var senderConcurrencyLimit = settings.RegisterNonNegativeIntSetting(
 	"kv.dist_sender.concurrency_limit",
 	"maximum number of asynchronous send requests",
-	max(defaultSenderConcurrency, int64(32*runtime.NumCPU())),
+	max(defaultSenderConcurrency, int64(64*runtime.NumCPU())),
 )
 
 func max(a, b int64) int64 {
@@ -166,6 +176,7 @@ type DistSenderMetrics struct {
 	RangeLookups            *metric.Counter
 	SlowRPCs                *metric.Gauge
 	MethodCounts            [roachpb.NumMethods]*metric.Counter
+	ErrCounts               [roachpb.NumErrors]*metric.Counter
 }
 
 func makeDistSenderMetrics() DistSenderMetrics {
@@ -188,6 +199,13 @@ func makeDistSenderMetrics() DistSenderMetrics {
 		meta.Name = fmt.Sprintf(meta.Name, strings.ToLower(method))
 		meta.Help = fmt.Sprintf(meta.Help, method)
 		m.MethodCounts[i] = metric.NewCounter(meta)
+	}
+	for i := range m.ErrCounts {
+		errType := roachpb.ErrorDetailType(i).String()
+		meta := metaDistSenderErrCountTmpl
+		meta.Name = fmt.Sprintf(meta.Name, strings.ToLower(errType))
+		meta.Help = fmt.Sprintf(meta.Help, errType)
+		m.ErrCounts[i] = metric.NewCounter(meta)
 	}
 	return m
 }
@@ -250,6 +268,13 @@ type DistSender struct {
 	// disableParallelBatches instructs DistSender to never parallelize
 	// the transmission of partial batch requests across ranges.
 	disableParallelBatches bool
+
+	// LatencyFunc is used to estimate the latency to other nodes.
+	latencyFunc LatencyFunc
+
+	// If set, the DistSender will try the replicas in the order they appear in
+	// the descriptor, instead of trying to reorder them by latency.
+	dontReorderReplicas bool
 }
 
 var _ kv.Sender = &DistSender{}
@@ -333,6 +358,7 @@ func NewDistSender(cfg DistSenderConfig) *DistSender {
 	} else {
 		ds.transportFactory = GRPCTransportFactory
 	}
+	ds.dontReorderReplicas = cfg.TestingKnobs.DontReorderReplicas
 	ds.rpcRetryOptions = base.DefaultRetryOptions()
 	if cfg.RPCRetryOptions != nil {
 		ds.rpcRetryOptions = *cfg.RPCRetryOptions
@@ -362,6 +388,12 @@ func NewDistSender(cfg DistSenderConfig) *DistSender {
 			log.VEventf(ctx, 1, "gossiped first range descriptor: %+v", desc.Replicas())
 			ds.rangeCache.EvictByKey(ctx, roachpb.RKeyMin)
 		})
+	}
+
+	if cfg.TestingKnobs.LatencyFunc != nil {
+		ds.latencyFunc = cfg.TestingKnobs.LatencyFunc
+	} else {
+		ds.latencyFunc = ds.rpcContext.RemoteClocks.Latency
 	}
 	return ds
 }
@@ -616,11 +648,11 @@ func splitBatchAndCheckForRefreshSpans(
 			ba.CanForwardReadTimestamp = false
 
 			// If the final part contains an EndTxn request, unset its
-			// CanCommitAtHigherTimestamp flag as well.
+			// DeprecatedCanCommitAtHigherTimestamp flag as well.
 			lastPart := parts[len(parts)-1]
 			if et := lastPart[len(lastPart)-1].GetEndTxn(); et != nil {
 				etCopy := *et
-				etCopy.CanCommitAtHigherTimestamp = false
+				etCopy.DeprecatedCanCommitAtHigherTimestamp = false
 				lastPart = append([]roachpb.RequestUnion(nil), lastPart...)
 				lastPart[len(lastPart)-1].MustSetInner(&etCopy)
 				parts[len(parts)-1] = lastPart
@@ -648,13 +680,14 @@ func unsetCanForwardReadTimestampFlag(ctx context.Context, ba *roachpb.BatchRequ
 			// Unset the flag.
 			ba.CanForwardReadTimestamp = false
 
-			// We would need to also unset the CanCommitAtHigherTimestamp flag
-			// on any EndTxn request in the batch, but it turns out that because
-			// we call this function when a batch is split across ranges, we'd
-			// already have bailed if the EndTxn wasn't a parallel commit — and
-			// if it was a parallel commit then we must not have any requests
-			// that need to refresh (see txnCommitter.canCommitInParallel).
-			// Assert this for our own sanity.
+			// We would need to also unset the DeprecatedCanCommitAtHigherTimestamp
+			// flag on any EndTxn request in the batch, but it turns out that
+			// because we call this function when a batch is split across
+			// ranges, we'd already have bailed if the EndTxn wasn't a parallel
+			// commit — and if it was a parallel commit then we must not have
+			// any requests that need to refresh (see
+			// txnCommitter.canCommitInParallel). Assert this for our own
+			// sanity.
 			if _, ok := ba.GetArg(roachpb.EndTxn); ok {
 				log.Fatalf(ctx, "batch unexpected contained requests "+
 					"that need to refresh and an EndTxn request: %s", ba.String())
@@ -933,7 +966,7 @@ func (ds *DistSender) divideAndSendParallelCommit(
 			// to intent resolution and can be safely ignored.
 			ignoreMissing, err = ds.detectIntentMissingDueToIntentResolution(ctx, br.Txn)
 			if err != nil {
-				return nil, roachpb.NewError(err)
+				return nil, roachpb.NewErrorWithTxn(err, br.Txn)
 			}
 		}
 		if !ignoreMissing {
@@ -998,9 +1031,10 @@ func (ds *DistSender) detectIntentMissingDueToIntentResolution(
 		// We weren't able to determine whether the intent missing error is
 		// due to intent resolution or not, so it is still ambiguous whether
 		// the commit succeeded.
-		return false, roachpb.NewAmbiguousResultError(fmt.Sprintf("error=%s [intent missing]", pErr))
+		return false, roachpb.NewAmbiguousResultErrorf("error=%s [intent missing]", pErr)
 	}
-	respTxn := &br.Responses[0].GetQueryTxn().QueriedTxn
+	resp := br.Responses[0].GetQueryTxn()
+	respTxn := &resp.QueriedTxn
 	switch respTxn.Status {
 	case roachpb.COMMITTED:
 		// The transaction has already been finalized as committed. The missing
@@ -1011,19 +1045,19 @@ func (ds *DistSender) detectIntentMissingDueToIntentResolution(
 		// successfully, so ignore the error.
 		return true, nil
 	case roachpb.ABORTED:
-		// The transaction has either already been finalized as aborted or has
-		// been finalized as committed and already had its transaction record
-		// GCed. We can't distinguish between these two conditions with full
-		// certainty, so we're forced to return an ambiguous commit error.
-		// TODO(nvanbenschoten): QueryTxn will materialize an ABORTED transaction
-		// record if one does not already exist. If we are certain that no actor
-		// will ever persist an ABORTED transaction record after a COMMIT record is
-		// GCed and we returned whether the record was synthesized in the QueryTxn
-		// response then we could use the existence of an ABORTED transaction record
-		// to further isolates the ambiguity caused by the loss of information
-		// during intent resolution. If this error becomes a problem, we can explore
-		// this option.
-		return false, roachpb.NewAmbiguousResultError("intent missing and record aborted")
+		// The transaction has either already been finalized as aborted or has been
+		// finalized as committed and already had its transaction record GCed. Both
+		// these cases return an ABORTED txn; in the GC case the record has been
+		// synthesized.
+		// If the the record has been GC'ed, then we can't distinguish between the
+		// two cases, and so we're forced to return an ambiguous error. On the other
+		// hand, if the record exists, then we know that the transaction did not
+		// commit because a committed record cannot be GC'ed and the recreated as
+		// ABORTED.
+		if resp.TxnRecordExists {
+			return false, roachpb.NewTransactionAbortedError(roachpb.ABORT_REASON_ABORTED_RECORD_FOUND)
+		}
+		return false, roachpb.NewAmbiguousResultErrorf("intent missing and record aborted")
 	default:
 		// The transaction has not been finalized yet, so the missing intent
 		// error must have been caused by a real missing intent. Propagate the
@@ -1109,7 +1143,7 @@ func (ds *DistSender) divideAndSendBatchToRanges(
 	// turning single-range queries into multi-range queries for no good
 	// reason.
 	if ba.IsUnsplittable() {
-		mismatch := roachpb.NewRangeKeyMismatchError(ctx, rs.Key.AsRawKey(), rs.EndKey.AsRawKey(), ri.Desc(), ri.Lease())
+		mismatch := roachpb.NewRangeKeyMismatchError(ctx, rs.Key.AsRawKey(), rs.EndKey.AsRawKey(), ri.Desc(), nil /* lease */)
 		return nil, roachpb.NewError(mismatch)
 	}
 	// If there's no transaction and ba spans ranges, possibly re-run as part of
@@ -1269,21 +1303,8 @@ func (ds *DistSender) divideAndSendBatchToRanges(
 				// passed recursively to further divideAndSendBatchToRanges() calls.
 				if ba.MaxSpanRequestKeys > 0 {
 					if replyResults > ba.MaxSpanRequestKeys {
-						// NOTE: v19.2 and below have a bug where MaxSpanRequestKeys
-						// is not respected by ResolveIntentRangeRequest once the
-						// limit has already been exhausted by the batch. This is
-						// mostly harmless (or at least, the damage has already been
-						// done by this point and resulted in a large Raft entry)
-						// and has been fixed in v20.1+, so don't bother hitting the
-						// assertion.
-						//
-						// TODO(nvanbenschoten): remove this hack in v20.2.
-						if _, ok := ba.GetArg(roachpb.ResolveIntentRange); ok {
-							replyResults = ba.MaxSpanRequestKeys
-						} else {
-							log.Fatalf(ctx, "received %d results, limit was %d",
-								replyResults, ba.MaxSpanRequestKeys)
-						}
+						log.Fatalf(ctx, "received %d results, limit was %d",
+							replyResults, ba.MaxSpanRequestKeys)
 					}
 					ba.MaxSpanRequestKeys -= replyResults
 					// Exiting; any missing responses will be filled in via defer().
@@ -1355,13 +1376,24 @@ func (ds *DistSender) sendPartialBatchAsync(
 }
 
 func slowRangeRPCWarningStr(
-	dur time.Duration, attempts int64, desc *roachpb.RangeDescriptor, pErr *roachpb.Error,
-) string {
-	return fmt.Sprintf("have been waiting %.2fs (%d attempts) for RPC to %s: %s", dur.Seconds(), attempts, desc, pErr)
+	s *redact.StringBuilder,
+	ba roachpb.BatchRequest,
+	dur time.Duration,
+	attempts int64,
+	desc *roachpb.RangeDescriptor,
+	err error,
+	br *roachpb.BatchResponse,
+) {
+	resp := interface{}(err)
+	if resp == nil {
+		resp = br
+	}
+	s.Printf("have been waiting %.2fs (%d attempts) for RPC %s to %s; resp: %s",
+		dur.Seconds(), attempts, ba, desc, resp)
 }
 
-func slowRangeRPCReturnWarningStr(dur time.Duration, attempts int64) string {
-	return fmt.Sprintf("slow RPC finished after %.2fs (%d attempts)", dur.Seconds(), attempts)
+func slowRangeRPCReturnWarningStr(s *redact.StringBuilder, dur time.Duration, attempts int64) {
+	s.Printf("slow RPC finished after %.2fs (%d attempts)", dur.Seconds(), attempts)
 }
 
 // sendPartialBatch sends the supplied batch to the range specified by
@@ -1379,7 +1411,7 @@ func (ds *DistSender) sendPartialBatch(
 	ctx context.Context,
 	ba roachpb.BatchRequest,
 	rs roachpb.RSpan,
-	routing EvictionToken,
+	routingTok EvictionToken,
 	withCommit bool,
 	batchIdx int,
 	needsTruncate bool,
@@ -1398,7 +1430,7 @@ func (ds *DistSender) sendPartialBatch(
 
 	if needsTruncate {
 		// Truncate the request to range descriptor.
-		rs, err = rs.Intersect(routing.Desc())
+		rs, err = rs.Intersect(routingTok.Desc())
 		if err != nil {
 			return response{pErr: roachpb.NewError(err)}
 		}
@@ -1423,20 +1455,23 @@ func (ds *DistSender) sendPartialBatch(
 	for r := retry.StartWithCtx(ctx, ds.rpcRetryOptions); r.Next(); {
 		attempts++
 		pErr = nil
-		// If we've cleared the descriptor on a send failure, re-lookup.
-		if routing.Empty() {
+		// If we've invalidated the descriptor on a send failure, re-lookup.
+		if !routingTok.Valid() {
 			var descKey roachpb.RKey
 			if isReverse {
 				descKey = rs.EndKey
 			} else {
 				descKey = rs.Key
 			}
-			routing, err = ds.getRoutingInfo(ctx, descKey, prevTok, isReverse)
+			routingTok, err = ds.getRoutingInfo(ctx, descKey, prevTok, isReverse)
 			if err != nil {
 				log.VErrEventf(ctx, 1, "range descriptor re-lookup failed: %s", err)
 				// We set pErr if we encountered an error getting the descriptor in
 				// order to return the most recent error when we are out of retries.
 				pErr = roachpb.NewError(err)
+				if !isRangeLookupErrorRetryable(err) {
+					return response{pErr: roachpb.NewError(err)}
+				}
 				continue
 			}
 
@@ -1445,7 +1480,7 @@ func (ds *DistSender) sendPartialBatch(
 			// batch, so that we know that the response to it matches the positions
 			// into our batch (using the full batch here would give a potentially
 			// larger response slice with unknown mapping to our truncated reply).
-			intersection, err := rs.Intersect(routing.Desc())
+			intersection, err := rs.Intersect(routingTok.Desc())
 			if err != nil {
 				return response{pErr: roachpb.NewError(err)}
 			}
@@ -1456,23 +1491,53 @@ func (ds *DistSender) sendPartialBatch(
 			}
 		}
 
-		reply, err = ds.sendToReplicas(ctx, ba, routing, withCommit)
+		prevTok = routingTok
+		reply, err = ds.sendToReplicas(ctx, ba, routingTok, withCommit)
+
+		const slowDistSenderThreshold = time.Minute
+		if dur := timeutil.Since(tBegin); dur > slowDistSenderThreshold && !tBegin.IsZero() {
+			{
+				var s redact.StringBuilder
+				slowRangeRPCWarningStr(&s, ba, dur, attempts, routingTok.Desc(), err, reply)
+				log.Warningf(ctx, "slow range RPC: %v", &s)
+			}
+			// If the RPC wasn't successful, defer the logging of a message once the
+			// RPC is not retried any more.
+			if err != nil || reply.Error != nil {
+				ds.metrics.SlowRPCs.Inc(1)
+				defer func(tBegin time.Time, attempts int64) {
+					ds.metrics.SlowRPCs.Dec(1)
+					var s redact.StringBuilder
+					slowRangeRPCReturnWarningStr(&s, timeutil.Since(tBegin), attempts)
+					log.Warningf(ctx, "slow RPC response: %v", &s)
+				}(tBegin, attempts)
+			}
+			tBegin = time.Time{} // prevent reentering branch for this RPC
+		}
+
 		if err != nil {
 			// Set pErr so that, if we don't perform any more retries, the
 			// deduceRetryEarlyExitError() call below the loop is inhibited.
 			pErr = roachpb.NewError(err)
 			switch {
 			case errors.HasType(err, sendError{}):
-				// We've tried all the replicas without success. Either they're all down,
-				// or we're using an out-of-date range descriptor. Invalidate the cache
-				// and try again with the new metadata. Re-sending the request is ok even
-				// though it might have succeeded the first time around because of
-				// idempotency.
-				log.VEventf(ctx, 1, "evicting range desc %s after %s", routing.entry, err)
-				routing.Evict(ctx)
-				// Clear the routing info to reload on the next attempt.
-				prevTok = routing
-				routing = EvictionToken{}
+				// We've tried all the replicas without success. Either they're all
+				// down, or we're using an out-of-date range descriptor. Evict from the
+				// cache and try again with an updated descriptor. Re-sending the
+				// request is ok even though it might have succeeded the first time
+				// around because of idempotency.
+				//
+				// Note that we're evicting the descriptor that sendToReplicas was
+				// called with, not necessarily the current descriptor from the cache.
+				// Even if the routing info used by sendToReplicas was updated, we're
+				// not aware of that update and that's mostly a good thing: consider
+				// calling sendToReplicas with descriptor (r1,r2,r3). Inside, the
+				// routing is updated to (r4,r5,r6) and sendToReplicas bails. At that
+				// point, we don't want to evict (r4,r5,r6) since we haven't actually
+				// used it; we're contempt attempting to evict (r1,r2,r3), failing, and
+				// reloading (r4,r5,r6) from the cache on the next iteration.
+				log.VEventf(ctx, 1, "evicting range desc %s after %s", routingTok, err)
+				routingTok.Evict(ctx)
 				continue
 			}
 			break
@@ -1504,19 +1569,6 @@ func (ds *DistSender) sendPartialBatch(
 			pErr.Index.Index = int32(positions[pErr.Index.Index])
 		}
 
-		const slowDistSenderThreshold = time.Minute
-		if dur := timeutil.Since(tBegin); dur > slowDistSenderThreshold && !tBegin.IsZero() {
-			ds.metrics.SlowRPCs.Inc(1)
-			dur := dur // leak dur to heap only when branch taken
-			log.Warningf(ctx, "slow range RPC: %v",
-				slowRangeRPCWarningStr(dur, attempts, routing.Desc(), pErr))
-			defer func(tBegin time.Time, attempts int64) {
-				ds.metrics.SlowRPCs.Dec(1)
-				log.Warningf(ctx, "slow RPC response: %v",
-					slowRangeRPCReturnWarningStr(timeutil.Since(tBegin), attempts))
-			}(tBegin, attempts)
-			tBegin = time.Time{} // prevent reentering branch for this RPC
-		}
 		log.VErrEventf(ctx, 2, "reply error %s: %s", ba, pErr)
 
 		// Error handling: If the error indicates that our range
@@ -1536,13 +1588,13 @@ func (ds *DistSender) sendPartialBatch(
 				// Sanity check that we got the different descriptors. Getting the same
 				// descriptor and putting it in the cache would be bad, as we'd go through
 				// an infinite loops of retries.
-				if routing.Desc().RSpan().Equal(ri.Desc.RSpan()) {
+				if routingTok.Desc().RSpan().Equal(ri.Desc.RSpan()) {
 					return response{pErr: roachpb.NewError(errors.AssertionFailedf(
 						"mismatched range suggestion not different from original desc. desc: %s. suggested: %s. err: %s",
-						routing.Desc(), ri.Desc, pErr))}
+						routingTok.Desc(), ri.Desc, pErr))}
 				}
 			}
-			routing.EvictAndReplace(ctx, tErr.Ranges()...)
+			routingTok.EvictAndReplace(ctx, tErr.Ranges()...)
 			// On addressing errors (likely a split), we need to re-invoke
 			// the range descriptor lookup machinery, so we recurse by
 			// sending batch to just the partial span this descriptor was
@@ -1578,7 +1630,7 @@ func (ds *DistSender) deduceRetryEarlyExitError(ctx context.Context) error {
 		return &roachpb.NodeUnavailableError{}
 	case <-ctx.Done():
 		// Happens when the client request is canceled.
-		return errors.Wrap(ctx.Err(), "aborted in distSender")
+		return errors.Wrap(ctx.Err(), "aborted in DistSender")
 	default:
 	}
 	return nil
@@ -1680,7 +1732,7 @@ func fillSkippedResponses(
 // the error that the last attempt to execute the request returned.
 func noMoreReplicasErr(ambiguousErr, lastAttemptErr error) error {
 	if ambiguousErr != nil {
-		return roachpb.NewAmbiguousResultError(fmt.Sprintf("error=%s [exhausted]", ambiguousErr))
+		return roachpb.NewAmbiguousResultErrorf("error=%s [exhausted]", ambiguousErr)
 	}
 
 	// TODO(bdarnell): The error from the last attempt is not necessarily the best
@@ -1704,6 +1756,9 @@ func noMoreReplicasErr(ambiguousErr, lastAttemptErr error) error {
 // internally by retrying (NotLeaseholderError, RangeNotFoundError), and falls
 // back to a sendError when it runs out of replicas to try.
 //
+// routing dictates what replicas will be tried (but not necessarily their
+// order).
+//
 // withCommit declares whether a transaction commit is either in this batch or
 // in-flight concurrently with this batch. If withCommit is false (i.e. either
 // no EndTxn is in flight, or it is attempting to abort), ambiguous results will
@@ -1718,10 +1773,7 @@ func (ds *DistSender) sendToReplicas(
 ) (*roachpb.BatchResponse, error) {
 	desc := routing.Desc()
 	ba.RangeID = desc.RangeID
-	var leaseholder *roachpb.ReplicaDescriptor
-	if routing.Lease() != nil {
-		leaseholder = &routing.Lease().Replica
-	}
+	leaseholder := routing.Leaseholder()
 	replicas, err := NewReplicaSlice(ctx, ds.nodeDescs, desc, leaseholder)
 	if err != nil {
 		return nil, err
@@ -1729,17 +1781,23 @@ func (ds *DistSender) sendToReplicas(
 
 	// Rearrange the replicas so that they're ordered in expectation of
 	// request latency. Leaseholder considerations come below.
-	replicas.OptimizeReplicaOrder(ds.getNodeDescriptor(), ds.rpcContext.RemoteClocks.Latency)
+	if !ds.dontReorderReplicas {
+		replicas.OptimizeReplicaOrder(ds.getNodeDescriptor(), ds.latencyFunc)
+	}
 
-	canFollowerRead := (ds.clusterID != nil) && CanSendToFollower(ds.clusterID.Get(), ds.st, ba)
-	sendToLeaseholder := (routing.Lease() != nil) && !canFollowerRead && ba.RequiresLeaseHolder()
-	routeToFollower := canFollowerRead || !ba.RequiresLeaseHolder()
-	if sendToLeaseholder {
-		idx := replicas.Find(routing.Lease().Replica.ReplicaID)
-		if idx != -1 {
-			replicas.MoveToFront(idx)
-		} else {
-			log.Eventf(ctx, "leaseholder missing from replicas; lease: %s", routing.Lease())
+	// Try the leaseholder first, if the request wants it.
+	{
+		canFollowerRead := (ds.clusterID != nil) && CanSendToFollower(ds.clusterID.Get(), ds.st, ba)
+		sendToLeaseholder := (leaseholder != nil) && !canFollowerRead && ba.RequiresLeaseHolder()
+		if sendToLeaseholder {
+			idx := replicas.Find(leaseholder.ReplicaID)
+			if idx != -1 {
+				replicas.MoveToFront(idx)
+			} else {
+				// The leaseholder node's info must have been missing from gossip when
+				// we created replicas.
+				log.Eventf(ctx, "leaseholder %s missing from replicas", leaseholder)
+			}
 		}
 	}
 
@@ -1747,31 +1805,84 @@ func (ds *DistSender) sendToReplicas(
 		class:   rpc.ConnectionClassForKey(desc.RSpan().Key),
 		metrics: &ds.metrics,
 	}
-	transport, err := ds.transportFactory(opts, ds.nodeDialer, replicas)
+	transport, err := ds.transportFactory(opts, ds.nodeDialer, replicas.Descriptors())
 	if err != nil {
 		return nil, err
 	}
-	if transport.IsExhausted() {
-		return nil, newSendError(
-			fmt.Sprintf("sending to all %d replicas failed", len(replicas)))
-	}
 
-	curReplica := transport.NextReplica()
-	if log.ExpensiveLogEnabled(ctx, 2) {
-		log.VEventf(ctx, 2, "r%d: sending batch %s to %s", desc.RangeID, ba.Summary(), curReplica)
-	}
-	br, err := transport.SendNext(ctx, ba)
 	// inTransferRetry is used to slow down retries in cases where an ongoing
 	// lease transfer is suspected.
 	inTransferRetry := retry.StartWithCtx(ctx, ds.rpcRetryOptions)
 	inTransferRetry.Next() // The first call to Next does not block.
+	var sameReplicaRetries int
+	var prevReplica roachpb.ReplicaDescriptor
 
 	// This loop will retry operations that fail with errors that reflect
 	// per-replica state and may succeed on other replicas.
 	var ambiguousError error
+	var br *roachpb.BatchResponse
+	for first := true; ; first = false {
+		if !first {
+			ds.metrics.NextReplicaErrCount.Inc(1)
+		}
 
-	for {
+		// Advance through the transport's replicas until we find one that's still
+		// part of routing.entry.Desc. The transport starts up initialized with
+		// routing's replica info, but routing can be updated as we go through the
+		// replicas, whereas transport isn't.
+		//
+		// TODO(andrei): The structure around here is no good; we're potentially
+		// updating routing with replicas that are not part of transport, and so
+		// those replicas will never be tried. Instead, we'll exhaust the transport
+		// and bubble up a SendError, which will cause a cache eviction and a new
+		// descriptor lookup potentially unnecessarily.
+		lastErr := err
+		if lastErr == nil && br != nil {
+			lastErr = br.Error.GoError()
+		}
+		err = skipStaleReplicas(transport, routing, ambiguousError, lastErr)
 		if err != nil {
+			return nil, err
+		}
+		curReplica := transport.NextReplica()
+		if first {
+			if log.ExpensiveLogEnabled(ctx, 2) {
+				log.VEventf(ctx, 2, "r%d: sending batch %s to %s", desc.RangeID, ba.Summary(), curReplica)
+			}
+		} else {
+			log.VEventf(ctx, 2, "trying next peer %s", curReplica.String())
+			if prevReplica == curReplica {
+				sameReplicaRetries++
+			} else {
+				sameReplicaRetries = 0
+			}
+		}
+		prevReplica = curReplica
+		// Communicate to the server the information our cache has about the range.
+		// If it's stale, the serve will return an update.
+		ba.ClientRangeInfo = &roachpb.ClientRangeInfo{
+			// Note that DescriptorGeneration will be 0 if the cached descriptor is
+			// "speculative" (see DescSpeculative()). Even if the speculation is
+			// correct, we want the serve to return an update, at which point the
+			// cached entry will no longer be "speculative".
+			DescriptorGeneration: routing.Desc().Generation,
+			// The LeaseSequence will be 0 if the cache doen't have lease info, or has
+			// a speculative lease. Like above, this asks the server to return an
+			// update.
+			LeaseSequence: routing.LeaseSeq(),
+		}
+		br, err = transport.SendNext(ctx, ba)
+		ds.maybeIncrementErrCounters(br, err)
+
+		if err != nil {
+			if grpcutil.IsAuthenticationError(err) {
+				// Authentication error. Propagate.
+				if ambiguousError != nil {
+					return nil, roachpb.NewAmbiguousResultErrorf("error=%s [propagate]", ambiguousError)
+				}
+				return nil, err
+			}
+
 			// For most connection errors, we cannot tell whether or not the request
 			// may have succeeded on the remote server (exceptions are captured in the
 			// grpcutil.RequestDidNotStart function). We'll retry the request in order
@@ -1835,8 +1946,8 @@ func (ds *DistSender) sendToReplicas(
 			// account that the local node can't be down) it won't take long until we
 			// talk to a replica that tells us who the leaseholder is.
 			if ctx.Err() == nil {
-				if routing.Lease() != nil && routing.Lease().Replica == curReplica {
-					routing = routing.ClearLease(ctx)
+				if lh := routing.Leaseholder(); lh != nil && *lh == curReplica {
+					routing.EvictLease(ctx)
 				}
 			}
 		} else {
@@ -1855,21 +1966,10 @@ func (ds *DistSender) sendToReplicas(
 			// requests will attempt the same useless replicas.
 			switch tErr := br.Error.GetDetail().(type) {
 			case nil:
-				// When a request that we've attempted to route to the leaseholder comes
-				// back as successful, we assume that it must have been served by the
-				// leaseholder and so we update the leaseholder in the cache. In steady
-				// state, this is almost always the case, and so we gate the update on
-				// whether the response comes from a node that we didn't know held the
-				// lease.
-				updateLeaseholder := !routeToFollower &&
-					(routing.Lease() == nil || routing.Lease().Replica != curReplica)
-				if updateLeaseholder {
-					// Synthesize a lease. We'll leave the Sequence at 0 such that this
-					// lease will be overwritten in the cache by any future lease info.
-					l := &roachpb.Lease{
-						Replica: curReplica,
-					}
-					routing, _ /* ok */ = routing.UpdateLease(ctx, l)
+				// If the server gave us updated range info, lets update our cache with it.
+				if len(br.RangeInfos) > 0 {
+					log.VEventf(ctx, 2, "received updated range info: %s", br.RangeInfos)
+					routing.EvictAndReplace(ctx, br.RangeInfos...)
 				}
 				return br, nil
 			case *roachpb.StoreNotFoundError, *roachpb.NodeUnavailableError:
@@ -1885,25 +1985,35 @@ func (ds *DistSender) sendToReplicas(
 				// leaseholder in the range cache.
 			case *roachpb.NotLeaseHolderError:
 				ds.metrics.NotLeaseHolderErrCount.Inc(1)
-				if tErr.LeaseHolder != nil {
+				// If we got some lease information, we use it. If not, we loop around
+				// and try the next replica.
+				if tErr.Lease != nil || tErr.LeaseHolder != nil {
 					// Update the leaseholder in the range cache. Naively this would also
 					// happen when the next RPC comes back, but we don't want to wait out
 					// the additional RPC latency.
 
-					// Figure out the lease we want to put in the cache.
-					l := tErr.Lease
-					// tErr.LeaseHolder might be set when tErr.Lease isn't.
-					if l == nil {
-						l = &roachpb.Lease{
-							Replica: *tErr.LeaseHolder,
-						}
-					}
-
 					var ok bool
-					routing, ok = routing.UpdateLease(ctx, l)
-					// Move the new lease holder to the head of the queue for the next retry.
-					if !routing.Empty() && routing.Lease() != nil {
-						transport.MoveToFront(routing.Lease().Replica)
+					if tErr.Lease != nil {
+						ok = routing.UpdateLease(ctx, tErr.Lease)
+					} else if tErr.LeaseHolder != nil {
+						// tErr.LeaseHolder might be set when tErr.Lease isn't.
+						routing.UpdateLeaseholder(ctx, *tErr.LeaseHolder)
+						ok = true
+					}
+					// Move the new leaseholder to the head of the queue for the next
+					// retry. Note that the leaseholder might not be the one indicated by
+					// the NLHE we just received, in case that error carried stale info.
+					if lh := routing.Leaseholder(); lh != nil {
+						// If the leaseholder is the replica that we've just tried, and
+						// we've tried this replica a bunch of times already, let's move on
+						// and not try it again. This prevents us getting stuck on a replica
+						// that we think has the lease but keeps returning redirects to us
+						// (possibly because it hasn't applied its lease yet). Perhaps that
+						// lease expires and someone else gets a new one, so by moving on we
+						// get out of possibly infinite loops.
+						if *lh != curReplica || sameReplicaRetries < sameReplicaRetryLimit {
+							transport.MoveToFront(*lh)
+						}
 					}
 					// See if we want to backoff a little before the next attempt. If the lease info
 					// we got is stale, we backoff because it might be the case that there's a
@@ -1919,7 +2029,7 @@ func (ds *DistSender) sendToReplicas(
 				}
 			default:
 				if ambiguousError != nil {
-					return nil, roachpb.NewAmbiguousResultError(fmt.Sprintf("error=%s [propagate]", ambiguousError))
+					return nil, roachpb.NewAmbiguousResultErrorf("error=%s [propagate]", ambiguousError)
 				}
 
 				// The error received is likely not specific to this
@@ -1936,7 +2046,7 @@ func (ds *DistSender) sendToReplicas(
 			reportedErr := errors.Wrap(ctx.Err(), "context done during DistSender.Send")
 			log.Eventf(ctx, "%v", reportedErr)
 			if ambiguousError != nil {
-				return nil, roachpb.NewAmbiguousResultError(reportedErr.Error())
+				return nil, roachpb.NewAmbiguousResultErrorf(reportedErr.Error())
 			}
 			// Don't consider this a sendError, because sendErrors indicate that we
 			// were unable to reach a replica that could serve the request, and they
@@ -1944,47 +2054,52 @@ func (ds *DistSender) sendToReplicas(
 			// sender changed its mind or the request timed out.
 			return nil, errors.Wrap(ctx.Err(), "aborted during DistSender.Send")
 		}
+	}
+}
 
-		// Advance through the transport's replicas until we find one that's still
-		// part of routing.entry.Desc. The transport starts up initialized with
-		// routing's replica info, but routing can be updated as we go through the
-		// replicas, whereas transport isn't.
-		//
-		// TODO(andrei): The structure around here is no good; we're potentially
-		// updating routing with replicas that are not part of transport, and so
-		// those replicas will never be tried. Instead, we'll exhaust the transport
-		// and bubble up a SendError, which will cause a cache eviction and a new
-		// descriptor lookup potentially unnecessarily.
-		ds.metrics.NextReplicaErrCount.Inc(1)
-		lastErr := err
-		if err == nil {
-			lastErr = br.Error.GoError()
+func (ds *DistSender) maybeIncrementErrCounters(br *roachpb.BatchResponse, err error) {
+	if err == nil && br.Error == nil {
+		return
+	}
+	if err != nil {
+		ds.metrics.ErrCounts[roachpb.CommunicationErrType].Inc(1)
+	} else {
+		ds.metrics.ErrCounts[br.Error.GetDetail().Type()].Inc(1)
+	}
+}
+
+// skipStaleReplicas advances the transport until it's positioned on a replica
+// that's part of routing. This is called as the DistSender tries replicas one
+// by one, as the routing can be updated in the process and so the transport can
+// get out of date.
+//
+// It's valid to pass in an empty routing, in which case the transport will be
+// considered to be exhausted.
+//
+// Returns an error if the transport is exhausted.
+func skipStaleReplicas(
+	transport Transport, routing EvictionToken, ambiguousError error, lastErr error,
+) error {
+	// Check whether the range cache told us that the routing info we had is
+	// very out-of-date. If so, there's not much point in trying the other
+	// replicas in the transport; they'll likely all return
+	// RangeKeyMismatchError if there's even a replica. We'll bubble up an
+	// error and try with a new descriptor.
+	if !routing.Valid() {
+		return noMoreReplicasErr(
+			ambiguousError,
+			errors.Newf("routing information detected to be stale; lastErr: %s", lastErr))
+	}
+
+	for {
+		if transport.IsExhausted() {
+			return noMoreReplicasErr(ambiguousError, lastErr)
 		}
-		for {
-			if transport.IsExhausted() {
-				return nil, noMoreReplicasErr(ambiguousError, lastErr)
-			}
 
-			// Check whether the range cache told us that the routing info we had is
-			// very out-of-date. If so, there's not much point in trying the other
-			// replicas in the transport; they'll likely all return
-			// RangeKeyMismatchError if there's even a replica. We'll bubble up an
-			// error and try with a new descriptor.
-			if routing.Empty() {
-				return nil, noMoreReplicasErr(
-					ambiguousError,
-					errors.Newf("routing information detected to be stale; lastErr: %s", lastErr))
-			}
-
-			curReplica = transport.NextReplica()
-			if _, ok := routing.entry.Desc.GetReplicaDescriptorByID(curReplica.ReplicaID); ok {
-				break
-			} else {
-				transport.SkipReplica()
-			}
+		if _, ok := routing.Desc().GetReplicaDescriptorByID(transport.NextReplica().ReplicaID); ok {
+			return nil
 		}
-		log.VEventf(ctx, 2, "error: %v %v; trying next peer %s", br, err, curReplica.String())
-		br, err = transport.SendNext(ctx, ba)
+		transport.SkipReplica()
 	}
 }
 

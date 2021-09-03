@@ -21,11 +21,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/lex"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
@@ -43,6 +42,7 @@ func TestShowCreateTable(t *testing.T) {
 	defer s.Stopper().Stop(context.Background())
 
 	if _, err := sqlDB.Exec(`
+    SET CLUSTER SETTING sql.cross_db_fks.enabled = TRUE;
 		CREATE DATABASE d;
 		SET DATABASE = d;
 		CREATE TABLE items (
@@ -71,7 +71,7 @@ func TestShowCreateTable(t *testing.T) {
 	FAMILY "primary" (i, v, t, rowid),
 	FAMILY fam_1_s (s)
 )`,
-			expect: `CREATE TABLE %s (
+			expect: `CREATE TABLE public.%s (
 	i INT8 NULL,
 	s STRING NULL,
 	v FLOAT8 NOT NULL,
@@ -90,7 +90,7 @@ func TestShowCreateTable(t *testing.T) {
 	FAMILY "primary" (i, v, t, rowid),
 	FAMILY fam_1_s (s)
 )`,
-			expect: `CREATE TABLE %s (
+			expect: `CREATE TABLE public.%s (
 	i INT8 NULL,
 	s STRING NULL,
 	v FLOAT8 NOT NULL,
@@ -108,7 +108,7 @@ func TestShowCreateTable(t *testing.T) {
 	FAMILY "primary" (i, rowid),
 	FAMILY fam_1_s (s)
 )`,
-			expect: `CREATE TABLE %s (
+			expect: `CREATE TABLE public.%s (
 	i INT8 NULL,
 	s STRING NULL,
 	FAMILY "primary" (i, rowid),
@@ -120,7 +120,7 @@ func TestShowCreateTable(t *testing.T) {
 			stmt: `CREATE TABLE %s (
 	i INT8 PRIMARY KEY
 )`,
-			expect: `CREATE TABLE %s (
+			expect: `CREATE TABLE public.%s (
 	i INT8 NOT NULL,
 	CONSTRAINT "primary" PRIMARY KEY (i ASC),
 	FAMILY "primary" (i)
@@ -134,7 +134,7 @@ func TestShowCreateTable(t *testing.T) {
 				CREATE INDEX idx_if on %[1]s (f, i) STORING (s, d);
 				CREATE UNIQUE INDEX on %[1]s (d);
 			`,
-			expect: `CREATE TABLE %s (
+			expect: `CREATE TABLE public.%s (
 	i INT8 NULL,
 	f FLOAT8 NULL,
 	s STRING NULL,
@@ -151,6 +151,11 @@ func TestShowCreateTable(t *testing.T) {
 	CONSTRAINT "pri""mary" PRIMARY KEY ("te""st" ASC),
 	FAMILY "primary" ("te""st")
 )`,
+			expect: `CREATE TABLE public.%s (
+	"te""st" INT8 NOT NULL,
+	CONSTRAINT "pri""mary" PRIMARY KEY ("te""st" ASC),
+	FAMILY "primary" ("te""st")
+)`,
 		},
 		{
 			stmt: `CREATE TABLE %s (
@@ -158,7 +163,7 @@ func TestShowCreateTable(t *testing.T) {
 	b int8,
 	index c(a asc, b desc)
 )`,
-			expect: `CREATE TABLE %s (
+			expect: `CREATE TABLE public.%s (
 	a INT8 NULL,
 	b INT8 NULL,
 	INDEX c (a ASC, b DESC),
@@ -174,14 +179,12 @@ func TestShowCreateTable(t *testing.T) {
 	FOREIGN KEY (i, j) REFERENCES items (a, b),
 	k int REFERENCES items (c)
 )`,
-			expect: `CREATE TABLE %s (
+			expect: `CREATE TABLE public.%s (
 	i INT8 NULL,
 	j INT8 NULL,
 	k INT8 NULL,
-	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES items(a, b),
-	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES items(c),
-	INDEX %[1]s_auto_index_fk_i_ref_items (i ASC, j ASC),
-	INDEX %[1]s_auto_index_fk_k_ref_items (k ASC),
+	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES public.items(a, b),
+	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES public.items(c),
 	FAMILY "primary" (i, j, k, rowid)
 )`,
 		},
@@ -194,14 +197,12 @@ func TestShowCreateTable(t *testing.T) {
 	k int REFERENCES items (c) MATCH FULL,
 	FOREIGN KEY (i, j) REFERENCES items (a, b) MATCH FULL
 )`,
-			expect: `CREATE TABLE %s (
+			expect: `CREATE TABLE public.%s (
 	i INT8 NULL,
 	j INT8 NULL,
 	k INT8 NULL,
-	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES items(a, b) MATCH FULL,
-	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES items(c) MATCH FULL,
-	INDEX %[1]s_auto_index_fk_i_ref_items (i ASC, j ASC),
-	INDEX %[1]s_auto_index_fk_k_ref_items (k ASC),
+	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES public.items(a, b) MATCH FULL,
+	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES public.items(c) MATCH FULL,
 	FAMILY "primary" (i, j, k, rowid)
 )`,
 		},
@@ -212,10 +213,9 @@ func TestShowCreateTable(t *testing.T) {
 	x INT8,
 	CONSTRAINT fk_ref FOREIGN KEY (x) REFERENCES o.foo (x)
 )`,
-			expect: `CREATE TABLE %s (
+			expect: `CREATE TABLE public.%s (
 	x INT8 NULL,
 	CONSTRAINT fk_ref FOREIGN KEY (x) REFERENCES o.public.foo(x),
-	INDEX %[1]s_auto_index_fk_ref (x ASC),
 	FAMILY "primary" (x, rowid)
 )`,
 		},
@@ -228,14 +228,12 @@ func TestShowCreateTable(t *testing.T) {
 	FOREIGN KEY (i, j) REFERENCES items (a, b) ON DELETE SET DEFAULT,
 	k int8 REFERENCES items (c) ON DELETE SET NULL
 )`,
-			expect: `CREATE TABLE %s (
+			expect: `CREATE TABLE public.%s (
 	i INT8 NULL DEFAULT 123:::INT8,
 	j INT8 NULL DEFAULT 123:::INT8,
 	k INT8 NULL,
-	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES items(a, b) ON DELETE SET DEFAULT,
-	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES items(c) ON DELETE SET NULL,
-	INDEX %[1]s_auto_index_fk_i_ref_items (i ASC, j ASC),
-	INDEX %[1]s_auto_index_fk_k_ref_items (k ASC),
+	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES public.items(a, b) ON DELETE SET DEFAULT,
+	CONSTRAINT fk_k_ref_items FOREIGN KEY (k) REFERENCES public.items(c) ON DELETE SET NULL,
 	FAMILY "primary" (i, j, k, rowid)
 )`,
 		},
@@ -247,12 +245,12 @@ func TestShowCreateTable(t *testing.T) {
 	b INT8,
 	PRIMARY KEY (a, b)
 ) INTERLEAVE IN PARENT items (a, b)`,
-			expect: `CREATE TABLE %s (
+			expect: `CREATE TABLE public.%s (
 	a INT8 NOT NULL,
 	b INT8 NOT NULL,
 	CONSTRAINT "primary" PRIMARY KEY (a ASC, b ASC),
 	FAMILY "primary" (a, b)
-) INTERLEAVE IN PARENT items (a, b)`,
+) INTERLEAVE IN PARENT public.items (a, b)`,
 		},
 		// Check that INTERLEAVE dependencies outside of the current
 		// database are prefixed by their db name.
@@ -260,7 +258,7 @@ func TestShowCreateTable(t *testing.T) {
 			stmt: `CREATE TABLE %s (
 	x INT8 PRIMARY KEY
 ) INTERLEAVE IN PARENT o.foo (x)`,
-			expect: `CREATE TABLE %s (
+			expect: `CREATE TABLE public.%s (
 	x INT8 NOT NULL,
 	CONSTRAINT "primary" PRIMARY KEY (x ASC),
 	FAMILY "primary" (x)
@@ -277,15 +275,13 @@ func TestShowCreateTable(t *testing.T) {
 	FOREIGN KEY (i, j) REFERENCES items (a, b) MATCH SIMPLE ON DELETE SET DEFAULT,
 	FOREIGN KEY (k, l) REFERENCES items (a, b) MATCH FULL ON UPDATE CASCADE
 )`,
-			expect: `CREATE TABLE %s (
+			expect: `CREATE TABLE public.%s (
 	i INT8 NULL DEFAULT 1:::INT8,
 	j INT8 NULL DEFAULT 2:::INT8,
 	k INT8 NULL DEFAULT 3:::INT8,
 	l INT8 NULL DEFAULT 4:::INT8,
-	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES items(a, b) ON DELETE SET DEFAULT,
-	CONSTRAINT fk_k_ref_items FOREIGN KEY (k, l) REFERENCES items(a, b) MATCH FULL ON UPDATE CASCADE,
-	INDEX %[1]s_auto_index_fk_i_ref_items (i ASC, j ASC),
-	INDEX %[1]s_auto_index_fk_k_ref_items (k ASC, l ASC),
+	CONSTRAINT fk_i_ref_items FOREIGN KEY (i, j) REFERENCES public.items(a, b) ON DELETE SET DEFAULT,
+	CONSTRAINT fk_k_ref_items FOREIGN KEY (k, l) REFERENCES public.items(a, b) MATCH FULL ON UPDATE CASCADE,
 	FAMILY "primary" (i, j, k, l, rowid)
 )`,
 		},
@@ -357,35 +353,35 @@ func TestShowCreateView(t *testing.T) {
 	}{
 		{
 			`CREATE VIEW %s AS SELECT i, s, v, t FROM t`,
-			`CREATE VIEW %s (i, s, v, t) AS SELECT i, s, v, t FROM d.public.t`,
+			`CREATE VIEW public.%s (i, s, v, t) AS SELECT i, s, v, t FROM d.public.t`,
 		},
 		{
 			`CREATE VIEW %s AS SELECT i, s, t FROM t`,
-			`CREATE VIEW %s (i, s, t) AS SELECT i, s, t FROM d.public.t`,
+			`CREATE VIEW public.%s (i, s, t) AS SELECT i, s, t FROM d.public.t`,
 		},
 		{
 			`CREATE VIEW %s AS SELECT t.i, t.s, t.t FROM t`,
-			`CREATE VIEW %s (i, s, t) AS SELECT t.i, t.s, t.t FROM d.public.t`,
+			`CREATE VIEW public.%s (i, s, t) AS SELECT t.i, t.s, t.t FROM d.public.t`,
 		},
 		{
 			`CREATE VIEW %s AS SELECT foo.i, foo.s, foo.t FROM t AS foo WHERE foo.i > 3`,
-			`CREATE VIEW %s (i, s, t) AS SELECT foo.i, foo.s, foo.t FROM d.public.t AS foo WHERE foo.i > 3`,
+			`CREATE VIEW public.%s (i, s, t) AS SELECT foo.i, foo.s, foo.t FROM d.public.t AS foo WHERE foo.i > 3`,
 		},
 		{
 			`CREATE VIEW %s AS SELECT count(*) FROM t`,
-			`CREATE VIEW %s (count) AS SELECT count(*) FROM d.public.t`,
+			`CREATE VIEW public.%s (count) AS SELECT count(*) FROM d.public.t`,
 		},
 		{
 			`CREATE VIEW %s AS SELECT s, count(*) FROM t GROUP BY s HAVING count(*) > 3:::INT8`,
-			`CREATE VIEW %s (s, count) AS SELECT s, count(*) FROM d.public.t GROUP BY s HAVING count(*) > 3:::INT8`,
+			`CREATE VIEW public.%s (s, count) AS SELECT s, count(*) FROM d.public.t GROUP BY s HAVING count(*) > 3:::INT8`,
 		},
 		{
 			`CREATE VIEW %s (a, b, c, d) AS SELECT i, s, v, t FROM t`,
-			`CREATE VIEW %s (a, b, c, d) AS SELECT i, s, v, t FROM d.public.t`,
+			`CREATE VIEW public.%s (a, b, c, d) AS SELECT i, s, v, t FROM d.public.t`,
 		},
 		{
 			`CREATE VIEW %s (a, b) AS SELECT i, v FROM t`,
-			`CREATE VIEW %s (a, b) AS SELECT i, v FROM d.public.t`,
+			`CREATE VIEW public.%s (a, b) AS SELECT i, v FROM d.public.t`,
 		},
 	}
 	for i, test := range tests {
@@ -451,19 +447,19 @@ func TestShowCreateSequence(t *testing.T) {
 	}{
 		{
 			`CREATE SEQUENCE %s`,
-			`CREATE SEQUENCE %s MINVALUE 1 MAXVALUE 9223372036854775807 INCREMENT 1 START 1`,
+			`CREATE SEQUENCE public.%s MINVALUE 1 MAXVALUE 9223372036854775807 INCREMENT 1 START 1`,
 		},
 		{
 			`CREATE SEQUENCE %s INCREMENT BY 5`,
-			`CREATE SEQUENCE %s MINVALUE 1 MAXVALUE 9223372036854775807 INCREMENT 5 START 1`,
+			`CREATE SEQUENCE public.%s MINVALUE 1 MAXVALUE 9223372036854775807 INCREMENT 5 START 1`,
 		},
 		{
 			`CREATE SEQUENCE %s START WITH 5`,
-			`CREATE SEQUENCE %s MINVALUE 1 MAXVALUE 9223372036854775807 INCREMENT 1 START 5`,
+			`CREATE SEQUENCE public.%s MINVALUE 1 MAXVALUE 9223372036854775807 INCREMENT 1 START 5`,
 		},
 		{
 			`CREATE SEQUENCE %s INCREMENT 5 MAXVALUE 10000 START 10 MINVALUE 0`,
-			`CREATE SEQUENCE %s MINVALUE 0 MAXVALUE 10000 INCREMENT 5 START 10`,
+			`CREATE SEQUENCE public.%s MINVALUE 0 MAXVALUE 10000 INCREMENT 5 START 10`,
 		},
 	}
 	for i, test := range tests {
@@ -596,7 +592,7 @@ func TestShowQueries(t *testing.T) {
 		}
 	}
 
-	tc := serverutils.StartTestCluster(t, 2, /* numNodes */
+	tc := serverutils.StartNewTestCluster(t, 2, /* numNodes */
 		base.TestClusterArgs{
 			ReplicationMode: base.ReplicationManual,
 			ServerArgs: base.TestServerArgs{
@@ -663,7 +659,7 @@ func TestShowSessions(t *testing.T) {
 
 	var conn *gosql.DB
 
-	tc := serverutils.StartTestCluster(t, 2 /* numNodes */, base.TestClusterArgs{})
+	tc := serverutils.StartNewTestCluster(t, 2 /* numNodes */, base.TestClusterArgs{})
 	defer tc.Stopper().Stop(context.Background())
 
 	conn = tc.ServerConn(0)
@@ -673,7 +669,7 @@ func TestShowSessions(t *testing.T) {
 	var showSessions = fmt.Sprintf(`
 	select node_id, (now() - session_start)::float from
 		[show cluster sessions] where application_name not like '%s%%'
-	`, sqlbase.InternalAppNamePrefix)
+	`, catconstants.InternalAppNamePrefix)
 
 	rows, err := conn.Query(showSessions)
 	if err != nil {
@@ -779,71 +775,72 @@ func TestShowSessionPrivileges(t *testing.T) {
 	sqlDBroot := sqlutils.MakeSQLRunner(rawSQLDBroot)
 	defer s.Stopper().Stop(context.Background())
 
-	// Prepare a non-root session.
-	_ = sqlDBroot.Exec(t, `CREATE USER nonroot`)
-	pgURL := url.URL{
-		Scheme:   "postgres",
-		User:     url.User("nonroot"),
-		Host:     s.ServingSQLAddr(),
-		RawQuery: "sslmode=disable",
-	}
-	rawSQLDBnonroot, err := gosql.Open("postgres", pgURL.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rawSQLDBnonroot.Close()
-	sqlDBnonroot := sqlutils.MakeSQLRunner(rawSQLDBnonroot)
+	// Create three users: one with no special permissions, one with the
+	// VIEWACTIVITY role option, and one admin. We'll check that the VIEWACTIVITY
+	// users and the admin can see all sessions and the unpermissioned user can
+	// only see their own session.
+	_ = sqlDBroot.Exec(t, `CREATE USER noperms`)
+	_ = sqlDBroot.Exec(t, `CREATE USER viewactivity VIEWACTIVITY`)
+	_ = sqlDBroot.Exec(t, `CREATE USER adminuser`)
+	_ = sqlDBroot.Exec(t, `GRANT admin TO adminuser`)
 
-	// Ensure the non-root session is open.
-	sqlDBnonroot.Exec(t, `SELECT version()`)
+	type user struct {
+		username             string
+		canViewOtherSessions bool
+		sqlRunner            *sqlutils.SQLRunner
+	}
 
-	t.Run("root", func(t *testing.T) {
-		// Verify that the root session can use SHOW SESSIONS properly and
-		// can observe other sessions than its own.
-		rows := sqlDBroot.Query(t, `SELECT user_name FROM [SHOW CLUSTER SESSIONS]`)
-		defer rows.Close()
-		counts := map[string]int{}
-		for rows.Next() {
-			var userName string
-			if err := rows.Scan(&userName); err != nil {
-				t.Fatal(err)
-			}
-			counts[userName]++
+	users := []user{
+		{"noperms", false, nil},
+		{"viewactivity", true, nil},
+		{"adminuser", true, nil},
+	}
+	for i, tc := range users {
+		pgURL := url.URL{
+			Scheme:   "postgres",
+			User:     url.User(tc.username),
+			Host:     s.ServingSQLAddr(),
+			RawQuery: "sslmode=disable",
 		}
-		if err := rows.Err(); err != nil {
+		db, err := gosql.Open("postgres", pgURL.String())
+		if err != nil {
 			t.Fatal(err)
 		}
-		if counts[security.RootUser] == 0 {
-			t.Fatalf("root session is unable to see its own session: %+v", counts)
-		}
-		if counts["nonroot"] == 0 {
-			t.Fatal("root session is unable to see non-root session")
-		}
-	})
+		defer db.Close()
+		users[i].sqlRunner = sqlutils.MakeSQLRunner(db)
 
-	t.Run("non-root", func(t *testing.T) {
-		// Verify that the non-root session can use SHOW SESSIONS properly
-		// and cannot observe other sessions than its own.
-		rows := sqlDBnonroot.Query(t, `SELECT user_name FROM [SHOW CLUSTER SESSIONS]`)
-		defer rows.Close()
-		counts := map[string]int{}
-		for rows.Next() {
-			var userName string
-			if err := rows.Scan(&userName); err != nil {
+		// Ensure the session is open.
+		users[i].sqlRunner.Exec(t, `SELECT version()`)
+	}
+
+	for _, u := range users {
+		t.Run(u.username, func(t *testing.T) {
+			rows := u.sqlRunner.Query(t, `SELECT user_name FROM [SHOW CLUSTER SESSIONS]`)
+			defer rows.Close()
+			counts := map[string]int{}
+			for rows.Next() {
+				var userName string
+				if err := rows.Scan(&userName); err != nil {
+					t.Fatal(err)
+				}
+				counts[userName]++
+			}
+			if err := rows.Err(); err != nil {
 				t.Fatal(err)
 			}
-			counts[userName]++
-		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
-		}
-		if counts["nonroot"] == 0 {
-			t.Fatal("non-root session is unable to see its own session")
-		}
-		if len(counts) > 1 {
-			t.Fatalf("non-root session is able to see other sessions: %+v", counts)
-		}
-	})
+			for _, u2 := range users {
+				if u.canViewOtherSessions || u.username == u2.username {
+					if counts[u2.username] == 0 {
+						t.Fatalf(
+							"%s session is unable to see %s session: %+v", u.username, u2.username, counts)
+					}
+				} else if counts[u2.username] > 0 {
+					t.Fatalf(
+						"%s session should not be able to see %s session: %+v", u.username, u2.username, counts)
+				}
+			}
+		})
+	}
 }
 
 func TestLintClusterSettingNames(t *testing.T) {
@@ -939,6 +936,11 @@ func TestLintClusterSettingNames(t *testing.T) {
 				// TODO(knz): remove these cases when these settings are retired.
 				"timeseries.storage.10s_resolution_ttl": `timeseries.storage.10s_resolution_ttl: part "10s_resolution_ttl" has invalid structure`,
 				"timeseries.storage.30m_resolution_ttl": `timeseries.storage.30m_resolution_ttl: part "30m_resolution_ttl" has invalid structure`,
+
+				// sql.defaults.idle_in_session_timeout uses the _timeout suffix stay
+				// consistent with the corresponding session variable
+				// idle_in_session_timeout.
+				"sql.defaults.idle_in_session_timeout": `sql.defaults.idle_in_session_timeout: use ".timeout" instead of "_timeout"`,
 			}
 			expectedErr, found := grandFathered[varName]
 			if !found || expectedErr != nameErr.Error() {
@@ -958,7 +960,8 @@ func TestLintClusterSettingNames(t *testing.T) {
 			if strings.ToLower(desc[0:1]) != desc[0:1] {
 				t.Errorf("%s: description %q must not start with capital", varName, desc)
 			}
-			if strings.Contains(desc, ". ") != (desc[len(desc)-1] == '.') {
+			if sType != "e" && strings.Contains(desc, ". ") != (desc[len(desc)-1] == '.') {
+				// TODO(knz): this check doesn't work with the way enum values are added to their descriptions.
 				t.Errorf("%s: description %q must end with period if and only if it contains a secondary sentence", varName, desc)
 			}
 		}

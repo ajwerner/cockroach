@@ -12,9 +12,13 @@ package cloud
 
 import (
 	"context"
+	"database/sql/driver"
 	"io"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 )
 
 // This file is for interfaces only and should not contain any implementation
@@ -37,6 +41,14 @@ type ExternalStorage interface {
 	// Conf should return the serializable configuration required to reconstruct
 	// this ExternalStorage implementation.
 	Conf() roachpb.ExternalStorage
+
+	// ExternalIOConf should return the configuration containing several server
+	// configured options pertaining to an ExternalStorage implementation.
+	ExternalIOConf() base.ExternalIODirConfig
+
+	// Settings should return the cluster settings used to configure the
+	// ExternalStorage implementation.
+	Settings() *cluster.Settings
 
 	// ReadFile should return a Reader for requested name.
 	// ErrFileDoesNotExist is raised if `basename` cannot be located in storage.
@@ -71,4 +83,11 @@ type ExternalStorageFactory func(ctx context.Context, dest roachpb.ExternalStora
 
 // ExternalStorageFromURIFactory describes a factory function for ExternalStorage given a URI.
 type ExternalStorageFromURIFactory func(ctx context.Context, uri string,
-	user string) (ExternalStorage, error)
+	user security.SQLUsername) (ExternalStorage, error)
+
+// SQLConnI encapsulates the interfaces which will be implemented by the network
+// backed SQLConn which is used to interact with the userfile tables.
+type SQLConnI interface {
+	driver.QueryerContext
+	driver.ExecerContext
+}

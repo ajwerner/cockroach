@@ -16,9 +16,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/backfill"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
@@ -28,7 +29,7 @@ type columnBackfiller struct {
 
 	backfill.ColumnBackfiller
 
-	desc *sqlbase.ImmutableTableDescriptor
+	desc *tabledesc.Immutable
 }
 
 var _ execinfra.Processor = &columnBackfiller{}
@@ -42,8 +43,10 @@ func newColumnBackfiller(
 	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
 ) (*columnBackfiller, error) {
+	columnBackfillerMon := execinfra.NewMonitor(ctx, flowCtx.Cfg.BackfillerMonitor,
+		"column-backfill-mon")
 	cb := &columnBackfiller{
-		desc: sqlbase.NewImmutableTableDescriptor(spec.Table),
+		desc: tabledesc.NewImmutable(spec.Table),
 		backfiller: backfiller{
 			name:        "Column",
 			filter:      backfill.ColumnMutationFilter,
@@ -55,16 +58,18 @@ func newColumnBackfiller(
 	}
 	cb.backfiller.chunks = cb
 
-	evalCtx := cb.flowCtx.NewEvalCtx()
-	evalCtx.DB = cb.flowCtx.Cfg.DB
-	if err := cb.ColumnBackfiller.Init(ctx, evalCtx, cb.desc); err != nil {
+	if err := cb.ColumnBackfiller.InitForDistributedUse(ctx, flowCtx, cb.desc,
+		columnBackfillerMon); err != nil {
 		return nil, err
 	}
 
 	return cb, nil
 }
 
-func (cb *columnBackfiller) close(ctx context.Context) {}
+func (cb *columnBackfiller) close(ctx context.Context) {
+	cb.ColumnBackfiller.Close(ctx)
+}
+
 func (cb *columnBackfiller) prepare(ctx context.Context) error {
 	return nil
 }
@@ -78,7 +83,7 @@ func (cb *columnBackfiller) CurrentBufferFill() float32 {
 // runChunk implements the chunkBackfiller interface.
 func (cb *columnBackfiller) runChunk(
 	ctx context.Context,
-	mutations []sqlbase.DescriptorMutation,
+	mutations []descpb.DescriptorMutation,
 	sp roachpb.Span,
 	chunkSize int64,
 	readAsOf hlc.Timestamp,

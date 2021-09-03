@@ -25,10 +25,10 @@ statement ok
 CREATE TABLE bar (k INT PRIMARY KEY)
 
 # Verify that the table is indeed in "foo".
-query TTT
+query TTTTI
 SHOW TABLES FROM foo
 ----
-public  bar  table
+public  bar  table  root  0
 
 # Verify set to empty string.
 statement ok
@@ -40,14 +40,14 @@ SHOW database
 database
 ·
 
-statement error no database specified
+statement error no database or schema specified
 SHOW TABLES
 
 # Verify SHOW TABLES FROM works when there is no current database.
-query TTT
+query TTTTI
 SHOW TABLES FROM foo
 ----
-public  bar  table
+public  bar  table  root  0
 
 # SET statement succeeds, CREATE TABLE fails.
 statement error pgcode 42P07 relation \"bar\" already exists
@@ -60,10 +60,10 @@ database
 foo
 
 # SET succeeds
-query TTT
+query TTTTI
 SHOW TABLES from foo
 ----
-public  bar  table
+public  bar  table  root  0
 
 statement error invalid variable name: ""
 SET ROW (1, TRUE, NULL)
@@ -167,9 +167,6 @@ SET distsql = off
 
 statement error invalid value for parameter "distsql": "bogus"
 SET distsql = bogus
-
-statement ok
-SET vectorize = '201auto'
 
 statement ok
 SET vectorize = on
@@ -290,6 +287,25 @@ SHOW statement_timeout
 ----
 100
 
+# Set the statement timeout to something absurdly small, so that no query would
+# presumably be able to go through. It should still be possible to get out of
+# this "bad state" by resetting the statement timeout.
+subtest impossible_statement_timeout_recovery
+
+statement ok
+SET statement_timeout = '1us'
+
+statement error query execution canceled due to statement timeout
+SHOW statement_timeout
+
+statement ok
+SET statement_timeout = 0
+
+query T
+SHOW statement_timeout
+----
+0
+
 # Test that composite variable names get rejected properly, especially
 # when "tracing" is used as prefix.
 
@@ -355,3 +371,53 @@ statement ok
 SET experimental_distsql_planning = always;
 SET experimental_distsql_planning = on;
 SET experimental_distsql_planning = off
+
+subtest dummy_session_vars
+
+query T noticetrace
+SET synchronous_commit = off; SET enable_seqscan = false
+----
+WARNING: setting session var "synchronous_commit" is a no-op
+WARNING: setting session var "enable_seqscan" is a no-op
+
+query T colnames
+SHOW synchronous_commit
+----
+synchronous_commit
+off
+
+query T colnames
+SHOW enable_seqscan
+----
+enable_seqscan
+off
+
+query T noticetrace
+SET synchronous_commit = on; SET enable_seqscan = true
+----
+WARNING: setting session var "synchronous_commit" is a no-op
+WARNING: setting session var "enable_seqscan" is a no-op
+
+query T colnames
+SHOW synchronous_commit
+----
+synchronous_commit
+on
+
+query T colnames
+SHOW enable_seqscan
+----
+enable_seqscan
+on
+
+statement ok
+BEGIN
+
+statement ok
+SET TRANSACTION NOT DEFERRABLE
+
+statement error pq: unimplemented: DEFERRABLE transactions
+SET TRANSACTION DEFERRABLE
+
+statement ok
+rollback

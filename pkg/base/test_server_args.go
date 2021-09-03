@@ -12,6 +12,7 @@ package base
 
 import (
 	"context"
+	"net"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -44,10 +45,21 @@ type TestServerArgs struct {
 	// is always set to true when the server is started via a TestCluster.
 	PartOfCluster bool
 
+	// Listener (if nonempty) is the listener to use for all incoming RPCs.
+	// If a listener is installed, it informs the RPC `Addr` used below. The
+	// Server itself knows to close it out. This is useful for when a test wants
+	// manual control over how the join flags (`JoinAddr`) are populated, and
+	// installs listeners manually to know which addresses to point to.
+	Listener net.Listener
+
 	// Addr (if nonempty) is the RPC address to use for the test server.
 	Addr string
 	// SQLAddr (if nonempty) is the SQL address to use for the test server.
 	SQLAddr string
+	// TenantAddr is the tenant KV address to use for the test server. If this
+	// is nil, the tenant server will be set up using a random port. If this
+	// is the empty string, no tenant server will be set up.
+	TenantAddr *string
 	// HTTPAddr (if nonempty) is the HTTP address to use for the test server.
 	HTTPAddr string
 	// DisableTLSForHTTP if set, disables TLS for the HTTP interface.
@@ -89,6 +101,11 @@ type TestServerArgs struct {
 	SQLMemoryPoolSize           int64
 	CacheSize                   int64
 
+	// By default, test servers have AutoInitializeCluster=true set in
+	// their config. If NoAutoInitializeCluster is set, that behavior is disabled
+	// and the test becomes responsible for initializing the cluster.
+	NoAutoInitializeCluster bool
+
 	// If set, this will be appended to the Postgres URL by functions that
 	// automatically open a connection to the server. That's equivalent to running
 	// SET DATABASE=foo, which works even if the database doesn't (yet) exist.
@@ -108,6 +125,9 @@ type TestServerArgs struct {
 	// If set, web session authentication will be disabled, even if the server
 	// is running in secure mode.
 	DisableWebSessionAuthentication bool
+
+	// If set, testing specific descriptor validation will be disabled. even if the server
+	DisableTestingDescriptorValidation bool
 }
 
 // TestClusterArgs contains the parameters one can set when creating a test
@@ -132,6 +152,8 @@ type TestClusterArgs struct {
 	// map. The map's key is an index within TestCluster.Servers. If there is
 	// no entry in the map for a particular server, the default ServerArgs are
 	// used.
+	//
+	// These are indexes: the key 0 corresponds to the first node.
 	//
 	// A copy of an entry from this map will be copied to each individual server
 	// and potentially adjusted according to ReplicationMode.
@@ -171,6 +193,7 @@ func DefaultTestTempStorageConfigWithSize(
 	return TempStorageConfig{
 		InMemory: true,
 		Mon:      monitor,
+		Settings: st,
 	}
 }
 
@@ -198,7 +221,16 @@ const (
 // TestServer.
 type TestTenantArgs struct {
 	TenantID roachpb.TenantID
+
+	// Existing, if true, indicates an existing tenant, rather than a new tenant
+	// to be created by StartTenant.
+	Existing bool
+
 	// AllowSettingClusterSettings, if true, allows the tenant to set in-memory
 	// cluster settings.
 	AllowSettingClusterSettings bool
+
+	// TenantIDCodecOverride overrides the tenant ID used to construct the SQL
+	// server's codec, but nothing else (e.g. its certs). Used for testing.
+	TenantIDCodecOverride roachpb.TenantID
 }

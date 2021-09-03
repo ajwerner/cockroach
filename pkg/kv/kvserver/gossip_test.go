@@ -21,7 +21,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -144,12 +146,10 @@ func TestGossipHandlesReplacedNode(t *testing.T) {
 	defer log.Scope(t).Close(t)
 
 	// Skipping as part of test-infra-team flaky test cleanup.
-	t.Skip("https://github.com/cockroachdb/cockroach/issues/50024")
+	skip.WithIssue(t, 50024)
 
-	if testing.Short() {
-		// As of Nov 2018 it takes 3.6s.
-		t.Skip("short")
-	}
+	// As of Nov 2018 it takes 3.6s.
+	skip.UnderShort(t)
 	ctx := context.Background()
 
 	// Shorten the raft tick interval and election timeout to make range leases
@@ -182,9 +182,9 @@ func TestGossipHandlesReplacedNode(t *testing.T) {
 	newServerArgs.JoinAddr = tc.Servers[1].ServingRPCAddr()
 	log.Infof(ctx, "stopping server %d", oldNodeIdx)
 	tc.StopServer(oldNodeIdx)
-	tc.AddServer(t, newServerArgs)
+	tc.AddAndStartServer(t, newServerArgs)
 
-	tc.WaitForStores(t, tc.Server(1).GossipI().(*gossip.Gossip))
+	tc.WaitForNStores(t, tc.NumServers(), tc.Server(1).GossipI().(*gossip.Gossip))
 
 	// Ensure that all servers still running are responsive. If the two remaining
 	// original nodes don't refresh their connection to the address of the first
@@ -218,14 +218,14 @@ func TestGossipAfterAbortOfSystemConfigTransactionAfterFailureDueToIntents(t *te
 	txA := db.NewTxn(ctx, "a")
 	txB := db.NewTxn(ctx, "b")
 
-	require.NoError(t, txA.SetSystemConfigTrigger())
-	db1000 := sqlbase.NewInitialDatabaseDescriptor(1000, "1000")
+	require.NoError(t, txA.SetSystemConfigTrigger(true /* forSystemTenant */))
+	db1000 := dbdesc.NewInitial(1000, "1000", security.AdminRoleName())
 	require.NoError(t, txA.Put(ctx,
 		keys.SystemSQLCodec.DescMetadataKey(1000),
 		db1000.DescriptorProto()))
 
-	require.NoError(t, txB.SetSystemConfigTrigger())
-	db2000 := sqlbase.NewInitialDatabaseDescriptor(2000, "2000")
+	require.NoError(t, txB.SetSystemConfigTrigger(true /* forSystemTenant */))
+	db2000 := dbdesc.NewInitial(2000, "2000", security.AdminRoleName())
 	require.NoError(t, txB.Put(ctx,
 		keys.SystemSQLCodec.DescMetadataKey(2000),
 		db2000.DescriptorProto()))

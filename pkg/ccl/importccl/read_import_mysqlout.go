@@ -16,9 +16,11 @@ import (
 	"unicode"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/errors"
@@ -36,7 +38,8 @@ func newMysqloutfileReader(
 	kvCh chan row.KVBatch,
 	walltime int64,
 	parallelism int,
-	tableDesc *sqlbase.TableDescriptor,
+	tableDesc *tabledesc.Immutable,
+	targetCols tree.NameList,
 	evalCtx *tree.EvalContext,
 ) (*mysqloutfileReader, error) {
 	return &mysqloutfileReader{
@@ -45,6 +48,7 @@ func newMysqloutfileReader(
 			numWorkers: parallelism,
 			evalCtx:    evalCtx,
 			tableDesc:  tableDesc,
+			targetCols: targetCols,
 			kvCh:       kvCh,
 		},
 		opts: opts,
@@ -60,7 +64,7 @@ func (d *mysqloutfileReader) readFiles(
 	resumePos map[int32]int64,
 	format roachpb.IOFileFormat,
 	makeExternalStorage cloud.ExternalStorageFactory,
-	user string,
+	user security.SQLUsername,
 ) error {
 	return readInputFiles(ctx, dataFiles, resumePos, format, d.readFile, makeExternalStorage, user)
 }
@@ -244,7 +248,7 @@ func (d *delimitedConsumer) FillDatums(
 			// function expects, and the difference between ParseStringAs and
 			// ParseDatumStringAs is whether or not it attempts to parse bytes.
 			var err error
-			datum, err = sqlbase.ParseDatumStringAsWithRawBytes(conv.VisibleColTypes[datumIdx], field, conv.EvalCtx)
+			datum, err = rowenc.ParseDatumStringAsWithRawBytes(conv.VisibleColTypes[datumIdx], field, conv.EvalCtx)
 			if err != nil {
 				col := conv.VisibleCols[datumIdx]
 				return newImportRowError(

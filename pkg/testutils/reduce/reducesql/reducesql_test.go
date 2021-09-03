@@ -22,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/testutils/reduce"
 	"github.com/cockroachdb/cockroach/pkg/testutils/reduce/reducesql"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/jackc/pgx"
 )
 
@@ -29,7 +30,7 @@ var printUnknown = flag.Bool("unknown", false, "print unknown types during walk"
 
 func TestReduceSQL(t *testing.T) {
 	// These take a bit too long to need to run every time.
-	t.Skip("unnecessary")
+	skip.IgnoreLint(t, "unnecessary")
 	reducesql.LogUnknown = *printUnknown
 
 	reduce.Walk(t, "testdata", reducesql.Pretty, isInterestingSQL, reduce.ModeInteresting, reducesql.SQLPasses)
@@ -40,18 +41,18 @@ func isInterestingSQL(contains string) reduce.InterestingFn {
 		args := base.TestServerArgs{
 			Insecure: true,
 		}
-		server := server.TestServerFactory.New(args).(*server.TestServer)
-		if err := server.Start(args); err != nil {
+		serv := server.TestServerFactory.New(args).(*server.TestServer)
+		if err := serv.Start(); err != nil {
 			panic(err)
 		}
-		defer server.Stopper().Stop(ctx)
+		defer serv.Stopper().Stop(ctx)
 
 		options := url.Values{}
 		options.Add("sslmode", "disable")
 		url := url.URL{
 			Scheme:   "postgres",
 			User:     url.User(security.RootUser),
-			Host:     server.ServingSQLAddr(),
+			Host:     serv.ServingSQLAddr(),
 			RawQuery: options.Encode(),
 		}
 

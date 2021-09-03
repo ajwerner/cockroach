@@ -25,8 +25,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts/ptpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
@@ -56,7 +57,7 @@ func TestJobsProtectedTimestamp(t *testing.T) {
 		return jobs.Record{
 			Description: "testing",
 			Statement:   "SELECT 1",
-			Username:    "root",
+			Username:    security.RootUserName(),
 			Details: jobspb.SchemaChangeGCDetails{
 				Tables: []jobspb.SchemaChangeGCDetails_DroppedID{
 					{
@@ -66,7 +67,7 @@ func TestJobsProtectedTimestamp(t *testing.T) {
 				},
 			},
 			Progress:      jobspb.SchemaChangeGCProgress{},
-			DescriptorIDs: []sqlbase.ID{42},
+			DescriptorIDs: []descpb.ID{42},
 		}
 	}
 	mkJobAndRecord := func() (j *jobs.Job, rec *ptpb.Record) {

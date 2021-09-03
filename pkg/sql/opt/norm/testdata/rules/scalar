@@ -1,5 +1,5 @@
 exec-ddl
-CREATE TABLE a (k INT PRIMARY KEY, i INT, f FLOAT, s STRING, j JSON, arr int[])
+CREATE TABLE a (k INT PRIMARY KEY, i INT, f FLOAT, s STRING, arr int[])
 ----
 
 exec-ddl
@@ -177,10 +177,10 @@ project
  ├── columns: c1:7 c2:8 c3:9!null c4:10 c5:11
  ├── fd: ()-->(9,10)
  ├── scan a
- │    └── columns: i:2 s:4 arr:6
+ │    └── columns: i:2 s:4 arr:5
  └── projections
       ├── i:2 [as=c1:7, outer=(2)]
-      ├── arr:6 [as=c2:8, outer=(6)]
+      ├── arr:5 [as=c2:8, outer=(5)]
       ├── '[1, 2]' [as=c3:9]
       ├── CAST(NULL AS BIT) [as=c4:10]
       └── s:4 [as=c5:11, outer=(4)]
@@ -202,10 +202,10 @@ project
  ├── columns: i:7 arr:8 s:9 s:10 i:11 s:12 array:13 array:14
  ├── stable
  ├── scan a
- │    └── columns: a.i:2 a.s:4 a.arr:6
+ │    └── columns: a.i:2 a.s:4 a.arr:5
  └── projections
       ├── a.i:2::FLOAT8 [as=i:7, outer=(2), immutable]
-      ├── a.arr:6::DECIMAL[] [as=arr:8, outer=(6), immutable]
+      ├── a.arr:5::DECIMAL[] [as=arr:8, outer=(5), immutable]
       ├── a.s:4::JSONB [as=s:9, outer=(4), immutable]
       ├── a.s:4::VARCHAR(2) [as=s:10, outer=(4), immutable]
       ├── a.i:2::INT2::INT8 [as=i:11, outer=(2), immutable]
@@ -292,13 +292,13 @@ norm expect=EliminateExistsProject
 SELECT * FROM a WHERE EXISTS(SELECT i+1, i*k FROM a)
 ----
 select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ ├── columns: k:1!null i:2 f:3 s:4 arr:5
  ├── key: (1)
- ├── fd: (1)-->(2-6)
+ ├── fd: (1)-->(2-5)
  ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ │    ├── columns: k:1!null i:2 f:3 s:4 arr:5
  │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
+ │    └── fd: (1)-->(2-5)
  └── filters
       └── exists [subquery]
            └── limit
@@ -322,13 +322,13 @@ norm expect-not=EliminateExistsGroupBy
 SELECT * FROM a WHERE EXISTS(SELECT max(s) FROM a WHERE False)
 ----
 select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ ├── columns: k:1!null i:2 f:3 s:4 arr:5
  ├── key: (1)
- ├── fd: (1)-->(2-6)
+ ├── fd: (1)-->(2-5)
  ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ │    ├── columns: k:1!null i:2 f:3 s:4 arr:5
  │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
+ │    └── fd: (1)-->(2-5)
  └── filters
       └── exists [subquery]
            └── scalar-group-by
@@ -349,13 +349,13 @@ norm expect=EliminateExistsGroupBy
 SELECT * FROM a WHERE EXISTS(SELECT DISTINCT s FROM a)
 ----
 select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ ├── columns: k:1!null i:2 f:3 s:4 arr:5
  ├── key: (1)
- ├── fd: (1)-->(2-6)
+ ├── fd: (1)-->(2-5)
  ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ │    ├── columns: k:1!null i:2 f:3 s:4 arr:5
  │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
+ │    └── fd: (1)-->(2-5)
  └── filters
       └── exists [subquery]
            └── limit
@@ -372,13 +372,13 @@ norm expect=EliminateExistsGroupBy
 SELECT * FROM a WHERE EXISTS(SELECT DISTINCT ON (i) s FROM a)
 ----
 select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ ├── columns: k:1!null i:2 f:3 s:4 arr:5
  ├── key: (1)
- ├── fd: (1)-->(2-6)
+ ├── fd: (1)-->(2-5)
  ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ │    ├── columns: k:1!null i:2 f:3 s:4 arr:5
  │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
+ │    └── fd: (1)-->(2-5)
  └── filters
       └── exists [subquery]
            └── limit
@@ -396,13 +396,13 @@ norm expect-not=EliminateExistsGroupBy
 SELECT * FROM a WHERE EXISTS(SELECT (SELECT y FROM xy WHERE y=k) FROM a)
 ----
 select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ ├── columns: k:1!null i:2 f:3 s:4 arr:5
  ├── key: (1)
- ├── fd: (1)-->(2-6)
+ ├── fd: (1)-->(2-5)
  ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ │    ├── columns: k:1!null i:2 f:3 s:4 arr:5
  │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
+ │    └── fd: (1)-->(2-5)
  └── filters
       └── exists [subquery]
            └── limit
@@ -439,13 +439,13 @@ norm expect=(EliminateExistsGroupBy,EliminateExistsProject)
 SELECT * FROM a WHERE EXISTS(SELECT max(s) FROM a GROUP BY i)
 ----
 select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ ├── columns: k:1!null i:2 f:3 s:4 arr:5
  ├── key: (1)
- ├── fd: (1)-->(2-6)
+ ├── fd: (1)-->(2-5)
  ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ │    ├── columns: k:1!null i:2 f:3 s:4 arr:5
  │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
+ │    └── fd: (1)-->(2-5)
  └── filters
       └── exists [subquery]
            └── limit
@@ -465,13 +465,13 @@ norm expect=IntroduceExistsLimit
 SELECT * FROM a WHERE EXISTS(SELECT i FROM a)
 ----
 select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ ├── columns: k:1!null i:2 f:3 s:4 arr:5
  ├── key: (1)
- ├── fd: (1)-->(2-6)
+ ├── fd: (1)-->(2-5)
  ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ │    ├── columns: k:1!null i:2 f:3 s:4 arr:5
  │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
+ │    └── fd: (1)-->(2-5)
  └── filters
       └── exists [subquery]
            └── limit
@@ -489,14 +489,14 @@ norm expect-not=IntroduceExistsLimit
 SELECT * FROM a a1 WHERE EXISTS(SELECT i FROM a a2 where a1.i = a2.i)
 ----
 semi-join (hash)
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ ├── columns: k:1!null i:2 f:3 s:4 arr:5
  ├── key: (1)
- ├── fd: (1)-->(2-6)
- ├── scan a1
- │    ├── columns: a1.k:1!null a1.i:2 a1.f:3 a1.s:4 a1.j:5 a1.arr:6
+ ├── fd: (1)-->(2-5)
+ ├── scan a [as=a1]
+ │    ├── columns: a1.k:1!null a1.i:2 a1.f:3 a1.s:4 a1.arr:5
  │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
- ├── scan a2
+ │    └── fd: (1)-->(2-5)
+ ├── scan a [as=a2]
  │    └── columns: a2.i:8
  └── filters
       └── a1.i:2 = a2.i:8 [outer=(2,8), constraints=(/2: (/NULL - ]; /8: (/NULL - ]), fd=(2)==(8), (8)==(2)]
@@ -506,13 +506,13 @@ norm expect-not=IntroduceExistsLimit
 SELECT * FROM a WHERE EXISTS(SELECT * FROM (VALUES (1)))
 ----
 select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ ├── columns: k:1!null i:2 f:3 s:4 arr:5
  ├── key: (1)
- ├── fd: (1)-->(2-6)
+ ├── fd: (1)-->(2-5)
  ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ │    ├── columns: k:1!null i:2 f:3 s:4 arr:5
  │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
+ │    └── fd: (1)-->(2-5)
  └── filters
       └── exists [subquery]
            └── values
@@ -529,14 +529,14 @@ norm expect=EliminateExistsLimit
 SELECT * FROM a a1 WHERE EXISTS(SELECT i FROM a a2 where a1.i = a2.i LIMIT 1)
 ----
 semi-join (hash)
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ ├── columns: k:1!null i:2 f:3 s:4 arr:5
  ├── key: (1)
- ├── fd: (1)-->(2-6)
- ├── scan a1
- │    ├── columns: a1.k:1!null a1.i:2 a1.f:3 a1.s:4 a1.j:5 a1.arr:6
+ ├── fd: (1)-->(2-5)
+ ├── scan a [as=a1]
+ │    ├── columns: a1.k:1!null a1.i:2 a1.f:3 a1.s:4 a1.arr:5
  │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
- ├── scan a2
+ │    └── fd: (1)-->(2-5)
+ ├── scan a [as=a2]
  │    └── columns: a2.i:8
  └── filters
       └── a1.i:2 = a2.i:8 [outer=(2,8), constraints=(/2: (/NULL - ]; /8: (/NULL - ]), fd=(2)==(8), (8)==(2)]
@@ -545,14 +545,14 @@ norm expect=EliminateExistsLimit
 SELECT * FROM a a1 WHERE NOT EXISTS(SELECT i FROM a a2 where a1.i = a2.i LIMIT 1)
 ----
 anti-join (hash)
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ ├── columns: k:1!null i:2 f:3 s:4 arr:5
  ├── key: (1)
- ├── fd: (1)-->(2-6)
- ├── scan a1
- │    ├── columns: a1.k:1!null a1.i:2 a1.f:3 a1.s:4 a1.j:5 a1.arr:6
+ ├── fd: (1)-->(2-5)
+ ├── scan a [as=a1]
+ │    ├── columns: a1.k:1!null a1.i:2 a1.f:3 a1.s:4 a1.arr:5
  │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
- ├── scan a2
+ │    └── fd: (1)-->(2-5)
+ ├── scan a [as=a2]
  │    └── columns: a2.i:8
  └── filters
       └── a1.i:2 = a2.i:8 [outer=(2,8), constraints=(/2: (/NULL - ]; /8: (/NULL - ]), fd=(2)==(8), (8)==(2)]
@@ -562,134 +562,36 @@ norm expect-not=EliminateExistsLimit
 SELECT * FROM a a1 WHERE EXISTS(SELECT i FROM a a2 where a1.i = a2.i LIMIT 0)
 ----
 values
- ├── columns: k:1!null i:2!null f:3!null s:4!null j:5!null arr:6!null
+ ├── columns: k:1!null i:2!null f:3!null s:4!null arr:5!null
  ├── cardinality: [0 - 0]
  ├── key: ()
- └── fd: ()-->(1-6)
+ └── fd: ()-->(1-5)
 
 # Don't eliminate a limit from a non-correlated subquery.
 norm expect-not=EliminateExistsLimit
 SELECT * FROM a WHERE EXISTS(SELECT * FROM a LIMIT 1)
 ----
 select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ ├── columns: k:1!null i:2 f:3 s:4 arr:5
  ├── key: (1)
- ├── fd: (1)-->(2-6)
+ ├── fd: (1)-->(2-5)
  ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
+ │    ├── columns: k:1!null i:2 f:3 s:4 arr:5
  │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
+ │    └── fd: (1)-->(2-5)
  └── filters
       └── exists [subquery]
            └── limit
-                ├── columns: k:7!null i:8 f:9 s:10 j:11 arr:12
+                ├── columns: k:7!null i:8 f:9 s:10 arr:11
                 ├── cardinality: [0 - 1]
                 ├── key: ()
-                ├── fd: ()-->(7-12)
+                ├── fd: ()-->(7-11)
                 ├── scan a
-                │    ├── columns: k:7!null i:8 f:9 s:10 j:11 arr:12
+                │    ├── columns: k:7!null i:8 f:9 s:10 arr:11
                 │    ├── key: (7)
-                │    ├── fd: (7)-->(8-12)
+                │    ├── fd: (7)-->(8-11)
                 │    └── limit hint: 1.00
                 └── 1
-
-# --------------------------------------------------
-# NormalizeJSONFieldAccess
-# --------------------------------------------------
-norm expect=NormalizeJSONFieldAccess
-SELECT * FROM a WHERE j->'a' = '"b"'::JSON
-----
-select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
- ├── immutable
- ├── key: (1)
- ├── fd: (1)-->(2-6)
- ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
- │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
- └── filters
-      └── j:5 @> '{"a": "b"}' [outer=(5), immutable]
-
-norm expect=NormalizeJSONFieldAccess
-SELECT * FROM a WHERE j->'a'->'x' = '"b"'::JSON
-----
-select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
- ├── immutable
- ├── key: (1)
- ├── fd: (1)-->(2-6)
- ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
- │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
- └── filters
-      └── j:5 @> '{"a": {"x": "b"}}' [outer=(5), immutable]
-
-# The transformation is not valid in this case.
-norm expect-not=NormalizeJSONFieldAccess
-SELECT * FROM a WHERE j->2 = '"b"'::JSON
-----
-select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
- ├── immutable
- ├── key: (1)
- ├── fd: (1)-->(2-6)
- ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
- │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
- └── filters
-      └── (j:5->2) = '"b"' [outer=(5), immutable]
-
-# The transformation is not valid in this case, since j->'a' could be an array.
-norm expect-not=NormalizeJSONFieldAccess
-SELECT * FROM a WHERE j->'a' @> '"b"'::JSON
-----
-select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
- ├── immutable
- ├── key: (1)
- ├── fd: (1)-->(2-6)
- ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
- │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
- └── filters
-      └── (j:5->'a') @> '"b"' [outer=(5), immutable]
-
-# The transformation is not valid in this case, since containment doesn't imply
-# equality for non-scalars.
-norm
-SELECT j->'a' = '["b"]'::JSON, j->'a' = '{"b": "c"}'::JSON FROM a
-----
-project
- ├── columns: "?column?":7 "?column?":8
- ├── immutable
- ├── scan a
- │    └── columns: j:5
- └── projections
-      ├── (j:5->'a') = '["b"]' [as="?column?":7, outer=(5), immutable]
-      └── (j:5->'a') = '{"b": "c"}' [as="?column?":8, outer=(5), immutable]
-
-# --------------------------------------------------
-# NormalizeJSONContains
-# --------------------------------------------------
-
-norm expect=NormalizeJSONContains
-SELECT * FROM a WHERE j->'a' @> '{"x": "b"}'::JSON
-----
-select
- ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
- ├── immutable
- ├── key: (1)
- ├── fd: (1)-->(2-6)
- ├── scan a
- │    ├── columns: k:1!null i:2 f:3 s:4 j:5 arr:6
- │    ├── key: (1)
- │    └── fd: (1)-->(2-6)
- └── filters
-      └── j:5 @> '{"a": {"x": "b"}}' [outer=(5), immutable]
 
 # --------------------------------------------------
 # SimplifyCaseWhenConstValue
@@ -1024,7 +926,7 @@ SELECT k FROM e WHERE i IS NOT DISTINCT FROM NULL::FLOAT
 project
  ├── columns: k:1(int!null)
  ├── stats: [rows=10]
- ├── cost: 10.52
+ ├── cost: 14.52
  ├── key: (1)
  ├── prune: (1)
  ├── interesting orderings: (+1)
@@ -1032,7 +934,7 @@ project
       ├── columns: t.public.e.k:1(int!null) t.public.e.i:2(int)
       ├── constraint: /2/1: [/NULL - /NULL]
       ├── stats: [rows=10, distinct(2)=1, null(2)=10]
-      ├── cost: 10.41
+      ├── cost: 14.41
       ├── key: (1)
       ├── fd: ()-->(2)
       ├── prune: (1)
@@ -1044,7 +946,7 @@ SELECT k FROM e WHERE i IS DISTINCT FROM NULL::FLOAT
 project
  ├── columns: k:1(int!null)
  ├── stats: [rows=990]
- ├── cost: 1039.52
+ ├── cost: 1043.52
  ├── key: (1)
  ├── prune: (1)
  ├── interesting orderings: (+1)
@@ -1052,7 +954,7 @@ project
       ├── columns: t.public.e.k:1(int!null) t.public.e.i:2(int!null)
       ├── constraint: /2/1: (/NULL - ]
       ├── stats: [rows=990, distinct(2)=100, null(2)=0]
-      ├── cost: 1029.61
+      ├── cost: 1033.61
       ├── key: (1)
       ├── fd: (1)-->(2)
       ├── prune: (1)
@@ -1090,7 +992,7 @@ project
       │    ├── key: (1)
       │    └── fd: (1)-->(4)
       └── filters
-           └── tz:4 > '2017-11-12 07:35:01+00:00' [outer=(4), stable, constraints=(/4: (/NULL - ])]
+           └── tz:4 > '2017-11-12 07:35:01' [outer=(4), stable, constraints=(/4: (/NULL - ])]
 
 opt expect=UnifyComparisonTypes
 SELECT k FROM e WHERE tz > '2017-11-12 07:35:01+00:00'::TIMESTAMP
@@ -1138,7 +1040,7 @@ project
       │    ├── key: (1)
       │    └── fd: (1)-->(5)
       └── filters
-           └── d:5 < '2018-07-08 00:00:01+00:00' [outer=(5), immutable, constraints=(/5: (/NULL - ])]
+           └── d:5 < '2018-07-08 00:00:01' [outer=(5), immutable, constraints=(/5: (/NULL - ])]
 
 # NULL value.
 opt
@@ -1451,7 +1353,7 @@ project
  │    │    ├── multiplicity: left-rows(exactly-one), right-rows(exactly-one)
  │    │    ├── key: (7)
  │    │    ├── fd: (1)==(7), (7)==(1)
- │    │    ├── scan b
+ │    │    ├── scan a [as=b]
  │    │    │    ├── columns: b.k:1!null
  │    │    │    └── key: (1)
  │    │    ├── scan a
@@ -1486,10 +1388,9 @@ project
  │    │    ├── ordering: +7 opt(8) [actual: +7]
  │    │    └── left-join (hash)
  │    │         ├── columns: b.k:1!null b.i:2 a.k:7 a.i:8
- │    │         ├── multiplicity: left-rows(one-or-more), right-rows(zero-or-more)
  │    │         ├── key: (1,7)
  │    │         ├── fd: (1)-->(2), (7)-->(8)
- │    │         ├── scan b
+ │    │         ├── scan a [as=b]
  │    │         │    ├── columns: b.k:1!null b.i:2
  │    │         │    ├── key: (1)
  │    │         │    └── fd: (1)-->(2)
@@ -1572,14 +1473,14 @@ project
  │    │    ├── multiplicity: left-rows(exactly-one), right-rows(exactly-one)
  │    │    ├── key: (7)
  │    │    ├── fd: ()-->(19,22), (1)==(7), (7)==(1)
- │    │    ├── scan c
+ │    │    ├── scan a [as=c]
  │    │    │    ├── columns: c.k:1!null
  │    │    │    └── key: (1)
  │    │    ├── project
  │    │    │    ├── columns: canary:22!null array:19 b.k:7!null
  │    │    │    ├── key: (7)
  │    │    │    ├── fd: ()-->(19,22)
- │    │    │    ├── scan b
+ │    │    │    ├── scan a [as=b]
  │    │    │    │    ├── columns: b.k:7!null
  │    │    │    │    └── key: (7)
  │    │    │    └── projections
@@ -1615,7 +1516,7 @@ project
  │    │    ├── columns: c.k:1!null array:20 canary:24
  │    │    ├── key: (1)
  │    │    ├── fd: (1)-->(20,24)
- │    │    ├── scan c
+ │    │    ├── scan a [as=c]
  │    │    │    ├── columns: c.k:1!null
  │    │    │    └── key: (1)
  │    │    ├── project
@@ -1643,7 +1544,7 @@ project
  │    │    │    │    │    │    ├── cardinality: [0 - 1]
  │    │    │    │    │    │    ├── key: ()
  │    │    │    │    │    │    ├── fd: ()-->(7)
- │    │    │    │    │    │    ├── scan b
+ │    │    │    │    │    │    ├── scan a [as=b]
  │    │    │    │    │    │    │    ├── columns: b.k:7!null
  │    │    │    │    │    │    │    └── key: (7)
  │    │    │    │    │    │    └── filters
@@ -1739,75 +1640,75 @@ SELECT (
 FROM pg_class AS rel
 ----
 project
- ├── columns: array:66
+ ├── columns: array:69
  ├── inner-join-apply
- │    ├── columns: rel.oid:1 array_agg:63 array:64
- │    ├── scan rel
+ │    ├── columns: rel.oid:1 array_agg:66 array:67
+ │    ├── scan pg_class [as=rel]
  │    │    └── columns: rel.oid:1
  │    ├── inner-join-apply
- │    │    ├── columns: array_agg:63 array:64
+ │    │    ├── columns: array_agg:66 array:67
  │    │    ├── outer: (1)
  │    │    ├── cardinality: [1 - 1]
  │    │    ├── key: ()
- │    │    ├── fd: ()-->(63,64)
+ │    │    ├── fd: ()-->(66,67)
  │    │    ├── project
- │    │    │    ├── columns: array_agg:63
+ │    │    │    ├── columns: array_agg:66
  │    │    │    ├── outer: (1)
  │    │    │    ├── cardinality: [1 - 1]
  │    │    │    ├── key: ()
- │    │    │    ├── fd: ()-->(63)
+ │    │    │    ├── fd: ()-->(66)
  │    │    │    ├── group-by
- │    │    │    │    ├── columns: inhrelid:30 array_agg:65
- │    │    │    │    ├── internal-ordering: +32 opt(30)
+ │    │    │    │    ├── columns: inhrelid:31 array_agg:68
+ │    │    │    │    ├── internal-ordering: +33 opt(31)
  │    │    │    │    ├── outer: (1)
  │    │    │    │    ├── cardinality: [1 - 1]
  │    │    │    │    ├── key: ()
- │    │    │    │    ├── fd: ()-->(30,65)
+ │    │    │    │    ├── fd: ()-->(31,68)
  │    │    │    │    ├── sort
- │    │    │    │    │    ├── columns: inhrelid:30 inhparent:31 inhseqno:32 c.oid:34 c.relname:35
+ │    │    │    │    │    ├── columns: inhrelid:31 inhparent:32 inhseqno:33 c.oid:36 c.relname:37
  │    │    │    │    │    ├── outer: (1)
  │    │    │    │    │    ├── cardinality: [1 - ]
- │    │    │    │    │    ├── fd: (31)==(34), (34)==(31)
- │    │    │    │    │    ├── ordering: +32 opt(30) [actual: +32]
+ │    │    │    │    │    ├── fd: (32)==(36), (36)==(32)
+ │    │    │    │    │    ├── ordering: +33 opt(31) [actual: +33]
  │    │    │    │    │    └── left-join (cross)
- │    │    │    │    │         ├── columns: inhrelid:30 inhparent:31 inhseqno:32 c.oid:34 c.relname:35
+ │    │    │    │    │         ├── columns: inhrelid:31 inhparent:32 inhseqno:33 c.oid:36 c.relname:37
  │    │    │    │    │         ├── outer: (1)
  │    │    │    │    │         ├── cardinality: [1 - ]
  │    │    │    │    │         ├── multiplicity: left-rows(one-or-more), right-rows(zero-or-one)
- │    │    │    │    │         ├── fd: (31)==(34), (34)==(31)
+ │    │    │    │    │         ├── fd: (32)==(36), (36)==(32)
  │    │    │    │    │         ├── values
  │    │    │    │    │         │    ├── cardinality: [1 - 1]
  │    │    │    │    │         │    ├── key: ()
  │    │    │    │    │         │    └── ()
  │    │    │    │    │         ├── inner-join (hash)
- │    │    │    │    │         │    ├── columns: inhrelid:30 inhparent:31!null inhseqno:32 c.oid:34!null c.relname:35!null
- │    │    │    │    │         │    ├── fd: (31)==(34), (34)==(31)
- │    │    │    │    │         │    ├── scan i
- │    │    │    │    │         │    │    └── columns: inhrelid:30 inhparent:31 inhseqno:32
- │    │    │    │    │         │    ├── scan c
- │    │    │    │    │         │    │    └── columns: c.oid:34 c.relname:35!null
+ │    │    │    │    │         │    ├── columns: inhrelid:31 inhparent:32!null inhseqno:33 c.oid:36!null c.relname:37!null
+ │    │    │    │    │         │    ├── fd: (32)==(36), (36)==(32)
+ │    │    │    │    │         │    ├── scan pg_inherits [as=i]
+ │    │    │    │    │         │    │    └── columns: inhrelid:31 inhparent:32 inhseqno:33
+ │    │    │    │    │         │    ├── scan pg_class [as=c]
+ │    │    │    │    │         │    │    └── columns: c.oid:36 c.relname:37!null
  │    │    │    │    │         │    └── filters
- │    │    │    │    │         │         └── c.oid:34 = inhparent:31 [outer=(31,34), constraints=(/31: (/NULL - ]; /34: (/NULL - ]), fd=(31)==(34), (34)==(31)]
+ │    │    │    │    │         │         └── c.oid:36 = inhparent:32 [outer=(32,36), constraints=(/32: (/NULL - ]; /36: (/NULL - ]), fd=(32)==(36), (36)==(32)]
  │    │    │    │    │         └── filters
- │    │    │    │    │              └── inhrelid:30 = rel.oid:1 [outer=(1,30), constraints=(/1: (/NULL - ]; /30: (/NULL - ]), fd=(1)==(30), (30)==(1)]
+ │    │    │    │    │              └── inhrelid:31 = rel.oid:1 [outer=(1,31), constraints=(/1: (/NULL - ]; /31: (/NULL - ]), fd=(1)==(31), (31)==(1)]
  │    │    │    │    └── aggregations
- │    │    │    │         ├── array-agg [as=array_agg:65, outer=(35)]
- │    │    │    │         │    └── c.relname:35
- │    │    │    │         └── any-not-null-agg [as=inhrelid:30, outer=(30)]
- │    │    │    │              └── inhrelid:30
+ │    │    │    │         ├── array-agg [as=array_agg:68, outer=(37)]
+ │    │    │    │         │    └── c.relname:37
+ │    │    │    │         └── any-not-null-agg [as=inhrelid:31, outer=(31)]
+ │    │    │    │              └── inhrelid:31
  │    │    │    └── projections
- │    │    │         └── CASE WHEN inhrelid:30 IS NOT NULL THEN array_agg:65 ELSE CAST(NULL AS NAME[]) END [as=array_agg:63, outer=(30,65)]
+ │    │    │         └── CASE WHEN inhrelid:31 IS NOT NULL THEN array_agg:68 ELSE CAST(NULL AS NAME[]) END [as=array_agg:66, outer=(31,68)]
  │    │    ├── values
- │    │    │    ├── columns: array:64
- │    │    │    ├── outer: (63)
+ │    │    │    ├── columns: array:67
+ │    │    │    ├── outer: (66)
  │    │    │    ├── cardinality: [1 - 1]
  │    │    │    ├── key: ()
- │    │    │    ├── fd: ()-->(64)
- │    │    │    └── (COALESCE(array_agg:63, ARRAY[]),)
+ │    │    │    ├── fd: ()-->(67)
+ │    │    │    └── (COALESCE(array_agg:66, ARRAY[]),)
  │    │    └── filters (true)
  │    └── filters (true)
  └── projections
-      └── array:64 [as=array:66, outer=(64)]
+      └── array:67 [as=array:69, outer=(67)]
 
 # --------------------------------------------------
 # SimplifySameVarEqualities
@@ -1839,39 +1740,33 @@ SELECT a.k FROM a FULL OUTER JOIN xy ON a.k = a.k
 ----
 full-join (cross)
  ├── columns: k:1
- ├── multiplicity: left-rows(one-or-more), right-rows(one-or-more)
  ├── scan a
  │    ├── columns: k:1!null
  │    └── key: (1)
  ├── scan xy
- └── filters
-      └── k:1 IS DISTINCT FROM CAST(NULL AS INT8) [outer=(1), constraints=(/1: (/NULL - ]; tight)]
+ └── filters (true)
 
 norm expect=(SimplifySameVarEqualities,SimplifyJoinFilters)
 SELECT a.k FROM a FULL OUTER JOIN xy ON a.k >= a.k
 ----
 full-join (cross)
  ├── columns: k:1
- ├── multiplicity: left-rows(one-or-more), right-rows(one-or-more)
  ├── scan a
  │    ├── columns: k:1!null
  │    └── key: (1)
  ├── scan xy
- └── filters
-      └── k:1 IS DISTINCT FROM CAST(NULL AS INT8) [outer=(1), constraints=(/1: (/NULL - ]; tight)]
+ └── filters (true)
 
 norm expect=(SimplifySameVarEqualities,SimplifyJoinFilters)
 SELECT a.k FROM a FULL OUTER JOIN xy ON a.k <= a.k
 ----
 full-join (cross)
  ├── columns: k:1
- ├── multiplicity: left-rows(one-or-more), right-rows(one-or-more)
  ├── scan a
  │    ├── columns: k:1!null
  │    └── key: (1)
  ├── scan xy
- └── filters
-      └── k:1 IS DISTINCT FROM CAST(NULL AS INT8) [outer=(1), constraints=(/1: (/NULL - ]; tight)]
+ └── filters (true)
 
 norm expect=SimplifySameVarEqualities
 SELECT k = k FROM a
@@ -1915,44 +1810,41 @@ values
  ├── key: ()
  └── fd: ()-->(1)
 
-norm expect=(SimplifySameVarInequalities,SimplifyJoinFilters)
+norm expect=(SimplifySameVarInequalities,DetectJoinContradiction)
 SELECT a.k FROM a FULL OUTER JOIN xy ON a.k != a.k
 ----
 full-join (cross)
  ├── columns: k:1
- ├── multiplicity: left-rows(one-or-more), right-rows(one-or-more)
  ├── scan a
  │    ├── columns: k:1!null
  │    └── key: (1)
  ├── scan xy
  └── filters
-      └── false
+      └── false [constraints=(contradiction; tight)]
 
-norm expect=(SimplifySameVarInequalities,SimplifyJoinFilters)
+norm expect=(SimplifySameVarInequalities,DetectJoinContradiction)
 SELECT a.k FROM a FULL OUTER JOIN xy ON a.k > a.k
 ----
 full-join (cross)
  ├── columns: k:1
- ├── multiplicity: left-rows(one-or-more), right-rows(one-or-more)
  ├── scan a
  │    ├── columns: k:1!null
  │    └── key: (1)
  ├── scan xy
  └── filters
-      └── false
+      └── false [constraints=(contradiction; tight)]
 
-norm expect=(SimplifySameVarInequalities,SimplifyJoinFilters)
+norm expect=(SimplifySameVarInequalities,DetectJoinContradiction)
 SELECT a.k FROM a FULL OUTER JOIN xy ON a.k < a.k
 ----
 full-join (cross)
  ├── columns: k:1
- ├── multiplicity: left-rows(one-or-more), right-rows(one-or-more)
  ├── scan a
  │    ├── columns: k:1!null
  │    └── key: (1)
  ├── scan xy
  └── filters
-      └── false
+      └── false [constraints=(contradiction; tight)]
 
 norm expect=SimplifySameVarInequalities
 SELECT k != k FROM a

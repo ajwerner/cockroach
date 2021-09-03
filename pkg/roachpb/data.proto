@@ -56,6 +56,7 @@ enum ValueType {
   DURATION = 6;
   TIMETZ = 12;
   GEO = 13;
+  BOX2D = 14;
 
   // TUPLE represents a DTuple, encoded as repeated pairs of varint field number
   // followed by a value encoded Datum.
@@ -322,12 +323,6 @@ message Transaction {
   // coordinator to indicate client activity. Concurrent transactions will
   // avoid aborting a transaction if it observes recent-enough activity.
   util.hlc.Timestamp last_heartbeat = 5 [(gogoproto.nullable) = false];
-  // The timestamp at which the transaction's current epoch started. Up until
-  // version 19.2, this was used in conjunction with read_timestamp to
-  // determine a transaction's read timestamp. In 20.1, read_timestamp
-  // alone is sufficient. This is just maintained for compatibility with 19.2.
-  // TODO(andrei): Remove in 20.2.
-  util.hlc.Timestamp deprecated_orig_timestamp = 6 [(gogoproto.nullable) = false];
   // This flag is set if the transaction's timestamp was "leaked" beyond the
   // transaction (e.g. via cluster_logical_timestamp()). If true, this prevents
   // the transaction's timestamp from being pushed, which means that the txn
@@ -510,7 +505,7 @@ message Transaction {
   repeated storage.enginepb.IgnoredSeqNumRange ignored_seqnums = 18
     [(gogoproto.nullable) = false, (gogoproto.customname) = "IgnoredSeqNums"];
 
-  reserved 3, 9, 13, 14;
+  reserved 3, 6, 9, 13, 14;
 }
 
 // A TransactionRecord message contains the subset of the fields in a
@@ -612,8 +607,9 @@ message Lease {
   // is considered invalid.
   util.hlc.Timestamp start = 1 [(gogoproto.nullable) = false];
 
-  // The expiration is a timestamp at which the lease expires. This means that
-  // a new lease can be granted for a later timestamp.
+  // The expiration is a timestamp at which the lease expires. This means that a
+  // new lease can be granted for a later timestamp. This field is only set for
+  // expiration-based leases.
   util.hlc.Timestamp expiration = 2;
 
   // The address of the would-be lease holder.
@@ -630,8 +626,8 @@ message Lease {
   // TODO(andrei): Make this non-nullable after the rollout.
   util.hlc.Timestamp proposed_ts  = 5 [(gogoproto.customname) = "ProposedTS"];
 
-  // The epoch of the lease holder's node liveness entry. If this value
-  // is non-zero, the start and expiration values are ignored.
+  // The epoch of the lease holder's node liveness entry. If this value is
+  // non-zero, the expiration field is ignored.
   int64 epoch = 6;
 
   // A zero-indexed sequence number which is incremented during the acquisition

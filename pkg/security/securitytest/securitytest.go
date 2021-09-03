@@ -16,13 +16,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/errors"
 )
 
-//go:generate go-bindata -mode 0600 -modtime 1400000000 -pkg securitytest -o embedded.go -ignore README.md -ignore regenerate.sh test_certs test_certs/mt
+//go:generate go-bindata -mode 0600 -modtime 1400000000 -pkg securitytest -o embedded.go -ignore README.md -ignore regenerate.sh test_certs
 //go:generate gofmt -s -w embedded.go
 //go:generate goimports -w embedded.go
 
@@ -33,16 +32,16 @@ import (
 // The file will have restrictive file permissions (0600), making it
 // appropriate for usage by libraries that require security assets to have such
 // restrictive permissions.
-func RestrictedCopy(t testing.TB, path, tempdir, name string) string {
+func RestrictedCopy(path, tempdir, name string) (string, error) {
 	contents, err := Asset(path)
 	if err != nil {
-		t.Fatal(err)
+		return "", err
 	}
 	tempPath := filepath.Join(tempdir, name)
 	if err := ioutil.WriteFile(tempPath, contents, 0600); err != nil {
-		t.Fatal(err)
+		return "", err
 	}
-	return tempPath
+	return tempPath, nil
 }
 
 // AssetReadDir mimics ioutil.ReadDir, returning a list of []os.FileInfo for

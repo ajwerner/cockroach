@@ -20,18 +20,20 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/workload"
 	"github.com/cockroachdb/cockroach/pkg/workload/tpcc"
+	"github.com/cockroachdb/pebble"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,10 +44,8 @@ type tableSSTable struct {
 }
 
 func BenchmarkImportWorkload(b *testing.B) {
-	b.Skip("#41932: broken due to adding keys out-of-order to an sstable")
-	if testing.Short() {
-		b.Skip("skipping long benchmark")
-	}
+	skip.WithIssue(b, 41932, "broken due to adding keys out-of-order to an sstable")
+	skip.UnderShort(b, "skipping long benchmark")
 
 	dir, cleanup := testutils.TempDir(b)
 	defer cleanup()
@@ -55,7 +55,7 @@ func BenchmarkImportWorkload(b *testing.B) {
 	ts := timeutil.Now()
 	var tableSSTs []tableSSTable
 	for i, table := range g.Tables() {
-		tableID := sqlbase.ID(keys.MinUserDescID + 1 + i)
+		tableID := descpb.ID(keys.MinUserDescID + 1 + i)
 		sst, err := format.ToSSTable(table, tableID, ts)
 		require.NoError(b, err)
 
@@ -91,16 +91,18 @@ func benchmarkWriteAndLink(b *testing.B, dir string, tables []tableSSTable) {
 	b.SetBytes(bytes)
 
 	ctx := context.Background()
-	cache := storage.NewRocksDBCache(server.DefaultCacheSize)
-	defer cache.Release()
+	cache := pebble.NewCache(server.DefaultCacheSize)
+	defer cache.Unref()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		cfg := storage.RocksDBConfig{
+		cfg := storage.PebbleConfig{
 			StorageConfig: base.StorageConfig{
-				Dir: filepath.Join(dir, `rocksdb`, timeutil.Now().String())}}
-		db, err := storage.NewRocksDB(cfg, cache)
+				Dir: filepath.Join(dir, `pebble`, timeutil.Now().String())}}
+		cfg.Opts = storage.DefaultPebbleOptions()
+		cfg.Opts.Cache = cache
+		db, err := storage.NewPebble(context.Background(), cfg)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -149,9 +151,7 @@ func benchmarkAddSSTable(b *testing.B, dir string, tables []tableSSTable) {
 }
 
 func BenchmarkConvertToKVs(b *testing.B) {
-	if testing.Short() {
-		b.Skip("skipping long benchmark")
-	}
+	skip.UnderShort(b, "skipping long benchmark")
 
 	tpccGen := tpcc.FromWarehouses(1)
 	b.Run(`tpcc/warehouses=1`, func(b *testing.B) {
@@ -161,7 +161,7 @@ func BenchmarkConvertToKVs(b *testing.B) {
 
 func benchmarkConvertToKVs(b *testing.B, g workload.Generator) {
 	ctx := context.Background()
-	const tableID = sqlbase.ID(keys.MinUserDescID)
+	const tableID = descpb.ID(keys.MinUserDescID)
 	ts := timeutil.Now()
 
 	var bytes int64
@@ -196,9 +196,7 @@ func benchmarkConvertToKVs(b *testing.B, g workload.Generator) {
 }
 
 func BenchmarkConvertToSSTable(b *testing.B) {
-	if testing.Short() {
-		b.Skip("skipping long benchmark")
-	}
+	skip.UnderShort(b, "skipping long benchmark")
 
 	tpccGen := tpcc.FromWarehouses(1)
 	b.Run(`tpcc/warehouses=1`, func(b *testing.B) {
@@ -207,7 +205,7 @@ func BenchmarkConvertToSSTable(b *testing.B) {
 }
 
 func benchmarkConvertToSSTable(b *testing.B, g workload.Generator) {
-	const tableID = sqlbase.ID(keys.MinUserDescID)
+	const tableID = descpb.ID(keys.MinUserDescID)
 	now := timeutil.Now()
 
 	var totalBytes int64

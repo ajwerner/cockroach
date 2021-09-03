@@ -22,7 +22,6 @@ import (
 
 	"github.com/biogo/store/llrb"
 	"github.com/cockroachdb/cockroach/pkg/keys"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -30,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -255,6 +255,7 @@ func initTestDescriptorDB(t *testing.T) *testDescriptorDB {
 			db.splitRange(t, keys.RangeMetaKey(roachpb.RKey(string(char))))
 		}
 	}
+	// TODO(andrei): don't leak this Stopper. Someone needs to Stop() it.
 	db.cache = NewRangeDescriptorCache(st, db, staticSize(2<<10), stop.NewStopper())
 	return db
 }
@@ -283,17 +284,16 @@ func doLookup(
 	return doLookupWithToken(ctx, rc, key, EvictionToken{}, false)
 }
 
-func evict(ctx context.Context, rc *RangeDescriptorCache, entry *kvbase.RangeCacheEntry) bool {
+func evict(ctx context.Context, rc *RangeDescriptorCache, desc *roachpb.RangeDescriptor) bool {
 	rc.rangeCache.Lock()
 	defer rc.rangeCache.Unlock()
-	ok, _ /* updatedEntry */ := rc.evictLocked(ctx, entry)
-	return ok
+	return rc.evictDescLocked(ctx, desc)
 }
 
 func clearOlderOverlapping(
 	ctx context.Context, rc *RangeDescriptorCache, desc *roachpb.RangeDescriptor,
 ) bool {
-	ent := &kvbase.RangeCacheEntry{Desc: *desc}
+	ent := &rangeCacheEntry{desc: *desc}
 	ok, _ /* newerEntry */ := rc.clearOlderOverlapping(ctx, ent)
 	return ok
 }
@@ -313,7 +313,7 @@ func doLookupWithToken(
 	if err != nil {
 		panic(fmt.Sprintf("unexpected error from Lookup: %s", err))
 	}
-	desc := &returnToken.entry.Desc
+	desc := returnToken.Desc()
 	keyAddr, err := keys.Addr(roachpb.Key(key))
 	if err != nil {
 		panic(err)
@@ -437,7 +437,7 @@ func TestRangeCache(t *testing.T) {
 	db.assertLookupCountEq(t, 1, "vu")
 
 	// Evicts [d,e).
-	require.True(t, evict(ctx, db.cache, deTok.entry))
+	require.True(t, evict(ctx, db.cache, deTok.Desc()))
 	// Evicts [meta(min),meta(g)).
 	require.True(t, db.cache.EvictByKey(ctx, keys.RangeMetaKey(roachpb.RKey("da"))))
 	doLookup(ctx, db.cache, "fa")
@@ -456,7 +456,9 @@ func TestRangeCache(t *testing.T) {
 	// Attempt to compare-and-evict with a cache entry that is not equal to the
 	// cached one; it should not alter the cache.
 	desc, _ := doLookup(ctx, db.cache, "cz")
-	require.False(t, evict(ctx, db.cache, &kvbase.RangeCacheEntry{Desc: *desc}))
+	descCopy := *desc
+	descCopy.Generation--
+	require.False(t, evict(ctx, db.cache, &descCopy))
 
 	_, evictToken := doLookup(ctx, db.cache, "cz")
 	db.assertLookupCountEq(t, 0, "cz")
@@ -468,6 +470,32 @@ func TestRangeCache(t *testing.T) {
 	//  Prefetches [c,e) and [e,f).
 	doLookup(ctx, db.cache, "cz")
 	db.assertLookupCountEq(t, 1, "cz")
+}
+
+// Test that cache lookups by RKeyMin and derivative keys work fine.
+func TestLookupByKeyMin(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+
+	st := cluster.MakeTestingClusterSettings()
+	stopper := stop.NewStopper()
+	defer stopper.Stop(context.Background())
+	cache := NewRangeDescriptorCache(st, nil, staticSize(2<<10), stopper)
+	startToMeta2Desc := roachpb.RangeDescriptor{
+		StartKey: roachpb.RKeyMin,
+		EndKey:   keys.RangeMetaKey(roachpb.RKey("a")),
+	}
+	cache.Insert(ctx, roachpb.RangeInfo{Desc: startToMeta2Desc})
+	entMin := cache.GetCached(ctx, roachpb.RKeyMin, false /* inverted */)
+	require.NotNil(t, entMin)
+	require.NotNil(t, entMin.Desc())
+	require.Equal(t, startToMeta2Desc, *entMin.Desc())
+
+	entNext := cache.GetCached(ctx, roachpb.RKeyMin.Next(), false /* inverted */)
+	require.True(t, entMin == entNext)
+	entNext = cache.GetCached(ctx, roachpb.RKeyMin.Next().Next(), false /* inverted */)
+	require.True(t, entMin == entNext)
 }
 
 // TestRangeCacheCoalescedRequests verifies that concurrent lookups for
@@ -601,25 +629,22 @@ func TestRangeCacheDetectSplit(t *testing.T) {
 	db := initTestDescriptorDB(t)
 	ctx := context.Background()
 
-	pauseLookupResumeAndAssert := func(key string, expected int64, evictToken EvictionToken) {
+	pauseLookupResumeAndAssert := func(key string, evictToken EvictionToken) {
 		var wg sync.WaitGroup
+		log.Infof(ctx, "test pausing lookups; token: %s", evictToken)
 		db.pauseRangeLookups()
 
-		// We're going to perform 3 lookups on the same key, in parallel, while
-		// lookups are paused. Either they're all expected to get cache hits (in the
-		// case where expected == 0), or there will be one request actually blocked
-		// in the db and the other two will get coalesced onto it.
-		var coalesced chan struct{}
-		if expected > 0 {
-			coalesced = make(chan struct{})
-			db.cache.coalesced = coalesced
-		}
+		// We're going to perform 3 lookups on the close-by keys, in parallel, while
+		// lookups are paused. We're expecting one request to be actually blocked in
+		// the db and the other two will get coalesced onto it.
+		coalesced := make(chan struct{})
+		db.cache.coalesced = coalesced
 
 		for i := 0; i < 3; i++ {
 			wg.Add(1)
 			go func(id int) {
 				// Each request goes to a different key.
-				doLookupWithToken(ctx, db.cache, fmt.Sprintf("%s%d", key, id), evictToken, false)
+				doLookupWithToken(ctx, db.cache, fmt.Sprintf("%s%d", key, id), evictToken, false /* useReverseScan */)
 				wg.Done()
 			}(i)
 		}
@@ -630,9 +655,10 @@ func TestRangeCacheDetectSplit(t *testing.T) {
 			}
 		}
 
+		log.Infof(ctx, "test resuming lookups")
 		db.resumeRangeLookups()
 		wg.Wait()
-		db.assertLookupCountEq(t, expected, key)
+		db.assertLookupCountEq(t, 1, key)
 	}
 
 	// A request initially looks up the range descriptor ["a"-"b").
@@ -653,8 +679,9 @@ func TestRangeCacheDetectSplit(t *testing.T) {
 	mismatchErrRange := ranges[0]
 	// The stale descriptor is evicted, the new descriptor from the error is
 	// replaced, and a new lookup is initialized.
+	oldToken := evictToken
 	evictToken.EvictAndReplace(ctx, roachpb.RangeInfo{Desc: mismatchErrRange})
-	pauseLookupResumeAndAssert("az", 1, evictToken)
+	pauseLookupResumeAndAssert("az", oldToken)
 
 	// Both sides of the split are now correctly cached.
 	doLookup(ctx, db.cache, "aa")
@@ -822,6 +849,7 @@ func TestRangeCacheHandleDoubleSplit(t *testing.T) {
 			mismatchErrRange := ranges[0]
 			// The stale descriptor is evicted, the new descriptor from the error is
 			// replaced, and a new lookup is initialized.
+			oldToken := evictToken
 			evictToken.EvictAndReplace(ctx, roachpb.RangeInfo{Desc: mismatchErrRange})
 
 			// wg will be used to wait for all the lookups to complete.
@@ -857,10 +885,10 @@ func TestRangeCacheHandleDoubleSplit(t *testing.T) {
 					ctx, getRecording, cancel := tracing.ContextWithRecordingSpan(ctx, "test")
 					defer cancel()
 					tok, err := db.cache.lookupInternal(
-						ctx, key, evictToken,
+						ctx, key, oldToken,
 						tc.reverseScan)
 					require.NoError(t, err)
-					desc = &tok.entry.Desc
+					desc = tok.Desc()
 					if tc.reverseScan {
 						if !desc.ContainsKeyInverted(key) {
 							t.Errorf("desc %s does not contain exclusive end key %s", desc, key)
@@ -949,10 +977,15 @@ func TestRangeCacheUseIntents(t *testing.T) {
 	if reflect.DeepEqual(abDesc, abDescIntent) {
 		t.Errorf("expected initial range descriptor to be different from the one from intents, found %v", abDesc)
 	}
+
+	// Check that the intent had been inserted into the cache with Generation=0,
+	// signifying a speculative descriptor.
+	require.Equal(t, roachpb.RangeGeneration(0), abDescIntent.Generation)
 }
 
 // TestRangeCacheClearOverlapping verifies that existing, overlapping
 // cached entries are cleared when adding a new entry.
+// Also see TestRangeCacheClearOlderOverlapping().
 func TestRangeCacheClearOverlapping(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
@@ -965,8 +998,10 @@ func TestRangeCacheClearOverlapping(t *testing.T) {
 	}
 
 	st := cluster.MakeTestingClusterSettings()
-	cache := NewRangeDescriptorCache(st, nil, staticSize(2<<10), stop.NewStopper())
-	cache.rangeCache.cache.Add(rangeCacheKey(keys.RangeMetaKey(roachpb.RKeyMax)), &kvbase.RangeCacheEntry{Desc: *defDesc})
+	stopper := stop.NewStopper()
+	defer stopper.Stop(ctx)
+	cache := NewRangeDescriptorCache(st, nil, staticSize(2<<10), stopper)
+	cache.rangeCache.cache.Add(rangeCacheKey(keys.RangeMetaKey(roachpb.RKeyMax)), &rangeCacheEntry{desc: *defDesc})
 
 	// Now, add a new, overlapping set of descriptors.
 	minToBDesc := &roachpb.RangeDescriptor{
@@ -979,27 +1014,27 @@ func TestRangeCacheClearOverlapping(t *testing.T) {
 		EndKey:     roachpb.RKeyMax,
 		Generation: 1,
 	}
-	curGeneration := int64(1)
+	curGeneration := roachpb.RangeGeneration(1)
 	require.True(t, clearOlderOverlapping(ctx, cache, minToBDesc))
-	cache.rangeCache.cache.Add(rangeCacheKey(keys.RangeMetaKey(roachpb.RKey("b"))), &kvbase.RangeCacheEntry{Desc: *minToBDesc})
-	if desc := cache.GetCached(roachpb.RKey("b"), false); desc != nil {
+	cache.rangeCache.cache.Add(rangeCacheKey(keys.RangeMetaKey(roachpb.RKey("b"))), &rangeCacheEntry{desc: *minToBDesc})
+	if desc := cache.GetCached(ctx, roachpb.RKey("b"), false); desc != nil {
 		t.Errorf("descriptor unexpectedly non-nil: %s", desc)
 	}
 
 	require.True(t, clearOlderOverlapping(ctx, cache, bToMaxDesc))
-	cache.rangeCache.cache.Add(rangeCacheKey(keys.RangeMetaKey(roachpb.RKeyMax)), &kvbase.RangeCacheEntry{Desc: *bToMaxDesc})
-	ri := cache.GetCached(roachpb.RKey("b"), false)
-	require.Equal(t, *bToMaxDesc, ri.Desc)
+	cache.rangeCache.cache.Add(rangeCacheKey(keys.RangeMetaKey(roachpb.RKeyMax)), &rangeCacheEntry{desc: *bToMaxDesc})
+	ri := cache.GetCached(ctx, roachpb.RKey("b"), false)
+	require.Equal(t, bToMaxDesc, ri.Desc())
 
 	// Add default descriptor back which should remove two split descriptors.
 	defDescCpy := *defDesc
 	curGeneration++
 	defDescCpy.Generation = curGeneration
 	require.True(t, clearOlderOverlapping(ctx, cache, &defDescCpy))
-	cache.rangeCache.cache.Add(rangeCacheKey(keys.RangeMetaKey(roachpb.RKeyMax)), &kvbase.RangeCacheEntry{Desc: defDescCpy})
+	cache.rangeCache.cache.Add(rangeCacheKey(keys.RangeMetaKey(roachpb.RKeyMax)), &rangeCacheEntry{desc: defDescCpy})
 	for _, key := range []roachpb.RKey{roachpb.RKey("a"), roachpb.RKey("b")} {
-		ri = cache.GetCached(key, false)
-		require.Equal(t, defDescCpy, ri.Desc)
+		ri = cache.GetCached(ctx, key, false)
+		require.Equal(t, &defDescCpy, ri.Desc())
 	}
 
 	// Insert ["b", "c") and then insert ["a", b"). Verify that the former is not evicted by the latter.
@@ -1010,9 +1045,9 @@ func TestRangeCacheClearOverlapping(t *testing.T) {
 		Generation: curGeneration,
 	}
 	require.True(t, clearOlderOverlapping(ctx, cache, bToCDesc))
-	cache.rangeCache.cache.Add(rangeCacheKey(keys.RangeMetaKey(roachpb.RKey("c"))), &kvbase.RangeCacheEntry{Desc: *bToCDesc})
-	ri = cache.GetCached(roachpb.RKey("c"), true)
-	require.Equal(t, *bToCDesc, ri.Desc)
+	cache.rangeCache.cache.Add(rangeCacheKey(keys.RangeMetaKey(roachpb.RKey("c"))), &rangeCacheEntry{desc: *bToCDesc})
+	ri = cache.GetCached(ctx, roachpb.RKey("c"), true)
+	require.Equal(t, bToCDesc, ri.Desc())
 
 	curGeneration++
 	aToBDesc := &roachpb.RangeDescriptor{
@@ -1022,8 +1057,149 @@ func TestRangeCacheClearOverlapping(t *testing.T) {
 	}
 	require.True(t, clearOlderOverlapping(ctx, cache, aToBDesc))
 	cache.rangeCache.cache.Add(rangeCacheKey(keys.RangeMetaKey(roachpb.RKey("b"))), ri)
-	ri = cache.GetCached(roachpb.RKey("c"), true)
-	require.Equal(t, *bToCDesc, ri.Desc)
+	ri = cache.GetCached(ctx, roachpb.RKey("c"), true)
+	require.Equal(t, bToCDesc, ri.Desc())
+}
+
+// Test The ClearOlderOverlapping. There's also the older
+// TestRangeCacheClearOverlapping(); this test is written in a table-driven
+// manner.
+func TestRangeCacheClearOlderOverlapping(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+
+	descAB1 := roachpb.RangeDescriptor{
+		StartKey:   roachpb.RKey("a"),
+		EndKey:     roachpb.RKey("b"),
+		Generation: 1,
+	}
+	descAB2 := roachpb.RangeDescriptor{
+		StartKey:   roachpb.RKey("a"),
+		EndKey:     roachpb.RKey("b"),
+		Generation: 2,
+	}
+	descAB3 := roachpb.RangeDescriptor{
+		StartKey:   roachpb.RKey("a"),
+		EndKey:     roachpb.RKey("b"),
+		Generation: 3,
+	}
+	descBC2 := roachpb.RangeDescriptor{
+		StartKey:   roachpb.RKey("b"),
+		EndKey:     roachpb.RKey("c"),
+		Generation: 2,
+	}
+	descCD2 := roachpb.RangeDescriptor{
+		StartKey:   roachpb.RKey("c"),
+		EndKey:     roachpb.RKey("d"),
+		Generation: 2,
+	}
+	descCD3 := roachpb.RangeDescriptor{
+		StartKey:   roachpb.RKey("c"),
+		EndKey:     roachpb.RKey("d"),
+		Generation: 3,
+	}
+	descAZ100 := roachpb.RangeDescriptor{
+		StartKey:   roachpb.RKey("a"),
+		EndKey:     roachpb.RKey("z"),
+		Generation: 100,
+	}
+
+	// A descriptor that overlaps [a,b) and [b,c).
+	descAxBx1 := roachpb.RangeDescriptor{
+		StartKey:   roachpb.RKey("a_"),
+		EndKey:     roachpb.RKey("b_"),
+		Generation: 1,
+	}
+	descAxBx3 := roachpb.RangeDescriptor{
+		StartKey:   roachpb.RKey("a_"),
+		EndKey:     roachpb.RKey("b_"),
+		Generation: 3,
+	}
+
+	testCases := []struct {
+		cachedDescs []roachpb.RangeDescriptor
+		clearDesc   roachpb.RangeDescriptor
+		expCache    []roachpb.RangeDescriptor
+		expNewest   bool
+		// If expNewest is false, expNewer indicates the expected 2nd ret val of
+		// clearOlderOverlapping().
+		expNewer *roachpb.RangeDescriptor
+	}{
+		{
+			cachedDescs: nil,
+			clearDesc:   descAZ100,
+			expCache:    nil,
+			expNewest:   true,
+		},
+		{
+			cachedDescs: []roachpb.RangeDescriptor{descAB2, descBC2, descCD2},
+			clearDesc:   descAZ100,
+			expCache:    nil,
+			expNewest:   true,
+		},
+		{
+			cachedDescs: []roachpb.RangeDescriptor{descAB2, descBC2, descCD2},
+			clearDesc:   descAB1,
+			expCache:    []roachpb.RangeDescriptor{descAB2, descBC2, descCD2},
+			expNewest:   false,
+			expNewer:    &descAB2,
+		},
+		{
+			cachedDescs: []roachpb.RangeDescriptor{descAB2, descBC2, descCD2},
+			clearDesc:   descAB3,
+			expCache:    []roachpb.RangeDescriptor{descBC2, descCD2},
+			expNewest:   true,
+		},
+		{
+			cachedDescs: []roachpb.RangeDescriptor{descAB2, descBC2, descCD2},
+			clearDesc:   descAxBx1, // old descriptor, doesn't clear anything.
+			expCache:    []roachpb.RangeDescriptor{descAB2, descBC2, descCD2},
+			expNewest:   false,
+		},
+		{
+			cachedDescs: []roachpb.RangeDescriptor{descAB2, descBC2, descCD2},
+			clearDesc:   descAxBx3,
+			expCache:    []roachpb.RangeDescriptor{descCD2},
+			expNewest:   true,
+		},
+		{
+			cachedDescs: []roachpb.RangeDescriptor{descAB2, descBC2, descCD2},
+			clearDesc:   descCD3,
+			expCache:    []roachpb.RangeDescriptor{descAB2, descBC2},
+			expNewest:   true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run("", func(t *testing.T) {
+			st := cluster.MakeTestingClusterSettings()
+			stopper := stop.NewStopper()
+			defer stopper.Stop(ctx)
+			cache := NewRangeDescriptorCache(st, nil /* db */, staticSize(2<<10), stopper)
+			for _, d := range tc.cachedDescs {
+				cache.Insert(ctx, roachpb.RangeInfo{Desc: d})
+			}
+			newEntry := &rangeCacheEntry{desc: tc.clearDesc}
+			newest, newer := cache.clearOlderOverlapping(ctx, newEntry)
+			all := cache.GetCachedOverlapping(ctx, roachpb.RSpan{Key: roachpb.RKeyMin, EndKey: roachpb.RKeyMax})
+			var allDescs []roachpb.RangeDescriptor
+			if len(all) != 0 {
+				allDescs = make([]roachpb.RangeDescriptor, len(all))
+				for i, e := range all {
+					allDescs[i] = *e.Desc()
+				}
+			}
+			var newerDesc *roachpb.RangeDescriptor
+			if newer != nil {
+				newerDesc = newer.Desc()
+			}
+
+			assert.Equal(t, tc.expCache, allDescs)
+			assert.Equal(t, tc.expNewest, newest)
+			assert.Equal(t, tc.expNewer, newerDesc)
+		})
+	}
 }
 
 // TestRangeCacheClearOverlappingMeta prevents regression of a bug which caused
@@ -1050,7 +1226,9 @@ func TestRangeCacheClearOverlappingMeta(t *testing.T) {
 	}
 
 	st := cluster.MakeTestingClusterSettings()
-	cache := NewRangeDescriptorCache(st, nil, staticSize(2<<10), stop.NewStopper())
+	stopper := stop.NewStopper()
+	defer stopper.Stop(ctx)
+	cache := NewRangeDescriptorCache(st, nil, staticSize(2<<10), stopper)
 	cache.Insert(ctx,
 		roachpb.RangeInfo{Desc: firstDesc},
 		roachpb.RangeInfo{Desc: restDesc})
@@ -1066,7 +1244,7 @@ func TestRangeCacheClearOverlappingMeta(t *testing.T) {
 				t.Fatalf("invocation of clearOlderOverlapping panicked: %v", r)
 			}
 		}()
-		cache.clearOlderOverlapping(ctx, &kvbase.RangeCacheEntry{Desc: metaSplitDesc})
+		cache.clearOlderOverlapping(ctx, &rangeCacheEntry{desc: metaSplitDesc})
 	}()
 }
 
@@ -1075,75 +1253,80 @@ func TestRangeCacheClearOverlappingMeta(t *testing.T) {
 func TestGetCachedRangeDescriptorInverted(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+	ctx := context.Background()
 
 	testData := []roachpb.RangeDescriptor{
+		{StartKey: roachpb.RKeyMin, EndKey: roachpb.RKey("a")},
 		{StartKey: roachpb.RKey("a"), EndKey: roachpb.RKey("c")},
 		{StartKey: roachpb.RKey("c"), EndKey: roachpb.RKey("e")},
-		{StartKey: roachpb.RKey("g"), EndKey: roachpb.RKey("z")},
+		{StartKey: roachpb.RKey("l"), EndKey: roachpb.RKey("m")},
+		{StartKey: roachpb.RKey("m"), EndKey: roachpb.RKey("z")},
 	}
 
 	st := cluster.MakeTestingClusterSettings()
-	cache := NewRangeDescriptorCache(st, nil, staticSize(2<<10), stop.NewStopper())
+	stopper := stop.NewStopper()
+	defer stopper.Stop(ctx)
+	cache := NewRangeDescriptorCache(st, nil, staticSize(2<<10), stopper)
 	for _, rd := range testData {
-		cache.rangeCache.cache.Add(
-			rangeCacheKey(keys.RangeMetaKey(rd.EndKey)), &kvbase.RangeCacheEntry{Desc: rd})
+		cache.Insert(ctx, roachpb.RangeInfo{
+			Desc: rd,
+		})
 	}
 
 	testCases := []struct {
 		queryKey roachpb.RKey
-		cacheKey rangeCacheKey
 		rng      *roachpb.RangeDescriptor
 	}{
 		{
 			// Check range start key.
-			queryKey: roachpb.RKey("a"),
-			cacheKey: nil,
+			queryKey: roachpb.RKey("l"),
 			rng:      nil,
+		},
+		{
+			// Check some key in first range.
+			queryKey: roachpb.RKey("0"),
+			rng:      &roachpb.RangeDescriptor{StartKey: roachpb.RKeyMin, EndKey: roachpb.RKey("a")},
+		},
+		{
+			// Check end key of first range.
+			queryKey: roachpb.RKey("a"),
+			rng:      &roachpb.RangeDescriptor{StartKey: roachpb.RKeyMin, EndKey: roachpb.RKey("a")},
 		},
 		{
 			// Check range end key.
 			queryKey: roachpb.RKey("c"),
-			cacheKey: rangeCacheKey(keys.RangeMetaKey(roachpb.RKey("c"))),
 			rng:      &roachpb.RangeDescriptor{StartKey: roachpb.RKey("a"), EndKey: roachpb.RKey("c")},
 		},
 		{
 			// Check range middle key.
 			queryKey: roachpb.RKey("d"),
-			cacheKey: rangeCacheKey(keys.RangeMetaKey(roachpb.RKey("e"))),
 			rng:      &roachpb.RangeDescriptor{StartKey: roachpb.RKey("c"), EndKey: roachpb.RKey("e")},
 		},
 		{
 			// Check miss range key.
 			queryKey: roachpb.RKey("f"),
-			cacheKey: nil,
 			rng:      nil,
 		},
 		{
 			// Check range start key with previous range miss.
-			queryKey: roachpb.RKey("g"),
-			cacheKey: nil,
+			queryKey: roachpb.RKey("l"),
 			rng:      nil,
 		},
 	}
 
 	for _, test := range testCases {
-		cache.rangeCache.RLock()
-		targetRange, entry := cache.getCachedLocked(test.queryKey, true /* inverted */)
-		cache.rangeCache.RUnlock()
+		t.Run("", func(t *testing.T) {
+			cache.rangeCache.RLock()
+			targetRange, _ := cache.getCachedRLocked(ctx, test.queryKey, true /* inverted */)
+			cache.rangeCache.RUnlock()
 
-		if test.rng == nil {
-			require.Nil(t, targetRange)
-		} else {
-			require.NotNil(t, targetRange)
-			require.Equal(t, *test.rng, targetRange.Desc)
-		}
-		var cacheKey rangeCacheKey
-		if entry != nil {
-			cacheKey = entry.Key.(rangeCacheKey)
-		}
-		if !reflect.DeepEqual(cacheKey, test.cacheKey) {
-			t.Fatalf("expect cache key %v, actual get %v", test.cacheKey, cacheKey)
-		}
+			if test.rng == nil {
+				require.Nil(t, targetRange)
+			} else {
+				require.NotNil(t, targetRange)
+				require.Equal(t, test.rng, targetRange.Desc())
+			}
+		})
 	}
 }
 
@@ -1152,31 +1335,36 @@ func TestRangeCacheGeneration(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	ctx := context.Background()
 
-	descAM1 := &roachpb.RangeDescriptor{
+	descAM2 := &roachpb.RangeDescriptor{
+		RangeID:    1,
 		StartKey:   roachpb.RKey("a"),
 		EndKey:     roachpb.RKey("m"),
-		Generation: 1,
-	}
-	descMZ3 := &roachpb.RangeDescriptor{
-		StartKey:   roachpb.RKey("m"),
-		EndKey:     roachpb.RKey("z"),
-		Generation: 3,
-	}
-
-	descBY0 := &roachpb.RangeDescriptor{
-		StartKey:   roachpb.RKey("b"),
-		EndKey:     roachpb.RKey("y"),
-		Generation: 0,
-	}
-	descBY2 := &roachpb.RangeDescriptor{
-		StartKey:   roachpb.RKey("b"),
-		EndKey:     roachpb.RKey("y"),
 		Generation: 2,
 	}
-	descBY4 := &roachpb.RangeDescriptor{
+	descMZ4 := &roachpb.RangeDescriptor{
+		RangeID:    2,
+		StartKey:   roachpb.RKey("m"),
+		EndKey:     roachpb.RKey("z"),
+		Generation: 4,
+	}
+
+	descBY1 := &roachpb.RangeDescriptor{
+		RangeID:    3,
 		StartKey:   roachpb.RKey("b"),
 		EndKey:     roachpb.RKey("y"),
-		Generation: 4,
+		Generation: 1,
+	}
+	descBY3 := &roachpb.RangeDescriptor{
+		RangeID:    3,
+		StartKey:   roachpb.RKey("b"),
+		EndKey:     roachpb.RKey("y"),
+		Generation: 3,
+	}
+	descBY5 := &roachpb.RangeDescriptor{
+		RangeID:    3,
+		StartKey:   roachpb.RKey("b"),
+		EndKey:     roachpb.RKey("y"),
+		Generation: 5,
 	}
 
 	testCases := []struct {
@@ -1186,48 +1374,48 @@ func TestRangeCacheGeneration(t *testing.T) {
 		expectedDesc []*roachpb.RangeDescriptor
 	}{
 		{
-			// descBY0 is ignored since the existing keyspace is covered by
-			// descriptors of generations 1 and 3, respectively.
-			name:         "evict 0",
-			insertDesc:   descBY0,
+			// descBY1 is ignored since the existing keyspace is covered by
+			// descriptors of generations 2 and 3, respectively.
+			name:         "insert old",
+			insertDesc:   descBY1,
 			queryKeys:    []roachpb.RKey{roachpb.RKey("b"), roachpb.RKey("y")},
-			expectedDesc: []*roachpb.RangeDescriptor{descAM1, descMZ3},
+			expectedDesc: []*roachpb.RangeDescriptor{descAM2, descMZ4},
 		},
 		{
-			// descBY2 evicts descAM1, but not descMZ3 based on Generation. Since
-			// there is an overlapping descriptor with higher Generation (descMZ3),
+			// descBY3 evicts descAM2, but not descMZ4 based on Generation. Since
+			// there is an overlapping descriptor with higher Generation (descMZ4),
 			// it is not inserted.
-			name:         "evict 1",
-			insertDesc:   descBY2,
+			name:         "evict some",
+			insertDesc:   descBY3,
 			queryKeys:    []roachpb.RKey{roachpb.RKey("b"), roachpb.RKey("y")},
-			expectedDesc: []*roachpb.RangeDescriptor{nil, descMZ3},
+			expectedDesc: []*roachpb.RangeDescriptor{nil, descMZ4},
 		},
 		{
-			// descBY4 replaces both existing descriptors and it is inserted.
-			name:         "evict 2",
-			insertDesc:   descBY4,
+			// descBY5 replaces both existing descriptors and it is inserted.
+			name:         "evict all",
+			insertDesc:   descBY5,
 			queryKeys:    []roachpb.RKey{roachpb.RKey("b"), roachpb.RKey("y")},
-			expectedDesc: []*roachpb.RangeDescriptor{descBY4, nil},
+			expectedDesc: []*roachpb.RangeDescriptor{descBY5, nil},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			st := cluster.MakeTestingClusterSettings()
-			cache := NewRangeDescriptorCache(st, nil, staticSize(2<<10), stop.NewStopper())
-			cache.Insert(ctx,
-				roachpb.RangeInfo{Desc: *descAM1},
-				roachpb.RangeInfo{Desc: *descMZ3},
-				roachpb.RangeInfo{Desc: *tc.insertDesc})
+			stopper := stop.NewStopper()
+			defer stopper.Stop(ctx)
+			cache := NewRangeDescriptorCache(st, nil, staticSize(2<<10), stopper)
+			cache.Insert(ctx, roachpb.RangeInfo{Desc: *descAM2}, roachpb.RangeInfo{Desc: *descMZ4})
+			cache.Insert(ctx, roachpb.RangeInfo{Desc: *tc.insertDesc})
 
 			for index, queryKey := range tc.queryKeys {
-				ri := cache.GetCached(queryKey, false)
+				ri := cache.GetCached(ctx, queryKey, false)
 				exp := tc.expectedDesc[index]
 				if exp == nil {
 					require.Nil(t, ri)
 				} else {
 					require.NotNil(t, ri)
-					require.NotNil(t, *exp, ri.Desc)
+					require.NotNil(t, *exp, ri.Desc())
 				}
 			}
 		})
@@ -1285,7 +1473,9 @@ func TestRangeCacheUpdateLease(t *testing.T) {
 	startKey := desc1.StartKey
 
 	st := cluster.MakeTestingClusterSettings()
-	cache := NewRangeDescriptorCache(st, nil, staticSize(2<<10), stop.NewStopper())
+	stopper := stop.NewStopper()
+	defer stopper.Stop(ctx)
+	cache := NewRangeDescriptorCache(st, nil, staticSize(2<<10), stopper)
 
 	cache.Insert(ctx, roachpb.RangeInfo{
 		Desc:  desc1,
@@ -1296,38 +1486,41 @@ func TestRangeCacheUpdateLease(t *testing.T) {
 	tok, err := cache.LookupWithEvictionToken(
 		ctx, desc1.StartKey, EvictionToken{}, false /* useReverseScan */)
 	require.NoError(t, err)
-	require.Nil(t, tok.Lease())
+	require.Nil(t, tok.Leaseholder())
 
 	l := &roachpb.Lease{
-		Replica: rep1,
+		Replica:  rep1,
+		Sequence: 1,
 	}
 	oldTok := tok
-	tok, ok := tok.UpdateLease(ctx, l)
+	ok := tok.UpdateLease(ctx, l)
 	require.True(t, ok)
 	require.Equal(t, oldTok.Desc(), tok.Desc())
-	ri := cache.GetCached(startKey, false /* inverted */)
+	require.Equal(t, &l.Replica, tok.Leaseholder())
+	ri := cache.GetCached(ctx, startKey, false /* inverted */)
 	require.NotNil(t, ri)
-	require.Equal(t, rep1, ri.Lease.Replica)
+	require.Equal(t, rep1, ri.Lease().Replica)
 
-	tok = tok.ClearLease(ctx)
-	ri = cache.GetCached(startKey, false /* inverted */)
+	tok.EvictLease(ctx)
+	ri = cache.GetCached(ctx, startKey, false /* inverted */)
 	require.NotNil(t, ri)
-	require.True(t, ri.Lease.Empty())
+	require.True(t, ri.(*rangeCacheEntry).lease.Empty())
 	require.NotNil(t, tok)
 
 	// Check that trying to update the lease to a non-member replica results
-	// in a nil return and the entry's eviction.
+	// in the entry's eviction and the token's invalidation.
 	l = &roachpb.Lease{
-		Replica: repNonMember,
+		Replica:  repNonMember,
+		Sequence: 2,
 	}
-	tok, ok = tok.UpdateLease(ctx, l)
+	ok = tok.UpdateLease(ctx, l)
 	require.False(t, ok)
-	require.True(t, tok.Empty())
-	ri = cache.GetCached(startKey, false /* inverted */)
+	require.False(t, tok.Valid())
+	ri = cache.GetCached(ctx, startKey, false /* inverted */)
 	require.Nil(t, ri)
 
 	// Check that updating the lease while the cache has a newer descriptor
-	// returns the newer descriptor.
+	// updates the token to the newer descriptor.
 
 	cache.Insert(ctx, roachpb.RangeInfo{
 		Desc:  desc1,
@@ -1342,14 +1535,15 @@ func TestRangeCacheUpdateLease(t *testing.T) {
 		Desc:  desc2,
 		Lease: roachpb.Lease{},
 	})
-	tok, ok = tok.UpdateLease(ctx,
+	ok = tok.UpdateLease(ctx,
 		// Specify a lease compatible with desc2.
-		&roachpb.Lease{Replica: rep2},
+		&roachpb.Lease{Replica: rep2, Sequence: 3},
 	)
 	require.True(t, ok)
 	require.NotNil(t, tok)
-	require.Equal(t, tok.Desc(), &desc2)
-	require.Equal(t, tok.Lease().Replica, rep2)
+	require.Equal(t, &desc2, tok.Desc())
+	require.Equal(t, &rep2, tok.Leaseholder())
+	require.Equal(t, tok.lease.Replica, rep2)
 
 	// Update the cache again.
 	cache.Insert(ctx, roachpb.RangeInfo{
@@ -1358,10 +1552,10 @@ func TestRangeCacheUpdateLease(t *testing.T) {
 	})
 	// This time try to specify a lease that's not compatible with the desc. The
 	// entry should end up evicted from the cache.
-	tok, ok = tok.UpdateLease(ctx, &roachpb.Lease{Replica: rep3})
+	ok = tok.UpdateLease(ctx, &roachpb.Lease{Replica: rep3, Sequence: 4})
 	require.False(t, ok)
-	require.True(t, tok.Empty())
-	ri = cache.GetCached(startKey, false /* inverted */)
+	require.False(t, tok.Valid())
+	ri = cache.GetCached(ctx, startKey, false /* inverted */)
 	require.Nil(t, ri)
 }
 
@@ -1392,9 +1586,9 @@ func TestRangeCacheEntryUpdateLease(t *testing.T) {
 		Generation: 0,
 	}
 
-	e := &kvbase.RangeCacheEntry{
-		Desc:  desc,
-		Lease: roachpb.Lease{},
+	e := &rangeCacheEntry{
+		desc:  desc,
+		lease: roachpb.Lease{},
 	}
 
 	// Check that some lease overwrites an empty lease.
@@ -1402,63 +1596,79 @@ func TestRangeCacheEntryUpdateLease(t *testing.T) {
 		Replica:  rep1,
 		Sequence: 1,
 	}
-	ok, e := e.UpdateLease(l)
+	ok, e := e.updateLease(l)
 	require.True(t, ok)
-	require.True(t, l.Equal(&e.Lease))
+	require.True(t, l.Equal(e.Lease()))
 
 	// Check that a lease with no sequence number overwrites any other lease.
 	l = &roachpb.Lease{
 		Replica:  rep1,
 		Sequence: 0,
 	}
-	ok, e = e.UpdateLease(l)
+	ok, e = e.updateLease(l)
 	require.True(t, ok)
-	require.True(t, l.Equal(e.Lease))
+	require.NotNil(t, e.Leaseholder())
+	require.True(t, l.Replica.Equal(*e.Leaseholder()))
+	// Check that Seq=0 leases are not returned by Lease().
+	require.Nil(t, e.Lease())
 
 	// Check that another lease with no seq num overwrites a lease with no seq num.
 	l = &roachpb.Lease{
 		Replica:  rep2,
 		Sequence: 0,
 	}
-	ok, e = e.UpdateLease(l)
+	ok, e = e.updateLease(l)
 	require.True(t, ok)
-	require.True(t, l.Equal(e.Lease))
+	require.NotNil(t, e.Leaseholder())
+	require.True(t, l.Replica.Equal(*e.Leaseholder()))
 
 	// Check that another lease with no seq num overwrites a lease with no seq num.
 	l = &roachpb.Lease{
 		Replica:  rep1,
 		Sequence: 0,
 	}
-	ok, e = e.UpdateLease(l)
+	ok, e = e.updateLease(l)
 	require.True(t, ok)
-	require.True(t, l.Equal(e.Lease))
+	require.NotNil(t, e.Leaseholder())
+	require.True(t, l.Replica.Equal(*e.Leaseholder()))
 
 	// Set a lease
 	l = &roachpb.Lease{
 		Replica:  rep1,
 		Sequence: 2,
 	}
-	ok, e = e.UpdateLease(l)
+	ok, e = e.updateLease(l)
 	require.True(t, ok)
-	require.True(t, l.Equal(e.Lease))
+	require.NotNil(t, e.Leaseholder())
+	require.True(t, l.Equal(*e.Lease()))
 
 	// Check that updating to an older lease doesn't work.
 	l = &roachpb.Lease{
 		Replica:  rep2,
 		Sequence: 1,
 	}
-	ok, e = e.UpdateLease(l)
+	ok, e = e.updateLease(l)
 	require.False(t, ok)
-	require.False(t, l.Equal(e.Lease))
+	require.False(t, l.Equal(*e.Lease()))
 
 	// Check that updating to a lease at the same sequence as the existing one works.
 	l = &roachpb.Lease{
 		Replica:  rep2,
 		Sequence: 2,
 	}
-	ok, e = e.UpdateLease(l)
+	ok, e = e.updateLease(l)
 	require.True(t, ok)
-	require.True(t, l.Equal(e.Lease))
+	require.True(t, l.Equal(e.Lease()))
+
+	// Check that updating to the same lease returns false.
+	l = &roachpb.Lease{
+		Replica:  rep2,
+		Sequence: 2,
+	}
+	require.True(t, l.Equal(e.Lease()))
+	ok, e = e.updateLease(l)
+	require.False(t, ok)
+	require.True(t, l.Equal(e.Lease()))
 
 	// Check that updating the lease to a non-member replica returns a nil
 	// entry.
@@ -1466,7 +1676,152 @@ func TestRangeCacheEntryUpdateLease(t *testing.T) {
 		Replica:  repNonMember,
 		Sequence: 0,
 	}
-	ok, e = e.UpdateLease(l)
+	ok, e = e.updateLease(l)
 	require.True(t, ok)
 	require.Nil(t, e)
+}
+
+func TestRangeCacheEntryOverrides(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	desc := func(gen roachpb.RangeGeneration) roachpb.RangeDescriptor {
+		return roachpb.RangeDescriptor{
+			StartKey:   roachpb.RKey("a"),
+			EndKey:     roachpb.RKey("b"),
+			Generation: gen,
+		}
+	}
+
+	tests := []struct {
+		name string
+		// We'll test b.overrides(a).
+		a, b rangeCacheEntry
+		exp  bool
+	}{
+		{
+			name: "b newer gen",
+			exp:  true,
+			a: rangeCacheEntry{
+				desc:  desc(5),
+				lease: roachpb.Lease{},
+			},
+			b: rangeCacheEntry{
+				desc:  desc(6),
+				lease: roachpb.Lease{},
+			},
+		},
+		{
+			name: "a newer gen",
+			exp:  false,
+			a: rangeCacheEntry{
+				desc:  desc(7),
+				lease: roachpb.Lease{},
+			},
+			b: rangeCacheEntry{
+				desc:  desc(6),
+				lease: roachpb.Lease{},
+			},
+		},
+		{
+			name: "b newer lease",
+			exp:  true,
+			a: rangeCacheEntry{
+				desc:  desc(5),
+				lease: roachpb.Lease{Sequence: 1},
+			},
+			b: rangeCacheEntry{
+				desc:  desc(5),
+				lease: roachpb.Lease{Sequence: 2},
+			},
+		},
+		{
+			name: "a newer lease",
+			exp:  false,
+			a: rangeCacheEntry{
+				desc:  desc(5),
+				lease: roachpb.Lease{Sequence: 2},
+			},
+			b: rangeCacheEntry{
+				desc:  desc(5),
+				lease: roachpb.Lease{Sequence: 1},
+			},
+		},
+		{
+			name: "equal",
+			exp:  false,
+			a: rangeCacheEntry{
+				desc:  desc(5),
+				lease: roachpb.Lease{Sequence: 1},
+			},
+			b: rangeCacheEntry{
+				desc:  desc(5),
+				lease: roachpb.Lease{Sequence: 1},
+			},
+		},
+		{
+			name: "a speculative desc",
+			exp:  true,
+			a: rangeCacheEntry{
+				desc:  desc(0),
+				lease: roachpb.Lease{Sequence: 1},
+			},
+			b: rangeCacheEntry{
+				desc:  desc(5),
+				lease: roachpb.Lease{Sequence: 2},
+			},
+		},
+		{
+			name: "b speculative desc",
+			exp:  true,
+			a: rangeCacheEntry{
+				desc:  desc(1),
+				lease: roachpb.Lease{Sequence: 1},
+			},
+			b: rangeCacheEntry{
+				desc:  desc(0),
+				lease: roachpb.Lease{Sequence: 2},
+			},
+		},
+		{
+			name: "both speculative descs",
+			exp:  true,
+			a: rangeCacheEntry{
+				desc:  desc(0),
+				lease: roachpb.Lease{Sequence: 1},
+			},
+			b: rangeCacheEntry{
+				desc:  desc(0),
+				lease: roachpb.Lease{Sequence: 2},
+			},
+		},
+		{
+			name: "a speculative lease",
+			exp:  true,
+			a: rangeCacheEntry{
+				desc:  desc(1),
+				lease: roachpb.Lease{Sequence: 0},
+			},
+			b: rangeCacheEntry{
+				desc:  desc(1),
+				lease: roachpb.Lease{Sequence: 1},
+			},
+		},
+		{
+			name: "both speculative leases",
+			exp:  true,
+			a: rangeCacheEntry{
+				desc:  desc(1),
+				lease: roachpb.Lease{Replica: roachpb.ReplicaDescriptor{ReplicaID: 1}, Sequence: 0},
+			},
+			b: rangeCacheEntry{
+				desc:  desc(1),
+				lease: roachpb.Lease{Replica: roachpb.ReplicaDescriptor{ReplicaID: 2}, Sequence: 0},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.exp, tc.b.overrides(&tc.a))
+		})
+	}
 }

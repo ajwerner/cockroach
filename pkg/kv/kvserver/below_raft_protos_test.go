@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -52,6 +51,13 @@ type fixture struct {
 	emptySum, populatedSum uint64
 }
 
+// belowRaftGoldenProtos are protos that we use below Raft. Care must be
+// taken to change these protos, as replica divergence could ensue (if the
+// old code and the new code handle the updated or old proto differently).
+// To reduce the chances of a bug like this, we track the protos that are
+// used below Raft and fail on any changes to their structure. When a
+// migration was put into place, the map below can be updated with the new
+// emptySum and populatedSum for the proto that was changed.
 var belowRaftGoldenProtos = map[reflect.Type]fixture{
 	reflect.TypeOf(&enginepb.MVCCMetadata{}): {
 		populatedConstructor: func(r *rand.Rand) protoutil.Message {
@@ -67,7 +73,7 @@ var belowRaftGoldenProtos = map[reflect.Type]fixture{
 			return enginepb.NewPopulatedRangeAppliedState(r, false)
 		},
 		emptySum:     615555020845646359,
-		populatedSum: 6873743885651366543,
+		populatedSum: 10390885694280604642,
 	},
 	reflect.TypeOf(&raftpb.HardState{}): {
 		populatedConstructor: func(r *rand.Rand) protoutil.Message {
@@ -106,28 +112,24 @@ var belowRaftGoldenProtos = map[reflect.Type]fixture{
 }
 
 func init() {
-	if storage.DefaultStorageEngine != enginepb.EngineTypeRocksDB {
-		// These are marshaled below Raft by the Pebble merge operator. The Pebble
-		// merge operator can be called below Raft whenever a Pebble Iterator is
-		// used. Note that we only see these protos marshaled below Raft when the
-		// engine type is not RocksDB. If the engine type is RocksDB the marshaling
-		// occurs in C++ which is invisible to the tracking mechanism.
-		belowRaftGoldenProtos[reflect.TypeOf(&roachpb.InternalTimeSeriesData{})] = fixture{
-			populatedConstructor: func(r *rand.Rand) protoutil.Message {
-				return roachpb.NewPopulatedInternalTimeSeriesData(r, false)
-			},
-			emptySum:     5531676819244041709,
-			populatedSum: 8911200268508796945,
-		}
-		belowRaftGoldenProtos[reflect.TypeOf(&enginepb.MVCCMetadataSubsetForMergeSerialization{})] =
-			fixture{
-				populatedConstructor: func(r *rand.Rand) protoutil.Message {
-					return enginepb.NewPopulatedMVCCMetadataSubsetForMergeSerialization(r, false)
-				},
-				emptySum:     14695981039346656037,
-				populatedSum: 7432412240713840291,
-			}
+	// These are marshaled below Raft by the Pebble merge operator. The Pebble
+	// merge operator can be called below Raft whenever a Pebble MVCCIterator is
+	// used.
+	belowRaftGoldenProtos[reflect.TypeOf(&roachpb.InternalTimeSeriesData{})] = fixture{
+		populatedConstructor: func(r *rand.Rand) protoutil.Message {
+			return roachpb.NewPopulatedInternalTimeSeriesData(r, false)
+		},
+		emptySum:     5531676819244041709,
+		populatedSum: 8911200268508796945,
 	}
+	belowRaftGoldenProtos[reflect.TypeOf(&enginepb.MVCCMetadataSubsetForMergeSerialization{})] =
+		fixture{
+			populatedConstructor: func(r *rand.Rand) protoutil.Message {
+				return enginepb.NewPopulatedMVCCMetadataSubsetForMergeSerialization(r, false)
+			},
+			emptySum:     14695981039346656037,
+			populatedSum: 7432412240713840291,
+		}
 }
 
 func TestBelowRaftProtos(t *testing.T) {

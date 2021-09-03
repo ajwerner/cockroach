@@ -27,12 +27,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
 
 type s3Storage struct {
 	bucket   *string
 	conf     *roachpb.ExternalStorage_S3
+	ioConf   base.ExternalIODirConfig
 	prefix   string
 	s3       *s3.S3
 	settings *cluster.Settings
@@ -47,10 +49,10 @@ func s3QueryParams(conf *roachpb.ExternalStorage_S3) string {
 			q.Set(key, value)
 		}
 	}
-	setIf(S3AccessKeyParam, conf.AccessKey)
-	setIf(S3SecretParam, conf.Secret)
-	setIf(S3TempTokenParam, conf.TempToken)
-	setIf(S3EndpointParam, conf.Endpoint)
+	setIf(AWSAccessKeyParam, conf.AccessKey)
+	setIf(AWSSecretParam, conf.Secret)
+	setIf(AWSTempTokenParam, conf.TempToken)
+	setIf(AWSEndpointParam, conf.Endpoint)
 	setIf(S3RegionParam, conf.Region)
 	setIf(AuthParam, conf.Auth)
 
@@ -97,7 +99,7 @@ func MakeS3Storage(
 				"%s is set to '%s', but %s is not set",
 				AuthParam,
 				AuthParamSpecified,
-				S3AccessKeyParam,
+				AWSAccessKeyParam,
 			)
 		}
 		if conf.Secret == "" {
@@ -105,7 +107,7 @@ func MakeS3Storage(
 				"%s is set to '%s', but %s is not set",
 				AuthParam,
 				AuthParamSpecified,
-				S3SecretParam,
+				AWSSecretParam,
 			)
 		}
 		opts.Config.MergeIn(config)
@@ -137,9 +139,16 @@ func MakeS3Storage(
 	if conf.Endpoint != "" {
 		sess.Config.S3ForcePathStyle = aws.Bool(true)
 	}
+	if log.V(2) {
+		sess.Config.LogLevel = aws.LogLevel(aws.LogDebugWithRequestRetries | aws.LogDebugWithRequestErrors)
+	}
+	maxRetries := 10
+	sess.Config.MaxRetries = &maxRetries
+
 	return &s3Storage{
 		bucket:   aws.String(conf.Bucket),
 		conf:     conf,
+		ioConf:   ioConf,
 		prefix:   conf.Prefix,
 		s3:       s3.New(sess),
 		settings: settings,
@@ -151,6 +160,14 @@ func (s *s3Storage) Conf() roachpb.ExternalStorage {
 		Provider: roachpb.ExternalStorageProvider_S3,
 		S3Config: s.conf,
 	}
+}
+
+func (s *s3Storage) ExternalIOConf() base.ExternalIODirConfig {
+	return s.ioConf
+}
+
+func (s *s3Storage) Settings() *cluster.Settings {
+	return s.settings
 }
 
 func (s *s3Storage) WriteFile(ctx context.Context, basename string, content io.ReadSeeker) error {

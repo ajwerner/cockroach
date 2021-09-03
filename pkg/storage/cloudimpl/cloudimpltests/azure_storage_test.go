@@ -18,6 +18,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 )
 
@@ -27,18 +28,18 @@ func TestPutAzure(t *testing.T) {
 	accountName := os.Getenv("AZURE_ACCOUNT_NAME")
 	accountKey := os.Getenv("AZURE_ACCOUNT_KEY")
 	if accountName == "" || accountKey == "" {
-		t.Skip("AZURE_ACCOUNT_NAME and AZURE_ACCOUNT_KEY env vars must be set")
+		skip.IgnoreLint(t, "AZURE_ACCOUNT_NAME and AZURE_ACCOUNT_KEY env vars must be set")
 	}
 	bucket := os.Getenv("AZURE_CONTAINER")
 	if bucket == "" {
-		t.Skip("AZURE_CONTAINER env var must be set")
+		skip.IgnoreLint(t, "AZURE_CONTAINER env var must be set")
 	}
 
 	testExportStore(t, fmt.Sprintf("azure://%s/%s?%s=%s&%s=%s",
 		bucket, "backup-test",
 		cloudimpl.AzureAccountNameParam, url.QueryEscape(accountName),
 		cloudimpl.AzureAccountKeyParam, url.QueryEscape(accountKey),
-	), false, security.RootUser, nil, nil)
+	), false, security.RootUserName(), nil, nil)
 	testListFiles(
 		t,
 		fmt.Sprintf("azure://%s/%s?%s=%s&%s=%s",
@@ -46,6 +47,6 @@ func TestPutAzure(t *testing.T) {
 			cloudimpl.AzureAccountNameParam, url.QueryEscape(accountName),
 			cloudimpl.AzureAccountKeyParam, url.QueryEscape(accountKey),
 		),
-		security.RootUser, nil, nil,
+		security.RootUserName(), nil, nil,
 	)
 }

@@ -16,6 +16,7 @@ func registerTests(r *testRegistry) {
 	// grep -h -E 'func register[^(]+\(.*testRegistry\) {' pkg/cmd/roachtest/*.go | grep -E -o 'register[^(]+' | grep -E -v '^register(Tests|Benchmarks)$' | grep -v '^\w*Bench$' | sort -f | awk '{printf "\t%s(r)\n", $0}'
 
 	registerAcceptance(r)
+	registerActiveRecord(r)
 	registerAllocator(r)
 	registerAlterPK(r)
 	registerAutoUpgrade(r)
@@ -27,7 +28,6 @@ func registerTests(r *testRegistry) {
 	registerClockMonotonicTests(r)
 	registerCopy(r)
 	registerDecommission(r)
-	registerDecommissionMixedVersion(r)
 	registerDiskFull(r)
 	registerDiskStalledDetection(r)
 	registerDjango(r)
@@ -49,6 +49,7 @@ func registerTests(r *testRegistry) {
 	registerInterleaved(r)
 	registerJepsen(r)
 	registerJobsMixedVersions(r)
+	registerJoinInitMixed(r)
 	registerKV(r)
 	registerKVContention(r)
 	registerKVQuiescenceDead(r)
@@ -75,6 +76,7 @@ func registerTests(r *testRegistry) {
 	registerRoachmart(r)
 	registerScaleData(r)
 	registerSchemaChangeBulkIngest(r)
+	registerSchemaChangeDatabaseVersionUpgrade(r)
 	registerSchemaChangeDuringKV(r)
 	registerSchemaChangeIndexTPCC100(r)
 	registerSchemaChangeIndexTPCC1000(r)

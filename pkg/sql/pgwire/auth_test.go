@@ -33,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -51,6 +52,9 @@ import (
 //       Only run the test file if the server is in the specified
 //       security mode. (The default is `config secure insecure` i.e.
 //       the test file is applicable to both.)
+//
+// accept_sql_without_tls
+//       Enable TCP connections without TLS in secure mode.
 //
 // set_hba
 // <hba config>
@@ -144,6 +148,10 @@ func hbaRunTest(t *testing.T, insecure bool) {
 		maybeSocketDir, maybeSocketFile, cleanup := makeSocketFile(t)
 		defer cleanup()
 
+		// We really need to have the logs go to files, so that -show-logs
+		// does not break the "authlog" directives.
+		defer log.ScopeWithoutShowLogs(t).Close(t)
+
 		s, conn, _ := serverutils.StartServer(t,
 			base.TestServerArgs{Insecure: insecure, SocketFile: maybeSocketFile})
 		defer s.Stopper().Stop(context.Background())
@@ -151,13 +159,8 @@ func hbaRunTest(t *testing.T, insecure bool) {
 		// Enable conn/auth logging.
 		// We can't use the cluster settings to do this, because
 		// cluster settings propagate asynchronously.
-		s.(*server.TestServer).PGServer().TestingEnableConnAuthLogging()
-
-		// We really need to have the logs go to files, so that -show-logs
-		// does not break the "authlog" directives. We also must call
-		// this here and not earlier, because it needs to enforce the
-		// redirect on the secondary loggers created by StartServer().
-		defer log.ScopeWithoutShowLogs(t).Close(t)
+		testServer := s.(*server.TestServer)
+		testServer.PGServer().TestingEnableConnAuthLogging()
 
 		pgServer := s.(*server.TestServer).PGServer()
 
@@ -167,7 +170,7 @@ func hbaRunTest(t *testing.T, insecure bool) {
 		}
 		httpHBAUrl := httpScheme + s.HTTPAddr() + "/debug/hba_conf"
 
-		if _, err := conn.ExecContext(context.Background(), `CREATE USER $1`, server.TestUser); err != nil {
+		if _, err := conn.ExecContext(context.Background(), `CREATE USER $1`, security.TestUser); err != nil {
 			t.Fatal(err)
 		}
 
@@ -187,8 +190,11 @@ func hbaRunTest(t *testing.T, insecure bool) {
 						}
 					}
 					if !allowed {
-						t.Skip("Test file not applicable at this security level.")
+						skip.IgnoreLint(t, "Test file not applicable at this security level.")
 					}
+
+				case "accept_sql_without_tls":
+					testServer.Cfg.AcceptSQLWithoutTLS = true
 
 				case "set_hba":
 					_, err := conn.ExecContext(context.Background(),
@@ -315,7 +321,7 @@ func hbaRunTest(t *testing.T, insecure bool) {
 					// However, certs are only generated for users "root" and "testuser" specifically.
 					sqlURL, cleanupFn := sqlutils.PGUrlWithOptionalClientCerts(
 						t, s.ServingSQLAddr(), t.Name(), url.User(user),
-						user == security.RootUser || user == server.TestUser /* withClientCerts */)
+						user == security.RootUser || user == security.TestUser /* withClientCerts */)
 					defer cleanupFn()
 
 					var host, port string

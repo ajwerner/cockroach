@@ -176,6 +176,9 @@ func TestTypeCheck(t *testing.T) {
 		{`((ROW (1) AS a)).*`, `((1:::INT8,) AS a)`},
 		{`((('1'||'', 1+1) AS a, b)).*`, `(('1':::STRING || '':::STRING, 1:::INT8 + 1:::INT8) AS a, b)`},
 
+		{`'{"x": "bar"}' -> 'x'`, `'{"x": "bar"}':::JSONB->'x':::STRING`},
+		{`('{"x": "bar"}') -> 'x'`, `'{"x": "bar"}':::JSONB->'x':::STRING`},
+
 		// These outputs, while bizarre looking, are correct and expected. The
 		// type annotation is caused by the call to tree.Serialize, which formats the
 		// output using the Parseable formatter which inserts type annotations
@@ -340,5 +343,75 @@ func TestTypeCheckError(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestTypeCheckVolatility(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	// $1 has type timestamptz.
+	placeholderTypes := []*types.T{types.TimestampTZ}
+
+	testCases := []struct {
+		expr       string
+		volatility tree.Volatility
+	}{
+		{"1 + 1", tree.VolatilityImmutable},
+		{"random()", tree.VolatilityVolatile},
+		{"now()", tree.VolatilityStable},
+		{"'2020-01-01 01:02:03'::timestamp", tree.VolatilityImmutable},
+		{"'now'::timestamp", tree.VolatilityStable},
+		{"'2020-01-01 01:02:03'::timestamptz", tree.VolatilityStable},
+		{"'1 hour'::interval", tree.VolatilityImmutable},
+		{"$1", tree.VolatilityImmutable},
+
+		// Stable cast with immutable input.
+		{"$1::string", tree.VolatilityStable},
+
+		// Stable binary operator with immutable inputs.
+		{"$1 + '1 hour'::interval", tree.VolatilityStable},
+
+		// Stable comparison operator with immutable inputs.
+		{"$1 = '2020-01-01 01:02:03'::timestamp", tree.VolatilityStable},
+	}
+
+	ctx := context.Background()
+	semaCtx := tree.MakeSemaContext()
+	if err := semaCtx.Placeholders.Init(len(placeholderTypes), placeholderTypes); err != nil {
+		t.Fatal(err)
+	}
+
+	typeCheck := func(sql string) error {
+		expr, err := parser.ParseExpr(sql)
+		if err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+		_, err = tree.TypeCheck(ctx, expr, &semaCtx, types.Any)
+		return err
+	}
+
+	for _, tc := range testCases {
+		// First, typecheck without any restrictions.
+		semaCtx.Properties.Require("", 0 /* flags */)
+		if err := typeCheck(tc.expr); err != nil {
+			t.Fatalf("%s: %v", tc.expr, err)
+		}
+
+		semaCtx.Properties.Require("", tree.RejectVolatileFunctions)
+		expectErr := tc.volatility == tree.VolatilityVolatile
+		if err := typeCheck(tc.expr); err == nil && expectErr {
+			t.Fatalf("%s: should have rejected volatile function", tc.expr)
+		} else if err != nil && !expectErr {
+			t.Fatalf("%s: %v", tc.expr, err)
+		}
+
+		semaCtx.Properties.Require("", tree.RejectStableOperators|tree.RejectVolatileFunctions)
+		expectErr = tc.volatility >= tree.VolatilityStable
+		if err := typeCheck(tc.expr); err == nil && expectErr {
+			t.Fatalf("%s: should have rejected stable operator", tc.expr)
+		} else if err != nil && !expectErr {
+			t.Fatalf("%s: %v", tc.expr, err)
+		}
 	}
 }

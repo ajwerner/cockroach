@@ -18,18 +18,15 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	opentracing "github.com/opentracing/opentracing-go"
-	"google.golang.org/grpc"
 )
 
 const outboxBufRows = 16
@@ -119,7 +116,7 @@ func (m *Outbox) Init(typs []*types.T) {
 // too, or it might be an encoding error, in which case we've forwarded it on
 // the stream.
 func (m *Outbox) addRow(
-	ctx context.Context, row sqlbase.EncDatumRow, meta *execinfrapb.ProducerMetadata,
+	ctx context.Context, row rowenc.EncDatumRow, meta *execinfrapb.ProducerMetadata,
 ) error {
 	mustFlush := false
 	var encodingErr error
@@ -203,7 +200,7 @@ func (m *Outbox) mainLoop(ctx context.Context) error {
 	// writers could be writing to it as soon as we are started.
 	defer m.RowChannel.ConsumerClosed()
 
-	var span opentracing.Span
+	var span *tracing.Span
 	ctx, span = execinfra.ProcessorSpan(ctx, "outbox")
 	if span != nil && tracing.IsRecording(span) {
 		m.statsCollectionEnabled = true
@@ -221,9 +218,9 @@ func (m *Outbox) mainLoop(ctx context.Context) error {
 	}()
 
 	if m.stream == nil {
-		var conn *grpc.ClientConn
-		var err error
-		conn, err = m.flowCtx.Cfg.NodeDialer.DialNoBreaker(ctx, m.nodeID, rpc.DefaultClass)
+		conn, err := execinfra.GetConnForOutbox(
+			ctx, m.flowCtx.Cfg.NodeDialer, m.nodeID, SettingFlowStreamTimeout.Get(&m.flowCtx.Cfg.Settings.SV),
+		)
 		if err != nil {
 			// Log any Dial errors. This does not have a verbosity check due to being
 			// a critical part of query execution: if this step doesn't work, the
@@ -413,10 +410,10 @@ func (m *Outbox) listenForDrainSignalFromConsumer(ctx context.Context) (<-chan d
 					return
 				}
 			case signal.SetupFlowRequest != nil:
-				log.Fatalf(ctx, "Unexpected SetupFlowRequest. "+
+				log.Fatalf(ctx, "unexpected SetupFlowRequest.\n"+
 					"This SyncFlow specific message should have been handled in RunSyncFlow.")
 			case signal.Handshake != nil:
-				log.Eventf(ctx, "Consumer sent handshake. Consuming flow scheduled: %t",
+				log.Eventf(ctx, "consumer sent handshake.\nConsuming flow scheduled: %t",
 					signal.Handshake.ConsumerScheduled)
 			}
 		}

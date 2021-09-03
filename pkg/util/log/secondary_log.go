@@ -51,6 +51,12 @@ func NewSecondaryLogger(
 ) *SecondaryLogger {
 	mainLog.mu.Lock()
 	defer mainLog.mu.Unlock()
+
+	// Any consumption of configuration off the main logger
+	// makes the logging module "active" and prevents further
+	// configuration changes.
+	setActive()
+
 	var dir string
 	if dirName != nil {
 		dir = dirName.String()
@@ -66,10 +72,6 @@ func NewSecondaryLogger(
 			stderrThreshold: mainLog.stderrThreshold.get(),
 			logCounter:      EntryCounter{EnableMsgCount: enableMsgCount},
 			gcNotify:        make(chan struct{}, 1),
-			// Only one logger can have redirectInternalStderrWrites set to
-			// true; this is going to be either mainLog or stderrLog
-			// depending on configuration.
-			redirectInternalStderrWrites: false,
 		},
 		forceSyncWrites: forceSyncWrites,
 	}
@@ -124,9 +126,4 @@ func (l *SecondaryLogger) LogfDepth(
 	ctx context.Context, depth int, format string, args ...interface{},
 ) {
 	l.output(ctx, depth+1, Severity_INFO, format, args...)
-}
-
-// LogSev logs an event at the specified severity on a secondary logger.
-func (l *SecondaryLogger) LogSev(ctx context.Context, sev Severity, args ...interface{}) {
-	l.output(ctx, 1, Severity_INFO, "", args...)
 }

@@ -13,11 +13,12 @@ package execinfrapb
 import (
 	"strings"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/errors"
@@ -34,15 +35,14 @@ func GetAggregateFuncIdx(funcName string) (int32, error) {
 	return funcIdx, nil
 }
 
+// AggregateConstructor is a function that creates an aggregate function.
+type AggregateConstructor func(*tree.EvalContext, tree.Datums) tree.AggregateFunc
+
 // GetAggregateInfo returns the aggregate constructor and the return type for
 // the given aggregate function when applied on the given type.
 func GetAggregateInfo(
 	fn AggregatorSpec_Func, inputTypes ...*types.T,
-) (
-	aggregateConstructor func(*tree.EvalContext, tree.Datums) tree.AggregateFunc,
-	returnType *types.T,
-	err error,
-) {
+) (aggregateConstructor AggregateConstructor, returnType *types.T, err error) {
 	if fn == AggregatorSpec_ANY_NOT_NULL {
 		// The ANY_NOT_NULL builtin does not have a fixed return type;
 		// handle it separately.
@@ -73,33 +73,50 @@ func GetAggregateInfo(
 			constructAgg := func(evalCtx *tree.EvalContext, arguments tree.Datums) tree.AggregateFunc {
 				return b.AggregateFunc(inputTypes, evalCtx, arguments)
 			}
-
-			colTyp := b.FixedReturnType()
-			// If the output type of the aggregation depends on its inputs, then
-			// the output of FixedReturnType will be ambiguous. In the ambiguous
-			// cases, use the information about the input types to construct the
-			// appropriate output type. The tree.ReturnTyper interface is
-			// []tree.TypedExpr -> *types.T, so construct the []tree.TypedExpr
-			// from the types that we know are the inputs. Note that we don't
-			// try to create datums of each input type, and instead use this
-			// "TypedDummy" construct. This is because some types don't have resident
-			// members (like an ENUM with no values), and we shouldn't error out
-			// trying to pick an aggregate spec for those cases.
-			if colTyp.IsAmbiguous() {
-				args := make([]tree.TypedExpr, len(inputTypes))
-				for i, t := range inputTypes {
-					args[i] = &tree.TypedDummy{Typ: t}
-				}
-				// Evaluate ReturnType with the fake input set of arguments.
-				colTyp = b.ReturnType(args)
-			}
-
+			colTyp := b.InferReturnTypeFromInputArgTypes(inputTypes)
 			return constructAgg, colTyp, nil
 		}
 	}
 	return nil, nil, errors.Errorf(
 		"no builtin aggregate for %s on %+v", fn, inputTypes,
 	)
+}
+
+// GetAggregateConstructor processes the specification of a single aggregate
+// function.
+func GetAggregateConstructor(
+	evalCtx *tree.EvalContext,
+	semaCtx *tree.SemaContext,
+	aggInfo *AggregatorSpec_Aggregation,
+	inputTypes []*types.T,
+) (constructor AggregateConstructor, arguments tree.Datums, outputType *types.T, err error) {
+	argTypes := make([]*types.T, len(aggInfo.ColIdx)+len(aggInfo.Arguments))
+	for j, c := range aggInfo.ColIdx {
+		if c >= uint32(len(inputTypes)) {
+			err = errors.Errorf("ColIdx out of range (%d)", aggInfo.ColIdx)
+			return
+		}
+		argTypes[j] = inputTypes[c]
+	}
+	arguments = make(tree.Datums, len(aggInfo.Arguments))
+	var d tree.Datum
+	for j, argument := range aggInfo.Arguments {
+		h := ExprHelper{}
+		// Pass nil types and row - there are no variables in these expressions.
+		if err = h.Init(argument, nil /* types */, semaCtx, evalCtx); err != nil {
+			err = errors.Wrapf(err, "%s", argument)
+			return
+		}
+		d, err = h.Eval(nil /* row */)
+		if err != nil {
+			err = errors.Wrapf(err, "%s", argument)
+			return
+		}
+		argTypes[len(aggInfo.ColIdx)+j] = d.ResolvedType()
+		arguments[j] = d
+	}
+	constructor, outputType, err = GetAggregateInfo(aggInfo.Func, argTypes...)
+	return
 }
 
 // Equals returns true if two aggregation specifiers are identical (and thus
@@ -207,7 +224,8 @@ func GetWindowFunctionInfo(
 			constructAgg := func(evalCtx *tree.EvalContext) tree.WindowFunc {
 				return b.WindowFunc(inputTypes, evalCtx)
 			}
-			return constructAgg, b.FixedReturnType(), nil
+			colTyp := b.InferReturnTypeFromInputArgTypes(inputTypes)
+			return constructAgg, colTyp, nil
 		}
 	}
 	return nil, nil, errors.Errorf(
@@ -296,11 +314,11 @@ func (spec *WindowerSpec_Frame_Bounds) initFromAST(
 				return pgerror.Newf(pgcode.InvalidWindowFrameOffset, "invalid preceding or following size in window function")
 			}
 			typ := dStartOffset.ResolvedType()
-			spec.Start.OffsetType = DatumInfo{Encoding: sqlbase.DatumEncoding_VALUE, Type: typ}
+			spec.Start.OffsetType = DatumInfo{Encoding: descpb.DatumEncoding_VALUE, Type: typ}
 			var buf []byte
-			var a sqlbase.DatumAlloc
-			datum := sqlbase.DatumToEncDatum(typ, dStartOffset)
-			buf, err = datum.Encode(typ, &a, sqlbase.DatumEncoding_VALUE, buf)
+			var a rowenc.DatumAlloc
+			datum := rowenc.DatumToEncDatum(typ, dStartOffset)
+			buf, err = datum.Encode(typ, &a, descpb.DatumEncoding_VALUE, buf)
 			if err != nil {
 				return err
 			}
@@ -340,11 +358,11 @@ func (spec *WindowerSpec_Frame_Bounds) initFromAST(
 					return pgerror.Newf(pgcode.InvalidWindowFrameOffset, "invalid preceding or following size in window function")
 				}
 				typ := dEndOffset.ResolvedType()
-				spec.End.OffsetType = DatumInfo{Encoding: sqlbase.DatumEncoding_VALUE, Type: typ}
+				spec.End.OffsetType = DatumInfo{Encoding: descpb.DatumEncoding_VALUE, Type: typ}
 				var buf []byte
-				var a sqlbase.DatumAlloc
-				datum := sqlbase.DatumToEncDatum(typ, dEndOffset)
-				buf, err = datum.Encode(typ, &a, sqlbase.DatumEncoding_VALUE, buf)
+				var a rowenc.DatumAlloc
+				datum := rowenc.DatumToEncDatum(typ, dEndOffset)
+				buf, err = datum.Encode(typ, &a, descpb.DatumEncoding_VALUE, buf)
 				if err != nil {
 					return err
 				}

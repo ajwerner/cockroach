@@ -21,11 +21,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/colexec"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexec/colbuilder"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
@@ -35,8 +35,58 @@ import (
 const nullProbability = 0.2
 const randTypesProbability = 0.5
 
+var aggregateFuncToNumArguments = map[execinfrapb.AggregatorSpec_Func]int{
+	execinfrapb.AggregatorSpec_ANY_NOT_NULL:         1,
+	execinfrapb.AggregatorSpec_AVG:                  1,
+	execinfrapb.AggregatorSpec_BOOL_AND:             1,
+	execinfrapb.AggregatorSpec_BOOL_OR:              1,
+	execinfrapb.AggregatorSpec_CONCAT_AGG:           1,
+	execinfrapb.AggregatorSpec_COUNT:                1,
+	execinfrapb.AggregatorSpec_MAX:                  1,
+	execinfrapb.AggregatorSpec_MIN:                  1,
+	execinfrapb.AggregatorSpec_STDDEV:               1,
+	execinfrapb.AggregatorSpec_SUM:                  1,
+	execinfrapb.AggregatorSpec_SUM_INT:              1,
+	execinfrapb.AggregatorSpec_VARIANCE:             1,
+	execinfrapb.AggregatorSpec_XOR_AGG:              1,
+	execinfrapb.AggregatorSpec_COUNT_ROWS:           0,
+	execinfrapb.AggregatorSpec_SQRDIFF:              1,
+	execinfrapb.AggregatorSpec_FINAL_VARIANCE:       3,
+	execinfrapb.AggregatorSpec_FINAL_STDDEV:         3,
+	execinfrapb.AggregatorSpec_ARRAY_AGG:            1,
+	execinfrapb.AggregatorSpec_JSON_AGG:             1,
+	execinfrapb.AggregatorSpec_JSONB_AGG:            1,
+	execinfrapb.AggregatorSpec_STRING_AGG:           2,
+	execinfrapb.AggregatorSpec_BIT_AND:              1,
+	execinfrapb.AggregatorSpec_BIT_OR:               1,
+	execinfrapb.AggregatorSpec_CORR:                 2,
+	execinfrapb.AggregatorSpec_PERCENTILE_DISC_IMPL: 2,
+	execinfrapb.AggregatorSpec_PERCENTILE_CONT_IMPL: 2,
+	execinfrapb.AggregatorSpec_JSON_OBJECT_AGG:      2,
+	execinfrapb.AggregatorSpec_JSONB_OBJECT_AGG:     2,
+	execinfrapb.AggregatorSpec_VAR_POP:              1,
+	execinfrapb.AggregatorSpec_STDDEV_POP:           1,
+	execinfrapb.AggregatorSpec_ST_MAKELINE:          1,
+	execinfrapb.AggregatorSpec_ST_EXTENT:            1,
+	execinfrapb.AggregatorSpec_ST_UNION:             1,
+	execinfrapb.AggregatorSpec_ST_COLLECT:           1,
+}
+
+// TestAggregateFuncToNumArguments ensures that all aggregate functions are
+// present in the map above.
+func TestAggregateFuncToNumArguments(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	for aggFn, aggFnName := range execinfrapb.AggregatorSpec_Func_name {
+		if _, found := aggregateFuncToNumArguments[execinfrapb.AggregatorSpec_Func(aggFn)]; !found {
+			t.Fatalf("didn't find number of arguments for %s", aggFnName)
+		}
+	}
+
+}
+
 func TestAggregatorAgainstProcessor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := tree.MakeTestingEvalContext(st)
 	defer evalCtx.Stop(context.Background())
@@ -44,6 +94,7 @@ func TestAggregatorAgainstProcessor(t *testing.T) {
 	rng, seed := randutil.NewPseudoRand()
 	nRuns := 20
 	nRows := 100
+	nAggFnsToTest := 5
 	const (
 		maxNumGroupingCols = 3
 		nextGroupProb      = 0.2
@@ -54,117 +105,211 @@ func TestAggregatorAgainstProcessor(t *testing.T) {
 		groupingCols[i] = i
 		orderingCols[i].ColIdx = i
 	}
-	var da sqlbase.DatumAlloc
+	var da rowenc.DatumAlloc
 
-	deterministicAggFns := make([]execinfrapb.AggregatorSpec_Func, 0, len(colexec.SupportedAggFns)-1)
-	for _, aggFn := range colexec.SupportedAggFns {
-		if aggFn == execinfrapb.AggregatorSpec_ANY_NOT_NULL {
-			// We skip ANY_NOT_NULL aggregate function because it returns
-			// non-deterministic results.
-			continue
+	// We need +1 because an entry for index=6 was omitted by mistake.
+	numSupportedAggFns := len(execinfrapb.AggregatorSpec_Func_name) + 1
+	aggregations := make([]execinfrapb.AggregatorSpec_Aggregation, 0, nAggFnsToTest)
+	for len(aggregations) < nAggFnsToTest {
+		var aggFn execinfrapb.AggregatorSpec_Func
+		found := false
+		for !found {
+			aggFn = execinfrapb.AggregatorSpec_Func(rng.Intn(numSupportedAggFns))
+			if _, valid := aggregateFuncToNumArguments[aggFn]; !valid {
+				continue
+			}
+			switch aggFn {
+			case execinfrapb.AggregatorSpec_ANY_NOT_NULL:
+				// We skip ANY_NOT_NULL aggregate function because it returns
+				// non-deterministic results.
+			case execinfrapb.AggregatorSpec_PERCENTILE_DISC_IMPL,
+				execinfrapb.AggregatorSpec_PERCENTILE_CONT_IMPL:
+				// We skip percentile functions because those can only be
+				// planned as window functions.
+			default:
+				found = true
+			}
+
 		}
-		deterministicAggFns = append(deterministicAggFns, aggFn)
+		aggregations = append(aggregations, execinfrapb.AggregatorSpec_Aggregation{Func: aggFn})
 	}
-	aggregations := make([]execinfrapb.AggregatorSpec_Aggregation, len(deterministicAggFns))
 	for _, hashAgg := range []bool{false, true} {
-		for numGroupingCols := 1; numGroupingCols <= maxNumGroupingCols; numGroupingCols++ {
-			for i, aggFn := range deterministicAggFns {
-				aggregations[i].Func = aggFn
-				aggregations[i].ColIdx = []uint32{uint32(i + numGroupingCols)}
+		filteringAggOptions := []bool{false}
+		if hashAgg {
+			// We currently support filtering aggregation only for hash
+			// aggregator.
+			filteringAggOptions = []bool{false, true}
+		}
+		for _, filteringAgg := range filteringAggOptions {
+			numFilteringCols := 0
+			if filteringAgg {
+				numFilteringCols = 1
 			}
-			inputTypes := make([]*types.T, len(aggregations)+numGroupingCols)
-			for i := 0; i < numGroupingCols; i++ {
-				inputTypes[i] = types.Int
-			}
-			outputTypes := make([]*types.T, len(aggregations))
-
-			for run := 0; run < nRuns; run++ {
-				var rows sqlbase.EncDatumRows
-				// We will be grouping based on the first numGroupingCols columns (which
-				// we already set to be of INT types) with the values for the column set
+			for numGroupingCols := 1; numGroupingCols <= maxNumGroupingCols; numGroupingCols++ {
+				// We will be grouping based on the first numGroupingCols columns
+				// (which will be of INT types) with the values for the columns set
 				// manually below.
-				for i := range aggregations {
-					aggFn := aggregations[i].Func
-					var aggTyp *types.T
-					for {
-						aggTyp = sqlbase.RandType(rng)
-						aggInputTypes := []*types.T{aggTyp}
-						if aggFn == execinfrapb.AggregatorSpec_COUNT_ROWS {
-							// Count rows takes no arguments.
-							aggregations[i].ColIdx = []uint32{}
-							aggInputTypes = aggInputTypes[:0]
-						}
-						if _, outputType, err := execinfrapb.GetAggregateInfo(aggFn, aggInputTypes...); err == nil {
-							outputTypes[i] = outputType
-							break
-						}
-					}
-					inputTypes[i+numGroupingCols] = aggTyp
+				numUtilityCols := numGroupingCols + numFilteringCols
+				inputTypes := make([]*types.T, 0, numUtilityCols+len(aggregations))
+				for i := 0; i < numGroupingCols; i++ {
+					inputTypes = append(inputTypes, types.Int)
 				}
-				rows = sqlbase.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
-				groupIdx := 0
-				for _, row := range rows {
-					for i := 0; i < numGroupingCols; i++ {
-						if rng.Float64() < nullProbability {
-							row[i] = sqlbase.EncDatum{Datum: tree.DNull}
-						} else {
-							row[i] = sqlbase.EncDatum{Datum: tree.NewDInt(tree.DInt(groupIdx))}
-							if rng.Float64() < nextGroupProb {
-								groupIdx++
+				// Check whether we want to add a column for FILTER clause.
+				var filteringColIdx uint32
+				if filteringAgg {
+					filteringColIdx = uint32(len(inputTypes))
+					inputTypes = append(inputTypes, types.Bool)
+				}
+				// After all utility columns, we will have input columns for each
+				// of the aggregate functions. Here, we will set up the column
+				// indices, and the types will be generated below.
+				numColsSoFar := numUtilityCols
+				for i := range aggregations {
+					numArguments := aggregateFuncToNumArguments[aggregations[i].Func]
+					aggregations[i].ColIdx = make([]uint32, numArguments)
+					for j := range aggregations[i].ColIdx {
+						aggregations[i].ColIdx[j] = uint32(numColsSoFar)
+						numColsSoFar++
+					}
+				}
+				outputTypes := make([]*types.T, len(aggregations))
+
+				for run := 0; run < nRuns; run++ {
+					inputTypes = inputTypes[:numUtilityCols]
+					var rows rowenc.EncDatumRows
+					hasJSONColumn := false
+					for i := range aggregations {
+						aggFn := aggregations[i].Func
+						aggFnInputTypes := make([]*types.T, len(aggregations[i].ColIdx))
+						for {
+							for j := range aggFnInputTypes {
+								aggFnInputTypes[j] = rowenc.RandType(rng)
+							}
+							// There is a special case for some functions when at
+							// least one argument is a tuple.
+							// Such cases pass GetAggregateInfo check below,
+							// but they are actually invalid, and during normal
+							// execution it is caught during type-checking.
+							// However, we don't want to do fully-fledged type
+							// checking, so we hard-code an exception here.
+							invalid := false
+							switch aggFn {
+							case execinfrapb.AggregatorSpec_CONCAT_AGG,
+								execinfrapb.AggregatorSpec_STRING_AGG,
+								execinfrapb.AggregatorSpec_ST_MAKELINE,
+								execinfrapb.AggregatorSpec_ST_EXTENT,
+								execinfrapb.AggregatorSpec_ST_UNION,
+								execinfrapb.AggregatorSpec_ST_COLLECT:
+								for _, typ := range aggFnInputTypes {
+									if typ.Family() == types.TupleFamily {
+										invalid = true
+										break
+									}
+								}
+							}
+							if invalid {
+								continue
+							}
+							for _, typ := range aggFnInputTypes {
+								hasJSONColumn = hasJSONColumn || typ.Family() == types.JsonFamily
+							}
+							if _, outputType, err := execinfrapb.GetAggregateInfo(aggFn, aggFnInputTypes...); err == nil {
+								outputTypes[i] = outputType
+								break
+							}
+						}
+						inputTypes = append(inputTypes, aggFnInputTypes...)
+					}
+					rows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
+					groupIdx := 0
+					for _, row := range rows {
+						for i := 0; i < numGroupingCols; i++ {
+							if rng.Float64() < nullProbability {
+								row[i] = rowenc.EncDatum{Datum: tree.DNull}
+							} else {
+								row[i] = rowenc.EncDatum{Datum: tree.NewDInt(tree.DInt(groupIdx))}
+								if rng.Float64() < nextGroupProb {
+									groupIdx++
+								}
 							}
 						}
 					}
-				}
 
-				aggregatorSpec := &execinfrapb.AggregatorSpec{
-					Type:         execinfrapb.AggregatorSpec_NON_SCALAR,
-					GroupCols:    groupingCols[:numGroupingCols],
-					Aggregations: aggregations,
-				}
-				if hashAgg {
-					// Let's shuffle the rows for the hash aggregator.
-					rand.Shuffle(nRows, func(i, j int) {
-						rows[i], rows[j] = rows[j], rows[i]
-					})
-				} else {
-					aggregatorSpec.OrderedGroupCols = groupingCols[:numGroupingCols]
-					orderedCols := execinfrapb.ConvertToColumnOrdering(
-						execinfrapb.Ordering{Columns: orderingCols[:numGroupingCols]},
-					)
-					// Although we build the input rows in "non-decreasing" order, it is
-					// possible that some NULL values are present here and there, so we
-					// need to sort the rows to satisfy the ordering conditions.
-					sort.Slice(rows, func(i, j int) bool {
-						cmp, err := rows[i].Compare(inputTypes, &da, orderedCols, &evalCtx, rows[j])
-						if err != nil {
-							t.Fatal(err)
+					// Update the specifications of aggregate functions to
+					// possibly include DISTINCT and/or FILTER clauses.
+					for _, aggFn := range aggregations {
+						distinctProb := 0.5
+						if hasJSONColumn {
+							// We currently cannot encode json columns, so we
+							// don't support distinct aggregation in both
+							// row-by-row and vectorized engines.
+							distinctProb = 0
 						}
-						return cmp < 0
-					})
-				}
-				pspec := &execinfrapb.ProcessorSpec{
-					Input: []execinfrapb.InputSyncSpec{{ColumnTypes: inputTypes}},
-					Core:  execinfrapb.ProcessorCoreUnion{Aggregator: aggregatorSpec},
-				}
-				args := verifyColOperatorArgs{
-					anyOrder:    hashAgg,
-					inputTypes:  [][]*types.T{inputTypes},
-					inputs:      []sqlbase.EncDatumRows{rows},
-					outputTypes: outputTypes,
-					pspec:       pspec,
-				}
-				if err := verifyColOperator(args); err != nil {
-					// Columnar aggregators check whether an overflow occurs whereas
-					// processors don't, so we simply swallow the integer out of range
-					// error if such occurs and move on.
-					if strings.Contains(err.Error(), tree.ErrIntOutOfRange.Error()) {
-						continue
+						aggFn.Distinct = rng.Float64() < distinctProb
+						if filteringAgg {
+							aggFn.FilterColIdx = &filteringColIdx
+						} else {
+							aggFn.FilterColIdx = nil
+						}
 					}
-					fmt.Printf("--- seed = %d run = %d hash = %t ---\n",
-						seed, run, hashAgg)
-					prettyPrintTypes(inputTypes, "t" /* tableName */)
-					prettyPrintInput(rows, inputTypes, "t" /* tableName */)
-					t.Fatal(err)
+					aggregatorSpec := &execinfrapb.AggregatorSpec{
+						Type:         execinfrapb.AggregatorSpec_NON_SCALAR,
+						GroupCols:    groupingCols[:numGroupingCols],
+						Aggregations: aggregations,
+					}
+					if hashAgg {
+						// Let's shuffle the rows for the hash aggregator.
+						rand.Shuffle(nRows, func(i, j int) {
+							rows[i], rows[j] = rows[j], rows[i]
+						})
+					} else {
+						aggregatorSpec.OrderedGroupCols = groupingCols[:numGroupingCols]
+						orderedCols := execinfrapb.ConvertToColumnOrdering(
+							execinfrapb.Ordering{Columns: orderingCols[:numGroupingCols]},
+						)
+						// Although we build the input rows in "non-decreasing" order, it is
+						// possible that some NULL values are present here and there, so we
+						// need to sort the rows to satisfy the ordering conditions.
+						sort.Slice(rows, func(i, j int) bool {
+							cmp, err := rows[i].Compare(inputTypes, &da, orderedCols, &evalCtx, rows[j])
+							if err != nil {
+								t.Fatal(err)
+							}
+							return cmp < 0
+						})
+					}
+					pspec := &execinfrapb.ProcessorSpec{
+						Input: []execinfrapb.InputSyncSpec{{ColumnTypes: inputTypes}},
+						Core:  execinfrapb.ProcessorCoreUnion{Aggregator: aggregatorSpec},
+					}
+					args := verifyColOperatorArgs{
+						anyOrder:    hashAgg,
+						inputTypes:  [][]*types.T{inputTypes},
+						inputs:      []rowenc.EncDatumRows{rows},
+						outputTypes: outputTypes,
+						pspec:       pspec,
+					}
+					if err := verifyColOperator(args); err != nil {
+						if strings.Contains(err.Error(), "different errors returned") {
+							// Columnar and row-based aggregators are likely to hit
+							// different errors, and we will swallow those and move
+							// on.
+							continue
+						}
+						fmt.Printf("--- seed = %d run = %d filter = %t hash = %t ---\n",
+							seed, run, filteringAgg, hashAgg)
+						var aggFnNames string
+						for i, agg := range aggregations {
+							if i > 0 {
+								aggFnNames += " "
+							}
+							aggFnNames += agg.Func.String()
+						}
+						fmt.Printf("--- %s ---\n", aggFnNames)
+						prettyPrintTypes(inputTypes, "t" /* tableName */)
+						prettyPrintInput(rows, inputTypes, "t" /* tableName */)
+						t.Fatal(err)
+					}
 				}
 			}
 		}
@@ -173,7 +318,7 @@ func TestAggregatorAgainstProcessor(t *testing.T) {
 
 func TestDistinctAgainstProcessor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	var da sqlbase.DatumAlloc
+	var da rowenc.DatumAlloc
 	evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 	defer evalCtx.Stop(context.Background())
 
@@ -192,16 +337,16 @@ func TestDistinctAgainstProcessor(t *testing.T) {
 			for nDistinctCols := 1; nDistinctCols <= nCols; nDistinctCols++ {
 				for nOrderedCols := 0; nOrderedCols <= nDistinctCols; nOrderedCols++ {
 					var (
-						rows       sqlbase.EncDatumRows
+						rows       rowenc.EncDatumRows
 						inputTypes []*types.T
 						ordCols    []execinfrapb.Ordering_Column
 					)
 					if rng.Float64() < randTypesProbability {
 						inputTypes = generateRandomSupportedTypes(rng, nCols)
-						rows = sqlbase.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
+						rows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
 					} else {
 						inputTypes = intTyps[:nCols]
-						rows = sqlbase.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+						rows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
 					}
 					distinctCols := make([]uint32, nDistinctCols)
 					for i, distinctCol := range rng.Perm(nCols)[:nDistinctCols] {
@@ -242,7 +387,7 @@ func TestDistinctAgainstProcessor(t *testing.T) {
 					args := verifyColOperatorArgs{
 						anyOrder:    false,
 						inputTypes:  [][]*types.T{inputTypes},
-						inputs:      []sqlbase.EncDatumRows{rows},
+						inputs:      []rowenc.EncDatumRows{rows},
 						outputTypes: inputTypes,
 						pspec:       pspec,
 					}
@@ -281,15 +426,15 @@ func TestSorterAgainstProcessor(t *testing.T) {
 				// We will try both general sort and top K sort.
 				for _, topK := range []uint64{0, uint64(1 + rng.Intn(64))} {
 					var (
-						rows       sqlbase.EncDatumRows
+						rows       rowenc.EncDatumRows
 						inputTypes []*types.T
 					)
 					if rng.Float64() < randTypesProbability {
 						inputTypes = generateRandomSupportedTypes(rng, nCols)
-						rows = sqlbase.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
+						rows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
 					} else {
 						inputTypes = intTyps[:nCols]
-						rows = sqlbase.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+						rows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
 					}
 
 					// Note: we're only generating column orderings on all nCols columns since
@@ -311,7 +456,7 @@ func TestSorterAgainstProcessor(t *testing.T) {
 					}
 					args := verifyColOperatorArgs{
 						inputTypes:     [][]*types.T{inputTypes},
-						inputs:         []sqlbase.EncDatumRows{rows},
+						inputs:         []rowenc.EncDatumRows{rows},
 						outputTypes:    inputTypes,
 						pspec:          pspec,
 						forceDiskSpill: spillForced,
@@ -334,7 +479,7 @@ func TestSorterAgainstProcessor(t *testing.T) {
 
 func TestSortChunksAgainstProcessor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	var da sqlbase.DatumAlloc
+	var da rowenc.DatumAlloc
 	st := cluster.MakeTestingClusterSettings()
 	evalCtx := tree.MakeTestingEvalContext(st)
 	defer evalCtx.Stop(context.Background())
@@ -354,15 +499,15 @@ func TestSortChunksAgainstProcessor(t *testing.T) {
 			for nCols := 2; nCols <= maxCols; nCols++ {
 				for matchLen := 1; matchLen < nCols; matchLen++ {
 					var (
-						rows       sqlbase.EncDatumRows
+						rows       rowenc.EncDatumRows
 						inputTypes []*types.T
 					)
 					if rng.Float64() < randTypesProbability {
 						inputTypes = generateRandomSupportedTypes(rng, nCols)
-						rows = sqlbase.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
+						rows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, inputTypes)
 					} else {
 						inputTypes = intTyps[:nCols]
-						rows = sqlbase.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+						rows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
 					}
 
 					// Note: we're only generating column orderings on all nCols columns since
@@ -389,7 +534,7 @@ func TestSortChunksAgainstProcessor(t *testing.T) {
 					}
 					args := verifyColOperatorArgs{
 						inputTypes:     [][]*types.T{inputTypes},
-						inputs:         []sqlbase.EncDatumRows{rows},
+						inputs:         []rowenc.EncDatumRows{rows},
 						outputTypes:    inputTypes,
 						pspec:          pspec,
 						forceDiskSpill: spillForced,
@@ -413,34 +558,34 @@ func TestHashJoinerAgainstProcessor(t *testing.T) {
 	defer evalCtx.Stop(context.Background())
 
 	type hjTestSpec struct {
-		joinType        sqlbase.JoinType
+		joinType        descpb.JoinType
 		onExprSupported bool
 	}
 	testSpecs := []hjTestSpec{
 		{
-			joinType:        sqlbase.InnerJoin,
+			joinType:        descpb.InnerJoin,
 			onExprSupported: true,
 		},
 		{
-			joinType: sqlbase.LeftOuterJoin,
+			joinType: descpb.LeftOuterJoin,
 		},
 		{
-			joinType: sqlbase.RightOuterJoin,
+			joinType: descpb.RightOuterJoin,
 		},
 		{
-			joinType: sqlbase.FullOuterJoin,
+			joinType: descpb.FullOuterJoin,
 		},
 		{
-			joinType: sqlbase.LeftSemiJoin,
+			joinType: descpb.LeftSemiJoin,
 		},
 		{
-			joinType: sqlbase.LeftAntiJoin,
+			joinType: descpb.LeftAntiJoin,
 		},
 		{
-			joinType: sqlbase.IntersectAllJoin,
+			joinType: descpb.IntersectAllJoin,
 		},
 		{
-			joinType: sqlbase.ExceptAllJoin,
+			joinType: descpb.ExceptAllJoin,
 		},
 	}
 
@@ -466,7 +611,7 @@ func TestHashJoinerAgainstProcessor(t *testing.T) {
 							}
 							for !triedWithoutOnExpr || !triedWithOnExpr {
 								var (
-									lRows, rRows             sqlbase.EncDatumRows
+									lRows, rRows             rowenc.EncDatumRows
 									lEqCols, rEqCols         []uint32
 									lInputTypes, rInputTypes []*types.T
 									usingRandomTypes         bool
@@ -481,15 +626,15 @@ func TestHashJoinerAgainstProcessor(t *testing.T) {
 										rInputTypes[iColIdx], rInputTypes[jColIdx] = rInputTypes[jColIdx], rInputTypes[iColIdx]
 										rEqCols[i], rEqCols[j] = rEqCols[j], rEqCols[i]
 									})
-									rInputTypes = generateRandomComparableTypes(rng, rInputTypes)
-									lRows = sqlbase.RandEncDatumRowsOfTypes(rng, nRows, lInputTypes)
-									rRows = sqlbase.RandEncDatumRowsOfTypes(rng, nRows, rInputTypes)
+									rInputTypes = randomizeJoinRightTypes(rng, rInputTypes)
+									lRows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, lInputTypes)
+									rRows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, rInputTypes)
 									usingRandomTypes = true
 								} else {
 									lInputTypes = intTyps[:nCols]
 									rInputTypes = lInputTypes
-									lRows = sqlbase.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
-									rRows = sqlbase.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+									lRows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+									rRows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
 									lEqCols = generateEqualityColumns(rng, nCols, nEqCols)
 									rEqCols = generateEqualityColumns(rng, nCols, nEqCols)
 								}
@@ -540,7 +685,7 @@ func TestHashJoinerAgainstProcessor(t *testing.T) {
 								args := verifyColOperatorArgs{
 									anyOrder:       true,
 									inputTypes:     [][]*types.T{lInputTypes, rInputTypes},
-									inputs:         []sqlbase.EncDatumRows{lRows, rRows},
+									inputs:         []rowenc.EncDatumRows{lRows, rRows},
 									outputTypes:    outputTypes,
 									pspec:          pspec,
 									forceDiskSpill: spillForced,
@@ -604,43 +749,43 @@ func generateEqualityColumns(rng *rand.Rand, nCols int, nEqCols int) []uint32 {
 
 func TestMergeJoinerAgainstProcessor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	var da sqlbase.DatumAlloc
+	var da rowenc.DatumAlloc
 	evalCtx := tree.MakeTestingEvalContext(cluster.MakeTestingClusterSettings())
 	defer evalCtx.Stop(context.Background())
 
 	type mjTestSpec struct {
-		joinType        sqlbase.JoinType
+		joinType        descpb.JoinType
 		anyOrder        bool
 		onExprSupported bool
 	}
 	testSpecs := []mjTestSpec{
 		{
-			joinType:        sqlbase.InnerJoin,
+			joinType:        descpb.InnerJoin,
 			onExprSupported: true,
 		},
 		{
-			joinType: sqlbase.LeftOuterJoin,
+			joinType: descpb.LeftOuterJoin,
 		},
 		{
-			joinType: sqlbase.RightOuterJoin,
+			joinType: descpb.RightOuterJoin,
 		},
 		{
-			joinType: sqlbase.FullOuterJoin,
+			joinType: descpb.FullOuterJoin,
 			// FULL OUTER JOIN doesn't guarantee any ordering on its output (since it
 			// is ambiguous), so we're comparing the outputs as sets.
 			anyOrder: true,
 		},
 		{
-			joinType: sqlbase.LeftSemiJoin,
+			joinType: descpb.LeftSemiJoin,
 		},
 		{
-			joinType: sqlbase.LeftAntiJoin,
+			joinType: descpb.LeftAntiJoin,
 		},
 		{
-			joinType: sqlbase.IntersectAllJoin,
+			joinType: descpb.IntersectAllJoin,
 		},
 		{
-			joinType: sqlbase.ExceptAllJoin,
+			joinType: descpb.ExceptAllJoin,
 		},
 	}
 
@@ -665,7 +810,7 @@ func TestMergeJoinerAgainstProcessor(t *testing.T) {
 						}
 						for !triedWithoutOnExpr || !triedWithOnExpr {
 							var (
-								lRows, rRows                 sqlbase.EncDatumRows
+								lRows, rRows                 rowenc.EncDatumRows
 								lInputTypes, rInputTypes     []*types.T
 								lOrderingCols, rOrderingCols []execinfrapb.Ordering_Column
 								usingRandomTypes             bool
@@ -680,15 +825,15 @@ func TestMergeJoinerAgainstProcessor(t *testing.T) {
 									rInputTypes[iColIdx], rInputTypes[jColIdx] = rInputTypes[jColIdx], rInputTypes[iColIdx]
 									rOrderingCols[i], rOrderingCols[j] = rOrderingCols[j], rOrderingCols[i]
 								})
-								rInputTypes = generateRandomComparableTypes(rng, rInputTypes)
-								lRows = sqlbase.RandEncDatumRowsOfTypes(rng, nRows, lInputTypes)
-								rRows = sqlbase.RandEncDatumRowsOfTypes(rng, nRows, rInputTypes)
+								rInputTypes = randomizeJoinRightTypes(rng, rInputTypes)
+								lRows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, lInputTypes)
+								rRows = rowenc.RandEncDatumRowsOfTypes(rng, nRows, rInputTypes)
 								usingRandomTypes = true
 							} else {
 								lInputTypes = intTyps[:nCols]
 								rInputTypes = lInputTypes
-								lRows = sqlbase.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
-								rRows = sqlbase.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+								lRows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+								rRows = rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
 								lOrderingCols = generateColumnOrdering(rng, nCols, nOrderingCols)
 								rOrderingCols = generateColumnOrdering(rng, nCols, nOrderingCols)
 							}
@@ -753,7 +898,7 @@ func TestMergeJoinerAgainstProcessor(t *testing.T) {
 							args := verifyColOperatorArgs{
 								anyOrder:    testSpec.anyOrder,
 								inputTypes:  [][]*types.T{lInputTypes, rInputTypes},
-								inputs:      []sqlbase.EncDatumRows{lRows, rRows},
+								inputs:      []rowenc.EncDatumRows{lRows, rRows},
 								outputTypes: outputTypes,
 								pspec:       pspec,
 								rng:         rng,
@@ -812,7 +957,7 @@ func generateColumnOrdering(
 	return orderingCols
 }
 
-func getAddFilterOptions(joinType sqlbase.JoinType, nonEqualityColsPresent bool) []bool {
+func getAddFilterOptions(joinType descpb.JoinType, nonEqualityColsPresent bool) []bool {
 	if joinType.IsSetOpJoin() && nonEqualityColsPresent {
 		// Output of set operation join when rows have non equality columns is
 		// not deterministic, so applying a filter on top of it can produce
@@ -859,7 +1004,7 @@ func generateFilterExpr(
 			// Use right side.
 			colIdx += nCols
 		}
-		constDatum := sqlbase.RandDatum(rng, colTypes[colIdx], true /* nullOk */)
+		constDatum := rowenc.RandDatum(rng, colTypes[colIdx], true /* nullOk */)
 		constDatumString := constDatum.String()
 		switch colTypes[colIdx].Family() {
 		case types.FloatFamily, types.DecimalFamily:
@@ -906,7 +1051,7 @@ func TestWindowFunctionsAgainstProcessor(t *testing.T) {
 						continue
 					}
 					inputTypes := typs[:nCols:nCols]
-					rows := sqlbase.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
+					rows := rowenc.MakeRandIntRowsInRange(rng, nRows, nCols, maxNum, nullProbability)
 
 					windowerSpec := &execinfrapb.WindowerSpec{
 						PartitionBy: partitionBy,
@@ -938,7 +1083,7 @@ func TestWindowFunctionsAgainstProcessor(t *testing.T) {
 					args := verifyColOperatorArgs{
 						anyOrder:    true,
 						inputTypes:  [][]*types.T{inputTypes},
-						inputs:      []sqlbase.EncDatumRows{rows},
+						inputs:      []rowenc.EncDatumRows{rows},
 						outputTypes: append(inputTypes, outputType),
 						pspec:       pspec,
 					}
@@ -959,7 +1104,7 @@ func TestWindowFunctionsAgainstProcessor(t *testing.T) {
 func generateRandomSupportedTypes(rng *rand.Rand, nCols int) []*types.T {
 	typs := make([]*types.T, 0, nCols)
 	for len(typs) < nCols {
-		typ := sqlbase.RandType(rng)
+		typ := rowenc.RandType(rng)
 		if typeconv.TypeFamilyToCanonicalTypeFamily(typ.Family()) == typeconv.DatumVecCanonicalTypeFamily {
 			// At the moment, we disallow datum-backed types.
 			// TODO(yuzefovich): remove this.
@@ -970,38 +1115,28 @@ func generateRandomSupportedTypes(rng *rand.Rand, nCols int) []*types.T {
 	return typs
 }
 
-// generateRandomComparableTypes generates random types that are supported by
-// the vectorized engine and are such that they are comparable to the
-// corresponding types in inputTypes.
-func generateRandomComparableTypes(rng *rand.Rand, inputTypes []*types.T) []*types.T {
-	typs := make([]*types.T, len(inputTypes))
-	for i, inputType := range inputTypes {
-		for {
-			typ := sqlbase.RandType(rng)
-			if typeconv.TypeFamilyToCanonicalTypeFamily(typ.Family()) == typeconv.DatumVecCanonicalTypeFamily {
-				// At the moment, we disallow datum-backed types.
-				// TODO(yuzefovich): remove this.
-				continue
+// randomizeJoinRightTypes returns somewhat random types to be used for the
+// right side of the join such that they would have produced equality
+// conditions in the non-test environment (currently, due to #43060, we don't
+// support joins of different types without pushing the mixed-type equality
+// checks into the ON condition).
+func randomizeJoinRightTypes(rng *rand.Rand, leftTypes []*types.T) []*types.T {
+	typs := make([]*types.T, len(leftTypes))
+	for i, inputType := range leftTypes {
+		switch inputType.Family() {
+		case types.IntFamily:
+			// We want to randomize integer types because they have different
+			// physical representations.
+			switch rng.Intn(3) {
+			case 0:
+				typs[i] = types.Int2
+			case 1:
+				typs[i] = types.Int4
+			default:
+				typs[i] = types.Int
 			}
-			comparable := false
-			for _, cmpOverloads := range tree.CmpOps[tree.LT] {
-				o := cmpOverloads.(*tree.CmpOp)
-				if inputType.Equivalent(o.LeftType) && typ.Equivalent(o.RightType) {
-					if (typ.Family() == types.DateFamily && inputType.Family() != types.DateFamily) ||
-						(typ.Family() != types.DateFamily && inputType.Family() == types.DateFamily) {
-						// We map Dates to int64 and don't have casts from int64 to
-						// timestamps (and there is a comparison between dates and
-						// timestamps).
-						continue
-					}
-					comparable = true
-					break
-				}
-			}
-			if comparable {
-				typs[i] = typ
-				break
-			}
+		default:
+			typs[i] = inputType
 		}
 	}
 	return typs
@@ -1053,7 +1188,7 @@ func prettyPrintTypes(typs []*types.T, tableName string) {
 }
 
 // prettyPrintInput prints out rows as INSERT INTO tableName VALUES statement.
-func prettyPrintInput(rows sqlbase.EncDatumRows, inputTypes []*types.T, tableName string) {
+func prettyPrintInput(rows rowenc.EncDatumRows, inputTypes []*types.T, tableName string) {
 	fmt.Printf("INSERT INTO %s VALUES\n", tableName)
 	for rowIdx, row := range rows {
 		fmt.Printf("(%s", row[0].String(inputTypes[0]))

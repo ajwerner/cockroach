@@ -17,16 +17,16 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/stringarena"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
-	"github.com/opentracing/opentracing-go"
 )
 
 type aggregateFuncs []tree.AggregateFunc
@@ -57,8 +57,8 @@ type aggregatorBase struct {
 	inputTypes   []*types.T
 	funcs        []*aggregateFuncHolder
 	outputTypes  []*types.T
-	datumAlloc   sqlbase.DatumAlloc
-	rowAlloc     sqlbase.EncDatumRowAlloc
+	datumAlloc   rowenc.DatumAlloc
+	rowAlloc     rowenc.EncDatumRowAlloc
 
 	bucketsAcc  mon.BoundAccount
 	aggFuncsAcc mon.BoundAccount
@@ -71,12 +71,12 @@ type aggregatorBase struct {
 	orderedGroupCols []uint32
 	aggregations     []execinfrapb.AggregatorSpec_Aggregation
 
-	lastOrdGroupCols sqlbase.EncDatumRow
+	lastOrdGroupCols rowenc.EncDatumRow
 	arena            stringarena.Arena
-	row              sqlbase.EncDatumRow
+	row              rowenc.EncDatumRow
 	scratch          []byte
 
-	cancelChecker *sqlbase.CancelChecker
+	cancelChecker *cancelchecker.CancelChecker
 }
 
 // init initializes the aggregatorBase.
@@ -95,7 +95,7 @@ func (ag *aggregatorBase) init(
 ) error {
 	ctx := flowCtx.EvalCtx.Ctx()
 	memMonitor := execinfra.NewMonitor(ctx, flowCtx.EvalCtx.Mon, "aggregator-mem")
-	if sp := opentracing.SpanFromContext(ctx); sp != nil && tracing.IsRecording(sp) {
+	if sp := tracing.SpanFromContext(ctx); sp != nil && tracing.IsRecording(sp) {
 		input = newInputStatCollector(input)
 		ag.FinishTrace = ag.outputStatsToTrace
 	}
@@ -106,7 +106,7 @@ func (ag *aggregatorBase) init(
 	ag.aggregations = spec.Aggregations
 	ag.funcs = make([]*aggregateFuncHolder, len(spec.Aggregations))
 	ag.outputTypes = make([]*types.T, len(spec.Aggregations))
-	ag.row = make(sqlbase.EncDatumRow, len(spec.Aggregations))
+	ag.row = make(rowenc.EncDatumRow, len(spec.Aggregations))
 	ag.bucketsAcc = memMonitor.MakeBoundAccount()
 	ag.arena = stringarena.Make(&ag.bucketsAcc)
 	ag.aggFuncsAcc = memMonitor.MakeBoundAccount()
@@ -117,6 +117,7 @@ func (ag *aggregatorBase) init(
 	// grouped-by values for each bucket.  ag.funcs is updated to contain all
 	// the functions which need to be fed values.
 	ag.inputTypes = input.OutputTypes()
+	semaCtx := flowCtx.TypeResolverFactory.NewSemaContext(flowCtx.EvalCtx.Txn)
 	for i, aggInfo := range spec.Aggregations {
 		if aggInfo.FilterColIdx != nil {
 			col := *aggInfo.FilterColIdx
@@ -130,40 +131,17 @@ func (ag *aggregatorBase) init(
 				)
 			}
 		}
-		argTypes := make([]*types.T, len(aggInfo.ColIdx)+len(aggInfo.Arguments))
-		for j, c := range aggInfo.ColIdx {
-			if c >= uint32(len(ag.inputTypes)) {
-				return errors.Errorf("ColIdx out of range (%d)", aggInfo.ColIdx)
-			}
-			argTypes[j] = ag.inputTypes[c]
-		}
-
-		arguments := make(tree.Datums, len(aggInfo.Arguments))
-		for j, argument := range aggInfo.Arguments {
-			h := execinfra.ExprHelper{}
-			// Pass nil types and row - there are no variables in these expressions.
-			if err := h.Init(argument, nil /* types */, flowCtx.EvalCtx); err != nil {
-				return errors.Wrapf(err, "%s", argument)
-			}
-			d, err := h.Eval(nil /* row */)
-			if err != nil {
-				return errors.Wrapf(err, "%s", argument)
-			}
-			argTypes[len(aggInfo.ColIdx)+j] = d.ResolvedType()
-			arguments[j] = d
-		}
-
-		aggConstructor, retType, err := execinfrapb.GetAggregateInfo(aggInfo.Func, argTypes...)
+		constructor, arguments, outputType, err := execinfrapb.GetAggregateConstructor(
+			flowCtx.EvalCtx, semaCtx, &aggInfo, ag.inputTypes,
+		)
 		if err != nil {
 			return err
 		}
-
-		ag.funcs[i] = ag.newAggregateFuncHolder(aggConstructor, arguments)
+		ag.funcs[i] = ag.newAggregateFuncHolder(constructor, arguments)
 		if aggInfo.Distinct {
 			ag.funcs[i].seen = make(map[string]struct{})
 		}
-
-		ag.outputTypes[i] = retType
+		ag.outputTypes[i] = outputType
 	}
 
 	return ag.ProcessorBase.Init(
@@ -203,7 +181,7 @@ func (ag *aggregatorBase) outputStatsToTrace() {
 	if !ok {
 		return
 	}
-	if sp := opentracing.SpanFromContext(ag.Ctx); sp != nil {
+	if sp := tracing.SpanFromContext(ag.Ctx); sp != nil {
 		tracing.SetSpanStats(
 			sp,
 			&AggregatorStats{
@@ -230,7 +208,7 @@ func (ag *aggregatorBase) Child(nth int, verbose bool) execinfra.OpNode {
 		}
 		panic("input to aggregatorBase is not an execinfra.OpNode")
 	}
-	panic(fmt.Sprintf("invalid index %d", nth))
+	panic(errors.AssertionFailedf("invalid index %d", nth))
 }
 
 const (
@@ -387,7 +365,7 @@ func (ag *orderedAggregator) Start(ctx context.Context) context.Context {
 func (ag *aggregatorBase) start(ctx context.Context, procName string) context.Context {
 	ag.input.Start(ctx)
 	ctx = ag.StartInternal(ctx, procName)
-	ag.cancelChecker = sqlbase.NewCancelChecker(ctx)
+	ag.cancelChecker = cancelchecker.NewCancelChecker(ctx)
 	ag.runningState = aggAccumulating
 	return ctx
 }
@@ -438,7 +416,7 @@ func (ag *orderedAggregator) close() {
 // matchLastOrdGroupCols takes a row and matches it with the row stored by
 // lastOrdGroupCols. It returns true if the two rows are equal on the grouping
 // columns, and false otherwise.
-func (ag *aggregatorBase) matchLastOrdGroupCols(row sqlbase.EncDatumRow) (bool, error) {
+func (ag *aggregatorBase) matchLastOrdGroupCols(row rowenc.EncDatumRow) (bool, error) {
 	for _, colIdx := range ag.orderedGroupCols {
 		res, err := ag.lastOrdGroupCols[colIdx].Compare(
 			ag.inputTypes[colIdx], &ag.datumAlloc, ag.EvalCtx, &row[colIdx],
@@ -456,7 +434,7 @@ func (ag *aggregatorBase) matchLastOrdGroupCols(row sqlbase.EncDatumRow) (bool, 
 // accumulation.
 func (ag *hashAggregator) accumulateRows() (
 	aggregatorState,
-	sqlbase.EncDatumRow,
+	rowenc.EncDatumRow,
 	*execinfrapb.ProducerMetadata,
 ) {
 	for {
@@ -525,7 +503,7 @@ func (ag *hashAggregator) accumulateRows() (
 // accumulation.
 func (ag *orderedAggregator) accumulateRows() (
 	aggregatorState,
-	sqlbase.EncDatumRow,
+	rowenc.EncDatumRow,
 	*execinfrapb.ProducerMetadata,
 ) {
 	for {
@@ -577,9 +555,13 @@ func (ag *orderedAggregator) accumulateRows() (
 	return aggEmittingRows, nil, nil
 }
 
+// getAggResults returns the new aggregatorState and the results from the
+// bucket. The bucket is closed.
 func (ag *aggregatorBase) getAggResults(
 	bucket aggregateFuncs,
-) (aggregatorState, sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+) (aggregatorState, rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
+	defer bucket.close(ag.Ctx)
+
 	for i, b := range bucket {
 		result, err := b.Result()
 		if err != nil {
@@ -590,9 +572,8 @@ func (ag *aggregatorBase) getAggResults(
 			// We can't encode nil into an EncDatum, so we represent it with DNull.
 			result = tree.DNull
 		}
-		ag.row[i] = sqlbase.DatumToEncDatum(ag.outputTypes[i], result)
+		ag.row[i] = rowenc.DatumToEncDatum(ag.outputTypes[i], result)
 	}
-	bucket.close(ag.Ctx)
 
 	if outRow := ag.ProcessRowHelper(ag.row); outRow != nil {
 		return aggEmittingRows, outRow, nil
@@ -609,7 +590,7 @@ func (ag *aggregatorBase) getAggResults(
 // ProcOutputHelper filtered the current row out.
 func (ag *hashAggregator) emitRow() (
 	aggregatorState,
-	sqlbase.EncDatumRow,
+	rowenc.EncDatumRow,
 	*execinfrapb.ProducerMetadata,
 ) {
 	if len(ag.bucketsIter) == 0 {
@@ -641,7 +622,11 @@ func (ag *hashAggregator) emitRow() (
 		ag.alreadyAccountedFor = 0
 		for _, f := range ag.funcs {
 			if f.seen != nil {
-				f.seen = make(map[string]struct{})
+				// It turns out that it is faster to delete entries from the
+				// old map rather than allocating a new one.
+				for s := range f.seen {
+					delete(f.seen, s)
+				}
 			}
 		}
 
@@ -662,7 +647,7 @@ func (ag *hashAggregator) emitRow() (
 	// NOTE: accounting for the memory under aggregate builtins in the bucket
 	// is updated in getAggResults (the bucket will be closed), however, we
 	// choose to not reduce our estimate of the map's internal footprint
-	// because it is error-prone to estimate the new footprint (we don't
+	// because it is error-prone to estimate the new footprint (we don't know
 	// whether and when Go runtime will release some of the underlying memory).
 	// This behavior is ok, though, since actual usage of buckets will be lower
 	// than what we accounted for - in the worst case, the query might hit a
@@ -681,7 +666,7 @@ func (ag *hashAggregator) emitRow() (
 // ProcOutputHelper filtered a the current row out.
 func (ag *orderedAggregator) emitRow() (
 	aggregatorState,
-	sqlbase.EncDatumRow,
+	rowenc.EncDatumRow,
 	*execinfrapb.ProducerMetadata,
 ) {
 	if ag.bucket == nil {
@@ -703,7 +688,11 @@ func (ag *orderedAggregator) emitRow() (
 		}
 		for _, f := range ag.funcs {
 			if f.seen != nil {
-				f.seen = make(map[string]struct{})
+				// It turns out that it is faster to delete entries from the
+				// old map rather than allocating a new one.
+				for s := range f.seen {
+					delete(f.seen, s)
+				}
 			}
 		}
 
@@ -721,9 +710,9 @@ func (ag *orderedAggregator) emitRow() (
 }
 
 // Next is part of the RowSource interface.
-func (ag *hashAggregator) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (ag *hashAggregator) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	for ag.State == execinfra.StateRunning {
-		var row sqlbase.EncDatumRow
+		var row rowenc.EncDatumRow
 		var meta *execinfrapb.ProducerMetadata
 		switch ag.runningState {
 		case aggAccumulating:
@@ -743,9 +732,9 @@ func (ag *hashAggregator) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMeta
 }
 
 // Next is part of the RowSource interface.
-func (ag *orderedAggregator) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
+func (ag *orderedAggregator) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	for ag.State == execinfra.StateRunning {
-		var row sqlbase.EncDatumRow
+		var row rowenc.EncDatumRow
 		var meta *execinfrapb.ProducerMetadata
 		switch ag.runningState {
 		case aggAccumulating:
@@ -777,7 +766,7 @@ func (ag *orderedAggregator) ConsumerClosed() {
 }
 
 func (ag *aggregatorBase) accumulateRowIntoBucket(
-	row sqlbase.EncDatumRow, groupKey []byte, bucket aggregateFuncs,
+	row rowenc.EncDatumRow, groupKey []byte, bucket aggregateFuncs,
 ) error {
 	var err error
 	// Feed the func holders for this bucket the non-grouping datums.
@@ -838,9 +827,29 @@ func (ag *aggregatorBase) accumulateRowIntoBucket(
 	return nil
 }
 
+// encode returns the encoding for the grouping columns, this is then used as
+// our group key to determine which bucket to add to.
+func (ag *hashAggregator) encode(
+	appendTo []byte, row rowenc.EncDatumRow,
+) (encoding []byte, err error) {
+	for _, colIdx := range ag.groupCols {
+		// We might allocate tree.Datums when hashing the row, so we'll ask the
+		// fingerprint to account for them. Note that if the datums are later
+		// used by the aggregate functions (and accounted for accordingly),
+		// this can lead to over-accounting which is acceptable.
+		appendTo, err = row[colIdx].Fingerprint(
+			ag.Ctx, ag.inputTypes[colIdx], &ag.datumAlloc, appendTo, &ag.bucketsAcc,
+		)
+		if err != nil {
+			return appendTo, err
+		}
+	}
+	return appendTo, nil
+}
+
 // accumulateRow accumulates a single row, returning an error if accumulation
 // failed for any reason.
-func (ag *hashAggregator) accumulateRow(row sqlbase.EncDatumRow) error {
+func (ag *hashAggregator) accumulateRow(row rowenc.EncDatumRow) error {
 	if err := ag.cancelChecker.Check(); err != nil {
 		return err
 	}
@@ -879,7 +888,7 @@ func (ag *hashAggregator) accumulateRow(row sqlbase.EncDatumRow) error {
 
 // accumulateRow accumulates a single row, returning an error if accumulation
 // failed for any reason.
-func (ag *orderedAggregator) accumulateRow(row sqlbase.EncDatumRow) error {
+func (ag *orderedAggregator) accumulateRow(row rowenc.EncDatumRow) error {
 	if err := ag.cancelChecker.Check(); err != nil {
 		return err
 	}
@@ -902,7 +911,6 @@ type aggregateFuncHolder struct {
 	// aggregate, for instance, the separator in string_agg.
 	arguments tree.Datums
 
-	group *aggregatorBase
 	seen  map[string]struct{}
 	arena *stringarena.Arena
 }
@@ -918,7 +926,6 @@ func (ag *aggregatorBase) newAggregateFuncHolder(
 ) *aggregateFuncHolder {
 	return &aggregateFuncHolder{
 		create:    create,
-		group:     ag,
 		arena:     &ag.arena,
 		arguments: arguments,
 	}
@@ -930,21 +937,27 @@ func (ag *aggregatorBase) newAggregateFuncHolder(
 // row in the group.
 func (a *aggregateFuncHolder) isDistinct(
 	ctx context.Context,
-	alloc *sqlbase.DatumAlloc,
+	alloc *rowenc.DatumAlloc,
 	prefix []byte,
 	firstArg tree.Datum,
 	otherArgs tree.Datums,
 ) (bool, error) {
 	// Allocate one EncDatum that will be reused when encoding every argument.
-	ed := sqlbase.EncDatum{Datum: firstArg}
-	encoded, err := ed.Fingerprint(firstArg.ResolvedType(), alloc, prefix)
+	ed := rowenc.EncDatum{Datum: firstArg}
+	// We know that we have tree.Datum, so there will definitely be no need to
+	// decode ed for fingerprinting, so we pass in nil memory account.
+	encoded, err := ed.Fingerprint(ctx, firstArg.ResolvedType(), alloc, prefix, nil /* acc */)
 	if err != nil {
 		return false, err
 	}
 	if otherArgs != nil {
 		for _, arg := range otherArgs {
+			// Note that we don't need to explicitly unset ed because encoded
+			// field is never set during fingerprinting - we'll compute the
+			// encoding and return it without updating the EncDatum; therefore,
+			// simply setting Datum field to the argument is sufficient.
 			ed.Datum = arg
-			encoded, err = ed.Fingerprint(arg.ResolvedType(), alloc, encoded)
+			encoded, err = ed.Fingerprint(ctx, arg.ResolvedType(), alloc, encoded, nil /* acc */)
 			if err != nil {
 				return false, err
 			}
@@ -962,21 +975,6 @@ func (a *aggregateFuncHolder) isDistinct(
 	}
 	a.seen[s] = struct{}{}
 	return true, nil
-}
-
-// encode returns the encoding for the grouping columns, this is then used as
-// our group key to determine which bucket to add to.
-func (ag *aggregatorBase) encode(
-	appendTo []byte, row sqlbase.EncDatumRow,
-) (encoding []byte, err error) {
-	for _, colIdx := range ag.groupCols {
-		appendTo, err = row[colIdx].Fingerprint(
-			ag.inputTypes[colIdx], &ag.datumAlloc, appendTo)
-		if err != nil {
-			return appendTo, err
-		}
-	}
-	return appendTo, nil
 }
 
 func (ag *aggregatorBase) createAggregateFuncs() (aggregateFuncs, error) {

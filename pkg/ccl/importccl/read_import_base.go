@@ -23,14 +23,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
@@ -47,9 +50,26 @@ func runImport(
 ) (*roachpb.BulkOpSummary, error) {
 	// Used to send ingested import rows to the KV layer.
 	kvCh := make(chan row.KVBatch, 10)
-	evalCtx := flowCtx.NewEvalCtx()
-	evalCtx.DB = flowCtx.Cfg.DB
-	conv, err := makeInputConverter(ctx, spec, evalCtx, kvCh)
+
+	// Install type metadata in all of the import tables. The DB is nil in some
+	// tests, so check first here.
+	if flowCtx.Cfg.DB != nil {
+		if err := flowCtx.Cfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+			resolver := flowCtx.TypeResolverFactory.NewTypeResolver(txn)
+			for _, table := range spec.Tables {
+				if err := typedesc.HydrateTypesInTableDescriptor(ctx, table.Desc, resolver); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		// Release leases on any accessed types now that type metadata is installed.
+		flowCtx.TypeResolverFactory.Descriptors.ReleaseAll(ctx)
+	}
+
+	conv, err := makeInputConverter(ctx, spec, flowCtx.NewEvalCtx(), kvCh)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +100,7 @@ func runImport(
 		}
 
 		return conv.readFiles(ctx, inputs, spec.ResumePos, spec.Format, flowCtx.Cfg.ExternalStorage,
-			spec.User)
+			spec.User())
 	})
 
 	// Ingest the KVs that the producer group emitted to the chan and the row result
@@ -130,7 +150,7 @@ func readInputFiles(
 	format roachpb.IOFileFormat,
 	fileFunc readFileFunc,
 	makeExternalStorage cloud.ExternalStorageFactory,
-	user string,
+	user security.SQLUsername,
 ) error {
 	done := ctx.Done()
 
@@ -323,7 +343,19 @@ func (f fileReader) ReadFraction() float32 {
 type inputConverter interface {
 	start(group ctxgroup.Group)
 	readFiles(ctx context.Context, dataFiles map[int32]string, resumePos map[int32]int64,
-		format roachpb.IOFileFormat, makeExternalStorage cloud.ExternalStorageFactory, user string) error
+		format roachpb.IOFileFormat, makeExternalStorage cloud.ExternalStorageFactory, user security.SQLUsername) error
+}
+
+// formatHasNamedColumns returns true if the data in the input files can be
+// mapped specifically to a particular data column.
+func formatHasNamedColumns(format roachpb.IOFileFormat_FileFormat) bool {
+	switch format {
+	case roachpb.IOFileFormat_Avro,
+		roachpb.IOFileFormat_Mysqldump,
+		roachpb.IOFileFormat_PgDump:
+		return true
+	}
+	return false
 }
 
 func isMultiTableFormat(format roachpb.IOFileFormat_FileFormat) bool {
@@ -375,13 +407,13 @@ func newImportRowError(err error, row string, num int64) error {
 
 // parallelImportContext describes state associated with the import.
 type parallelImportContext struct {
-	walltime   int64                    // Import time stamp.
-	numWorkers int                      // Parallelism
-	batchSize  int                      // Number of records to batch
-	evalCtx    *tree.EvalContext        // Evaluation context.
-	tableDesc  *sqlbase.TableDescriptor // Table descriptor we're importing into.
-	targetCols tree.NameList            // List of columns to import.  nil if importing all columns.
-	kvCh       chan row.KVBatch         // Channel for sending KV batches.
+	walltime   int64                // Import time stamp.
+	numWorkers int                  // Parallelism
+	batchSize  int                  // Number of records to batch
+	evalCtx    *tree.EvalContext    // Evaluation context.
+	tableDesc  *tabledesc.Immutable // Table descriptor we're importing into.
+	targetCols tree.NameList        // List of columns to import.  nil if importing all columns.
+	kvCh       chan row.KVBatch     // Channel for sending KV batches.
 }
 
 // importFileContext describes state specific to a file being imported.
@@ -408,7 +440,7 @@ func makeDatumConverter(
 	ctx context.Context, importCtx *parallelImportContext, fileCtx *importFileContext,
 ) (*row.DatumRowConverter, error) {
 	conv, err := row.NewDatumRowConverter(
-		ctx, importCtx.tableDesc, importCtx.targetCols, importCtx.evalCtx.Copy(), importCtx.kvCh)
+		ctx, importCtx.tableDesc, importCtx.targetCols, importCtx.evalCtx, importCtx.kvCh)
 	if err == nil {
 		conv.KvBatch.Source = fileCtx.source
 	}
@@ -589,6 +621,12 @@ func (p *parallelImporter) flush(ctx context.Context) error {
 	}
 }
 
+func timestampAfterEpoch(walltime int64) uint64 {
+	epoch := time.Date(2015, time.January, 1, 0, 0, 0, 0, time.UTC).UnixNano()
+	const precision = uint64(10 * time.Microsecond)
+	return uint64(walltime-epoch) / precision
+}
+
 func (p *parallelImporter) importWorker(
 	ctx context.Context,
 	workerID int,
@@ -606,9 +644,7 @@ func (p *parallelImporter) importWorker(
 	}
 
 	var rowNum int64
-	epoch := time.Date(2015, time.January, 1, 0, 0, 0, 0, time.UTC).UnixNano()
-	const precision = uint64(10 * time.Microsecond)
-	timestamp := uint64(importCtx.walltime-epoch) / precision
+	timestamp := timestampAfterEpoch(importCtx.walltime)
 
 	conv.CompletedRowFn = func() int64 {
 		m := emittedRowLowWatermark(workerID, rowNum, minEmitted)

@@ -14,39 +14,46 @@ package backfill
 
 import (
 	"context"
+	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemaexpr"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/transform"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/errors"
 )
 
 // MutationFilter is the type of a simple predicate on a mutation.
-type MutationFilter func(sqlbase.DescriptorMutation) bool
+type MutationFilter func(descpb.DescriptorMutation) bool
 
 // ColumnMutationFilter is a filter that allows mutations that add or drop
 // columns.
-func ColumnMutationFilter(m sqlbase.DescriptorMutation) bool {
+func ColumnMutationFilter(m descpb.DescriptorMutation) bool {
 	return m.GetColumn() != nil &&
-		(m.Direction == sqlbase.DescriptorMutation_ADD || m.Direction == sqlbase.DescriptorMutation_DROP)
+		(m.Direction == descpb.DescriptorMutation_ADD || m.Direction == descpb.DescriptorMutation_DROP)
 }
 
 // IndexMutationFilter is a filter that allows mutations that add indexes.
-func IndexMutationFilter(m sqlbase.DescriptorMutation) bool {
-	return m.GetIndex() != nil && m.Direction == sqlbase.DescriptorMutation_ADD
+func IndexMutationFilter(m descpb.DescriptorMutation) bool {
+	return m.GetIndex() != nil && m.Direction == descpb.DescriptorMutation_ADD
 }
 
 // backfiller is common to a ColumnBackfiller or an IndexBackfiller.
 type backfiller struct {
 	fetcher row.Fetcher
-	alloc   sqlbase.DatumAlloc
+	alloc   rowenc.DatumAlloc
 }
 
 // ColumnBackfiller is capable of running a column backfill for all
@@ -54,96 +61,46 @@ type backfiller struct {
 type ColumnBackfiller struct {
 	backfiller
 
-	added []sqlbase.ColumnDescriptor
+	added   []descpb.ColumnDescriptor
+	dropped []descpb.ColumnDescriptor
+
 	// updateCols is a slice of all column descriptors that are being modified.
-	updateCols  []sqlbase.ColumnDescriptor
+	updateCols  []descpb.ColumnDescriptor
 	updateExprs []tree.TypedExpr
 	evalCtx     *tree.EvalContext
+
+	// mon is a memory monitor linked with the ColumnBackfiller on creation.
+	mon *mon.BytesMonitor
 }
 
-// Init initializes a column backfiller.
-func (cb *ColumnBackfiller) Init(
-	ctx context.Context, evalCtx *tree.EvalContext, desc *sqlbase.ImmutableTableDescriptor,
-) error {
-	cols := desc.Columns
-	cb.evalCtx = evalCtx
-	var dropped []sqlbase.ColumnDescriptor
+// initCols is a helper to populate some column metadata on a ColumnBackfiller.
+func (cb *ColumnBackfiller) initCols(desc *tabledesc.Immutable) {
 	if len(desc.Mutations) > 0 {
-		cols = make([]sqlbase.ColumnDescriptor, 0, len(desc.Columns)+len(desc.Mutations))
-		cols = append(cols, desc.Columns...)
 		for _, m := range desc.Mutations {
 			if ColumnMutationFilter(m) {
 				desc := *m.GetColumn()
 				switch m.Direction {
-				case sqlbase.DescriptorMutation_ADD:
+				case descpb.DescriptorMutation_ADD:
 					cb.added = append(cb.added, desc)
-				case sqlbase.DescriptorMutation_DROP:
-					dropped = append(dropped, desc)
+				case descpb.DescriptorMutation_DROP:
+					cb.dropped = append(cb.dropped, desc)
 				}
-				cols = append(cols, desc)
 			}
 		}
 	}
+}
 
-	colTyps := make([]*types.T, len(cols))
-	for i := range cols {
-		colTyps[i] = cols[i].Type
-	}
-
-	var defaultExprs, computedExprs []tree.TypedExpr
-	// Set up a closure to hydrate and preprocess expressions needed for
-	// the backfill.
-	hydrateTypes := func(ctx context.Context, evalCtx *tree.EvalContext) error {
-		// Hydrate all the types present in the table.
-		if err := execinfrapb.HydrateTypeSlice(cb.evalCtx, colTyps); err != nil {
-			return err
-		}
-		// Set up a SemaContext to type check the default and computed expressions.
-		semaCtx := tree.MakeSemaContext()
-		semaCtx.TypeResolver = cb.evalCtx.TypeResolver
-		var err error
-		defaultExprs, err = sqlbase.MakeDefaultExprs(
-			ctx, cb.added, &transform.ExprTransformContext{}, cb.evalCtx, &semaCtx,
-		)
-		if err != nil {
-			return err
-		}
-		var txCtx transform.ExprTransformContext
-		computedExprs, err = schemaexpr.MakeComputedExprs(
-			ctx,
-			cb.added,
-			desc,
-			tree.NewUnqualifiedTableName(tree.Name(desc.Name)),
-			&txCtx,
-			cb.evalCtx,
-			&semaCtx,
-			true, /* addingCols */
-		)
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-
-	if cb.evalCtx.Txn != nil {
-		// If we have a txn, then use it.
-		if err := hydrateTypes(ctx, cb.evalCtx); err != nil {
-			return err
-		}
-	} else {
-		// Otherwise, create one. We fall into this case when performing
-		// a distributed backfill outside of a transaction.
-		if err := cb.evalCtx.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-			cb.evalCtx.Txn = txn
-			return hydrateTypes(ctx, cb.evalCtx)
-		}); err != nil {
-			return err
-		}
-		// Reset the evalCtx's transaction after type the expressions are processed.
-		cb.evalCtx.Txn = nil
-	}
-
-	cb.updateCols = append(cb.added, dropped...)
+// init performs initialization operations that are shared across the local
+// and distributed initialization procedures for the ColumnBackfiller.
+func (cb *ColumnBackfiller) init(
+	evalCtx *tree.EvalContext,
+	defaultExprs []tree.TypedExpr,
+	computedExprs []tree.TypedExpr,
+	desc *tabledesc.Immutable,
+	mon *mon.BytesMonitor,
+) error {
+	cb.evalCtx = evalCtx
+	cb.updateCols = append(cb.added, cb.dropped...)
 	// Populate default or computed values.
 	cb.updateExprs = make([]tree.TypedExpr, len(cb.updateCols))
 	for j := range cb.added {
@@ -156,7 +113,7 @@ func (cb *ColumnBackfiller) Init(
 			cb.updateExprs[j] = defaultExprs[j]
 		}
 	}
-	for j := range dropped {
+	for j := range cb.dropped {
 		cb.updateExprs[j+len(cb.added)] = tree.DNull
 	}
 
@@ -171,15 +128,115 @@ func (cb *ColumnBackfiller) Init(
 		Cols:            desc.Columns,
 		ValNeededForCol: valNeededForCol,
 	}
+
+	// Create a bound account associated with the column backfiller.
+	if mon == nil {
+		return errors.AssertionFailedf("no memory monitor linked to ColumnBackfiller during init")
+	}
+	cb.mon = mon
+
 	return cb.fetcher.Init(
+		evalCtx.Context,
 		evalCtx.Codec,
 		false, /* reverse */
-		sqlbase.ScanLockingStrength_FOR_NONE,
-		false, /* returnRangeInfo */
+		descpb.ScanLockingStrength_FOR_NONE,
+		descpb.ScanLockingWaitPolicy_BLOCK,
 		false, /* isCheck */
 		&cb.alloc,
+		cb.mon,
 		tableArgs,
 	)
+}
+
+// InitForLocalUse initializes a ColumnBackfiller for use during local
+// execution within a transaction. In this case, the entire backfill process
+// is occurring on the gateway as part of the user's transaction.
+func (cb *ColumnBackfiller) InitForLocalUse(
+	ctx context.Context,
+	evalCtx *tree.EvalContext,
+	semaCtx *tree.SemaContext,
+	desc *tabledesc.Immutable,
+	mon *mon.BytesMonitor,
+) error {
+	cb.initCols(desc)
+	defaultExprs, err := schemaexpr.MakeDefaultExprs(
+		ctx, cb.added, &transform.ExprTransformContext{}, evalCtx, semaCtx,
+	)
+	if err != nil {
+		return err
+	}
+	computedExprs, err := schemaexpr.MakeComputedExprs(
+		ctx,
+		cb.added,
+		desc,
+		tree.NewUnqualifiedTableName(tree.Name(desc.Name)),
+		evalCtx,
+		semaCtx,
+	)
+	if err != nil {
+		return err
+	}
+	return cb.init(evalCtx, defaultExprs, computedExprs, desc, mon)
+}
+
+// InitForDistributedUse initializes a ColumnBackfiller for use as part of a
+// backfill operation executing as part of a distributed flow. In this use,
+// the backfill operation manages its own transactions. This separation is
+// necessary due to the different procedure for accessing user defined type
+// metadata as part of a distributed flow.
+func (cb *ColumnBackfiller) InitForDistributedUse(
+	ctx context.Context, flowCtx *execinfra.FlowCtx, desc *tabledesc.Immutable, mon *mon.BytesMonitor,
+) error {
+	cb.initCols(desc)
+	evalCtx := flowCtx.NewEvalCtx()
+	var defaultExprs, computedExprs []tree.TypedExpr
+	// Install type metadata in the target descriptors, as well as resolve any
+	// user defined types in the column expressions.
+	if err := flowCtx.Cfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		resolver := flowCtx.TypeResolverFactory.NewTypeResolver(txn)
+		// Hydrate all the types present in the table.
+		if err := typedesc.HydrateTypesInTableDescriptor(ctx, desc.TableDesc(), resolver); err != nil {
+			return err
+		}
+		// Set up a SemaContext to type check the default and computed expressions.
+		semaCtx := tree.MakeSemaContext()
+		semaCtx.TypeResolver = resolver
+		var err error
+		defaultExprs, err = schemaexpr.MakeDefaultExprs(
+			ctx, cb.added, &transform.ExprTransformContext{}, evalCtx, &semaCtx,
+		)
+		if err != nil {
+			return err
+		}
+		computedExprs, err = schemaexpr.MakeComputedExprs(
+			ctx,
+			cb.added,
+			desc,
+			tree.NewUnqualifiedTableName(tree.Name(desc.Name)),
+			evalCtx,
+			&semaCtx,
+		)
+		if err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	// Release leases on any accessed types now that type metadata is installed.
+	// We do this so that leases on any accessed types are not held for the
+	// entire backfill process.
+	flowCtx.TypeResolverFactory.Descriptors.ReleaseAll(ctx)
+
+	return cb.init(evalCtx, defaultExprs, computedExprs, desc, mon)
+}
+
+// Close frees the resources used by the ColumnBackfiller.
+func (cb *ColumnBackfiller) Close(ctx context.Context) {
+	cb.fetcher.Close(ctx)
+	if cb.mon != nil {
+		cb.mon.Stop(ctx)
+	}
 }
 
 // RunColumnBackfillChunk runs column backfill over a chunk of the table using
@@ -187,7 +244,7 @@ func (cb *ColumnBackfiller) Init(
 func (cb *ColumnBackfiller) RunColumnBackfillChunk(
 	ctx context.Context,
 	txn *kv.Txn,
-	tableDesc *sqlbase.ImmutableTableDescriptor,
+	tableDesc *tabledesc.Immutable,
 	sp roachpb.Span,
 	chunkSize int64,
 	alsoCommit bool,
@@ -195,7 +252,7 @@ func (cb *ColumnBackfiller) RunColumnBackfillChunk(
 ) (roachpb.Key, error) {
 	// TODO(dan): Tighten up the bound on the requestedCols parameter to
 	// makeRowUpdater.
-	requestedCols := make([]sqlbase.ColumnDescriptor, 0, len(tableDesc.Columns)+len(cb.added))
+	requestedCols := make([]descpb.ColumnDescriptor, 0, len(tableDesc.Columns)+len(cb.added))
 	requestedCols = append(requestedCols, tableDesc.Columns...)
 	requestedCols = append(requestedCols, cb.added...)
 	ru, err := row.MakeUpdater(
@@ -238,7 +295,7 @@ func (cb *ColumnBackfiller) RunColumnBackfillChunk(
 	updateValues := make(tree.Datums, len(cb.updateExprs))
 	b := txn.NewBatch()
 	rowLength := 0
-	iv := &sqlbase.RowIndexedVarContainer{
+	iv := &schemaexpr.RowIndexedVarContainer{
 		Cols:    append(tableDesc.Columns, cb.added...),
 		Mapping: ru.FetchColIDtoRowIndex,
 	}
@@ -258,10 +315,10 @@ func (cb *ColumnBackfiller) RunColumnBackfillChunk(
 		for j, e := range cb.updateExprs {
 			val, err := e.Eval(cb.evalCtx)
 			if err != nil {
-				return roachpb.Key{}, sqlbase.NewInvalidSchemaDefinitionError(err)
+				return roachpb.Key{}, sqlerrors.NewInvalidSchemaDefinitionError(err)
 			}
 			if j < len(cb.added) && !cb.added[j].Nullable && val == tree.DNull {
-				return roachpb.Key{}, sqlbase.NewNonNullViolationError(cb.added[j].Name)
+				return roachpb.Key{}, sqlerrors.NewNonNullViolationError(cb.added[j].Name)
 			}
 
 			// Added computed column values should be usable for the next
@@ -281,8 +338,12 @@ func (cb *ColumnBackfiller) RunColumnBackfillChunk(
 				oldValues[j] = tree.DNull
 			}
 		}
+		// No existing secondary indexes will be updated by adding or dropping a
+		// column. It is safe to use an empty PartialIndexUpdateHelper in this
+		// case.
+		var pm row.PartialIndexUpdateHelper
 		if _, err := ru.UpdateRow(
-			ctx, b, oldValues, updateValues, traceKV,
+			ctx, b, oldValues, updateValues, pm, traceKV,
 		); err != nil {
 			return roachpb.Key{}, err
 		}
@@ -299,142 +360,299 @@ func (cb *ColumnBackfiller) RunColumnBackfillChunk(
 }
 
 // ConvertBackfillError returns a cleaner SQL error for a failed Batch.
-func ConvertBackfillError(
-	ctx context.Context, tableDesc *sqlbase.ImmutableTableDescriptor, b *kv.Batch,
-) error {
+func ConvertBackfillError(ctx context.Context, tableDesc *tabledesc.Immutable, b *kv.Batch) error {
 	// A backfill on a new schema element has failed and the batch contains
 	// information useful in printing a sensible error. However
 	// ConvertBatchError() will only work correctly if the schema elements
 	// are "live" in the tableDesc.
-	desc, err := tableDesc.MakeFirstMutationPublic(sqlbase.IncludeConstraints)
+	desc, err := tableDesc.MakeFirstMutationPublic(tabledesc.IncludeConstraints)
 	if err != nil {
 		return err
 	}
-	return row.ConvertBatchError(ctx, sqlbase.NewImmutableTableDescriptor(*desc.TableDesc()), b)
+	return row.ConvertBatchError(ctx, tabledesc.NewImmutable(*desc.TableDesc()), b)
 }
 
 // IndexBackfiller is capable of backfilling all the added index.
 type IndexBackfiller struct {
 	backfiller
 
-	added []sqlbase.IndexDescriptor
+	added []*descpb.IndexDescriptor
 	// colIdxMap maps ColumnIDs to indices into desc.Columns and desc.Mutations.
-	colIdxMap map[sqlbase.ColumnID]int
+	colIdxMap map[descpb.ColumnID]int
 
 	types   []*types.T
 	rowVals tree.Datums
 	evalCtx *tree.EvalContext
+	cols    []descpb.ColumnDescriptor
+
+	// predicates is a map of indexes to partial index predicate expressions. It
+	// includes entries for partial indexes only.
+	predicates map[descpb.IndexID]tree.TypedExpr
+	// indexesToEncode is a list of indexes to encode entries for a given row.
+	// It is a field of IndexBackfiller to avoid allocating a slice for each row
+	// backfilled.
+	indexesToEncode []*descpb.IndexDescriptor
+
+	// mon is a memory monitor linked with the IndexBackfiller on creation.
+	mon *mon.BytesMonitor
+	// boundAccount is associated with mon and is used to track allocations during
+	// an	index backfill.
+	boundAccount mon.BoundAccount
 }
 
 // ContainsInvertedIndex returns true if backfilling an inverted index.
 func (ib *IndexBackfiller) ContainsInvertedIndex() bool {
 	for _, idx := range ib.added {
-		if idx.Type == sqlbase.IndexDescriptor_INVERTED {
+		if idx.Type == descpb.IndexDescriptor_INVERTED {
 			return true
 		}
 	}
 	return false
 }
 
-// Init initializes an IndexBackfiller.
-func (ib *IndexBackfiller) Init(
-	evalCtx *tree.EvalContext, desc *sqlbase.ImmutableTableDescriptor,
+// InitForLocalUse initializes an IndexBackfiller for use during local execution
+// within a transaction. In this case, the entire backfill process is occurring
+// on the gateway as part of the user's transaction.
+func (ib *IndexBackfiller) InitForLocalUse(
+	ctx context.Context,
+	evalCtx *tree.EvalContext,
+	semaCtx *tree.SemaContext,
+	desc *tabledesc.Immutable,
+	mon *mon.BytesMonitor,
 ) error {
-	ib.evalCtx = evalCtx
-	numCols := len(desc.Columns)
-	cols := desc.Columns
+	// Initialize ib.cols and ib.colIdxMap.
+	ib.initCols(desc)
+
+	// Initialize ib.added.
+	valNeededForCol := ib.initIndexes(desc)
+
+	// Convert any partial index predicate strings into expressions.
+	predicates, predicateRefColIDs, err := schemaexpr.MakePartialIndexExprs(
+		ctx,
+		ib.added,
+		ib.cols,
+		desc,
+		evalCtx,
+		semaCtx,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Add the columns referenced in the predicate to valNeededForCol so that
+	// columns necessary to evaluate the predicate expression are fetched.
+	predicateRefColIDs.ForEach(func(col descpb.ColumnID) {
+		valNeededForCol.Add(ib.colIdxMap[col])
+	})
+
+	return ib.init(evalCtx, predicates, valNeededForCol, desc, mon)
+}
+
+// InitForDistributedUse initializes an IndexBackfiller for use as part of a
+// backfill operation executing as part of a distributed flow. In this use, the
+// backfill operation manages its own transactions. This separation is necessary
+// due to the different procedure for accessing user defined type metadata as
+// part of a distributed flow.
+func (ib *IndexBackfiller) InitForDistributedUse(
+	ctx context.Context, flowCtx *execinfra.FlowCtx, desc *tabledesc.Immutable, mon *mon.BytesMonitor,
+) error {
+	// Initialize ib.cols and ib.colIdxMap.
+	ib.initCols(desc)
+
+	// Initialize ib.added.
+	valNeededForCol := ib.initIndexes(desc)
+
+	evalCtx := flowCtx.NewEvalCtx()
+	var predicates map[descpb.IndexID]tree.TypedExpr
+	var predicateRefColIDs schemaexpr.TableColSet
+
+	// Install type metadata in the target descriptors, as well as resolve any
+	// user defined types in partial index predicate expressions.
+	if err := flowCtx.Cfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		resolver := flowCtx.TypeResolverFactory.NewTypeResolver(txn)
+		// Hydrate all the types present in the table.
+		if err := typedesc.HydrateTypesInTableDescriptor(ctx, desc.TableDesc(), resolver); err != nil {
+			return err
+		}
+		// Set up a SemaContext to type check the default and computed expressions.
+		semaCtx := tree.MakeSemaContext()
+		semaCtx.TypeResolver = resolver
+
+		// Convert any partial index predicate strings into expressions.
+		var err error
+		predicates, predicateRefColIDs, err =
+			schemaexpr.MakePartialIndexExprs(ctx, ib.added, ib.cols, desc, evalCtx, &semaCtx)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}); err != nil {
+		return err
+	}
+	// Release leases on any accessed types now that type metadata is installed.
+	// We do this so that leases on any accessed types are not held for the
+	// entire backfill process.
+	flowCtx.TypeResolverFactory.Descriptors.ReleaseAll(ctx)
+
+	// Add the columns referenced in the predicate to valNeededForCol so that
+	// columns necessary to evaluate the predicate expression are fetched.
+	predicateRefColIDs.ForEach(func(col descpb.ColumnID) {
+		valNeededForCol.Add(ib.colIdxMap[col])
+	})
+
+	return ib.init(evalCtx, predicates, valNeededForCol, desc, mon)
+}
+
+// Close releases the resources used by the IndexBackfiller.
+func (ib *IndexBackfiller) Close(ctx context.Context) {
+	ib.fetcher.Close(ctx)
+	if ib.mon != nil {
+		ib.boundAccount.Close(ctx)
+		ib.mon.Stop(ctx)
+	}
+}
+
+// Clear releases the allocations on the IndexBackfiller's bound account,
+// prepping it for reuse.
+func (ib *IndexBackfiller) Clear(ctx context.Context) {
+	ib.boundAccount.Clear(ctx)
+}
+
+// initCols is a helper to populate column metadata of an IndexBackfiller. It
+// populates the cols and colIdxMap fields.
+func (ib *IndexBackfiller) initCols(desc *tabledesc.Immutable) {
+	ib.cols = desc.Columns
+
+	// If there are ongoing mutations, add columns that are being added and in
+	// the DELETE_AND_WRITE_ONLY state.
 	if len(desc.Mutations) > 0 {
-		cols = make([]sqlbase.ColumnDescriptor, 0, numCols+len(desc.Mutations))
-		cols = append(cols, desc.Columns...)
+		ib.cols = make([]descpb.ColumnDescriptor, 0, len(desc.Columns)+len(desc.Mutations))
+		ib.cols = append(ib.cols, desc.Columns...)
 		for _, m := range desc.Mutations {
 			if column := m.GetColumn(); column != nil &&
-				m.Direction == sqlbase.DescriptorMutation_ADD &&
-				m.State == sqlbase.DescriptorMutation_DELETE_AND_WRITE_ONLY {
-				cols = append(cols, *column)
+				m.Direction == descpb.DescriptorMutation_ADD &&
+				m.State == descpb.DescriptorMutation_DELETE_AND_WRITE_ONLY {
+				ib.cols = append(ib.cols, *column)
 			}
 		}
 	}
 
+	// Create a map of each column's ID to its ordinal.
+	ib.colIdxMap = make(map[descpb.ColumnID]int, len(ib.cols))
+	for i := range ib.cols {
+		ib.colIdxMap[ib.cols[i].ID] = i
+	}
+}
+
+// initIndexes is a helper to populate index metadata of an IndexBackfiller. It
+// populates the added field. It returns a set of column ordinals that must be
+// fetched in order to backfill the added indexes.
+func (ib *IndexBackfiller) initIndexes(desc *tabledesc.Immutable) util.FastIntSet {
 	var valNeededForCol util.FastIntSet
 	mutationID := desc.Mutations[0].MutationID
+
+	// Mutations in the same transaction have the same ID. Loop through the
+	// mutations and collect all index mutations.
 	for _, m := range desc.Mutations {
 		if m.MutationID != mutationID {
 			break
 		}
 		if IndexMutationFilter(m) {
 			idx := m.GetIndex()
-			ib.added = append(ib.added, *idx)
-			for i := range cols {
-				id := cols[i].ID
+			ib.added = append(ib.added, idx)
+			for i := range ib.cols {
+				id := ib.cols[i].ID
 				if idx.ContainsColumnID(id) ||
-					idx.GetEncodingType(desc.PrimaryIndex.ID) == sqlbase.PrimaryIndexEncoding {
+					idx.GetEncodingType(desc.PrimaryIndex.ID) == descpb.PrimaryIndexEncoding {
 					valNeededForCol.Add(i)
 				}
 			}
 		}
 	}
 
-	ib.types = make([]*types.T, len(cols))
-	for i := range cols {
-		ib.types[i] = cols[i].Type
+	return valNeededForCol
+}
+
+// init completes the initialization of an IndexBackfiller.
+func (ib *IndexBackfiller) init(
+	evalCtx *tree.EvalContext,
+	predicateExprs map[descpb.IndexID]tree.TypedExpr,
+	valNeededForCol util.FastIntSet,
+	desc *tabledesc.Immutable,
+	mon *mon.BytesMonitor,
+) error {
+	ib.evalCtx = evalCtx
+	ib.predicates = predicateExprs
+
+	// Initialize a list of index descriptors to encode entries for. If there
+	// are no partial indexes, the list is equivalent to the list of indexes
+	// being added. If there are partial indexes, allocate a new list that is
+	// reset in BuildIndexEntriesChunk for every row added.
+	ib.indexesToEncode = ib.added
+	if len(ib.predicates) > 0 {
+		ib.indexesToEncode = make([]*descpb.IndexDescriptor, 0, len(ib.added))
 	}
 
-	// Hydrate types used by the backfiller.
-	// TODO (rohany): As part of #49261, this needs to use cached enum data.
-	if evalCtx.Txn != nil {
-		// If the evalCtx has a transaction (if the schema change is running on a
-		// new table within a transaction), then use that.
-		if err := execinfrapb.HydrateTypeSlice(evalCtx, ib.types); err != nil {
-			return err
-		}
-	} else {
-		// Otherwise, make a new transaction. This case will happen when we are
-		// performing a distributed schema change outside of a transaction.
-		if err := ib.evalCtx.DB.Txn(evalCtx.Context, func(_ context.Context, txn *kv.Txn) error {
-			evalCtx.Txn = txn
-			return execinfrapb.HydrateTypeSlice(evalCtx, ib.types)
-		}); err != nil {
-			return err
-		}
-	}
-
-	ib.colIdxMap = make(map[sqlbase.ColumnID]int, len(cols))
-	for i := range cols {
-		ib.colIdxMap[cols[i].ID] = i
+	ib.types = make([]*types.T, len(ib.cols))
+	for i := range ib.cols {
+		ib.types[i] = ib.cols[i].Type
 	}
 
 	tableArgs := row.FetcherTableArgs{
 		Desc:            desc,
 		Index:           &desc.PrimaryIndex,
 		ColIdxMap:       ib.colIdxMap,
-		Cols:            cols,
+		Cols:            ib.cols,
 		ValNeededForCol: valNeededForCol,
 	}
+
+	// Create a bound account associated with the index backfiller monitor.
+	if mon == nil {
+		return errors.AssertionFailedf("no memory monitor linked to IndexBacfiller during init")
+	}
+	ib.mon = mon
+	ib.boundAccount = mon.MakeBoundAccount()
+
 	return ib.fetcher.Init(
+		evalCtx.Context,
 		evalCtx.Codec,
 		false, /* reverse */
-		sqlbase.ScanLockingStrength_FOR_NONE,
-		false, /* returnRangeInfo */
+		descpb.ScanLockingStrength_FOR_NONE,
+		descpb.ScanLockingWaitPolicy_BLOCK,
 		false, /* isCheck */
 		&ib.alloc,
+		mon,
 		tableArgs,
 	)
 }
 
 // BuildIndexEntriesChunk reads a chunk of rows from a table using the span sp
 // provided, and builds all the added indexes.
+// The method accounts for the memory used by the index entries for this chunk
+// using the memory monitor associated with ib. It is the callers responsibility
+// to clear the associated bound account when appropriate.
 func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 	ctx context.Context,
 	txn *kv.Txn,
-	tableDesc *sqlbase.ImmutableTableDescriptor,
+	tableDesc *tabledesc.Immutable,
 	sp roachpb.Span,
 	chunkSize int64,
 	traceKV bool,
-) ([]sqlbase.IndexEntry, roachpb.Key, error) {
+) ([]rowenc.IndexEntry, roachpb.Key, error) {
 	// This ought to be chunkSize but in most tests we are actually building smaller
 	// indexes so use a smaller value.
 	const initBufferSize = 1000
-	entries := make([]sqlbase.IndexEntry, 0, initBufferSize*int64(len(ib.added)))
+	const sizeOfIndexEntry = int64(unsafe.Sizeof(rowenc.IndexEntry{}))
+
+	indexEntriesInChunkInitialBufferSize :=
+		sizeOfIndexEntry * initBufferSize * int64(len(ib.added))
+	if err := ib.boundAccount.Grow(ctx,
+		indexEntriesInChunkInitialBufferSize); err != nil {
+		return nil, nil, errors.Wrap(err,
+			"failed to initialize empty buffer to store the index entries of all rows in the chunk")
+	}
+	entries := make([]rowenc.IndexEntry, 0, initBufferSize*int64(len(ib.added)))
 
 	// Get the next set of rows.
 	//
@@ -451,7 +669,18 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 		return nil, nil, err
 	}
 
-	buffer := make([]sqlbase.IndexEntry, len(ib.added))
+	iv := &schemaexpr.RowIndexedVarContainer{
+		Cols:    ib.cols,
+		Mapping: ib.colIdxMap,
+	}
+	ib.evalCtx.IVarContainer = iv
+
+	indexEntriesPerRowInitialBufferSize := int64(len(ib.added)) * sizeOfIndexEntry
+	if err := ib.boundAccount.Grow(ctx, indexEntriesPerRowInitialBufferSize); err != nil {
+		return nil, nil, errors.Wrap(err,
+			"failed to initialize empty buffer to store the index entries of a single row")
+	}
+	buffer := make([]rowenc.IndexEntry, len(ib.added))
 	for i := int64(0); i < chunkSize; i++ {
 		encRow, _, _, err := ib.fetcher.NextRow(ctx)
 		if err != nil {
@@ -463,8 +692,37 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 		if len(ib.rowVals) == 0 {
 			ib.rowVals = make(tree.Datums, len(encRow))
 		}
-		if err := sqlbase.EncDatumRowToDatums(ib.types, ib.rowVals, encRow, &ib.alloc); err != nil {
+		if err := rowenc.EncDatumRowToDatums(ib.types, ib.rowVals, encRow, &ib.alloc); err != nil {
 			return nil, nil, err
+		}
+
+		iv.CurSourceRow = ib.rowVals
+
+		// If there are any partial indexes being added, make a list of the
+		// indexes that the current row should be added to.
+		if len(ib.predicates) > 0 {
+			ib.indexesToEncode = ib.indexesToEncode[:0]
+			for _, idx := range ib.added {
+				if !idx.IsPartial() {
+					// If the index is not a partial index, all rows should have
+					// an entry.
+					ib.indexesToEncode = append(ib.indexesToEncode, idx)
+					continue
+				}
+
+				// If the index is a partial index, only include it if the
+				// predicate expression evaluates to true.
+				texpr := ib.predicates[idx.ID]
+
+				val, err := texpr.Eval(ib.evalCtx)
+				if err != nil {
+					return nil, nil, err
+				}
+
+				if val == tree.DBoolTrue {
+					ib.indexesToEncode = append(ib.indexesToEncode, idx)
+				}
+			}
 		}
 
 		// We're resetting the length of this slice for variable length indexes such as inverted
@@ -473,35 +731,49 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 		// subsequent rows and we would then have duplicates in entries on output. Additionally, we do
 		// not want to include empty k/v pairs while backfilling.
 		buffer = buffer[:0]
-		if buffer, err = sqlbase.EncodeSecondaryIndexes(
+		if buffer, err = rowenc.EncodeSecondaryIndexes(
+			ctx,
 			ib.evalCtx.Codec,
-			tableDesc.TableDesc(),
-			ib.added,
+			tableDesc,
+			ib.indexesToEncode,
 			ib.colIdxMap,
 			ib.rowVals,
 			buffer,
 			false, /* includeEmpty */
+			ib.boundAccount,
 		); err != nil {
 			return nil, nil, err
 		}
+
+		// The memory monitor has already accounted for cap(entries). If the number
+		// of index entries are going to cause the entries buffer to re-slice, then
+		// it will very likely double in capacity. Therefore, we must account for
+		// another cap(entries) in the index memory account.
+		if cap(entries)-len(entries) < len(buffer) {
+			if err := ib.boundAccount.Grow(ctx, sizeOfIndexEntry*int64(cap(entries))); err != nil {
+				return nil, nil, err
+			}
+		}
+
 		entries = append(entries, buffer...)
 	}
 	return entries, ib.fetcher.Key(), nil
 }
 
 // RunIndexBackfillChunk runs an index backfill over a chunk of the table
-// by tracversing the span sp provided. The backfill is run for the added
+// by traversing the span sp provided. The backfill is run for the added
 // indexes.
 func (ib *IndexBackfiller) RunIndexBackfillChunk(
 	ctx context.Context,
 	txn *kv.Txn,
-	tableDesc *sqlbase.ImmutableTableDescriptor,
+	tableDesc *tabledesc.Immutable,
 	sp roachpb.Span,
 	chunkSize int64,
 	alsoCommit bool,
 	traceKV bool,
 ) (roachpb.Key, error) {
-	entries, key, err := ib.BuildIndexEntriesChunk(ctx, txn, tableDesc, sp, chunkSize, traceKV)
+	entries, key, err := ib.BuildIndexEntriesChunk(ctx, txn, tableDesc, sp,
+		chunkSize, traceKV)
 	if err != nil {
 		return nil, err
 	}
@@ -520,5 +792,11 @@ func (ib *IndexBackfiller) RunIndexBackfillChunk(
 	if err := writeBatch(ctx, batch); err != nil {
 		return nil, ConvertBackfillError(ctx, tableDesc, batch)
 	}
+
+	// After the chunk entries have been written, we must clear the bound account
+	// tracking the memory usage for the chunk.
+	entries = nil
+	ib.Clear(ctx)
+
 	return key, nil
 }

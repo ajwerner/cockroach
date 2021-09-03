@@ -213,9 +213,9 @@ func (b *SSTBatcher) flushIfNeeded(ctx context.Context, nextKey roachpb.Key) err
 		if k, err := keys.Addr(nextKey); err != nil {
 			log.Warningf(ctx, "failed to get RKey for flush key lookup")
 		} else {
-			r := b.rc.GetCached(k, false /* inverted */)
+			r := b.rc.GetCached(ctx, k, false /* inverted */)
 			if r != nil {
-				b.flushKey = r.Desc.EndKey.AsRawKey()
+				b.flushKey = r.Desc().EndKey.AsRawKey()
 				log.VEventf(ctx, 3, "building sstable that will flush before %v", b.flushKey)
 			} else {
 				log.VEventf(ctx, 3, "no cached range desc available to determine sst flush key")
@@ -476,7 +476,7 @@ func createSplitSSTable(
 	db SSTSender,
 	start, splitKey roachpb.Key,
 	disallowShadowing bool,
-	iter storage.SimpleIterator,
+	iter storage.SimpleMVCCIterator,
 	settings *cluster.Settings,
 ) (*sstSpan, *sstSpan, error) {
 	sstFile := &storage.MemFile{}

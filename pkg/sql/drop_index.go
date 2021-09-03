@@ -19,12 +19,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/errors"
@@ -73,7 +76,7 @@ func (n *dropIndexNode) startExec(params runParams) error {
 	telemetry.Inc(sqltelemetry.SchemaChangeDropCounter("index"))
 
 	if n.n.Concurrently {
-		params.p.SendClientNotice(
+		params.p.BufferClientNotice(
 			params.ctx,
 			pgnotice.Newf("CONCURRENTLY is not required as all indexes are dropped concurrently"),
 		)
@@ -86,8 +89,8 @@ func (n *dropIndexNode) startExec(params runParams) error {
 		// the mutation list and new version number created by the first
 		// drop need to be visible to the second drop.
 		tableDesc, err := params.p.ResolveMutableTableDescriptor(
-			ctx, index.tn, true /*required*/, tree.ResolveRequireTableDesc)
-		if sqlbase.IsUndefinedRelationError(err) {
+			ctx, index.tn, true /*required*/, tree.ResolveRequireTableOrViewDesc)
+		if sqlerrors.IsUndefinedRelationError(err) {
 			// Somehow the descriptor we had during planning is not there
 			// any more.
 			return errors.NewAssertionErrorWithWrappedErrf(err,
@@ -96,6 +99,10 @@ func (n *dropIndexNode) startExec(params runParams) error {
 		}
 		if err != nil {
 			return err
+		}
+
+		if tableDesc.IsView() && !tableDesc.MaterializedView() {
+			return pgerror.Newf(pgcode.WrongObjectType, "%q is not a table or materialized view", tableDesc.Name)
 		}
 
 		// If we couldn't find the index by name, this is either a legitimate error or
@@ -128,16 +135,14 @@ func (n *dropIndexNode) startExec(params runParams) error {
 // dropShardColumnAndConstraint drops the given shard column and its associated check
 // constraint.
 func (n *dropIndexNode) dropShardColumnAndConstraint(
-	params runParams,
-	tableDesc *sqlbase.MutableTableDescriptor,
-	shardColDesc *sqlbase.ColumnDescriptor,
+	params runParams, tableDesc *tabledesc.Mutable, shardColDesc *descpb.ColumnDescriptor,
 ) error {
 	validChecks := tableDesc.Checks[:0]
 	for _, check := range tableDesc.AllActiveAndInactiveChecks() {
-		if used, err := check.UsesColumn(tableDesc.TableDesc(), shardColDesc.ID); err != nil {
+		if used, err := tableDesc.CheckConstraintUsesColumn(check, shardColDesc.ID); err != nil {
 			return err
 		} else if used {
-			if check.Validity == sqlbase.ConstraintValidity_Validating {
+			if check.Validity == descpb.ConstraintValidity_Validating {
 				return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
 					"referencing constraint %q in the middle of being added, try again later", check.Name)
 			}
@@ -150,22 +155,18 @@ func (n *dropIndexNode) dropShardColumnAndConstraint(
 		tableDesc.Checks = validChecks
 	}
 
-	tableDesc.AddColumnMutation(shardColDesc, sqlbase.DescriptorMutation_DROP)
+	tableDesc.AddColumnMutation(shardColDesc, descpb.DescriptorMutation_DROP)
 	for i := range tableDesc.Columns {
 		if tableDesc.Columns[i].ID == shardColDesc.ID {
-			tmp := tableDesc.Columns[:0]
-			for j, col := range tableDesc.Columns {
-				if i == j {
-					continue
-				}
-				tmp = append(tmp, col)
-			}
-			tableDesc.Columns = tmp
+			// Note the third slice parameter which will force a copy of the backing
+			// array if the column being removed is not the last column.
+			tableDesc.Columns = append(tableDesc.Columns[:i:i],
+				tableDesc.Columns[i+1:]...)
 			break
 		}
 	}
 
-	if err := tableDesc.AllocateIDs(); err != nil {
+	if err := tableDesc.AllocateIDs(params.ctx); err != nil {
 		return err
 	}
 	mutationID := tableDesc.ClusterVersion.NextMutationID
@@ -182,7 +183,7 @@ func (n *dropIndexNode) dropShardColumnAndConstraint(
 //
 // Assumes that the given index is sharded.
 func (n *dropIndexNode) maybeDropShardColumn(
-	params runParams, tableDesc *sqlbase.MutableTableDescriptor, shardColName string,
+	params runParams, tableDesc *tabledesc.Mutable, shardColName string,
 ) error {
 	shardColDesc, dropped, err := tableDesc.FindColumnByName(tree.Name(shardColName))
 	if err != nil {
@@ -229,7 +230,7 @@ func (p *planner) dropIndexByName(
 	ctx context.Context,
 	tn *tree.TableName,
 	idxName tree.UnrestrictedName,
-	tableDesc *sqlbase.MutableTableDescriptor,
+	tableDesc *tabledesc.Mutable,
 	ifExists bool,
 	behavior tree.DropBehavior,
 	constraintBehavior dropIndexConstraintBehavior,
@@ -273,12 +274,12 @@ func (p *planner) dropIndexByName(
 					p.ExecCfg().Settings,
 					p.ExecCfg().ClusterID(),
 					p.ExecCfg().Codec,
-					tableDesc.TableDesc(),
+					tableDesc,
 					zone.Subzones,
 					false, /* newSubzones */
 				)
-				if sqlbase.IsCCLRequiredError(err) {
-					return sqlbase.NewCCLRequiredError(fmt.Errorf("schema change requires a CCL binary "+
+				if sqlerrors.IsCCLRequiredError(err) {
+					return sqlerrors.NewCCLRequiredError(fmt.Errorf("schema change requires a CCL binary "+
 						"because table %q has at least one remaining index or partition with a zone config",
 						tableDesc.Name))
 				}
@@ -305,7 +306,7 @@ func (p *planner) dropIndexByName(
 	// Construct a list of all the remaining indexes, so that we can see if there
 	// is another index that could replace the one we are deleting for a given
 	// foreign key constraint.
-	remainingIndexes := make([]*sqlbase.IndexDescriptor, 0, len(tableDesc.Indexes)+1)
+	remainingIndexes := make([]*descpb.IndexDescriptor, 0, len(tableDesc.Indexes)+1)
 	remainingIndexes = append(remainingIndexes, &tableDesc.PrimaryIndex)
 	for i := range tableDesc.Indexes {
 		index := &tableDesc.Indexes[i]
@@ -316,7 +317,7 @@ func (p *planner) dropIndexByName(
 
 	// indexHasReplacementCandidate runs isValidIndex on each index in remainingIndexes and returns
 	// true if at least one index satisfies isValidIndex.
-	indexHasReplacementCandidate := func(isValidIndex func(*sqlbase.IndexDescriptor) bool) bool {
+	indexHasReplacementCandidate := func(isValidIndex func(*descpb.IndexDescriptor) bool) bool {
 		foundReplacement := false
 		for _, index := range remainingIndexes {
 			if isValidIndex(index) {
@@ -330,7 +331,7 @@ func (p *planner) dropIndexByName(
 	// from the foreign key descriptors, fall back to the existing drop index logic.
 	// That means we pretend that we can never find replacements for any indexes.
 	if !p.ExecCfg().Settings.Version.IsActive(ctx, clusterversion.VersionNoExplicitForeignKeyIndexIDs) {
-		indexHasReplacementCandidate = func(func(*sqlbase.IndexDescriptor) bool) bool {
+		indexHasReplacementCandidate = func(func(*descpb.IndexDescriptor) bool) bool {
 			return false
 		}
 	}
@@ -338,12 +339,12 @@ func (p *planner) dropIndexByName(
 	// Check for foreign key mutations referencing this index.
 	for _, m := range tableDesc.Mutations {
 		if c := m.GetConstraint(); c != nil &&
-			c.ConstraintType == sqlbase.ConstraintToUpdate_FOREIGN_KEY &&
+			c.ConstraintType == descpb.ConstraintToUpdate_FOREIGN_KEY &&
 			// If the index being deleted could be used as a index for this outbound
 			// foreign key mutation, then make sure that we have another index that
 			// could be used for this mutation.
 			idx.IsValidOriginIndex(c.ForeignKey.OriginColumnIDs) &&
-			!indexHasReplacementCandidate(func(idx *sqlbase.IndexDescriptor) bool {
+			!indexHasReplacementCandidate(func(idx *descpb.IndexDescriptor) bool {
 				return idx.IsValidOriginIndex(c.ForeignKey.OriginColumnIDs)
 			}) {
 			return pgerror.Newf(pgcode.ObjectNotInPrerequisiteState,
@@ -364,7 +365,7 @@ func (p *planner) dropIndexByName(
 			tableDesc.OutboundFKs[sliceIdx] = tableDesc.OutboundFKs[i]
 			sliceIdx++
 			fk := &tableDesc.OutboundFKs[i]
-			canReplace := func(idx *sqlbase.IndexDescriptor) bool {
+			canReplace := func(idx *descpb.IndexDescriptor) bool {
 				return idx.IsValidOriginIndex(fk.OriginColumnIDs)
 			}
 			// The index being deleted could be used as the origin index for this foreign key.
@@ -387,7 +388,7 @@ func (p *planner) dropIndexByName(
 		tableDesc.InboundFKs[sliceIdx] = tableDesc.InboundFKs[i]
 		sliceIdx++
 		fk := &tableDesc.InboundFKs[i]
-		canReplace := func(idx *sqlbase.IndexDescriptor) bool {
+		canReplace := func(idx *descpb.IndexDescriptor) bool {
 			return idx.IsValidReferencedIndex(fk.ReferencedColumnIDs)
 		}
 		// The index being deleted could potentially be the referenced index for this fk.
@@ -452,26 +453,30 @@ func (p *planner) dropIndexByName(
 	for i, idxEntry := range tableDesc.Indexes {
 		if idxEntry.ID == idx.ID {
 			// Unsplit all manually split ranges in the index so they can be
-			// automatically merged by the merge queue.
-			span := tableDesc.IndexSpan(p.ExecCfg().Codec, idxEntry.ID)
-			ranges, err := ScanMetaKVs(ctx, p.txn, span)
-			if err != nil {
-				return err
-			}
-			for _, r := range ranges {
-				var desc roachpb.RangeDescriptor
-				if err := r.ValueProto(&desc); err != nil {
+			// automatically merged by the merge queue. Gate this on being the
+			// system tenant because secondary tenants aren't allowed to scan
+			// the meta ranges directly.
+			if p.ExecCfg().Codec.ForSystemTenant() {
+				span := tableDesc.IndexSpan(p.ExecCfg().Codec, idxEntry.ID)
+				ranges, err := ScanMetaKVs(ctx, p.txn, span)
+				if err != nil {
 					return err
 				}
-				// We have to explicitly check that the range descriptor's start key
-				// lies within the span of the index since ScanMetaKVs returns all
-				// intersecting spans.
-				if (desc.GetStickyBit() != hlc.Timestamp{}) && span.Key.Compare(desc.StartKey.AsRawKey()) <= 0 {
-					// Swallow "key is not the start of a range" errors because it would
-					// mean that the sticky bit was removed and merged concurrently. DROP
-					// INDEX should not fail because of this.
-					if err := p.ExecCfg().DB.AdminUnsplit(ctx, desc.StartKey); err != nil && !strings.Contains(err.Error(), "is not the start of a range") {
+				for _, r := range ranges {
+					var desc roachpb.RangeDescriptor
+					if err := r.ValueProto(&desc); err != nil {
 						return err
+					}
+					// We have to explicitly check that the range descriptor's start key
+					// lies within the span of the index since ScanMetaKVs returns all
+					// intersecting spans.
+					if (desc.GetStickyBit() != hlc.Timestamp{}) && span.Key.Compare(desc.StartKey.AsRawKey()) <= 0 {
+						// Swallow "key is not the start of a range" errors because it would
+						// mean that the sticky bit was removed and merged concurrently. DROP
+						// INDEX should not fail because of this.
+						if err := p.ExecCfg().DB.AdminUnsplit(ctx, desc.StartKey); err != nil && !strings.Contains(err.Error(), "is not the start of a range") {
+							return err
+						}
 					}
 				}
 			}
@@ -480,7 +485,7 @@ func (p *planner) dropIndexByName(
 			// contain the same field any more due to other schema changes
 			// intervening since the initial lookup. So we send the recent
 			// copy idxEntry for drop instead.
-			if err := tableDesc.AddIndexMutation(&idxEntry, sqlbase.DescriptorMutation_DROP); err != nil {
+			if err := tableDesc.AddIndexMutation(&idxEntry, descpb.DescriptorMutation_DROP); err != nil {
 				return err
 			}
 			tableDesc.Indexes = append(tableDesc.Indexes[:i], tableDesc.Indexes[i+1:]...)
@@ -489,21 +494,27 @@ func (p *planner) dropIndexByName(
 		}
 	}
 	if !found {
-		return fmt.Errorf("index %q in the middle of being added, try again later", idxName)
+		return pgerror.Newf(
+			pgcode.ObjectNotInPrerequisiteState,
+			"index %q in the middle of being added, try again later",
+			idxName,
+		)
 	}
 
 	if err := p.removeIndexComment(ctx, tableDesc.ID, idx.ID); err != nil {
 		return err
 	}
 
-	if err := tableDesc.Validate(ctx, p.txn, p.ExecCfg().Codec); err != nil {
+	if err := tableDesc.Validate(
+		ctx, catalogkv.NewOneLevelUncachedDescGetter(p.txn, p.ExecCfg().Codec),
+	); err != nil {
 		return err
 	}
 	mutationID := tableDesc.ClusterVersion.NextMutationID
 	if err := p.writeSchemaChange(ctx, tableDesc, mutationID, jobDesc); err != nil {
 		return err
 	}
-	p.SendClientNotice(
+	p.BufferClientNotice(
 		ctx,
 		errors.WithHint(
 			pgnotice.Newf("the data for dropped indexes is reclaimed asynchronously"),
@@ -526,7 +537,7 @@ func (p *planner) dropIndexByName(
 			User                string
 			MutationID          uint32
 			CascadeDroppedViews []string
-		}{tn.FQString(), string(idxName), jobDesc, p.SessionData().User, uint32(mutationID),
+		}{tn.FQString(), string(idxName), jobDesc, p.User().Normalized(), uint32(mutationID),
 			droppedViews},
 	)
 }

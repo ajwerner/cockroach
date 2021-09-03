@@ -22,12 +22,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/backfill"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowexec"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/sqlmigrations"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/errors"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWriteResumeSpan(t *testing.T) {
@@ -72,12 +74,12 @@ func TestWriteResumeSpan(t *testing.T) {
 	}
 
 	registry := server.JobRegistry().(*jobs.Registry)
-	tableDesc := sqlbase.TestingGetMutableExistingTableDescriptor(
+	tableDesc := catalogkv.TestingGetMutableExistingTableDescriptor(
 		kvDB, keys.SystemSQLCodec, "t", "test")
 
 	if err := kvDB.Put(
 		ctx,
-		sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, tableDesc.ID),
+		catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, tableDesc.ID),
 		tableDesc.DescriptorProto(),
 	); err != nil {
 		t.Fatal(err)
@@ -99,10 +101,15 @@ func TestWriteResumeSpan(t *testing.T) {
 		{ResumeSpans: resumeSpans}}}
 
 	job, err := registry.LoadJob(ctx, jobID)
-
 	if err != nil {
 		t.Fatal(errors.Wrapf(err, "can't find job %d", jobID))
 	}
+
+	require.NoError(t, job.Update(ctx,
+		func(_ *kv.Txn, _ jobs.JobMetadata, ju *jobs.JobUpdater) error {
+			ju.UpdateStatus(jobs.StatusRunning)
+			return nil
+		}))
 
 	err = job.SetDetails(ctx, details)
 	if err != nil {

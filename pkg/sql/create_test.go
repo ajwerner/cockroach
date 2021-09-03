@@ -22,7 +22,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/server"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/sqlmigrations"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -53,7 +55,7 @@ func TestDatabaseDescriptor(t *testing.T) {
 	}
 
 	// Database name.
-	nameKey := sqlbase.NewDatabaseKey("test").Key(codec)
+	nameKey := catalogkeys.NewDatabaseKey("test").Key(codec)
 	if gr, err := kvDB.Get(ctx, nameKey); err != nil {
 		t.Fatal(err)
 	} else if gr.Exists() {
@@ -61,13 +63,13 @@ func TestDatabaseDescriptor(t *testing.T) {
 	}
 
 	// Write a descriptor key that will interfere with database creation.
-	dbDescKey := sqlbase.MakeDescMetadataKey(codec, sqlbase.ID(expectedCounter))
-	dbDesc := &sqlbase.Descriptor{
-		Union: &sqlbase.Descriptor_Database{
-			Database: &sqlbase.DatabaseDescriptor{
+	dbDescKey := catalogkeys.MakeDescMetadataKey(codec, descpb.ID(expectedCounter))
+	dbDesc := &descpb.Descriptor{
+		Union: &descpb.Descriptor_Database{
+			Database: &descpb.DatabaseDescriptor{
 				Name:       "sentinel",
-				ID:         sqlbase.ID(expectedCounter),
-				Privileges: &sqlbase.PrivilegeDescriptor{},
+				ID:         descpb.ID(expectedCounter),
+				Privileges: &descpb.PrivilegeDescriptor{},
 			},
 		},
 	}
@@ -116,7 +118,7 @@ func TestDatabaseDescriptor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dbDescKey = sqlbase.MakeDescMetadataKey(codec, sqlbase.ID(expectedCounter))
+	dbDescKey = catalogkeys.MakeDescMetadataKey(codec, descpb.ID(expectedCounter))
 	if _, err := sqlDB.Exec(`CREATE DATABASE test`); err != nil {
 		t.Fatal(err)
 	}
@@ -223,17 +225,17 @@ func verifyTables(
 	tc *testcluster.TestCluster,
 	completed chan int,
 	expectedNumOfTables int,
-	descIDStart sqlbase.ID,
+	descIDStart descpb.ID,
 ) {
-	usedTableIDs := make(map[sqlbase.ID]string)
+	usedTableIDs := make(map[descpb.ID]string)
 	var count int
-	tableIDs := make(map[sqlbase.ID]struct{})
+	tableIDs := make(map[descpb.ID]struct{})
 	maxID := descIDStart
 	for id := range completed {
 		count++
 		tableName := fmt.Sprintf("table_%d", id)
 		kvDB := tc.Servers[count%tc.NumServers()].DB()
-		tableDesc := sqlbase.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", tableName)
+		tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", tableName)
 		if tableDesc.ID < descIDStart {
 			t.Fatalf(
 				"table %s's ID %d is too small. Expected >= %d",
@@ -265,12 +267,12 @@ func verifyTables(
 		if _, ok := tableIDs[id]; ok {
 			continue
 		}
-		descKey := sqlbase.MakeDescMetadataKey(keys.SystemSQLCodec, id)
-		desc := &sqlbase.Descriptor{}
+		descKey := catalogkeys.MakeDescMetadataKey(keys.SystemSQLCodec, id)
+		desc := &descpb.Descriptor{}
 		if err := kvDB.GetProto(context.Background(), descKey, desc); err != nil {
 			t.Fatal(err)
 		}
-		if !desc.Equal(sqlbase.Descriptor{}) {
+		if !desc.Equal(descpb.Descriptor{}) {
 			t.Fatalf("extra descriptor with id %d", id)
 		}
 	}
@@ -295,11 +297,11 @@ func TestParallelCreateTables(t *testing.T) {
 	}
 	// Get the id descriptor generator count.
 	kvDB := tc.Servers[0].DB()
-	var descIDStart sqlbase.ID
+	var descIDStart descpb.ID
 	if descID, err := kvDB.Get(context.Background(), keys.SystemSQLCodec.DescIDSequenceKey()); err != nil {
 		t.Fatal(err)
 	} else {
-		descIDStart = sqlbase.ID(descID.ValueInt())
+		descIDStart = descpb.ID(descID.ValueInt())
 	}
 
 	var wgStart sync.WaitGroup
@@ -350,11 +352,11 @@ func TestParallelCreateConflictingTables(t *testing.T) {
 
 	// Get the id descriptor generator count.
 	kvDB := tc.Servers[0].DB()
-	var descIDStart sqlbase.ID
+	var descIDStart descpb.ID
 	if descID, err := kvDB.Get(context.Background(), keys.SystemSQLCodec.DescIDSequenceKey()); err != nil {
 		t.Fatal(err)
 	} else {
-		descIDStart = sqlbase.ID(descID.ValueInt())
+		descIDStart = descpb.ID(descID.ValueInt())
 	}
 
 	var wgStart sync.WaitGroup
@@ -504,7 +506,7 @@ func TestSetUserPasswordInsecure(t *testing.T) {
 		errString string
 	}{
 		{"CREATE USER user1", ""},
-		{"CREATE USER user2 WITH PASSWORD ''", "empty passwords are not permitted"},
+		{"CREATE USER user2 WITH PASSWORD ''", errFail},
 		{"CREATE USER user2 WITH PASSWORD 'cockroach'", errFail},
 		{"CREATE USER user3 WITH PASSWORD NULL", ""},
 		{"ALTER USER user1 WITH PASSWORD 'somepass'", errFail},

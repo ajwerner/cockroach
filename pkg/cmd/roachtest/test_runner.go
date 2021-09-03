@@ -370,6 +370,7 @@ func (r *testRunner) runWorker(
 		wStatus.SetCluster(nil)
 
 		if c == nil {
+			l.PrintfCtx(ctx, "Worker exiting; no cluster to destroy.")
 			return
 		}
 		doDestroy := ctx.Err() == nil
@@ -399,7 +400,7 @@ func (r *testRunner) runWorker(
 			if _, ok := c.spec.ReusePolicy.(reusePolicyNone); ok {
 				wStatus.SetStatus("destroying cluster")
 				// We use a context that can't be canceled for the Destroy().
-				c.Destroy(ctx, closeLogger, l)
+				c.Destroy(context.Background(), closeLogger, l)
 				c = nil
 			}
 		}
@@ -494,7 +495,7 @@ func (r *testRunner) runWorker(
 				// On any test failure or error, we destroy the cluster. We could be
 				// more selective, but this sounds safer.
 				l.PrintfCtx(ctx, "destroying cluster %s because: %s", c, failureMsg)
-				c.Destroy(ctx, closeLogger, l)
+				c.Destroy(context.Background(), closeLogger, l)
 				c = nil
 			}
 
@@ -610,7 +611,6 @@ func (r *testRunner) runTest(
 		if t.Failed() {
 			t.mu.Lock()
 			output := fmt.Sprintf("test artifacts and logs in: %s\n", t.ArtifactsDir()) + string(t.mu.output)
-			failLoc := t.mu.failLoc
 			t.mu.Unlock()
 
 			if teamCity {
@@ -629,13 +629,11 @@ func (r *testRunner) runTest(
 			shout(ctx, l, stdout, "--- FAIL: %s (%s)\n%s", t.Name(), durationStr, output)
 			// NB: check NodeCount > 0 to avoid posting issues from this pkg's unit tests.
 			if issues.CanPost() && t.spec.Run != nil && t.spec.Cluster.NodeCount > 0 {
-				authorEmail := getAuthorEmail(t.spec.Tags, failLoc.file, failLoc.line)
-				if authorEmail == "" {
-					ownerInfo, ok := roachtestOwners[t.spec.Owner]
-					if ok {
-						authorEmail = ownerInfo.ContactEmail
-					}
+				projectColumnID := 0
+				if info, ok := roachtestOwners[t.spec.Owner]; ok {
+					projectColumnID = info.TriageColumnID
 				}
+
 				branch := "<unknown branch>"
 				if b := os.Getenv("TC_BUILD_BRANCH"); b != "" {
 					branch = b
@@ -653,11 +651,11 @@ func (r *testRunner) runTest(
 					TestName:     t.Name(),
 					Message:      msg,
 					Artifacts:    artifacts,
-					AuthorEmail:  authorEmail,
 					// Issues posted from roachtest are identifiable as such and
 					// they are also release blockers (this label may be removed
 					// by a human upon closer investigation).
-					ExtraLabels: []string{"O-roachtest", "release-blocker"},
+					ExtraLabels:     []string{"O-roachtest", "release-blocker"},
+					ProjectColumnID: projectColumnID,
 				}
 				if err := issues.Post(
 					context.Background(),
@@ -757,9 +755,21 @@ func (r *testRunner) runTest(
 		t.spec.Run(runCtx, t, c)
 	}()
 
+	teardownL, err := c.l.ChildLogger("teardown", quietStderr, quietStdout)
+	if err != nil {
+		return false, err
+	}
 	select {
 	case <-done:
+		s := "success"
+		if t.Failed() {
+			s = "failure"
+		}
+		c.l.Printf("tearing down after %s; see teardown.log", s)
+		l, c.l, t.l = teardownL, teardownL, teardownL
 	case <-time.After(timeout):
+		c.l.Printf("tearing down after timeout; see teardown.log")
+		l, c.l, t.l = teardownL, teardownL, teardownL
 		// Timeouts are often opaque. Improve our changes by dumping the stack
 		// so that at least we can piece together what the test is trying to
 		// do at this very moment.
@@ -871,6 +881,9 @@ func (r *testRunner) collectClusterLogs(ctx context.Context, c *cluster, l *logg
 	}
 	if err := c.CopyRoachprodState(ctx); err != nil {
 		l.Printf("failed to copy roachprod state: %s", err)
+	}
+	if err := c.FetchDiskUsage(ctx); err != nil {
+		l.Printf("failed to fetch disk uage summary: %s", err)
 	}
 	if err := c.FetchDebugZip(ctx); err != nil {
 		l.Printf("failed to collect zip: %s", err)
@@ -1158,8 +1171,8 @@ func PredecessorVersion(buildVersion version.Version) (string, error) {
 	// (see runVersionUpgrade). The same is true for adding a new key to this
 	// map.
 	verMap := map[string]string{
-		"20.2": "20.1.3",
-		"20.1": "19.2.9",
+		"20.2": "20.1.8",
+		"20.1": "19.2.11",
 		"19.2": "19.1.11",
 		"19.1": "2.1.9",
 		"2.2":  "2.1.9",

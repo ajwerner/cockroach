@@ -19,7 +19,7 @@ import "roachpb/metadata.proto";
 import "storage/enginepb/mvcc.proto";
 import "storage/enginepb/mvcc3.proto";
 import "util/hlc/timestamp.proto";
-import "util/tracing/recorded_span.proto";
+import "util/tracing/tracingpb/recorded_span.proto";
 import "gogoproto/gogo.proto";
 
 // ReadConsistencyType specifies what type of consistency is observed
@@ -320,11 +320,20 @@ message DeleteRangeResponse {
 //
 // NOTE: it is important that this method only be invoked on a key
 // range which is guaranteed to be both inactive and not see future
-// writes. Ignoring this warning may result in data loss.
+// writes (until Deadline, if set, below).
+// Ignoring this warning may result in data loss.
 message ClearRangeRequest {
   option (gogoproto.equal) = true;
 
   RequestHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
+
+  // Deadline can be set to a time at or after which the server will refuse to
+  // execute this ClearRange request, providing a form of replay protection:
+  // if a caller sets this to a time in the near future, they can then wait for
+  // that time (plus max offset) to have passed at which point they can reuse
+  // the span they cleared without fear of this request being replayed later and
+  // clearing subsequent writes.
+  util.hlc.Timestamp deadline = 2 [(gogoproto.nullable) = false];
 }
 
 // A ClearRangeResponse is the return value from the ClearRange() method.
@@ -648,21 +657,35 @@ message EndTxnRequest {
   // reliably for these transactions - a TransactionStatusError might be
   // returned instead if 1PC execution fails.
   bool require_1pc = 6 [(gogoproto.customname) = "Require1PC"];
-  // CanCommitAtHigherTimestamp indicates that the batch this EndTxn is part of
-  // can be evaluated at a higher timestamp than the transaction's read
-  // timestamp. This is set by the client if the transaction has not performed
-  // any reads that must be refreshed prior to sending this current batch. When
-  // set, it allows the server to handle pushes and write too old conditions
-  // locally.
+  // DeprecatedCanCommitAtHigherTimestamp indicates that the batch this EndTxn
+  // is part of can be evaluated at a higher timestamp than the transaction's
+  // read timestamp. This is set by the client if the transaction has not
+  // performed any reads that must be refreshed prior to sending this current
+  // batch. When set, it allows the server to handle pushes and write too old
+  // conditions locally.
   // TODO(nvanbenschoten): remove this in favor of can_forward_read_timestamp
-  // in v20.2.
-  bool can_commit_at_higher_timestamp = 8;
+  // in v21.1. The flag is not read in v20.2.
+  bool deprecated_can_commit_at_higher_timestamp = 8;
   // True to indicate that lock spans should be resolved with poison=true.
   // This is used when the transaction is being aborted independently of the
   // main thread of client operation, as in the case of an asynchronous abort
   // from the TxnCoordSender on a failed heartbeat. It should only be set to
   // true when commit=false.
   bool poison = 9;
+  // TxnHeartbeating indicates that the transaction's coordinator has launched
+  // its heartbeat loop and that it may have created its transaction record as
+  // PENDING through a HeartbeatTxn request by the time that this EndTxn request
+  // evaluates. If the flag is not set and the transaction has not yet issued a
+  // successful EndTxn requests, the transaction's record can not already exist
+  // (but see the WARNING below).
+  //
+  // For details about transaction record state transitions, see the diagram on
+  // CanCreateTxnRecord. This diagram demonstrates that only EndTxn requests and
+  // HeartbeatTxn requests can create new transaction records.
+  //
+  // WARNING: this flag was introduced in the v20.2 release. v20.1 nodes may not
+  // set this properly so it should not be relied upon for correctness.
+  bool txn_heartbeating = 10;
   reserved 7;
 }
 
@@ -874,6 +897,16 @@ message GCRequest {
 
     bytes key = 1 [(gogoproto.casttype) = "Key"];
     util.hlc.Timestamp timestamp = 2 [(gogoproto.nullable) = false];
+
+    // UseClearRange indicates that the evaluation of deleting versions of this
+    // key should utilize a ClearRange operation instead of issuing point
+    // deletes. We delegate this decision to the caller which has the visibility
+    // to determine whether there are sufficient versions to justify this
+    // approach. This field was introduced in version 20.2 and is gated on that
+    // version. Nodes at earlier versions would happily ignore this value but
+    // it remains gated to avoid the negative consequences of sending a single
+    // key with an extremely large number of versions.
+    bool use_clear_range = 3;
   }
   repeated GCKey keys = 3 [(gogoproto.nullable) = false];
   // Threshold is the expiration timestamp.
@@ -1011,6 +1044,11 @@ message QueryTxnResponse {
   // Contains the current state of the queried transaction. If the queried
   // transaction record does not exist, this will be empty.
   Transaction queried_txn = 2 [(gogoproto.nullable) = false];
+  // txn_record_exists is set if the queried_txn comes from a transaction record
+  // read from the database. If not set, then the txn record was "synthesized".
+  //
+  // The field only started being populated in 20.2, so 20.1 nodes never set it.
+  bool txn_record_exists = 4;
   // Specifies a list of transaction IDs which are waiting on the txn.
   repeated bytes waiting_txns = 3 [(gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/util/uuid.UUID"];
 }
@@ -1069,8 +1107,9 @@ message ResolveIntentRequest {
   storage.enginepb.TxnMeta intent_txn = 2 [(gogoproto.nullable) = false];
   // The status of the transaction.
   TransactionStatus status = 3;
-  // Optionally poison the abort span for the transaction the intent's
-  // range.
+  // Optionally poison the abort span for the transaction on the intent's range.
+  // The field is ignored if status != ABORTED (i.e. only intents from ABORTED
+  // txns ever poison the abort spans).
   bool poison = 4;
   // The list of ignored seqnum ranges as per the Transaction record.
   repeated storage.enginepb.IgnoredSeqNumRange ignored_seqnums = 5 [
@@ -1097,8 +1136,9 @@ message ResolveIntentRangeRequest {
   storage.enginepb.TxnMeta intent_txn = 2 [(gogoproto.nullable) = false];
   // The status of the transaction.
   TransactionStatus status = 3;
-  // Optionally poison the abort span for the transaction on all ranges
-  // on which the intents reside.
+  // Optionally poison the abort span for the transaction on all ranges on which
+  // the intents reside. The field is ignored if status != ABORTED (i.e. only
+  // intents from ABORTED txns ever poison the abort spans).
   bool poison = 4;
   // The minimum timestamp for any intents written by this
   // transaction. If present, this value can be used to optimize the
@@ -1337,6 +1377,8 @@ message ExternalStorage {
 
     // User interacting with the external storage. This is used to check access
     // privileges of the requested user scoped tables.
+    // This field is really of type security.SQLUsername. We can't use
+    // the type directly however because it would create a circular dependency.
     string user = 1;
 
     // QualifiedTableName specifies the database.schema.tablename which the
@@ -1378,6 +1420,8 @@ enum MVCCFilter {
   All = 1;
 }
 
+// FileEncryptionOptions stores information needed by KV level requests (egs:
+// ExportRequest, ImportRequest) to encrypt or decrypt data.
 message FileEncryptionOptions {
   option (gogoproto.equal) = true;
   // Key specifies the key to use for encryption or decryption.
@@ -1542,11 +1586,14 @@ message AdminScatterRequest {
 message AdminScatterResponse {
   ResponseHeader header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
 
+
   message Range {
     Span span = 1 [(gogoproto.nullable) = false];
     reserved 2;
   }
-  repeated Range ranges = 2 [(gogoproto.nullable) = false];
+  // This field is deprecated in 20.2 in favor of RangeInfos.
+  repeated Range deprecated_ranges = 2 [(gogoproto.nullable) = false];
+  repeated RangeInfo range_infos = 3 [(gogoproto.nullable) = false];
 }
 
 // AdminVerifyProtectedTimestampRequest is the argument to the
@@ -1733,6 +1780,10 @@ message RangeStatsResponse {
 
   // QueriesPerSecond is the rate of request/s or QPS for the range.
   double queries_per_second = 3;
+
+  // range_info contains descriptor and lease information. Added in 20.2.
+  // TODO(andrei): Make non-nullable in 21.1.
+  RangeInfo range_info = 4;
 }
 
 // A RequestUnion contains exactly one of the requests.
@@ -1879,6 +1930,15 @@ message Header {
   // operations. The default is CONSISTENT. This value is ignored for
   // write operations.
   ReadConsistencyType read_consistency = 6;
+  // wait_policy specifies the desired behavior for the batch request if it
+  // encounters a conflicting lock held by another active transaction.
+  //
+  // If an Error wait policy is set and a conflicting lock held by an active
+  // transaction is encountered, a WriteIntentError will be returned.
+  //
+  // If the desired behavior is to block on the conflicting lock up to some
+  // maximum duration, use the Block wait policy and set a context timeout.
+  kv.kvserver.concurrency.lock.WaitPolicy wait_policy = 18;
   // If set to a non-zero value, the total number of keys touched by requests in
   // the batch is limited. A resume span will be provided on the response of the
   // requests that were not able to run to completion before the limit was
@@ -1960,7 +2020,18 @@ message Header {
   bool distinct_spans = 9;
   // If set, return_range_info causes RangeInfo details to be returned with
   // each ResponseHeader.
+  // TODO(andrei): Remove straggler users of this field, then delete the field
+  // in 21.1 now that we have client_range_info.
   bool return_range_info = 10;
+  // client_range_info represents the kvclient's knowledge about the state of
+  // the range (i.e. of the range descriptor and lease). The kvserver checks
+  // whether the client's info is up to date and, if it isn't, it will return a
+  // RangeInfo with up-to-date information. This field supersedes return_range_info.
+  //
+  // The field is nil for RPCs coming from 20.1 clients. For 20.2+ clients, at
+  // least the descriptor info is filled in.
+  // TODO(andrei): Make the field non-nullable in 21.1.
+  ClientRangeInfo client_range_info = 17;
   // gateway_node_id is the ID of the gateway node where the request originated.
   int32 gateway_node_id = 11 [(gogoproto.customname) = "GatewayNodeID", (gogoproto.casttype) = "NodeID"];
   // If set, the request will return to the client before proposing the
@@ -1985,6 +2056,15 @@ message Header {
   // TODO(nvanbenschoten): perform this migration.
   bool can_forward_read_timestamp = 16;
   reserved 7, 12, 14;
+}
+
+// ClientRangeInfo represents the kvclient's knowledge about the state of the
+// range (i.e. of the range descriptor and lease). The kvserver checks whether
+// the client's info is up to date and, if it isn't, it will return a RangeInfo
+// with up-to-date information.
+message ClientRangeInfo {
+  int64 descriptor_generation = 1 [(gogoproto.casttype) = "RangeGeneration"];
+  int64 lease_sequence = 2 [(gogoproto.casttype) = "LeaseSequence"];
 }
 
 
@@ -2032,19 +2112,45 @@ message BatchResponse {
     util.hlc.Timestamp now = 5 [(gogoproto.nullable) = false];
     // collected_spans stores trace spans recorded during the execution of this
     // request.
-    repeated util.tracing.RecordedSpan collected_spans = 6 [(gogoproto.nullable) = false];
-    // Range or list of ranges used to execute the request, if the request set
-    // return_range_info. For one batch, the kvserver returns at most one
-    // element. The DistSender will combine multiple responses though when it
-    // reassembles a split batch; in this case the RangeInfos are maintained in
-    // sorted order by range id.
+    repeated util.tracing.tracingpb.RecordedSpan collected_spans = 6 [(gogoproto.nullable) = false];
+    // Range or list of ranges used to execute the request. The server only
+    // populates this if return_range_info is set on the request, or if the
+    // server detects the client's client_range_info to be stale.
+    //
+    // For one batch, the kvserver returns at most one element. The DistSender
+    // will combine multiple responses though when it reassembles a split batch;
+    // in this case the RangeInfos are maintained in sorted order by range id.
     //
     // Not set when Error is set.
+    //
+    // TODO(andrei): In 21.1 there should be no users of this field left above
+    // the DistSender. At that point, the DistSender will no longer need to
+    // combine these - in fact it should clear the field. And then the field
+    // doesn't need to be `repeated` any more - the proto encoding
+    // allows us to change it to non-repeated.
     repeated RangeInfo range_infos = 7 [(gogoproto.nullable) = false];
     // NB: if you add a field here, don't forget to update combine().
   }
   Header header = 1 [(gogoproto.nullable) = false, (gogoproto.embed) = true];
   repeated ResponseUnion responses = 2 [(gogoproto.nullable) = false];
+}
+
+// RangeLookupRequest is a request to proxy a RangeLookup through a Tenant
+// service. Its fields correspond to a subset of the args of kv.RangeLookup.
+message RangeLookupRequest {
+  bytes               key              = 1 [(gogoproto.casttype) = "RKey"];
+  ReadConsistencyType read_consistency = 2;
+  int64               prefetch_num     = 3;
+  bool                prefetch_reverse = 4;
+}
+
+// RangeLookupResponse is returned from a RangeLookup request proxied through a
+// Tenant service. Its fields correspond to the return values of kv.RangeLookup.
+message RangeLookupResponse {
+  repeated RangeDescriptor descriptors            = 1 [(gogoproto.nullable) = false];
+  repeated RangeDescriptor prefetched_descriptors = 2 [(gogoproto.nullable) = false];
+  // If non-nil, the other fields will be empty.
+  Error error = 3;
 }
 
 // RangeFeedRequest is a request that expresses the intention to establish a
@@ -2100,8 +2206,54 @@ message RangeFeedEvent {
   RangeFeedError      error      = 3;
 }
 
-// Batch and RangeFeed service implemeted by nodes for KV API requests.
+// GossipSubscriptionRequest initiates a game of telephone. It establishes an
+// indefinite stream that proxies gossip information overheard by the recipient
+// node back to the caller. Gossip information is filtered down to just those
+// identified by a key matching any of the specified patterns.
+//
+// Upon establishment of the stream, all existing information that matches one
+// or more of the patterns is returned. After this point, only new information
+// matching the patterns is returned.
+message GossipSubscriptionRequest {
+  repeated string patterns = 1;
+}
+
+// GossipSubscriptionEvent is a single piece of proxied gossip information.
+message GossipSubscriptionEvent {
+  string key     = 1;
+  Value  content = 2 [(gogoproto.nullable) = false];
+  // Which pattern does this gossip information match?
+  string pattern_matched = 3;
+  // If non-nil, the other fields will be empty and this will be the final event
+  // send on the stream before it is terminated.
+  Error error = 4;
+}
+
+// JoinNodeRequest is used to specify to the server node what the client's
+// binary version is. If it's not compatible with the rest of the cluster, the
+// join attempt is refused.
+message JoinNodeRequest {
+  roachpb.Version binary_version = 1;
+}
+
+// JoinNodeResponse informs the joining node what the cluster id is, what
+// node id was allocated to it, and what store ID to use for its first store. It
+// also informs the node what the current active version is.
+message JoinNodeResponse {
+  bytes cluster_id = 1 [(gogoproto.customname) = "ClusterID"];
+  int32 node_id = 2 [(gogoproto.customname) = "NodeID"];
+  int32 store_id = 3 [(gogoproto.customname) = "StoreID"];
+  roachpb.Version active_version = 4;
+}
+
+// Batch and RangeFeed service implemented by nodes for KV API requests.
 service Internal {
-  rpc Batch     (BatchRequest)     returns (BatchResponse)         {}
-  rpc RangeFeed (RangeFeedRequest) returns (stream RangeFeedEvent) {}
+  rpc Batch              (BatchRequest)              returns (BatchResponse)                  {}
+  rpc RangeLookup        (RangeLookupRequest)        returns (RangeLookupResponse)            {}
+  rpc RangeFeed          (RangeFeedRequest)          returns (stream RangeFeedEvent)          {}
+  rpc GossipSubscription (GossipSubscriptionRequest) returns (stream GossipSubscriptionEvent) {}
+
+  // Join a bootstrapped cluster. If the target node is itself not part of a
+  // bootstrapped cluster, an appropriate error is returned.
+  rpc Join(JoinNodeRequest) returns (JoinNodeResponse) { }
 }

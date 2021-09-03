@@ -12,17 +12,20 @@ package sql
 
 import (
 	"context"
-	"strings"
+	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemadesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
-	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 )
 
 type createSchemaNode struct {
@@ -33,26 +36,6 @@ func (n *createSchemaNode) startExec(params runParams) error {
 	return params.p.createUserDefinedSchema(params, n.n)
 }
 
-func (p *planner) schemaExists(
-	ctx context.Context, parentID sqlbase.ID, schema string,
-) (bool, error) {
-	// Check statically known schemas.
-	if schema == tree.PublicSchema {
-		return true, nil
-	}
-	for _, vs := range virtualSchemas {
-		if schema == vs.name {
-			return true, nil
-		}
-	}
-	// Now lookup in the namespace for other schemas.
-	exists, _, err := sqlbase.LookupObjectID(ctx, p.txn, p.ExecCfg().Codec, parentID, keys.RootNamespaceID, schema)
-	if err != nil {
-		return false, err
-	}
-	return exists, nil
-}
-
 func (p *planner) createUserDefinedSchema(params runParams, n *tree.CreateSchema) error {
 	// Users can't create a schema without being connected to a DB.
 	if p.CurrentDatabase() == "" {
@@ -60,7 +43,13 @@ func (p *planner) createUserDefinedSchema(params runParams, n *tree.CreateSchema
 			"cannot create schema without being connected to a database")
 	}
 
-	db, err := p.ResolveUncachedDatabaseByName(params.ctx, p.CurrentDatabase(), true /* required */)
+	sqltelemetry.IncrementUserDefinedSchemaCounter(sqltelemetry.UserDefinedSchemaCreate)
+	dbName := p.CurrentDatabase()
+	if n.Schema.ExplicitCatalog {
+		dbName = n.Schema.Catalog()
+	}
+
+	db, err := p.ResolveMutableDatabaseDescriptor(params.ctx, dbName, true /* required */)
 	if err != nil {
 		return err
 	}
@@ -70,8 +59,19 @@ func (p *planner) createUserDefinedSchema(params runParams, n *tree.CreateSchema
 		return pgerror.New(pgcode.InvalidObjectDefinition, "cannot create schemas in the system database")
 	}
 
+	if err := p.CheckPrivilege(params.ctx, db, privilege.CREATE); err != nil {
+		return err
+	}
+
+	var schemaName string
+	if !n.Schema.ExplicitSchema {
+		schemaName = n.AuthRole.Normalized()
+	} else {
+		schemaName = n.Schema.Schema()
+	}
+
 	// Ensure there aren't any name collisions.
-	exists, err := p.schemaExists(params.ctx, db.ID, n.Schema)
+	exists, err := p.schemaExists(params.ctx, db.ID, schemaName)
 	if err != nil {
 		return err
 	}
@@ -80,13 +80,11 @@ func (p *planner) createUserDefinedSchema(params runParams, n *tree.CreateSchema
 		if n.IfNotExists {
 			return nil
 		}
-		return pgerror.Newf(pgcode.DuplicateSchema, "schema %q already exists", n.Schema)
+		return pgerror.Newf(pgcode.DuplicateSchema, "schema %q already exists", schemaName)
 	}
 
-	// Schemas starting with "pg_" are not allowed.
-	if strings.HasPrefix(n.Schema, sessiondata.PgSchemaPrefix) {
-		err := pgerror.Newf(pgcode.ReservedName, "unacceptable schema name %q", n.Schema)
-		err = errors.WithDetail(err, `The prefix "pg_" is reserved for system schemas.`)
+	// Check validity of the schema name.
+	if err := schemadesc.IsSchemaNameValid(schemaName); err != nil {
 		return err
 	}
 
@@ -97,35 +95,79 @@ func (p *planner) createUserDefinedSchema(params runParams, n *tree.CreateSchema
 			clusterversion.VersionByKey(clusterversion.VersionUserDefinedSchemas))
 	}
 
-	// Check that creation of schemas is enabled.
-	if !p.EvalContext().SessionData.UserDefinedSchemasEnabled {
-		return pgerror.Newf(pgcode.FeatureNotSupported,
-			"session variable experimental_enable_user_defined_schemas is set to false, cannot create a schema")
-	}
-
 	// Create the ID.
 	id, err := catalogkv.GenerateUniqueDescID(params.ctx, p.ExecCfg().DB, p.ExecCfg().Codec)
 	if err != nil {
 		return err
 	}
 
+	// Inherit the parent privileges and filter out those which are not valid for
+	// schemas.
+	privs := protoutil.Clone(db.GetPrivileges()).(*descpb.PrivilegeDescriptor)
+	for i := range privs.Users {
+		privs.Users[i].Privileges &= privilege.SchemaPrivileges.ToBitField()
+	}
+
+	if !n.AuthRole.Undefined() {
+		exists, err := p.RoleExists(params.ctx, n.AuthRole)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return pgerror.Newf(pgcode.UndefinedObject, "role/user %q does not exist", n.AuthRole)
+		}
+		privs.SetOwner(n.AuthRole)
+	} else {
+		privs.SetOwner(params.SessionData().User())
+	}
+
 	// Create the SchemaDescriptor.
-	desc := sqlbase.NewMutableCreatedSchemaDescriptor(sqlbase.SchemaDescriptor{
-		ParentID: db.ID,
-		Name:     n.Schema,
-		ID:       id,
-		// Inherit the parent privileges.
-		Privileges: db.GetPrivileges(),
+	desc := schemadesc.NewCreatedMutable(descpb.SchemaDescriptor{
+		ParentID:   db.ID,
+		Name:       schemaName,
+		ID:         id,
+		Privileges: privs,
+		Version:    1,
 	})
 
+	// Update the parent database with this schema information.
+	if db.Schemas == nil {
+		db.Schemas = make(map[string]descpb.DatabaseDescriptor_SchemaInfo)
+	}
+	db.Schemas[desc.Name] = descpb.DatabaseDescriptor_SchemaInfo{
+		ID:      desc.ID,
+		Dropped: false,
+	}
+
+	if err := p.writeNonDropDatabaseChange(
+		params.ctx, db,
+		fmt.Sprintf("updating parent database %s for %s", db.GetName(), tree.AsStringWithFQNames(n, params.Ann())),
+	); err != nil {
+		return err
+	}
+
 	// Finally create the schema on disk.
-	return p.createDescriptorWithID(
+	if err := p.createDescriptorWithID(
 		params.ctx,
-		sqlbase.NewSchemaKey(db.ID, n.Schema).Key(p.ExecCfg().Codec),
+		catalogkeys.NewSchemaKey(db.ID, schemaName).Key(p.ExecCfg().Codec),
 		id,
 		desc,
 		params.ExecCfg().Settings,
 		tree.AsStringWithFQNames(n, params.Ann()),
+	); err != nil {
+		return err
+	}
+	return MakeEventLogger(params.extendedEvalCtx.ExecCfg).InsertEventRecord(
+		params.ctx,
+		params.p.txn,
+		EventLogCreateSchema,
+		int32(desc.GetID()),
+		int32(params.extendedEvalCtx.NodeID.SQLInstanceID()),
+		struct {
+			SchemaName string
+			Owner      string
+			User       string
+		}{schemaName, privs.Owner().Normalized(), params.p.User().Normalized()},
 	)
 }
 
@@ -133,8 +175,7 @@ func (*createSchemaNode) Next(runParams) (bool, error) { return false, nil }
 func (*createSchemaNode) Values() tree.Datums          { return tree.Datums{} }
 func (n *createSchemaNode) Close(ctx context.Context)  {}
 
-// CreateSchema creates a schema. Currently only works in IF NOT EXISTS mode,
-// for schemas that do in fact already exist.
+// CreateSchema creates a schema.
 func (p *planner) CreateSchema(ctx context.Context, n *tree.CreateSchema) (planNode, error) {
 	return &createSchemaNode{
 		n: n,

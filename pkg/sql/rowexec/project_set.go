@@ -12,13 +12,14 @@ package rowexec
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
+	"github.com/cockroachdb/errors"
 )
 
 // projectSetProcessor is the physical processor implementation of
@@ -33,7 +34,7 @@ type projectSetProcessor struct {
 	// in the ROWS FROM syntax. This can contain many kinds of expressions
 	// (anything that is "function-like" including COALESCE, NULLIF) not just
 	// SRFs.
-	exprHelpers []*execinfra.ExprHelper
+	exprHelpers []*execinfrapb.ExprHelper
 
 	// funcs contains a valid pointer to a SRF FuncExpr for every entry
 	// in `exprHelpers` that is actually a SRF function application.
@@ -45,7 +46,7 @@ type projectSetProcessor struct {
 	inputRowReady bool
 
 	// RowBuffer will contain the current row of results.
-	rowBuffer sqlbase.EncDatumRow
+	rowBuffer rowenc.EncDatumRow
 
 	// gens contains the current "active" ValueGenerators for each entry
 	// in `funcs`. They are initialized anew for every new row in the source.
@@ -56,9 +57,7 @@ type projectSetProcessor struct {
 	// thus also whether NULLs should be emitted instead.
 	done []bool
 
-	// emitCount is used to track the number of rows that have been
-	// emitted from Next().
-	emitCount int64
+	cancelChecker *cancelchecker.CancelChecker
 }
 
 var _ execinfra.Processor = &projectSetProcessor{}
@@ -79,9 +78,9 @@ func newProjectSetProcessor(
 	ps := &projectSetProcessor{
 		input:       input,
 		spec:        spec,
-		exprHelpers: make([]*execinfra.ExprHelper, len(spec.Exprs)),
+		exprHelpers: make([]*execinfrapb.ExprHelper, len(spec.Exprs)),
 		funcs:       make([]*tree.FuncExpr, len(spec.Exprs)),
-		rowBuffer:   make(sqlbase.EncDatumRow, len(outputTypes)),
+		rowBuffer:   make(rowenc.EncDatumRow, len(outputTypes)),
 		gens:        make([]tree.ValueGenerator, len(spec.Exprs)),
 		done:        make([]bool, len(spec.Exprs)),
 	}
@@ -97,21 +96,14 @@ func newProjectSetProcessor(
 	); err != nil {
 		return nil, err
 	}
-	return ps, nil
-}
-
-// Start is part of the RowSource interface.
-func (ps *projectSetProcessor) Start(ctx context.Context) context.Context {
-	ps.input.Start(ctx)
-	ctx = ps.StartInternal(ctx, projectSetProcName)
 
 	// Initialize exprHelpers.
+	semaCtx := ps.FlowCtx.TypeResolverFactory.NewSemaContext(ps.EvalCtx.Txn)
 	for i, expr := range ps.spec.Exprs {
-		var helper execinfra.ExprHelper
-		err := helper.Init(expr, ps.input.OutputTypes(), ps.EvalCtx)
+		var helper execinfrapb.ExprHelper
+		err := helper.Init(expr, ps.input.OutputTypes(), semaCtx, ps.EvalCtx)
 		if err != nil {
-			ps.MoveToDraining(err)
-			return ctx
+			return nil, err
 		}
 		if tFunc, ok := helper.Expr.(*tree.FuncExpr); ok && tFunc.IsGeneratorApplication() {
 			// Expr is a set-generating function.
@@ -119,13 +111,21 @@ func (ps *projectSetProcessor) Start(ctx context.Context) context.Context {
 		}
 		ps.exprHelpers[i] = &helper
 	}
+	return ps, nil
+}
+
+// Start is part of the RowSource interface.
+func (ps *projectSetProcessor) Start(ctx context.Context) context.Context {
+	ctx = ps.input.Start(ctx)
+	ctx = ps.StartInternal(ctx, projectSetProcName)
+	ps.cancelChecker = cancelchecker.NewCancelChecker(ctx)
 	return ctx
 }
 
 // nextInputRow returns the next row or metadata from ps.input. It also
 // initializes the value generators for that row.
 func (ps *projectSetProcessor) nextInputRow() (
-	sqlbase.EncDatumRow,
+	rowenc.EncDatumRow,
 	*execinfrapb.ProducerMetadata,
 	error,
 ) {
@@ -223,18 +223,11 @@ func (ps *projectSetProcessor) nextGeneratorValues() (newValAvail bool, err erro
 }
 
 // Next is part of the RowSource interface.
-func (ps *projectSetProcessor) Next() (sqlbase.EncDatumRow, *execinfrapb.ProducerMetadata) {
-	const cancelCheckCount = 10000
-
+func (ps *projectSetProcessor) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMetadata) {
 	for ps.State == execinfra.StateRunning {
-
-		// Occasionally check for cancellation.
-		ps.emitCount++
-		if ps.emitCount%cancelCheckCount == 0 {
-			if err := ps.Ctx.Err(); err != nil {
-				ps.MoveToDraining(err)
-				return nil, ps.DrainHelper()
-			}
+		if err := ps.cancelChecker.Check(); err != nil {
+			ps.MoveToDraining(err)
+			return nil, ps.DrainHelper()
 		}
 
 		// Start of a new row of input?
@@ -280,10 +273,10 @@ func (ps *projectSetProcessor) Next() (sqlbase.EncDatumRow, *execinfrapb.Produce
 	return nil, ps.DrainHelper()
 }
 
-func (ps *projectSetProcessor) toEncDatum(d tree.Datum, colIdx int) sqlbase.EncDatum {
+func (ps *projectSetProcessor) toEncDatum(d tree.Datum, colIdx int) rowenc.EncDatum {
 	generatedColIdx := colIdx - len(ps.input.OutputTypes())
 	ctyp := ps.spec.GeneratedColumns[generatedColIdx]
-	return sqlbase.DatumToEncDatum(ctyp, d)
+	return rowenc.DatumToEncDatum(ctyp, d)
 }
 
 // ConsumerClosed is part of the RowSource interface.
@@ -309,5 +302,5 @@ func (ps *projectSetProcessor) Child(nth int, verbose bool) execinfra.OpNode {
 		panic("input to projectSetProcessor is not an execinfra.OpNode")
 
 	}
-	panic(fmt.Sprintf("invalid index %d", nth))
+	panic(errors.AssertionFailedf("invalid index %d", nth))
 }

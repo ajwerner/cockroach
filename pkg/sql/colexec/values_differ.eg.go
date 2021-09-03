@@ -11,7 +11,6 @@ package colexec
 
 import (
 	"bytes"
-	"fmt"
 	"math"
 
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
@@ -20,6 +19,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
+)
+
+// Workaround for bazel auto-generated code. goimports does not automatically
+// pick up the right packages when run within the bazel sandbox.
+var (
+	_ = typeconv.DatumVecCanonicalTypeFamily
+	_ coldataext.Datum
+	_ tree.AggType
 )
 
 // valuesDiffer takes in two ColVecs as well as values indices to check whether
@@ -359,7 +367,7 @@ func valuesDiffer(aColVec coldata.Vec, aValueIdx int, bColVec coldata.Vec, bValu
 			return unique
 		}
 	}
-	colexecerror.InternalError(fmt.Sprintf("unsupported valuesDiffer type %s", aColVec.Type()))
+	colexecerror.InternalError(errors.AssertionFailedf("unsupported valuesDiffer type %s", aColVec.Type()))
 	// This code is unreachable, but the compiler cannot infer that.
 	return false
 }

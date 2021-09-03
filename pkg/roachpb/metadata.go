@@ -11,6 +11,7 @@
 package roachpb
 
 import (
+	"bytes"
 	"fmt"
 	"sort"
 	"strconv"
@@ -112,6 +113,21 @@ func (a Attributes) String() string {
 	return strings.Join(a.Attrs, ",")
 }
 
+// RangeGeneration is a custom type for a range generation. Range generation
+// counters are incremented on every split, merge, and every replica change,
+// i.e., whenever the span of the range or replica set changes.
+//
+// See the comment on RangeDescriptor.Generation for more.
+type RangeGeneration int64
+
+// String implements the fmt.Stringer interface.
+func (g RangeGeneration) String() string {
+	return strconv.FormatInt(int64(g), 10)
+}
+
+// SafeValue implements the redact.SafeValue interface.
+func (g RangeGeneration) SafeValue() {}
+
 // NewRangeDescriptor returns a RangeDescriptor populated from the input.
 func NewRangeDescriptor(
 	rangeID RangeID, start, end RKey, replicas ReplicaDescriptors,
@@ -128,6 +144,44 @@ func NewRangeDescriptor(
 	}
 	desc.SetReplicas(MakeReplicaDescriptors(repls))
 	return desc
+}
+
+// Equal compares two descriptors for equality. This was copied over from the
+// gogoproto generated version in order to ignore deprecated fields.
+func (r *RangeDescriptor) Equal(other *RangeDescriptor) bool {
+	if other == nil {
+		return r == nil
+	}
+	if r == nil {
+		return false
+	}
+	if r.RangeID != other.RangeID {
+		return false
+	}
+	if r.Generation != other.Generation {
+		return false
+	}
+	if !bytes.Equal(r.StartKey, other.StartKey) {
+		return false
+	}
+	if !bytes.Equal(r.EndKey, other.EndKey) {
+		return false
+	}
+	if len(r.InternalReplicas) != len(other.InternalReplicas) {
+		return false
+	}
+	for i := range r.InternalReplicas {
+		if !r.InternalReplicas[i].Equal(&other.InternalReplicas[i]) {
+			return false
+		}
+	}
+	if r.NextReplicaID != other.NextReplicaID {
+		return false
+	}
+	if !r.StickyBit.Equal(other.StickyBit) {
+		return false
+	}
+	return true
 }
 
 // RSpan returns the RangeDescriptor's resolved span.
@@ -426,8 +480,8 @@ func (sc StoreCapacity) SafeFormat(w redact.SafePrinter, _ rune) {
 	w.Printf("disk (capacity=%s, available=%s, used=%s, logicalBytes=%s), "+
 		"ranges=%d, leases=%d, queries=%.2f, writes=%.2f, "+
 		"bytesPerReplica={%s}, writesPerReplica={%s}",
-		humanizeutil.IBytes(sc.Capacity), humanizeutil.IBytes(sc.Available),
-		humanizeutil.IBytes(sc.Used), humanizeutil.IBytes(sc.LogicalBytes),
+		redact.Safe(humanizeutil.IBytes(sc.Capacity)), redact.Safe(humanizeutil.IBytes(sc.Available)),
+		redact.Safe(humanizeutil.IBytes(sc.Used)), redact.Safe(humanizeutil.IBytes(sc.LogicalBytes)),
 		sc.RangeCount, sc.LeaseCount, sc.QueriesPerSecond, sc.WritesPerSecond,
 		sc.BytesPerReplica, sc.WritesPerReplica)
 }
@@ -468,6 +522,16 @@ func (n *NodeDescriptor) AddressForLocality(loc Locality) *util.UnresolvedAddr {
 		}
 	}
 	return &n.Address
+}
+
+// CheckedSQLAddress returns the value of SQLAddress if set. If not, either
+// because the receiver is a pre-19.2 node, or because it is using the same
+// address for both SQL and RPC, the Address is returned.
+func (n *NodeDescriptor) CheckedSQLAddress() *util.UnresolvedAddr {
+	if n.SQLAddress.IsEmpty() {
+		return &n.Address
+	}
+	return &n.SQLAddress
 }
 
 // String returns a string representation of the Tier.
@@ -623,4 +687,22 @@ var DefaultLocationInformation = []struct {
 		Latitude:  "50.44816",
 		Longitude: "3.81886",
 	},
+}
+
+// Locality returns the locality of the Store, which is the Locality of the node
+// plus an extra tier for the node itself.
+func (s StoreDescriptor) Locality() Locality {
+	return s.Node.Locality.AddTier(
+		Tier{Key: "node", Value: s.Node.NodeID.String()})
+}
+
+// AddTier creates a new Locality with a Tier at the end.
+func (l Locality) AddTier(tier Tier) Locality {
+	if len(l.Tiers) > 0 {
+		tiers := make([]Tier, len(l.Tiers), len(l.Tiers)+1)
+		copy(tiers, l.Tiers)
+		tiers = append(tiers, tier)
+		return Locality{Tiers: tiers}
+	}
+	return Locality{Tiers: []Tier{tier}}
 }

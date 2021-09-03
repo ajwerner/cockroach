@@ -143,13 +143,29 @@ func TestGCQueueMakeGCScoreLargeAbortSpan(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	const seed = 1
 	var ms enginepb.MVCCStats
-	ms.SysCount += probablyLargeAbortSpanSysCountThreshold
-	ms.SysBytes += probablyLargeAbortSpanSysBytesThreshold
+	ms.AbortSpanBytes += largeAbortSpanBytesThreshold
+	ms.SysBytes += largeAbortSpanBytesThreshold
+	ms.SysCount++
 
 	gcThresh := hlc.Timestamp{WallTime: 1}
 	expiration := kvserverbase.TxnCleanupThreshold.Nanoseconds() + 1
 
-	// GC triggered if abort span should all be gc'able and it's likely large.
+	// GC triggered if abort span should all be gc'able and it's large.
+	{
+		r := makeGCQueueScoreImpl(
+			context.Background(), seed,
+			hlc.Timestamp{WallTime: expiration + 1},
+			ms, zonepb.GCPolicy{TTLSeconds: 10000},
+			gcThresh,
+		)
+		require.True(t, r.ShouldQueue)
+		require.NotZero(t, r.FinalScore)
+	}
+
+	// GC triggered if abort span bytes count is 0, but the sys bytes
+	// and sys count exceed a certain threshold (likely large abort span).
+	ms.AbortSpanBytes = 0
+	ms.SysCount = probablyLargeAbortSpanSysCountThreshold
 	{
 		r := makeGCQueueScoreImpl(
 			context.Background(), seed,
@@ -195,11 +211,11 @@ func newCachedWriteSimulator(t *testing.T) *cachedWriteSimulator {
 	cws.cache = map[gcTestCacheKey]gcTestCacheVal{
 		{enginepb.MVCCStats{LastUpdateNanos: 946684800000000000}, "1-1m0s-1.0 MiB"}: {
 			first: [cacheFirstLen]enginepb.MVCCStats{
-				{ContainsEstimates: 0, LastUpdateNanos: 946684800000000000, IntentAge: 0, GCBytesAge: 0, LiveBytes: 1048604, LiveCount: 1, KeyBytes: 23, KeyCount: 1, ValBytes: 1048581, ValCount: 1, IntentBytes: 0, IntentCount: 0, SysBytes: 0, SysCount: 0},
-				{ContainsEstimates: 0, LastUpdateNanos: 946684801000000000, IntentAge: 0, GCBytesAge: 0, LiveBytes: 1048604, LiveCount: 1, KeyBytes: 35, KeyCount: 1, ValBytes: 2097162, ValCount: 2, IntentBytes: 0, IntentCount: 0, SysBytes: 0, SysCount: 0},
-				{ContainsEstimates: 0, LastUpdateNanos: 946684802000000000, IntentAge: 0, GCBytesAge: 1048593, LiveBytes: 1048604, LiveCount: 1, KeyBytes: 47, KeyCount: 1, ValBytes: 3145743, ValCount: 3, IntentBytes: 0, IntentCount: 0, SysBytes: 0, SysCount: 0},
+				{ContainsEstimates: 0, LastUpdateNanos: 946684800000000000, IntentAge: 0, GCBytesAge: 0, LiveBytes: 1048604, LiveCount: 1, KeyBytes: 23, KeyCount: 1, ValBytes: 1048581, ValCount: 1, IntentBytes: 0, IntentCount: 0, SysBytes: 0, SysCount: 0, AbortSpanBytes: 0},
+				{ContainsEstimates: 0, LastUpdateNanos: 946684801000000000, IntentAge: 0, GCBytesAge: 0, LiveBytes: 1048604, LiveCount: 1, KeyBytes: 35, KeyCount: 1, ValBytes: 2097162, ValCount: 2, IntentBytes: 0, IntentCount: 0, SysBytes: 0, SysCount: 0, AbortSpanBytes: 0},
+				{ContainsEstimates: 0, LastUpdateNanos: 946684802000000000, IntentAge: 0, GCBytesAge: 1048593, LiveBytes: 1048604, LiveCount: 1, KeyBytes: 47, KeyCount: 1, ValBytes: 3145743, ValCount: 3, IntentBytes: 0, IntentCount: 0, SysBytes: 0, SysCount: 0, AbortSpanBytes: 0},
 			},
-			last: enginepb.MVCCStats{ContainsEstimates: 0, LastUpdateNanos: 946684860000000000, IntentAge: 0, GCBytesAge: 1856009610, LiveBytes: 1048604, LiveCount: 1, KeyBytes: 743, KeyCount: 1, ValBytes: 63963441, ValCount: 61, IntentBytes: 0, IntentCount: 0, SysBytes: 0, SysCount: 0},
+			last: enginepb.MVCCStats{ContainsEstimates: 0, LastUpdateNanos: 946684860000000000, IntentAge: 0, GCBytesAge: 1856009610, LiveBytes: 1048604, LiveCount: 1, KeyBytes: 743, KeyCount: 1, ValBytes: 63963441, ValCount: 61, IntentBytes: 0, IntentCount: 0, SysBytes: 0, SysCount: 0, AbortSpanBytes: 0},
 		},
 	}
 	return &cws
@@ -494,7 +510,6 @@ func TestGCQueueProcess(t *testing.T) {
 				txn.ReadTimestamp = datum.ts
 				txn.WriteTimestamp = datum.ts
 				txn.MinTimestamp = datum.ts
-				txn.DeprecatedOrigTimestamp = datum.ts
 				assignSeqNumsForReqs(txn, &dArgs)
 			}
 			if _, err := tc.SendWrappedWith(roachpb.Header{
@@ -512,7 +527,6 @@ func TestGCQueueProcess(t *testing.T) {
 				txn.ReadTimestamp = datum.ts
 				txn.WriteTimestamp = datum.ts
 				txn.MinTimestamp = datum.ts
-				txn.DeprecatedOrigTimestamp = datum.ts
 				assignSeqNumsForReqs(txn, &pArgs)
 			}
 			if _, err := tc.SendWrappedWith(roachpb.Header{
@@ -560,9 +574,10 @@ func TestGCQueueProcess(t *testing.T) {
 			func(ctx context.Context, intents []roachpb.Intent) error {
 				return nil
 			},
-			func(ctx context.Context, txn *roachpb.Transaction, intents []roachpb.LockUpdate) error {
+			func(ctx context.Context, txn *roachpb.Transaction) error {
 				return nil
-			})
+			},
+			false /* canUseClearRange */)
 	}()
 	if err != nil {
 		t.Fatal(err)
@@ -879,9 +894,9 @@ func TestGCQueueTransactionTable(t *testing.T) {
 	outsideTxnPrefixEnd := keys.TransactionKey(outsideKey.Next(), uuid.UUID{})
 	var count int
 	if _, err := storage.MVCCIterate(ctx, tc.store.Engine(), outsideTxnPrefix, outsideTxnPrefixEnd, hlc.Timestamp{},
-		storage.MVCCScanOptions{}, func(roachpb.KeyValue) (bool, error) {
+		storage.MVCCScanOptions{}, func(roachpb.KeyValue) error {
 			count++
-			return false, nil
+			return nil
 		}); err != nil {
 		t.Fatal(err)
 	}
@@ -953,23 +968,22 @@ func TestGCQueueIntentResolution(t *testing.T) {
 	}
 	assert.True(t, processed, "queue not processed")
 
-	// Iterate through all values to ensure intents have been fully resolved.
+	// MVCCIterate through all values to ensure intents have been fully resolved.
 	// This must be done in a SucceedsSoon loop because intent resolution
 	// is initiated asynchronously from the GC queue.
 	testutils.SucceedsSoon(t, func() error {
 		meta := &enginepb.MVCCMetadata{}
-		return tc.store.Engine().Iterate(roachpb.KeyMin, roachpb.KeyMax,
-			func(kv storage.MVCCKeyValue) (bool, error) {
-				if !kv.Key.IsValue() {
-					if err := protoutil.Unmarshal(kv.Value, meta); err != nil {
-						return false, err
-					}
-					if meta.Txn != nil {
-						return false, errors.Errorf("non-nil Txn after GC for key %s", kv.Key)
-					}
+		return tc.store.Engine().MVCCIterate(roachpb.KeyMin, roachpb.KeyMax, storage.MVCCKeyAndIntentsIterKind, func(kv storage.MVCCKeyValue) error {
+			if !kv.Key.IsValue() {
+				if err := protoutil.Unmarshal(kv.Value, meta); err != nil {
+					return err
 				}
-				return false, nil
-			})
+				if meta.Txn != nil {
+					return errors.Errorf("non-nil Txn after GC for key %s", kv.Key)
+				}
+			}
+			return nil
+		})
 	})
 }
 

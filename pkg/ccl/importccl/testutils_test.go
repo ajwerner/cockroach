@@ -17,14 +17,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -32,8 +35,8 @@ import (
 )
 
 func descForTable(
-	t *testing.T, create string, parent, id sqlbase.ID, fks fkHandler,
-) *sqlbase.TableDescriptor {
+	ctx context.Context, t *testing.T, create string, parent, id descpb.ID, fks fkHandler,
+) *tabledesc.Mutable {
 	t.Helper()
 	parsed, err := parser.Parse(create)
 	if err != nil {
@@ -50,8 +53,9 @@ func descForTable(
 		name := parsed[0].AST.(*tree.CreateSequence).Name.String()
 
 		ts := hlc.Timestamp{WallTime: nanos}
-		priv := sqlbase.NewDefaultPrivilegeDescriptor()
-		desc, err := sql.MakeSequenceTableDesc(
+		priv := descpb.NewDefaultPrivilegeDescriptor(security.AdminRoleName())
+		desc, err := sql.NewSequenceTableDesc(
+			ctx,
 			name,
 			tree.SequenceOptions{},
 			parent,
@@ -59,30 +63,30 @@ func descForTable(
 			id-1,
 			ts,
 			priv,
-			false, /* temporary */
-			nil,   /* params */
+			tree.PersistencePermanent,
+			nil, /* params */
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		fks.resolver[name] = &desc
+		fks.resolver[name] = desc
 	} else {
 		stmt = parsed[0].AST.(*tree.CreateTable)
 	}
 	semaCtx := tree.MakeSemaContext()
-	table, err := MakeSimpleTableDescriptor(context.Background(), &semaCtx, settings, stmt, parent, id, fks, nanos)
+	table, err := MakeSimpleTableDescriptor(context.Background(), &semaCtx, settings, stmt, parent, keys.PublicSchemaID, id, fks, nanos)
 	if err != nil {
 		t.Fatalf("could not interpret %q: %v", create, err)
 	}
-	if err := fixDescriptorFKState(table.TableDesc()); err != nil {
+	if err := fixDescriptorFKState(table); err != nil {
 		t.Fatal(err)
 	}
-	return table.TableDesc()
+	return table
 }
 
 var testEvalCtx = &tree.EvalContext{
 	SessionData: &sessiondata.SessionData{
-		DataConversion: sessiondata.DataConversionConfig{Location: time.UTC},
+		Location: time.UTC,
 	},
 	StmtTimestamp: timeutil.Unix(100000000, 0),
 	Settings:      cluster.MakeTestingClusterSettings(),
@@ -272,6 +276,14 @@ func (es *generatorExternalStorage) ListFiles(ctx context.Context, _ string) ([]
 
 func (es *generatorExternalStorage) Delete(ctx context.Context, basename string) error {
 	return errors.New("unsupported")
+}
+
+func (es *generatorExternalStorage) ExternalIOConf() base.ExternalIODirConfig {
+	return base.ExternalIODirConfig{}
+}
+
+func (es *generatorExternalStorage) Settings() *cluster.Settings {
+	return cluster.NoSettings
 }
 
 // generatedStorage is a factory (cloud.ExternalStorageFactory)

@@ -21,8 +21,20 @@ package colexec
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
+	"github.com/cockroachdb/cockroach/pkg/col/coldataext"
+	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/colexecbase/colexecerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
+)
+
+// Workaround for bazel auto-generated code. goimports does not automatically
+// pick up the right packages when run within the bazel sandbox.
+var (
+	_ = typeconv.DatumVecCanonicalTypeFamily
+	_ coldataext.Datum
+	_ tree.AggType
 )
 
 // {{/*
@@ -42,7 +54,7 @@ const _RIGHT_TYPE_WIDTH = 0
 // _ASSIGN_NE is the template equality function for assigning the first input
 // to the result of the the second input != the third input.
 func _ASSIGN_NE(_, _, _, _, _, _ interface{}) int {
-	colexecerror.InternalError("")
+	colexecerror.InternalError(errors.AssertionFailedf(""))
 }
 
 // This is a code snippet that is the main body of checkCol* functions. It
@@ -82,11 +94,8 @@ func _CHECK_COL_BODY(
 		probeIdx, buildIdx       int
 		probeIsNull, buildIsNull bool
 	)
-	// Early bounds check.
-	_ = ht.probeScratch.toCheck[nToCheck-1]
-	for i := uint64(0); i < nToCheck; i++ {
+	for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
 		// keyID of 0 is reserved to represent the end of the next chain.
-		toCheck := ht.probeScratch.toCheck[i]
 		keyID := ht.probeScratch.groupID[toCheck]
 		if keyID != 0 {
 			// the build table key (calculated using keys[keyID - 1] = key) is
@@ -201,17 +210,24 @@ func _CHECK_COL_FUNCTION_TEMPLATE(_PROBING_AGAINST_ITSELF bool, _DELETING_PROBE_
 	// {{$probingAgainstItself := .ProbingAgainstItself}}
 	// {{$deletingProbeMode := .DeletingProbeMode}}
 	// {{with .Global}}
-	// In order to inline the templated code of overloads, we need to have a
-	// `_overloadHelper` local variable of type `overloadHelper`.
-	_overloadHelper := ht.overloadHelper
 	switch probeVec.CanonicalTypeFamily() {
 	// {{range .LeftFamilies}}
+	// {{$leftFamily := .LeftCanonicalFamilyStr}}
 	case _LEFT_CANONICAL_TYPE_FAMILY:
 		switch probeVec.Type().Width() {
 		// {{range .LeftWidths}}
 		case _LEFT_TYPE_WIDTH:
 			switch buildVec.CanonicalTypeFamily() {
 			// {{range .RightFamilies}}
+			// {{$rightFamily := .RightCanonicalFamilyStr}}
+			// {{/*
+			//     We currently only support the cases of same-type as well as
+			//     integers of mixed widths in the equality conditions (all
+			//     other allowed mixed-type comparisons are pushed into the ON
+			//     condition, see #43060), so we will generate the code only
+			//     for same-type comparisons and for integer ones.
+			//  */}}
+			// {{if or (eq $leftFamily $rightFamily) (and (eq $leftFamily "types.IntFamily") (eq $rightFamily "types.IntFamily"))}}
 			case _RIGHT_CANONICAL_TYPE_FAMILY:
 				switch buildVec.Type().Width() {
 				// {{range .RightWidths}}
@@ -225,6 +241,7 @@ func _CHECK_COL_FUNCTION_TEMPLATE(_PROBING_AGAINST_ITSELF bool, _DELETING_PROBE_
 					}
 					// {{end}}
 				}
+				// {{end}}
 				// {{end}}
 			}
 			// {{end}}
@@ -423,40 +440,6 @@ func _CHECK_BODY(_SELECT_SAME_TUPLES bool, _DELETING_PROBE_MODE bool) { // */}}
 	// {{/*
 } // */}}
 
-// {{if .HashTableMode.IsDistinctBuild}}
-
-// checkBuildForDistinct finds all tuples in probeVecs that are not present in
-// buffered tuples stored in ht.vals. It stores the probeVecs's distinct tuples'
-// keyIDs in headID buffer.
-// NOTE: It assumes that probeVecs does not contain any duplicates itself.
-// NOTE: It assumes that probeSel has already been populated and it is not nil.
-func (ht *hashTable) checkBuildForDistinct(
-	probeVecs []coldata.Vec, nToCheck uint64, probeSel []int,
-) uint64 {
-	if probeSel == nil {
-		colexecerror.InternalError("invalid selection vector")
-	}
-	copy(ht.probeScratch.distinct, zeroBoolColumn)
-
-	ht.checkColsForDistinctTuples(probeVecs, nToCheck, probeSel)
-	nDiffers := uint64(0)
-	for i := uint64(0); i < nToCheck; i++ {
-		if ht.probeScratch.distinct[ht.probeScratch.toCheck[i]] {
-			ht.probeScratch.distinct[ht.probeScratch.toCheck[i]] = false
-			// Calculated using the convention: keyID = keys.indexOf(key) + 1.
-			ht.probeScratch.headID[ht.probeScratch.toCheck[i]] = ht.probeScratch.toCheck[i] + 1
-		} else if ht.probeScratch.differs[ht.probeScratch.toCheck[i]] {
-			// Continue probing in this next chain for the probe key.
-			ht.probeScratch.differs[ht.probeScratch.toCheck[i]] = false
-			ht.probeScratch.toCheck[nDiffers] = ht.probeScratch.toCheck[i]
-			nDiffers++
-		}
-	}
-	return nDiffers
-}
-
-// {{end}}
-
 // {{/*
 //     Note that both probing modes (when hash table is built in full mode)
 //     are handled by the same check() function, so we will generate it only
@@ -471,18 +454,24 @@ func (ht *hashTable) checkBuildForDistinct(
 // key is removed from toCheck if it has already been visited in a previous
 // probe, or the bucket has reached the end (key not found in build table). The
 // new length of toCheck is returned by this function.
-func (ht *hashTable) check(
-	probeVecs []coldata.Vec, buildKeyCols []uint32, nToCheck uint64, probeSel []int,
-) uint64 {
-	ht.checkCols(probeVecs, ht.vals.ColVecs(), buildKeyCols, nToCheck, probeSel)
+func (ht *hashTable) check(probeVecs []coldata.Vec, nToCheck uint64, probeSel []int) uint64 {
+	ht.checkCols(probeVecs, nToCheck, probeSel)
 	nDiffers := uint64(0)
 	switch ht.probeMode {
 	case hashTableDefaultProbeMode:
-		_CHECK_BODY(true, false)
+		if ht.same != nil {
+			_CHECK_BODY(true, false)
+		} else {
+			_CHECK_BODY(false, false)
+		}
 	case hashTableDeletingProbeMode:
-		_CHECK_BODY(true, true)
+		if ht.same != nil {
+			_CHECK_BODY(true, true)
+		} else {
+			_CHECK_BODY(false, true)
+		}
 	default:
-		colexecerror.InternalError("unsupported hash table probe mode")
+		colexecerror.InternalError(errors.AssertionFailedf("unsupported hash table probe mode"))
 	}
 	return nDiffers
 }
@@ -507,25 +496,24 @@ func (ht *hashTable) checkProbeForDistinct(vecs []coldata.Vec, nToCheck uint64, 
 // {{/*
 func _UPDATE_SEL_BODY(_USE_SEL bool) { // */}}
 	// {{define "updateSelBody" -}}
+	batchLength := b.Length()
 	// Reuse the buffer allocated for distinct.
 	visited := ht.probeScratch.distinct
 	copy(visited, zeroBoolColumn)
-	for i := 0; i < b.Length(); i++ {
-		if ht.probeScratch.headID[i] != 0 {
-			if hasVisited := visited[ht.probeScratch.headID[i]-1]; !hasVisited {
+	for i, headID := range ht.probeScratch.headID[:batchLength] {
+		if headID != 0 {
+			if hasVisited := visited[headID-1]; !hasVisited {
 				// {{if .UseSel}}
-				sel[distinctCount] = sel[ht.probeScratch.headID[i]-1]
+				sel[distinctCount] = sel[headID-1]
 				// {{else}}
-				sel[distinctCount] = int(ht.probeScratch.headID[i] - 1)
+				sel[distinctCount] = int(headID - 1)
 				// {{end}}
-				visited[ht.probeScratch.headID[i]-1] = true
+				visited[headID-1] = true
 				// Compacting and deduplicating hash buffer.
 				ht.probeScratch.hashBuffer[distinctCount] = ht.probeScratch.hashBuffer[i]
 				distinctCount++
 			}
 		}
-		ht.probeScratch.headID[i] = 0
-		ht.probeScratch.differs[i] = false
 	}
 	// {{end}}
 	// {{/*
@@ -558,16 +546,13 @@ func (ht *hashTable) updateSel(b coldata.Batch) {
 // list is reconstructed to only hold the indices of the eqCol keys that have
 // not been found. The new length of toCheck is returned by this function.
 func (ht *hashTable) distinctCheck(nToCheck uint64, probeSel []int) uint64 {
-	probeVecs := ht.probeScratch.keys
-	buildVecs := ht.vals.ColVecs()
-	buildKeyCols := ht.keyCols
-	ht.checkCols(probeVecs, buildVecs, buildKeyCols, nToCheck, probeSel)
+	ht.checkCols(ht.keys, nToCheck, probeSel)
 	// Select the indices that differ and put them into toCheck.
 	nDiffers := uint64(0)
-	for i := uint64(0); i < nToCheck; i++ {
-		if ht.probeScratch.differs[ht.probeScratch.toCheck[i]] {
-			ht.probeScratch.differs[ht.probeScratch.toCheck[i]] = false
-			ht.probeScratch.toCheck[nDiffers] = ht.probeScratch.toCheck[i]
+	for _, toCheck := range ht.probeScratch.toCheck[:nToCheck] {
+		if ht.probeScratch.differs[toCheck] {
+			ht.probeScratch.differs[toCheck] = false
+			ht.probeScratch.toCheck[nDiffers] = toCheck
 			nDiffers++
 		}
 	}

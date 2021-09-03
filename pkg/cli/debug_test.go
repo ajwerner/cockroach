@@ -32,28 +32,29 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
+	"github.com/cockroachdb/pebble"
 )
 
 func createStore(t *testing.T, path string) {
 	t.Helper()
-	cache := storage.NewRocksDBCache(server.DefaultCacheSize)
-	defer cache.Release()
-	db, err := storage.NewRocksDB(
-		storage.RocksDBConfig{
-			StorageConfig: base.StorageConfig{
-				Dir:       path,
-				MustExist: false,
-			},
+	cache := pebble.NewCache(server.DefaultCacheSize)
+	defer cache.Unref()
+	cfg := storage.PebbleConfig{
+		StorageConfig: base.StorageConfig{
+			Dir:       path,
+			MustExist: false,
 		},
-		cache,
-	)
+	}
+	cfg.Opts = storage.DefaultPebbleOptions()
+	cfg.Opts.Cache = cache
+	db, err := storage.NewPebble(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,9 +144,7 @@ func TestRemoveDeadReplicas(t *testing.T) {
 	// This test is pretty slow under race (200+ cpu-seconds) because it
 	// uses multiple real disk-backed stores and goes through multiple
 	// cycles of rereplicating all ranges.
-	if util.RaceEnabled {
-		t.Skip("skipping under race")
-	}
+	skip.UnderRace(t)
 
 	ctx := context.Background()
 
