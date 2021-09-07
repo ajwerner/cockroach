@@ -70,14 +70,17 @@ func BenchmarkLinkedList(b *testing.B) {
 		for i := 0; i < depth+1; i++ {
 			names = append(names, mkVar(i))
 		}
+		idVar := func(nameVar rel.Var) rel.Var {
+			return nameVar + "id"
+		}
 		var terms []rel.Clause
 		for i := depth; i > 0; i-- {
 			terms = append(terms,
-				rel.Datom(names[i-1], nextAttr, names[i]+"id"),
-				rel.Datom(names[i], idAttr, names[i]+"id"),
+				names[i-1].Attr(nextAttr, idVar(names[i])),
+				names[i].Attr(idAttr, idVar(names[i])),
 			)
 		}
-		return terms, names[depth] + "id"
+		return terms, idVar(names[depth])
 	}
 	check := func(b *testing.B, q int, depth int, links, perm []int, r rel.Result) error {
 		b.StopTimer()

@@ -9,7 +9,7 @@ type entityIterator interface {
 
 // Attribute is used to define a property of entities. Attributes in a given
 // schema have a type. They are one the members of the 3-tuple which defines
-// a Datom.
+// a datom.
 type Attribute interface {
 
 	// String is used when formatting the attribute.

@@ -14,7 +14,7 @@ import (
 type Var string
 
 // Clause is the basic building block of a query. The most foundational
-// clause is Datom which declares some fact about an attribute of a named
+// clause is datom which declares some fact about an attribute of a named
 // variable.
 type Clause interface {
 	// clause is a marker interface to prevent external package from implementing
@@ -22,10 +22,10 @@ type Clause interface {
 	clause()
 }
 
-// Datom is a basic Clause. It declares that the provided attribute of the
+// datom is a basic Clause. It declares that the provided attribute of the
 // referenced variable must be the provided value. Value can be a constant,
 // a Var, or a set of constants as returned from Any.
-func Datom(entity Var, attr Attribute, value Expr) Clause {
+func datom(entity Var, attr Attribute, value Expr) Clause {
 	return &datomDecl{entity: entity, attribute: attr, value: value}
 }
 
@@ -44,14 +44,14 @@ type eqDecl struct {
 }
 
 func (v Var) Attr(a Attribute, e Expr) Clause {
-	return Datom(v, a, e)
+	return datom(v, a, e)
 }
 
 // Type returns a clause enforcing that the variable has one of the types
 // passed by constraining its TypeAttribute to the output of passing the
 // args to Types.
 func (v Var) Type(valuesForTypeOf ...interface{}) Clause {
-	return Datom(v, TypeAttribute, Types(valuesForTypeOf...))
+	return datom(v, TypeAttribute, Types(valuesForTypeOf...))
 }
 
 func (e *eqDecl) clause() {}

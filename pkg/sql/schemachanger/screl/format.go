@@ -14,20 +14,12 @@ import (
 	"fmt"
 	"io"
 	"reflect"
-	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/pkg/errors"
 )
-
-// ToString renders an element's attributes to a string.
-func ToString(e *scpb.Node) string {
-	var buf strings.Builder
-
-	return buf.String()
-}
 
 func FormatElement(e scpb.Element, w io.Writer) (err error) {
 	if e == nil {

@@ -196,7 +196,7 @@ func init() {
 			to.Type((*TypeReference)(nil)),
 
 			from.Attr(screl.DescID, id),
-			to.Attr(screl.ReferencedDescID, id),
+			to.Attr(screl.DescID, id),
 
 			screl.JoinTargetNode(from, fromTarget, fromNode),
 			screl.JoinTargetNode(to, toTarget, toNode),
