@@ -11,6 +11,8 @@
 package rel
 
 import (
+	"reflect"
+
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
 )
@@ -132,6 +134,32 @@ func (ec *evalContext) maybeFoundResult() (done bool, _ error) {
 	// If not, then we did not successfully unify everything (right?).
 	for _, v := range ec.q.variableSlots {
 		if ec.slots[v].value == nil {
+			return true, nil
+		}
+	}
+	for _, f := range ec.q.filters {
+		// TODO(ajwerner): Catch panics here and convert them to errors.
+		ins := make([]reflect.Value, len(f.input))
+		for i, idx := range f.input {
+			in := reflect.ValueOf(ec.slots[idx].typedValue.toInterface())
+			// Note that this will enforce that the type of the input to the filter
+			// matches the expectation by omitting results of the wrong type. This
+			// may or may not be the right behavior.
+			//
+			// TODO(ajwerner): Enforce the typing at a lower layer. See the TODO
+			// where this filter was built.
+			inType := f.predicate.Type().In(i)
+			if in.Type() != inType {
+				if in.Type().ConvertibleTo(inType) {
+					in = in.Convert(inType)
+				} else {
+					return true, nil
+				}
+			}
+			ins[i] = in
+		}
+		outs := f.predicate.Call(ins)
+		if !outs[0].Bool() {
 			return true, nil
 		}
 	}

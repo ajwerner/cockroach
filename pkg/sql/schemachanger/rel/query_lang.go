@@ -140,3 +140,21 @@ func Types(valuesForTypeOf ...interface{}) Expr {
 		return Any(types...)
 	}
 }
+
+type filterDecl struct {
+	vars          []Var
+	predicateFunc interface{}
+}
+
+func (f filterDecl) clause() {}
+
+// Filter is used to construct a clause which runs an arbitrary predicate
+// over variables.
+func Filter(vars ...Var) func(predicateFunc interface{}) Clause {
+	return func(predicateFunc interface{}) Clause {
+		return &filterDecl{
+			vars:          vars,
+			predicateFunc: predicateFunc,
+		}
+	}
+}

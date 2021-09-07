@@ -1,6 +1,7 @@
 package rel
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -118,9 +119,15 @@ func TestMusicInfo(t *testing.T) {
 	var a Var = "a"
 	q, err := NewQuery(sc,
 		a.Attr(A("artist"), Value(ArtistName("The Beatles!"))),
+		Filter("a")(func(artist *Artist) bool {
+			fmt.Println("hi", artist)
+			return true
+		}),
 	)
 	require.Nil(t, err)
 	require.NoError(t, q.Prepare().Iterate(db, func(r Result) error {
-		return nil
+		v := r.Var(a)
+		_, err := fmt.Printf("%T %v\n", v, v)
+		return err
 	}))
 }

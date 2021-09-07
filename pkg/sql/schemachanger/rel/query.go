@@ -22,6 +22,8 @@ type Query struct {
 	slots []slot
 	// facts are the set of facts which must be unified.
 	facts []fact
+	// filters are the set of predicate filters to evaluate.
+	filters []filter
 }
 
 // Result represents A setting of entities which fulfills the
@@ -99,6 +101,7 @@ func newQuery(sc *Schema, clauses []Clause) *Query {
 		entities:      entities,
 		facts:         p.facts,
 		slots:         p.slots,
+		filters:       p.filters,
 	}
 }
 

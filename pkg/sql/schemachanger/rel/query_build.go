@@ -6,12 +6,18 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
+type filter struct {
+	input     []slotIdx
+	predicate reflect.Value
+}
+
 type queryBuilder struct {
 	sc            *Schema
 	variables     []Var
 	variableSlots map[Var]slotIdx
 	facts         []fact
 	slots         []slot
+	filters       []filter
 
 	// Track whether the slotIdx holds an entity separately. We want to
 	// know this in planning, but it'll be implicit during execution.
@@ -30,6 +36,8 @@ func (p *queryBuilder) processClause(t Clause) {
 		for _, term := range *t {
 			p.processClause(term)
 		}
+	case *filterDecl:
+		p.processFilterDecl(t)
 	default:
 		panic(errors.AssertionFailedf("unknown clause type %T", t))
 	}
@@ -142,9 +150,58 @@ func (p *queryBuilder) typeCheck(f fact) {
 	}
 }
 
+var boolType = reflect.TypeOf((*bool)(nil)).Elem()
+
+func (p *queryBuilder) processFilterDecl(t *filterDecl) {
+	fv := reflect.ValueOf(t.predicateFunc)
+	// Type check the function.
+	if err := checkNotNil(fv); err != nil {
+		panic(errors.Wrapf(err, "nil filter function for variables %s", t.vars))
+	}
+	if fv.Kind() != reflect.Func {
+		panic(errors.Errorf(
+			"non-function %T filter function for variables %s",
+			t.predicateFunc, t.vars,
+		))
+	}
+	ft := fv.Type()
+	if ft.NumOut() != 1 || ft.Out(0) != boolType {
+		panic(errors.Errorf(
+			"invalid non-bool return from %T filter function for variables %s",
+			t.predicateFunc, t.vars,
+		))
+	}
+	if ft.NumIn() != len(t.vars) {
+		panic(errors.Errorf(
+			"invalid %T filter function for variables %s accepts %d inputs",
+			t.predicateFunc, t.vars, ft.NumIn(),
+		))
+	}
+
+	slots := make([]slotIdx, len(t.vars))
+	for i, v := range t.vars {
+		slots[i] = p.maybeAddVar(v, false)
+		// TODO(ajwerner): This should end up constraining the slot type, but
+		// it currently doesn't. In fact, we have no way of constraining the
+		// type for a non-entity variable. Probably the way this should go is
+		// that the slots should carry constraints like types and any values.
+		// Then, when we go to populate them, we can enforce the constraints.
+		//
+		// Instead, as a hack, we've got a runtime check on the types to fail
+		// out if any of the types are not right.
+		checkSlotType(&p.slots[slots[i]], ft.In(i))
+	}
+	p.filters = append(p.filters, filter{
+		input:     slots,
+		predicate: fv,
+	})
+}
+
 func checkSlotType(s *slot, exp reflect.Type) {
-	if err := checkType(s.typ, exp); err != nil {
-		panic(err)
+	if !s.empty() {
+		if err := checkType(s.typ, exp); err != nil {
+			panic(err)
+		}
 	}
 	for i := range s.any {
 		if err := checkType(s.any[i].typ, exp); err != nil {
