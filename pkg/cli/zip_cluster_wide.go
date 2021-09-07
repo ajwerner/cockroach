@@ -95,6 +95,7 @@ var debugZipTablesPerCluster = []string{
 	"crdb_internal.partitions",
 	"crdb_internal.zones",
 	"crdb_internal.invalid_objects",
+	"crdb_internal.sqlliveness_sessions",
 }
 
 // collectClusterData runs the data collection that only needs to

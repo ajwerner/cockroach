@@ -80,7 +80,7 @@
 // At the end of the day, for each statement we're going to evaluate some
 // constant number of clauses, each of which is going to apply to some subset of
 // the elements and is going to need to explore some other constrained subset of
-// the elements. If we assume that our queries are generally depth 2 (i.entity. just
+// the elements. If we assume that our queries are generally depth 2 (i.variable. just
 // direct references), then maybe this isn't so bad, it'd mean that we'd do at
 // most N^2 work for each statement. However, it gets worse when you think about
 // transactions which contain many statements (think big migrations). In that

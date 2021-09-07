@@ -20,12 +20,12 @@ import (
 type Database struct {
 	schema *Schema
 
-	// dims stores the specifications of all of the indexes in which
-	// all of the elements in the tree are stored. When an entity is
-	// inserted, it is inserted into each of the indexes. The first
-	// entry in the list is the "primary index" which compares entities
+	// indexes are store the entities, ordered by a specified set of attributes.
+	// When an entity is inserted, it is inserted into each of the indexes. The
+	// first entry in the list is the "primary index" which compares entities
 	// based on all attributes.
-	indexes  []index
+	indexes []index
+	// entities stores all the entities keyed on its pointer value.
 	entities map[uintptr]*entity
 }
 
@@ -64,15 +64,15 @@ func NewDatabase(sc *Schema, indexes [][]Attribute) *Database {
 	return t
 }
 
-// Insert inserts an entity.
+// Insert inserts an variable.
 //
-// TODO(ajwerner): Figure out what to do if the entity already
+// TODO(ajwerner): Figure out what to do if the variable already
 // exists. We need to nail down what existence means: is it
 // intentional, as in, does the unique pointer exist, or is it
-// extensional, as in, does some entity exist with the same attributes
+// extensional, as in, does some variable exist with the same attributes
 // ignoring pointer value? Either way, what we have here does not fly.
 func (t *Database) Insert(e interface{}) error {
-	return asEntities(t.schema, e, func(entity entity) error {
+	return asEntities(t.schema, allOrdinals, e, func(entity entity) error {
 		return t.insert(&entity)
 	})
 }
@@ -163,7 +163,7 @@ func (t *Database) iterate(where *valuesMap, f entityIterator) (err error) {
 // attributes which are not covered by the index prefix.
 //
 // TODO(ajwerner): Consider something about selectivity by tracking
-// the number of entries under each index (i.entity. which have non-NULL valuesMap)
+// the number of entries under each index (i.variable. which have non-NULL valuesMap)
 // for the given dimension.
 func (t *Database) chooseIndex(m ordinalSet) (_ *index, toCheck ordinalSet) {
 	// Default to the "primary" index.

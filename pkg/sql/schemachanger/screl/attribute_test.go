@@ -8,7 +8,7 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package scpb
+package screl
 
 /*
 func TestGetAttribute(t *testing.T) {
@@ -44,10 +44,10 @@ func TestGetAttribute(t *testing.T) {
 		require.NoError(t, FormatAttr(e, attr, &buf))
 		return buf.String()
 	}
-	require.Equal(t, "3", toString(AttrReferencedDescID, typeBackRef))
-	require.Equal(t, "1", toString(AttrDescID, typeBackRef))
+	require.Equal(t, "3", toString(ReferencedDescID, typeBackRef))
+	require.Equal(t, "1", toString(DescID, typeBackRef))
 	require.Equal(t, "TypeReference", toString(AttrElementType, typeBackRef))
-	require.Equal(t, "4", toString(AttrColumnID, seqElemDiff))
+	require.Equal(t, "4", toString(ColumnID, seqElemDiff))
 }
 
 func BenchmarkCompareElements(b *testing.B) {

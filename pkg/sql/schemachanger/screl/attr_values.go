@@ -8,13 +8,13 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package scpb
+package screl
 
 /*
 
 // GetDescID returns the ID stored in the Entity.
 func GetDescID(e Entity) descpb.ID {
-	if idVal, ok := e.Get(AttrDescID).(*eav.Uint32); ok {
+	if idVal, ok := e.Get(DescID).(*eav.Uint32); ok {
 		return descpb.ID(*idVal)
 	}
 	return descpb.InvalidID

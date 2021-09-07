@@ -1,7 +1,5 @@
 package rel
 
-import "github.com/cockroachdb/errors"
-
 // entityIterator is used to iterate Entities.
 type entityIterator interface {
 	// Visit visits an entity. If iterutil.StopIteration
@@ -24,7 +22,3 @@ type Attribute interface {
 // Ordinal is used to correlate attributes in a schema.
 // It enables use of the ordinalSet.
 type Ordinal uint64
-
-func panicf(format string, args ...interface{}) {
-	panic(errors.AssertionFailedWithDepthf(1, format, args...))
-}

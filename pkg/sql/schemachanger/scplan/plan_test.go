@@ -33,6 +33,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/screl"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -155,9 +156,9 @@ func marshalDeps(t *testing.T, plan *scplan.Plan) string {
 		return plan.Graph.ForEachDepEdgeFrom(n, func(de *scgraph.DepEdge) error {
 			var deps strings.Builder
 			deps.WriteString("- from: ")
-			scpb.Format(de.From(), &deps)
+			screl.Format(de.From(), &deps)
 			deps.WriteString("\n  to:   ")
-			scpb.Format(de.To(), &deps)
+			screl.Format(de.To(), &deps)
 			deps.WriteString("\n")
 			sortedDeps = append(sortedDeps, deps.String())
 			return nil

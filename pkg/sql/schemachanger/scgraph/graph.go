@@ -14,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/screl"
 	"github.com/cockroachdb/errors"
 )
 
@@ -66,11 +67,11 @@ func New(initial scpb.State) (*Graph, error) {
 		nodeOpEdges:  map[*scpb.Node]*OpEdge{},
 		nodeDepEdges: map[*scpb.Node][]*DepEdge{},
 		opToNode:     map[scop.Op]*scpb.Node{},
-		entities: rel.NewDatabase(scpb.AttrSchema, [][]rel.Attribute{
-			{rel.TypeAttribute, scpb.AttrDescID},
-			{scpb.AttrDescID, rel.TypeAttribute},
-			{scpb.AttrElement},
-			{scpb.AttrTarget},
+		entities: rel.NewDatabase(screl.Schema, [][]rel.Attribute{
+			{rel.TypeAttribute, screl.DescID},
+			{screl.DescID, rel.TypeAttribute},
+			{screl.Element},
+			{screl.Target},
 			// TODO(ajwerner): Decide what more predicates are needed
 		}),
 	}

@@ -8,17 +8,16 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package scpb_test
+package screl_test
 
 import (
-	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/screl"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,26 +55,32 @@ func TestQueryBasic(t *testing.T) {
 			mkTypeRef(typID, tabID),
 		}
 	}
-	type v = rel.Var
 	var (
-		d             = rel.Datom
-		pathJoinQuery = rel.MustQuery(scpb.AttrSchema,
-			rel.EntityType("table", (*scpb.Table)(nil)),
-			rel.EntityType("ref", (*scpb.TypeReference)(nil)),
-			rel.EntityType("type", (*scpb.Type)(nil)),
-			d("table", scpb.AttrDescID, v("table-id")),
-			d("ref", scpb.AttrDescID, v("table-id")),
-			d("ref", scpb.AttrReferencedDescID, v("type-id")),
-			d("type", rel.TypeAttribute, reflect.TypeOf((*scpb.Type)(nil))),
-			d("type", scpb.AttrDescID, v("type-id")),
-			scpb.NodeRule("table", v("direction"), v("status")),
-			scpb.NodeRule("ref", v("direction"), v("status")),
-			scpb.NodeRule("type", v("direction"), v("status")),
+		tableEl, tableTarget, tableNode rel.Var = "table-el", "table-target", "table-node"
+		refEl, refTarget, refNode       rel.Var = "ref-el", "ref-target", "ref-node"
+		typeEl, typeTarget, typeNode    rel.Var = "type-el", "type-target", "type-node"
+		tableID, typeID, dir, status    rel.Var = "table-id", "type-id", "dir", "status"
+		pathJoinQuery                           = rel.MustQuery(screl.Schema,
+			tableEl.Type((*scpb.Table)(nil)),
+			refEl.Type((*scpb.TypeReference)(nil)),
+			typeEl.Type((*scpb.Type)(nil)),
+
+			tableEl.Attr(screl.DescID, tableID),
+			refEl.Attr(screl.DescID, tableID),
+			refEl.Attr(screl.ReferencedDescID, typeID),
+			typeEl.Attr(screl.DescID, typeID),
+
+			screl.JoinTargetNode(tableEl, tableTarget, tableNode),
+			screl.JoinTargetNode(refEl, refTarget, refNode),
+			screl.JoinTargetNode(typeEl, typeTarget, typeNode),
+
+			dir.Entities(screl.Direction, tableTarget, refTarget, typeTarget),
+			status.Entities(screl.Status, tableNode, refNode, typeNode),
 		).Prepare()
 	)
 	type queryExpectations struct {
 		query rel.PreparedQuery
-		nodes []string
+		nodes []rel.Var
 		exp   []string
 	}
 	for _, c := range []struct {
@@ -95,7 +100,7 @@ func TestQueryBasic(t *testing.T) {
 			queries: []queryExpectations{
 				{
 					query: pathJoinQuery,
-					nodes: []string{"table", "type"},
+					nodes: []rel.Var{tableNode, typeNode},
 					exp: []string{`
 [Table: {DescID: 2}, ABSENT, ADD]
 [Type: {DescID: 1}, ABSENT, ADD]`, `
@@ -107,7 +112,7 @@ func TestQueryBasic(t *testing.T) {
 				},
 				{
 					query: pathJoinQuery,
-					nodes: []string{"table", "type", "ref"},
+					nodes: []rel.Var{tableNode, typeNode, refNode},
 					exp: []string{`
 [Table: {DescID: 2}, ABSENT, ADD]
 [Type: {DescID: 1}, ABSENT, ADD]
@@ -124,8 +129,8 @@ func TestQueryBasic(t *testing.T) {
 		},
 	} {
 		t.Run("", func(t *testing.T) {
-			tr := rel.NewDatabase(scpb.AttrSchema, [][]rel.Attribute{
-				{scpb.AttrColumnID},
+			tr := rel.NewDatabase(screl.Schema, [][]rel.Attribute{
+				{screl.ColumnID},
 			})
 			for _, n := range c.nodes {
 				tr.Insert(n)
@@ -145,22 +150,22 @@ func TestQueryBasic(t *testing.T) {
 }
 
 func TestContradiction(t *testing.T) {
-	require.Panics(t, func() {
-		rel.NewQuery(scpb.AttrSchema,
-			rel.EntityType("a", (*scpb.Type)(nil)),
-			rel.EntityType("b", (*scpb.Table)(nil)),
-			rel.Datom("a", rel.TypeAttribute, rel.Var("typ")),
-			rel.Datom("b", rel.TypeAttribute, rel.Var("typ")),
-		)
-	})
+	var a, b, typ rel.Var = "a", "b", "typ"
+	_, err := rel.NewQuery(screl.Schema,
+		a.Type((*scpb.Type)(nil)),
+		b.Type((*scpb.Table)(nil)),
+		a.Attr(rel.TypeAttribute, typ),
+		b.Attr(rel.TypeAttribute, typ),
+	)
+	require.Regexp(t, "failed to construct query: query contains contradiction on TypeAttribute", err)
 }
 
-func formatResults(r rel.Result, nodes []string) string {
+func formatResults(r rel.Result, nodes []rel.Var) string {
 	var buf strings.Builder
 	for _, n := range nodes {
 		buf.WriteString("\n")
-		got := r.Var(rel.Var(n))
-		fmt.Fprintf(&buf, "%T: %v", got, got)
+		got := r.Var(n).(*scpb.Node)
+		screl.Format(got, &buf)
 	}
 	return buf.String()
 }

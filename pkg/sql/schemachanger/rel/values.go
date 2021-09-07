@@ -36,11 +36,15 @@ func getValues() *valuesMap {
 }
 
 func putValues(v *valuesMap) {
+	v.clear()
+	valuesSyncPool.Put(v)
+}
+
+func (v *valuesMap) clear() {
 	for k := range v.m {
 		delete(v.m, k)
 	}
 	v.attrs = 0
-	valuesSyncPool.Put(v)
 }
 
 // get retrieves the primitive valuesMap stores in the valuesMap

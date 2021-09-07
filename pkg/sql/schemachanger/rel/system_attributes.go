@@ -2,7 +2,7 @@ package rel
 
 // SystemAttribute is a type which represents attributes offerred by the
 // system for all entities stored in a database. In particular they capture
-// the type and address of the entity.
+// the type and address of the variable.
 //
 // The system attribute may be extended to cover other structural attributes.
 // TODO(ajwerner): Add support for slices, arrays, and maps and then provide
@@ -19,11 +19,11 @@ func (s SystemAttribute) Ordinal() Ordinal {
 const (
 	_ SystemAttribute = 64 - iota
 
-	// TypeAttribute is an attribute which stores the type of an entity.
+	// TypeAttribute is an attribute which stores the type of an variable.
 	TypeAttribute
 
-	// IDAttribute is an attribute which stores the ID of an entity.
-	IDAttribute
+	// SelfAttribute is an attribute which stores the ID of an variable.
+	SelfAttribute
 
 	maxUserAttribute Ordinal = 64 - iota
 )

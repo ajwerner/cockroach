@@ -85,7 +85,7 @@ func (a A) Ordinal() Ordinal {
 var _ Attribute = A("")
 
 func TestMusicInfo(t *testing.T) {
-	sc := NewSchema("", Mappings{
+	sc := MustSchema("", Mappings{
 		TypeMappings: map[reflect.Type]map[string]Attribute{
 			reflect.TypeOf((*Artist)(nil)): {
 				"Name": A("artist"),
@@ -115,8 +115,9 @@ func TestMusicInfo(t *testing.T) {
 		require.Nil(t, db.Insert(d))
 	}
 
+	var a Var = "a"
 	q, err := NewQuery(sc,
-		Datom("a", A("artist"), ArtistName("The Beatles!")),
+		a.Attr(A("artist"), Value(ArtistName("The Beatles!"))),
 	)
 	require.Nil(t, err)
 	require.NoError(t, q.Prepare().Iterate(db, func(r Result) error {

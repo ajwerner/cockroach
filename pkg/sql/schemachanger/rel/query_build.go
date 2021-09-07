@@ -1,6 +1,10 @@
 package rel
 
-import "github.com/cockroachdb/errors"
+import (
+	"reflect"
+
+	"github.com/cockroachdb/errors"
+)
 
 type queryBuilder struct {
 	sc            *Schema
@@ -10,7 +14,7 @@ type queryBuilder struct {
 	slots         []slot
 
 	// Track whether the slotIdx holds an entity separately. We want to
-	// know this in planning but it'll be implicit during execution.
+	// know this in planning, but it'll be implicit during execution.
 	// This might be badly named. What we really mean here is that the
 	// slotIdx is A join target.
 	slotIsEntity []bool
@@ -20,6 +24,8 @@ func (p *queryBuilder) processClause(t Clause) {
 	switch t := t.(type) {
 	case *datomDecl:
 		p.processFactDecl(t)
+	case *eqDecl:
+		p.processEqDecl(t)
 	case *and:
 		for _, term := range *t {
 			p.processClause(term)
@@ -31,32 +37,39 @@ func (p *queryBuilder) processClause(t Clause) {
 
 func (p *queryBuilder) processFactDecl(fd *datomDecl) {
 	f := fact{
-		entity: p.maybeAddVar(fd.entity, true),
-		attr:   fd.attribute,
+		variable: p.maybeAddVar(fd.entity, true),
+		attr:     fd.attribute,
 	}
-	switch v := fd.value.(type) {
+	f.value = p.processValueExpr(fd.value)
+	p.typeCheck(f)
+	p.facts = append(p.facts, f)
+}
+
+func (p *queryBuilder) processValueExpr(rawValue Expr) slotIdx {
+	switch v := rawValue.(type) {
 	case Var:
-		f.value = p.maybeAddVar(v, false)
-	case any:
+		return p.maybeAddVar(v, false)
+	case anyExpr:
 		sd := slot{
 			any: make([]typedValue, len(v)),
 		}
 		for i, vv := range v {
-			tv, err := makeComparableValue(p.sc, fd.attribute, vv)
+			tv, err := makeComparableValue(p.sc, vv)
 			if err != nil {
 				panic(err)
 			}
 			sd.any[i] = tv
 		}
-		f.value = p.fillSlot(sd, false)
-	default:
-		tv, err := makeComparableValue(p.sc, fd.attribute, fd.value)
+		return p.fillSlot(sd, false)
+	case valueExpr:
+		tv, err := makeComparableValue(p.sc, v.value)
 		if err != nil {
 			panic(err)
 		}
-		f.value = p.fillSlot(slot{typedValue: tv}, false)
+		return p.fillSlot(slot{typedValue: tv}, false)
+	default:
+		panic(errors.Errorf("unknown expr type %T", rawValue))
 	}
-	p.facts = append(p.facts, f)
 }
 
 func (p *queryBuilder) maybeAddVar(v Var, entity bool) slotIdx {
@@ -90,4 +103,52 @@ func (p *queryBuilder) findEntitySlots() (entitySlots []slotIdx) {
 		}
 	}
 	return entitySlots
+}
+
+func (p *queryBuilder) processEqDecl(t *eqDecl) {
+	varIdx := p.maybeAddVar(t.v, false)
+	valueIdx := p.processValueExpr(t.expr)
+	// This is somewhat inefficient but what it does is it lets
+	// us state that the variable is equal to itself and that it
+	// is equal to the value.
+	//
+	// Note that there's no need to typeCheck because the SelfAttribute accepts
+	// all types. We'll do a pass of type-checking at the end.
+	p.facts = append(p.facts,
+		fact{
+			variable: varIdx,
+			attr:     SelfAttribute,
+			value:    valueIdx,
+		},
+		fact{
+			variable: varIdx,
+			attr:     SelfAttribute,
+			value:    varIdx,
+		})
+}
+
+// typeCheck asserts that the value types for the fact are sane given the
+// attribute.
+func (p *queryBuilder) typeCheck(f fact) {
+	s := &p.slots[f.value]
+	if s.empty() {
+		return
+	}
+	switch f.attr {
+	case TypeAttribute:
+		checkSlotType(s, schemaTypePtrType)
+	default:
+		checkSlotType(s, p.sc.attributeTypes[f.attr])
+	}
+}
+
+func checkSlotType(s *slot, exp reflect.Type) {
+	if err := checkType(s.typ, exp); err != nil {
+		panic(err)
+	}
+	for i := range s.any {
+		if err := checkType(s.any[i].typ, exp); err != nil {
+			panic(err)
+		}
+	}
 }

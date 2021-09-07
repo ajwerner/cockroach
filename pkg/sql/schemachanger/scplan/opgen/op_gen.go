@@ -7,6 +7,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scgraph"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/screl"
 	"github.com/cockroachdb/errors"
 )
 
@@ -23,22 +24,14 @@ func (r *Registry) BuildGraph(initial scpb.State) (*scgraph.Graph, error) {
 	if err != nil {
 		return nil, err
 	}
-	tr := rel.NewDatabase(scpb.AttrSchema, [][]rel.Attribute{
-		{scpb.AttrElementType, scpb.AttrDirection},
+	tr := rel.NewDatabase(screl.Schema, [][]rel.Attribute{
+		{rel.TypeAttribute, screl.Direction},
 	})
 	for _, n := range initial {
 		tr.Insert(n)
 	}
-
 	for _, t := range r.targets {
-		// TODO(ajwerner): Make it easy to parameterize queries.
-		q := rel.NewQuery(scpb.AttrSchema,
-			scpb.TypeRule("el", t.element),
-			scpb.NodeRule("el")("elTarget", "elNode"),
-			rel.Datom("elTarget", scpb.AttrDirection, t.dir),
-		)
-		if err := tr.Evaluate(q, func(r rel.Result) error {
-			n := r.Var("el").(*scpb.Node)
+		if err := t.iterateFunc(tr, func(n *scpb.Node) error {
 			var in bool
 			for _, op := range t.ops {
 				if in = in || op.From == n.Status; !in {
@@ -70,9 +63,10 @@ func (r *Registry) Register(
 
 // target represents a set of transitions for a target.
 type target struct {
-	element scpb.Element
-	dir     scpb.Target_Direction
-	ops     []ops
+	element     scpb.Element
+	dir         scpb.Target_Direction
+	ops         []ops
+	iterateFunc func(*rel.Database, func(*scpb.Node) error) error
 }
 
 func (t *target) Sequence() []scpb.Status {
@@ -107,10 +101,35 @@ func makeTarget(
 			return target{}, err
 		}
 	}
+	iterateFunc, err := makeQuery(e, dir)
+	if err != nil {
+		return target{}, err
+	}
 	return target{
-		element: e,
-		dir:     dir,
-		ops:     transitions,
+		element:     e,
+		dir:         dir,
+		ops:         transitions,
+		iterateFunc: iterateFunc,
+	}, nil
+}
+
+func makeQuery(
+	e scpb.Element, d scpb.Target_Direction,
+) (func(*rel.Database, func(*scpb.Node) error) error, error) {
+	var element, target, node, dir rel.Var = "element", "target", "node", "dir"
+	q, err := rel.NewQuery(screl.Schema,
+		element.Type(e),
+		dir.Eq(d),
+		screl.JoinTargetNode(element, target, node),
+		target.Attr(screl.Direction, dir),
+	)
+	if err != nil {
+		return nil, errors.WithAssertionFailure(err)
+	}
+	return func(database *rel.Database, f func(*scpb.Node) error) error {
+		return q.Prepare().Iterate(database, func(r rel.Result) error {
+			return f(r.Var(node).(*scpb.Node))
+		})
 	}, nil
 }
 

@@ -41,10 +41,20 @@ const (
 
 var _ rel.Attribute = llAttrs(0)
 
+func forEachListDepth(f func(lists, depth int)) {
+	for _, lists := range []int{32, 64, 128, 256, 512, 1024, 2048, 4096, 8192} {
+		for _, depth := range []int{1, 2, 4, 8, 16, 32} {
+			f(lists, depth)
+		}
+	}
+}
+
 // BenchmarkLinkedList constructs A linked list of N elements and figures out
-// how long it takes to find sublists of A given depth and starting point.
+// how long it takes to find sublists of A given depth and end point. Note that
+// in general, the process of reversing the linked list without any indexing is
+// a O(N * depth) proposition. With the indexing, it becomes O(log(N) * depth).
 func BenchmarkLinkedList(b *testing.B) {
-	sc := rel.NewSchema("", rel.Mappings{
+	sc := rel.MustSchema("", rel.Mappings{
 		TypeMappings: map[reflect.Type]map[string]rel.Attribute{
 			reflect.TypeOf((*ListNode)(nil)): {
 				"ID":   idAttr,
@@ -52,76 +62,125 @@ func BenchmarkLinkedList(b *testing.B) {
 			},
 		},
 	})
+	mkVar := func(i int) rel.Var {
+		return rel.Var(strconv.Itoa(i))
+	}
+	queryDepth := func(depth int) (_ []rel.Clause, endName rel.Var) {
+		names := make([]rel.Var, 0, depth+1)
+		for i := 0; i < depth+1; i++ {
+			names = append(names, mkVar(i))
+		}
+		var terms []rel.Clause
+		for i := depth; i > 0; i-- {
+			terms = append(terms,
+				rel.Datom(names[i-1], nextAttr, names[i]+"id"),
+				rel.Datom(names[i], idAttr, names[i]+"id"),
+			)
+		}
+		return terms, names[depth] + "id"
+	}
+	check := func(b *testing.B, q int, depth int, links, perm []int, r rel.Result) error {
+		b.StopTimer()
+		defer b.StartTimer()
+		var exp int
+		var ln *ListNode
+		for i := 0; i < depth+1; i++ {
+			ln = r.Var(mkVar(i)).(*ListNode)
+			if i == 0 {
+				exp = ln.ID
+			}
+			require.Equal(b, exp, ln.ID)
+			require.Equal(b, links[ln.ID], ln.Next)
+			exp = ln.Next
+		}
+		require.Equal(b, ln.ID, perm[q], "%d %v %d %v", perm, perm[q], ln)
+		return nil
+	}
 
 	// We want to create N nodes such that each node has attributes
 	// ID, next, prev. Then we want to define A set of queries for the
 	// specified depth.
+	const numQueries = 16
 	runDepth := func(b *testing.B, lists, depth int, attrs [][]rel.Attribute) {
-		db := rel.NewDatabase(sc, attrs)
 		links := rand.Perm(lists + depth)
+		p := rand.Perm(lists)[:numQueries]
+		db := rel.NewDatabase(sc, attrs)
 		for i, j := range links {
 			db.Insert(&ListNode{ID: i, Next: j})
 		}
 
-		const numQueries = 16
 		queries := make([]rel.PreparedQuery, numQueries)
-		p := rand.Perm(lists)[:numQueries]
-		names := make([]rel.Var, 0, depth+1)
-		for i := 0; i < depth+1; i++ {
-			names = append(names, rel.Var(strconv.Itoa(i)))
-		}
-
-		for i, start := range p {
-			var terms []rel.Clause
-			for i := 0; i < depth; i++ {
-				terms = append(terms,
-					rel.Datom(names[i], nextAttr, names[i+1]+"id"),
-					rel.Datom(names[i+1], idAttr, names[i+1]+"id"),
-				)
-			}
-			terms = append(terms,
-				rel.Datom("0", idAttr, start),
-			)
-			q, err := rel.NewQuery(sc, terms...)
+		clauses, endVar := queryDepth(depth)
+		for i, end := range p {
+			q, err := rel.NewQuery(sc, append(clauses, endVar.Eq(end))...)
 			require.NoError(b, err)
 			queries[i] = q.Prepare()
 		}
+
 		var q int
-		f := func(r rel.Result) error {
-			const checkFrac = 1
-			if rand.Float64() > checkFrac {
-				return nil
-			}
-			b.StopTimer()
-			defer b.StartTimer()
-			ln := r.Var(names[0]).(*ListNode)
-			require.Equal(b, ln.ID, p[q], "%d %v", q, p)
-			exp := ln.ID
-			for _, name := range names {
-				ln := r.Var(name).(*ListNode)
-				require.Equal(b, exp, ln.ID)
-				require.Equal(b, links[ln.ID], ln.Next)
-				exp = ln.Next
+		run := func(r rel.Result) error {
+			const checkFrac = .01 // check that the list is correct sometimes
+			if rand.Float64() < checkFrac {
+				check(b, q, depth, links, p, r)
 			}
 			return nil
 		}
-		b.ResetTimer()
 
+		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			q = rand.Intn(numQueries)
-			require.NoError(b, queries[q].Iterate(db, f))
+			require.NoError(b, queries[q].Iterate(db, run))
 		}
 	}
+
 	for _, attrs := range [][][]rel.Attribute{
-		{{idAttr}},
+		{{nextAttr}, {idAttr}},
 		nil,
 	} {
-		for _, lists := range []int{32, 64, 128, 256, 512, 1024} {
-			for _, depth := range []int{2, 4, 8, 16} {
-				b.Run(fmt.Sprintf("lists=%d,depth=%d,%s", lists, depth, attrs), func(b *testing.B) {
-					runDepth(b, lists, depth, attrs)
-				})
+		forEachListDepth(func(lists, depth int) {
+			b.Run(fmt.Sprintf("lists=%d,depth=%d,%s", lists, depth, attrs), func(b *testing.B) {
+				runDepth(b, lists, depth, attrs)
+			})
+		})
+	}
+
+}
+
+// BenchmarkReverseLinkedListNoRel is used to provide a reminder that while
+// the big-O notation of the indexed solution may be better, for an N that
+// is smaller than 8k, it's slower than the N^2 approach.
+func BenchmarkReverseLinkedListNoRel(b *testing.B) {
+	const numQueries = 16
+	// Benchmark running the same process of reversing the list without the
+	// query structure.
+	runDepthNoQuery := func(b *testing.B, lists, depth int) {
+		links := rand.Perm(lists + depth)
+		p := rand.Perm(lists)[:numQueries]
+		nodes := make([]*ListNode, len(links))
+		for i, j := range links {
+			nodes[i] = &ListNode{ID: i, Next: j}
+		}
+		res := make([]*ListNode, depth+1)
+		query := func(q int) {
+			res[depth] = nodes[p[q]]
+			for d := depth - 1; d >= 0; d-- {
+				for _, n := range nodes {
+					if n.Next == res[d+1].ID {
+						res[d] = n
+						break
+					}
+				}
 			}
 		}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			q := rand.Intn(numQueries)
+			query(q)
+		}
 	}
+	forEachListDepth(func(lists, depth int) {
+		b.Run(fmt.Sprintf("lists=%d,depth=%d", lists, depth), func(b *testing.B) {
+			runDepthNoQuery(b, lists, depth)
+		})
+	})
 }

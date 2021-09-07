@@ -56,15 +56,7 @@ func MustQuery(sc *Schema, clauses ...Clause) *Query {
 // conjunction of constraints on the results of the query when it is
 // evaluated against a database.
 func NewQuery(sc *Schema, clauses ...Clause) (_ *Query, err error) {
-	defer func() {
-		switch r := recover().(type) {
-		case nil:
-		case error:
-			err = errors.Wrap(r, "failed to construct query")
-		default:
-			err = errors.AssertionFailedf("failed to construct query: %v", r)
-		}
-	}()
+	defer catchError(&err)
 	q := newQuery(sc, clauses)
 	return q, nil
 }
@@ -78,26 +70,26 @@ func newQuery(sc *Schema, clauses []Clause) *Query {
 		p.processClause(t)
 	}
 
-	// Order the facts for unification. The ordering is first by entity
+	// Order the facts for unification. The ordering is first by variable
 	// variable and then by attribute.
 	//
 	// TODO(ajwerner): For disjunctions using Any, the code currently uses
 	// the index to constrain the search for each value in the "first"
-	// such fact for the entity. Maybe we should trust the user order of
-	// facts for a given entity rather than sorting by attribute ordinal.
-	// However, we do need all the facts with the same entity and attribute
+	// such fact for the variable. Maybe we should trust the user order of
+	// facts for a given variable rather than sorting by attribute ordinal.
+	// However, we do need all the facts with the same variable and attribute
 	// to be adjacent for the unification fixed point evaluation to work.
 	entities := p.findEntitySlots()
 	sort.SliceStable(p.facts, func(i, j int) bool {
-		if p.facts[i].entity == p.facts[j].entity {
-			return p.facts[i].attr.Ordinal() < p.facts[j].attr.Ordinal()
+		if p.facts[i].variable == p.facts[j].variable {
+			return attrLess(p.facts[i].attr, p.facts[j].attr)
 		}
-		return p.facts[i].entity < p.facts[j].entity
+		return p.facts[i].variable < p.facts[j].variable
 	})
 	// Ensure that the query does not already contain a contradiction as that
 	// is almost definitely a bug.
-	if contradictionFound := unify(p.facts, p.slots, nil); contradictionFound {
-		panic(errors.Errorf("query contains contradiction"))
+	if contradictionFound, _, attr := unify(p.facts, p.slots, nil); contradictionFound {
+		panic(errors.Errorf("query contains contradiction on %v", attr))
 	}
 	return &Query{
 		schema:        sc,
@@ -107,6 +99,19 @@ func newQuery(sc *Schema, clauses []Clause) *Query {
 		entities:      entities,
 		facts:         p.facts,
 		slots:         p.slots,
+	}
+}
+
+func attrLess(a, b Attribute) bool {
+	switch {
+	case a != nil && b != nil:
+		return a.Ordinal() < b.Ordinal()
+	case a != nil:
+		return false
+	case b != nil:
+		return true
+	default:
+		return false
 	}
 }
 

@@ -9,7 +9,7 @@ func _() {
 	// Re-run the stringer command to generate them again.
 	var x [1]struct{}
 	_ = x[TypeAttribute-63]
-	_ = x[IDAttribute-62]
+	_ = x[SelfAttribute-62]
 }
 
 const _SystemAttribute_name = "IDAttributeTypeAttribute"

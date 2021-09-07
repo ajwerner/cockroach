@@ -11,9 +11,6 @@
 package rel
 
 import (
-	"reflect"
-	"unsafe"
-
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/errors"
 )
@@ -53,17 +50,7 @@ func (ec *evalResult) Var(name Var) interface{} {
 		// TODO(ajwerner): it is far from clear that this should ever happen.
 		return nil
 	}
-	s := ec.slots[n]
-	if s.typ == schemaTypePtrType {
-		return (*entityTypeSchema)(unsafe.Pointer(*s.value.(*uintptr))).typ
-	}
-	if s.typ.Kind() == reflect.Ptr {
-		if s.typ.Elem().Kind() == reflect.Struct {
-			return reflect.NewAt(s.typ.Elem(), unsafe.Pointer(*s.value.(*uintptr))).Interface()
-		}
-		return reflect.ValueOf(s.value).Convert(s.typ).Interface()
-	}
-	return reflect.ValueOf(s.value).Convert(reflect.PtrTo(s.typ)).Elem().Interface()
+	return ec.slots[n].toInterface()
 }
 
 // Iterate is part of the PreparedQuery interface.
@@ -115,15 +102,19 @@ func (ec *evalContext) visit(e *entity) error {
 		})
 	}()
 
-	// Apply the information about this entity to the slots and find a new
+	// Apply the information about this variable to the slots and find a new
 	// fixed point given this information.
+	unifyFacts := func() (foundContradiction bool) {
+		foundContradiction, _, _ = unify(ec.facts, ec.slots, &slotsFilled)
+		return foundContradiction
+	}
 	if foundContradiction := ec.setEntitySlot(e, &slotsFilled) ||
 		ec.propagateCurEntityValues(e, &slotsFilled) ||
-		unify(ec.facts, ec.slots, &slotsFilled); foundContradiction {
+		unifyFacts(); foundContradiction {
 		return nil
 	}
 
-	// Step down to the next entity, or, if at the bottom, ensure that
+	// Step down to the next variable, or, if at the bottom, ensure that
 	// all the required slots are filled and pass the result to the caller.
 	ec.cur++
 	defer func() { ec.cur-- }()
@@ -159,7 +150,7 @@ func (ec *evalContext) buildWhere() (where *valuesMap, anyAttr Attribute, anyVal
 	// TODO(ajwerner): Make this filter push-down smarter based on the indexes
 	// which exist.
 	for _, f := range ec.facts {
-		if f.entity != ec.q.entities[ec.cur] {
+		if f.variable != ec.q.entities[ec.cur] {
 			continue
 		}
 
@@ -173,7 +164,9 @@ func (ec *evalContext) buildWhere() (where *valuesMap, anyAttr Attribute, anyVal
 	return where, anyAttr, anyValues
 }
 
-func unify(facts []fact, s []slot, set *util.FastIntSet) (contradictionFound bool) {
+func unify(
+	facts []fact, s []slot, set *util.FastIntSet,
+) (contradictionFound bool, eIdx slotIdx, attr Attribute) {
 	// TODO(ajwerner): As we unify we could determine that some facts are no
 	// longer relevant. When we do that we could move them to the front and keep
 	// track of some offset. In principle, we could do this and then each time
@@ -192,7 +185,7 @@ func unify(facts []fact, s []slot, set *util.FastIntSet) (contradictionFound boo
 		var prev, cur *fact
 		for i := 1; i < len(facts); i++ {
 			prev, cur = &facts[i-1], &facts[i]
-			if prev.entity != cur.entity || prev.attr != cur.attr ||
+			if prev.variable != cur.variable || prev.attr != cur.attr ||
 				// This case is weird. I guess we could do more to get
 				// rid of this case.
 				prev.value == cur.value ||
@@ -204,12 +197,12 @@ func unify(facts []fact, s []slot, set *util.FastIntSet) (contradictionFound boo
 			} else if s[cur.value].empty() {
 				setSlot(cur.value, prev.value)
 			} else {
-				return true
+				return true, cur.variable, cur.attr
 			}
 			somethingChanged = true
 		}
 		if !somethingChanged {
-			return false
+			return false, 0, nil
 		}
 	}
 }
@@ -217,29 +210,22 @@ func unify(facts []fact, s []slot, set *util.FastIntSet) (contradictionFound boo
 func (ec *evalContext) propagateCurEntityValues(
 	e *entity, slotsFilled *util.FastIntSet,
 ) (foundContradiction bool) {
-	// TODO(ajwerner): Constrain to just the facts about this entity.
+	// TODO(ajwerner): Constrain to just the facts about this variable.
 	for _, f := range ec.facts {
-		if f.entity != ec.q.entities[ec.cur] {
+		if f.variable != ec.q.entities[ec.cur] {
 			continue
 		}
-		got, typ, isEntity := e.getValueAndType(f.attr)
-		if got == nil {
+		tv, ok := e.getTypedValue(f.attr, ec.db.entities)
+		if !ok {
 			return true // we have no value for this attribute, contradiction
 		}
-		if isEntity {
-			ee := ec.db.entities[*got.(*uintptr)]
-			typ = ee.getTypeInfo().typ
-		}
 		s := &ec.slots[f.value]
-		ok, foundContradiction := s.shouldSet(got)
+		ok, foundContradiction := s.shouldSet(tv.value)
 		if foundContradiction {
 			return true
 		}
 		if ok {
-			s.set(typedValue{
-				typ:   typ,
-				value: got,
-			})
+			s.set(tv)
 			slotsFilled.Add(int(f.value))
 		}
 	}
@@ -251,7 +237,7 @@ func (ec *evalContext) setEntitySlot(
 ) (foundContradiction bool) {
 	eSlot := ec.q.entities[ec.cur]
 	s := &ec.slots[eSlot]
-	idVal := e.get(IDAttribute)
+	idVal := e.get(SelfAttribute)
 	ok, foundContradiction := s.shouldSet(idVal)
 	if foundContradiction {
 		return true
@@ -277,7 +263,7 @@ func (ec *evalContext) maybeVisitAlreadyBoundEntity() (done bool, _ error) {
 	v, ok := s.value.(*uintptr)
 	if !ok {
 		return true, errors.AssertionFailedf(
-			"expected *uintptr for entity value, found %T", s.value,
+			"expected *uintptr for variable value, found %T", s.value,
 		)
 	}
 	e, ok := ec.db.entities[*v]

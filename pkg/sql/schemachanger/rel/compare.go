@@ -116,6 +116,11 @@ var kindTypeMap = map[reflect.Kind]reflect.Type{
 	// TODO(ajwerner): Fill out all of the kinds.
 }
 
+func isSupportScalarKind(kind reflect.Kind) bool {
+	_, ok := kindTypeMap[kind]
+	return kind != reflect.Ptr && ok
+}
+
 func getComparableType(t reflect.Type) reflect.Type {
 	ct, ok := kindTypeMap[t.Kind()]
 	if !ok {

@@ -1,13 +1,16 @@
 package rel
 
-import "reflect"
+import (
+	"reflect"
+	"unsafe"
+)
 
 type slotIdx int
 
 type fact struct {
-	entity slotIdx
-	attr   Attribute
-	value  slotIdx
+	variable slotIdx
+	attr     Attribute
+	value    slotIdx
 }
 
 // slot represents an potentially unbound value referenced in a query.
@@ -16,6 +19,8 @@ type slot struct {
 
 	// any holds the acceptable valuesMap which may occupy this slot as
 	// indicated from an Any value.
+	//
+	// TODO(ajwerner): Consider boxing this inside of typedValue.
 	any []typedValue
 }
 
@@ -25,6 +30,19 @@ type slot struct {
 type typedValue struct {
 	typ   reflect.Type
 	value interface{}
+}
+
+func (tv typedValue) toInterface() interface{} {
+	if tv.typ == schemaTypePtrType {
+		return (*entityTypeSchema)(unsafe.Pointer(*tv.value.(*uintptr))).typ
+	}
+	if tv.typ.Kind() == reflect.Ptr {
+		if tv.typ.Elem().Kind() == reflect.Struct {
+			return reflect.NewAt(tv.typ.Elem(), unsafe.Pointer(*tv.value.(*uintptr))).Interface()
+		}
+		return reflect.ValueOf(tv.value).Convert(tv.typ).Interface()
+	}
+	return reflect.ValueOf(tv.value).Convert(reflect.PtrTo(tv.typ)).Elem().Interface()
 }
 
 func (s *slot) eq(other slot) bool {

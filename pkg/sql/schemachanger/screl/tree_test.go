@@ -8,7 +8,7 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package scpb_test
+package screl_test
 
 /*
 func TestTreeBasic(t *testing.T) {
@@ -38,7 +38,7 @@ func TestTreeBasic(t *testing.T) {
 			Status: scpb.Status_ABSENT,
 		},
 	}
-	tr := eav.NewDatabase(scpb.AttrSchema, nil)
+	tr := eav.NewDatabase(scpb.Schema, nil)
 	for i := range nodes {
 		tr.Insert(&nodes[i])
 	}
@@ -82,7 +82,7 @@ func BenchmarkTree(b *testing.B) {
 	run := func(b *testing.B, c tc) {
 		n := (b.N * c.mul) + 1
 		nodes := makeNodes(n, c.originDist(b, c), c.refDist(b, c))
-		t := eav.NewTree(scpb.AttrSchema(), c.attrs)
+		t := eav.NewTree(scpb.Schema(), c.attrs)
 		for _, node := range nodes {
 			t.Insert(node)
 		}
@@ -90,7 +90,7 @@ func BenchmarkTree(b *testing.B) {
 		vals := make([]eav.Values, len(nodes))
 		for i, j := range perm {
 			vals[i] = eav.GetValues()
-			vals[i].SetFrom(nodes[j], scpb.AttrReferencedDescID, scpb.AttrDescID)
+			vals[i].SetFrom(nodes[j], scpb.ReferencedDescID, scpb.DescID)
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -126,19 +126,19 @@ func BenchmarkTree(b *testing.B) {
 			name:       "indexed",
 			originDist: perMul,
 			refDist:    unique,
-			attrs:      [][]eav.Attribute{{scpb.AttrReferencedDescID, scpb.AttrDescID}},
+			attrs:      [][]eav.Attribute{{scpb.ReferencedDescID, scpb.DescID}},
 		},
 		{
 			name:       "indexed on unique",
 			originDist: perMul,
 			refDist:    unique,
-			attrs:      [][]eav.Attribute{{scpb.AttrReferencedDescID}},
+			attrs:      [][]eav.Attribute{{scpb.ReferencedDescID}},
 		},
 		{
 			name:       "indexed on non-unique",
 			originDist: perMul,
 			refDist:    unique,
-			attrs:      [][]eav.Attribute{{scpb.AttrDescID}},
+			attrs:      [][]eav.Attribute{{scpb.DescID}},
 		},
 	} {
 		b.Run(c.name, func(b *testing.B) {

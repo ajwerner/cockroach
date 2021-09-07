@@ -1,10 +1,9 @@
 package scplan
 
 import (
-	"reflect"
-
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
 	. "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/screl"
 )
 
 type depRegistry struct {
@@ -28,75 +27,65 @@ func (r *depRegistry) Register(ruleName string, from, to rel.Var, query *rel.Que
 
 var depRules depRegistry
 
-type v = rel.Var
-
-var d, any, t = rel.Datom, rel.Any, reflect.TypeOf
-
 func init() {
-	typ := rel.EntityType
-	node := NodeRule
+	var (
+		parent, parentTarget, parentNode rel.Var = "parent", "parent-target", "parent-node"
+		other, otherTarget, otherNode    rel.Var = "other", "other-target", "other-node"
+		status, direction                rel.Var = "status", "direction"
+	)
 	depRules.Register(
 		"database dependencies",
-		"db", "other",
-		rel.MustQuery(AttrSchema,
-			typ("db", (*Database)(nil)),
-			d("db", AttrDescID, v("db-id")),
-			node("db", Target_DROP, any(Status_DELETE_ONLY, Status_DELETE_AND_WRITE_ONLY)),
-			d("db-node", AttrStatus, v("status")),
-			d("other", AttrParentID, v("dbID")),
-			node("other", Target_DROP, v("status")),
-			typ("other",
-				(*Type)(nil),
-				(*Table)(nil),
-				(*View)(nil),
-				(*Sequence)(nil),
+		parentNode, otherNode,
+		rel.MustQuery(screl.Schema,
+			direction.Eq(Target_DROP),
+			status.EqAny(Status_DELETE_ONLY, Status_DELETE_AND_WRITE_ONLY),
+
+			parent.Type((*Database)(nil)),
+			other.Type(
+				(*Type)(nil), (*Table)(nil), (*View)(nil), (*Sequence)(nil),
 				(*Schema)(nil),
 			),
+			screl.JoinTargetNode(parent, parentTarget, parentNode),
+			screl.JoinTargetNode(other, otherTarget, otherNode),
+
+			direction.Entities(screl.Direction, parentTarget, otherTarget),
+			status.Entities(screl.Status, parentNode, otherNode),
+
+			// TODO(ajwerner): Filter dependencies.
 		),
 	)
-
 	depRules.Register(
 		"schema dependencies",
-		"schemaNode", "otherNode",
-		rel.MustQuery(AttrSchema,
-			d("schema", rel.TypeAttribute, t((*Database)(nil))),
-			d("schema", AttrDescID, v("schemaID")),
-			d("schemaTarget", AttrElement, v("schema")),
-			d("schemaTarget", AttrDirection, Target_DROP),
-			d("schemaNode", AttrTarget, v("schemaTarget")),
-			d("schemaNode", AttrStatus, v("status")),
-			d("schemaNode", AttrStatus, Status_DELETE_ONLY),
-			d("other", AttrParentID, v("dbID")),
-			d("other", rel.TypeAttribute, any(
-				t((*Type)(nil)),
-				t((*Table)(nil)),
-				t((*View)(nil)),
-				t((*Sequence)(nil)),
-			)),
-			d("otherTarget", AttrElement, v("other")),
-			d("otherTarget", AttrDirection, Target_DROP),
-			d("otherNode", AttrTarget, v("otherTarget")),
-			d("otherNode", AttrStatus, v("status")),
+		parentNode, otherNode,
+		rel.MustQuery(screl.Schema,
+			direction.Eq(Target_DROP),
+			status.EqAny(Status_DELETE_ONLY, Status_DELETE_AND_WRITE_ONLY),
+
+			parent.Type((*Schema)(nil)),
+			other.Type(
+				(*Type)(nil), (*Table)(nil), (*View)(nil), (*Sequence)(nil),
+			),
+			screl.JoinTargetNode(parent, parentTarget, parentNode),
+			screl.JoinTargetNode(other, otherTarget, otherNode),
+
+			direction.Entities(screl.Direction, parentTarget, otherTarget),
+			status.Entities(screl.Status, parentNode, otherNode),
 		),
 	)
-	depRules.Register(
-		"sequence owned by being dropped relies on sequence entering delete only",
-		"ownedBy", "seq",
-		rel.MustQuery(AttrSchema,
-			d("ownedBy", rel.TypeAttribute, t((*SequenceOwnedBy)(nil))),
-			d("ownedBy", AttrDescID, v("id")),
-			d("ownedByTarget", AttrElement, v("ownedBy")),
-			d("ownedByTarget", AttrDirection, Target_DROP),
-			d("ownedByNode", AttrTarget, v("ownedByTarget")),
-			d("ownedByNode", AttrDirection, Status_ABSENT),
-			d("seq", rel.TypeAttribute, t((*Sequence)(nil))),
-			d("seq", AttrDescID, v("id")),
-			d("seqTarget", AttrElement, v("seq")),
-			d("seqNode", AttrTarget, v("seqTarget")),
-			d("seqNode", AttrDirection, Status_ABSENT),
-			d("seqTarget", AttrDirection, Target_DROP),
-		))
 
+	/*
+		depRules.Register(
+			"sequence owned by being dropped relies on sequence entering delete only",
+			"owned-by", "seq",
+			rel.MustQuery(screl.Schema,
+				typ("owned-by", (*SequenceOwnedBy)(nil)),
+				d("owned-by", screl.DescID, v("id")),
+				node("owned-by", Target_DROP, Status_ABSENT),
+				typ("seq", (*Sequence)(nil)),
+				d("seq", screl.DescID, v("id")),
+				node("seq", Target_DROP, Status_ABSENT),
+			))
+	*/
 	/*
 
 		// TODO(ajwerner): What does this even mean?
@@ -105,13 +94,13 @@ func init() {
 			"type", "type_ref",
 			q.MustBuild(func(b q.Builder) {
 				typ := q.Constrain(b, "type", []q.AttributeValue{
-					{AttrStatus, PublicStatus},
-					{AttrDirection, DropDirection},
+					{Status, PublicStatus},
+					{Direction, DropDirection},
 				})
 				q.Constrain(b, "type_ref", []q.AttributeValue{
-					{AttrStatus, DeleteOnlyStatus},
-					{AttrDirection, DropDirection},
-					{AttrReferencedDescID, typ.Reference(AttrDescID)},
+					{Status, DeleteOnlyStatus},
+					{Direction, DropDirection},
+					{ReferencedDescID, typ.Reference(DescID)},
 				})
 			}))
 
@@ -122,13 +111,13 @@ func init() {
 			"seq", "def_expr",
 			q.MustBuild(func(b q.Builder) {
 				q.Constrain(b, "seq", []q.AttributeValue{
-					{AttrStatus, PublicStatus},
-					{AttrDirection, DropDirection},
+					{Status, PublicStatus},
+					{Direction, DropDirection},
 					{AttrElementType, SequenceElement},
 				})
 				q.Constrain(b, "def_expr", []q.AttributeValue{
-					{AttrStatus, AbsentStatus},
-					{AttrDirection, DropDirection},
+					{Status, AbsentStatus},
+					{Direction, DropDirection},
 					{AttrElementType, DefaultExpressionElement},
 				})
 				b.Filter(makeFilter(b, []string{
@@ -142,13 +131,13 @@ func init() {
 	/*
 		dropViewAbsent := []q.AttributeValue{
 			{AttrElementType, ViewElement},
-			{AttrDirection, DropDirection},
-			{AttrStatus, AbsentStatus},
+			{Direction, DropDirection},
+			{Status, AbsentStatus},
 		}
 		depRules.Register(
 			"view depends on view",
 			"from", "to",
-			eav.NewQuery(AttrSchema,
+			eav.NewQuery(Schema,
 				d("from", eav.TypeAttribute, t((*View)(nil))),
 
 			)),
@@ -171,9 +160,9 @@ func init() {
 					from := q.Constrain(b, "from", dropViewAbsent)
 					q.Constrain(b, "to", []q.AttributeValue{
 						{AttrElementType, TypeRefElement},
-						{AttrDirection, DropDirection},
-						{AttrStatus, AbsentStatus},
-						{AttrDescID, from.Reference(AttrDescID)},
+						{Direction, DropDirection},
+						{Status, AbsentStatus},
+						{DescID, from.Reference(DescID)},
 					})
 				}))
 
@@ -183,13 +172,13 @@ func init() {
 				q.MustBuild(func(b q.Builder) {
 					from := q.Constrain(b, "from", []q.AttributeValue{
 						{AttrElementType, ColumnElement},
-						{AttrDirection, AddDirection},
-						{AttrStatus, q.Any(DeleteAndWriteOnlyStatus, PublicStatus)},
+						{Direction, AddDirection},
+						{Status, q.Any(DeleteAndWriteOnlyStatus, PublicStatus)},
 					})
 					q.Constrain(b, "to", []q.AttributeValue{
-						{AttrDescID, from.Reference(AttrDescID)},
-						{AttrDirection, AddDirection},
-						{AttrStatus, from.Reference(AttrStatus)},
+						{DescID, from.Reference(DescID)},
+						{Direction, AddDirection},
+						{Status, from.Reference(Status)},
 						{AttrElementType, q.Any(PrimaryIndexElement, SecondaryIndexElement)},
 					})
 					b.Filter(makeFilter(b, []string{
@@ -211,14 +200,14 @@ func init() {
 			primaryIndexReferenceEachOther := q.MustBuild(func(b q.Builder) {
 				add := q.Constrain(b, "add", []q.AttributeValue{
 					{AttrElementType, PrimaryIndexElement},
-					{AttrDirection, AddDirection},
-					{AttrStatus, PublicStatus},
+					{Direction, AddDirection},
+					{Status, PublicStatus},
 				})
 				q.Constrain(b, "drop", []q.AttributeValue{
 					{AttrElementType, PrimaryIndexElement},
-					{AttrDirection, DropDirection},
-					{AttrStatus, DeleteAndWriteOnlyStatus},
-					{AttrDescID, add.Reference(AttrDescID)},
+					{Direction, DropDirection},
+					{Status, DeleteAndWriteOnlyStatus},
+					{DescID, add.Reference(DescID)},
 				})
 				b.Filter(makeFilter(b, []string{
 					"add", "drop",

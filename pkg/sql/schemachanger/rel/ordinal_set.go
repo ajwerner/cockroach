@@ -10,7 +10,10 @@
 
 package rel
 
-import "math/bits"
+import (
+	"math"
+	"math/bits"
+)
 
 // makeOrdinalSetWithAttributes constructs an ordinalSet with A slice of
 // Attribute.
@@ -24,6 +27,8 @@ func makeOrdinalSetWithAttributes(attrs []Attribute) (m ordinalSet) {
 // ordinalSet represents A bitmask over ordinals.
 // Note that it cannot contain attributes with ordinals greater than 64.
 type ordinalSet uint64
+
+const allOrdinals = math.MaxUint64
 
 // ForEach iterates the set of attributes.
 func (m ordinalSet) ForEach(s *Schema, f func(a Attribute) (wantMore bool)) {
