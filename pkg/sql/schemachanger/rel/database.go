@@ -115,6 +115,13 @@ type indexSpec struct {
 	attrs []Attribute
 }
 
+// entityIterator is used to iterate Entities.
+type entityIterator interface {
+	// Visit visits an entity. If iterutil.StopIteration
+	// is returned, iteration will stop but no error is returned.
+	visit(*entity) error
+}
+
 // Iterate will iterate the containers which match the specified valuesMap.
 func (t *Database) iterate(where *valuesMap, f entityIterator) (err error) {
 	var all, nils, nonNils ordinalSet

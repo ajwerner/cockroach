@@ -8,35 +8,34 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package scplan
+package opgen
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
-	. "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan/opgen"
 )
 
 func init() {
-	opGenRegistry.Register(
+	opRegistry.register(
 		(*scpb.PrimaryIndex)(nil),
 		scpb.Target_ADD,
 		scpb.Status_ABSENT,
-		To(scpb.Status_DELETE_ONLY,
-			Emit(func(this *scpb.PrimaryIndex) scop.Op {
+		to(scpb.Status_DELETE_ONLY,
+			emit(func(this *scpb.PrimaryIndex) scop.Op {
 				return &scop.MakeAddedIndexDeleteOnly{
 					TableID: this.TableID,
 					Index:   this.Index,
 				}
 			})),
-		To(scpb.Status_DELETE_AND_WRITE_ONLY,
-			Emit(func(this *scpb.PrimaryIndex) scop.Op {
+		to(scpb.Status_DELETE_AND_WRITE_ONLY,
+			emit(func(this *scpb.PrimaryIndex) scop.Op {
 				return &scop.MakeAddedIndexDeleteAndWriteOnly{
 					TableID: this.TableID,
 					IndexID: this.Index.ID,
 				}
 			})),
-		To(scpb.Status_BACKFILLED,
-			Emit(func(this *scpb.PrimaryIndex) scop.Op {
+		to(scpb.Status_BACKFILLED,
+			emit(func(this *scpb.PrimaryIndex) scop.Op {
 				return &scop.BackfillIndex{
 					TableID: this.TableID,
 					IndexID: this.Index.ID,
@@ -47,16 +46,16 @@ func init() {
 		// validate that this index indeed is unique.
 		//
 		// TODO(ajwerner): Rationalize this and hook up the optimization.
-		To(scpb.Status_VALIDATED,
-			Emit(func(this *scpb.PrimaryIndex) scop.Op {
+		to(scpb.Status_VALIDATED,
+			emit(func(this *scpb.PrimaryIndex) scop.Op {
 				return &scop.ValidateUniqueIndex{
 					TableID:        this.TableID,
 					PrimaryIndexID: this.OtherPrimaryIndexID,
 					IndexID:        this.Index.ID,
 				}
 			})),
-		To(scpb.Status_PUBLIC,
-			Emit(func(this *scpb.PrimaryIndex) scop.Op {
+		to(scpb.Status_PUBLIC,
+			emit(func(this *scpb.PrimaryIndex) scop.Op {
 				return &scop.MakeAddedPrimaryIndexPublic{
 					TableID: this.TableID,
 					Index:   this.Index,
@@ -64,29 +63,29 @@ func init() {
 			})),
 	)
 
-	opGenRegistry.Register(
+	opRegistry.register(
 		(*scpb.PrimaryIndex)(nil),
 		scpb.Target_DROP,
 		scpb.Status_PUBLIC,
-		To(scpb.Status_DELETE_AND_WRITE_ONLY,
-			Emit(func(this *scpb.PrimaryIndex) scop.Op {
+		to(scpb.Status_DELETE_AND_WRITE_ONLY,
+			emit(func(this *scpb.PrimaryIndex) scop.Op {
 				// Most of this logic is taken from MakeMutationComplete().
 				return &scop.MakeDroppedPrimaryIndexDeleteAndWriteOnly{
 					TableID: this.TableID,
 					Index:   this.Index,
 				}
 			})),
-		To(scpb.Status_DELETE_ONLY,
-			Revertible(false),
-			Emit(func(this *scpb.PrimaryIndex) scop.Op {
+		to(scpb.Status_DELETE_ONLY,
+			revertible(false),
+			emit(func(this *scpb.PrimaryIndex) scop.Op {
 				return &scop.MakeDroppedIndexDeleteOnly{
 					TableID: this.TableID,
 					IndexID: this.Index.ID,
 				}
 			})),
-		To(scpb.Status_ABSENT,
-			Revertible(false),
-			Emit(func(this *scpb.PrimaryIndex) scop.Op {
+		to(scpb.Status_ABSENT,
+			revertible(false),
+			emit(func(this *scpb.PrimaryIndex) scop.Op {
 				return &scop.MakeIndexAbsent{
 					TableID: this.TableID,
 					IndexID: this.Index.ID,

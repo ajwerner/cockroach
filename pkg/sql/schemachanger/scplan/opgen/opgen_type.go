@@ -8,31 +8,32 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package scplan
+package opgen
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan/opgen"
 )
 
 func init() {
-	opGenRegistry.Register(
-		(*scpb.Database)(nil),
+	opRegistry.register(
+		(*scpb.Type)(nil),
 		scpb.Target_DROP,
 		scpb.Status_PUBLIC,
-		opgen.To(scpb.Status_DELETE_ONLY,
-			opgen.Revertible(false),
-			opgen.Emit(func(this *scpb.Database) scop.Op {
+		to(scpb.Status_DELETE_ONLY,
+			revertible(false),
+			emit(func(this *scpb.Type) scop.Op {
 				return &scop.MarkDescriptorAsDropped{
-					TableID: this.DatabaseID,
+					TableID: this.TypeID,
 				}
 			})),
-		opgen.To(scpb.Status_ABSENT,
-			opgen.Revertible(false),
-			opgen.Emit(func(this *scpb.Database) scop.Op {
+		to(scpb.Status_ABSENT,
+			// TODO(ajwerner): The move to DELETE_ONLY should be marked
+			// non-revertible.
+			revertible(false),
+			emit(func(this *scpb.Type) scop.Op {
 				return &scop.DrainDescriptorName{
-					TableID: this.DatabaseID,
+					TableID: this.TypeID,
 				}
 			})),
 	)

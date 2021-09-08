@@ -115,7 +115,7 @@ func BenchmarkLinkedList(b *testing.B) {
 		queries := make([]rel.PreparedQuery, numQueries)
 		clauses, endVar := queryDepth(depth)
 		for i, end := range p {
-			q, err := rel.NewQuery(sc, append(clauses, endVar.Eq(end))...)
+			q, err := rel.NewQuery(sc, append(clauses, endVar.Eq(rel.Value(end)))...)
 			require.NoError(b, err)
 			queries[i] = q.Prepare()
 		}

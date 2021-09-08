@@ -8,39 +8,37 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package scplan
+package opgen
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan/opgen"
 )
 
 func init() {
 	// TODO(ajwerner): This needs more steps.
-	opGenRegistry.Register(
-		(*scpb.Table)(nil),
+	opRegistry.register(
+		(*scpb.View)(nil),
 		scpb.Target_DROP,
 		scpb.Status_PUBLIC,
-		opgen.To(scpb.Status_DELETE_ONLY,
-			opgen.Revertible(false),
-			opgen.Emit(func(this *scpb.Table) scop.Op {
+		to(scpb.Status_DELETE_ONLY,
+			revertible(false),
+			emit(func(this *scpb.View) scop.Op {
 				return &scop.MarkDescriptorAsDropped{
 					TableID: this.TableID,
 				}
 			})),
-		opgen.To(scpb.Status_ABSENT,
-			opgen.Revertible(false),
-			opgen.Emit(func(this *scpb.Table) scop.Op {
+		to(scpb.Status_ABSENT,
+			revertible(false),
+			emit(func(this *scpb.View) scop.Op {
 				return &scop.DrainDescriptorName{
 					TableID: this.TableID,
 				}
 			}),
-			opgen.Emit(func(this *scpb.Table) scop.Op {
+			emit(func(this *scpb.View) scop.Op {
 				return &scop.CreateGcJobForDescriptor{
 					DescID: this.TableID,
 				}
-			}),
-		),
+			})),
 	)
 }

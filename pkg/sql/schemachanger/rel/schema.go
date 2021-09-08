@@ -94,8 +94,8 @@ func buildSchema(name string, m Mappings) *Schema {
 	for a, t := range m.AttributeTypes {
 		sb.maybeAddAttribute(a, t)
 	}
-	sb.maybeAddAttribute(TypeAttribute, reflectTypeType)
-	sb.maybeAddAttribute(SelfAttribute, emptyInterfaceType)
+	sb.maybeAddAttribute(Type, reflectTypeType)
+	sb.maybeAddAttribute(Self, emptyInterfaceType)
 
 	// We want to know what all the variable types are.
 	for t, fields := range m.TypeMappings {
@@ -133,7 +133,7 @@ func checkType(typ, exp reflect.Type) error {
 			return errors.Errorf("%v does not implement %v", typ, exp)
 		}
 	default:
-		if typ != exp {
+		if typ != exp && !(exp.Kind() == reflect.Ptr && typ == exp.Elem()) {
 			return errors.Errorf("%v is not %v", typ, exp)
 		}
 	}
@@ -182,23 +182,28 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]A
 			cur = sf.Type
 		}
 		// TODO(ajwerner): Deal with making entities out of structs themselves.
-		sb.maybeAddAttribute(attr, cur)
-		curIsStructPointer := isStructPointer(cur)
-		if curIsStructPointer {
+		isPtr := cur.Kind() == reflect.Ptr
+		isStructPtr := isPtr && cur.Elem().Kind() == reflect.Struct
+		if isStructPtr {
 			curFields, ok := sb.m.TypeMappings[cur]
 			if !ok {
 				sb.maybeAddTypeMapping(cur, curFields)
 			}
 		}
+		isScalarPtr := isPtr && isSupportScalarKind(cur.Elem().Kind())
+		if isScalarPtr {
 
+		}
+		sb.maybeAddAttribute(attr, cur)
 		f := fieldInfo{
+			path:     fieldName,
 			attr:     attr,
-			isEntity: curIsStructPointer,
+			isEntity: isStructPtr,
 			typ:      cur,
 		}
 		{
 			vg := makeValueGetter(cur, offset)
-			if curIsStructPointer {
+			if isPtr {
 				f.value = func(u uintptr) interface{} {
 					got := vg(u)
 					if got.Elem().IsNil() {

@@ -5,16 +5,16 @@ package rel
 import "strconv"
 
 func _() {
-	// An "invalid array index" compiler error signifies that the constant valuesMap have changed.
+	// An "invalid array index" compiler error signifies that the constant values have changed.
 	// Re-run the stringer command to generate them again.
 	var x [1]struct{}
-	_ = x[TypeAttribute-63]
-	_ = x[SelfAttribute-62]
+	_ = x[Type-63]
+	_ = x[Self-62]
 }
 
-const _SystemAttribute_name = "IDAttributeTypeAttribute"
+const _SystemAttribute_name = "SelfType"
 
-var _SystemAttribute_index = [...]uint8{0, 11, 24}
+var _SystemAttribute_index = [...]uint8{0, 4, 8}
 
 func (i SystemAttribute) String() string {
 	i -= 62

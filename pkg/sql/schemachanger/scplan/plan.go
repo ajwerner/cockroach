@@ -13,10 +13,10 @@ package scplan
 import (
 	"sort"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scgraph"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan/deprules"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan/opgen"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/errors"
@@ -50,8 +50,6 @@ type Stage struct {
 	Revertible    bool
 }
 
-var opGenRegistry = opgen.NewRegistry()
-
 // MakePlan generates a Plan for a particular phase of a schema change, given
 // the initial state for a set of targets.
 func MakePlan(initial scpb.State, params Params) (_ Plan, err error) {
@@ -65,27 +63,12 @@ func MakePlan(initial scpb.State, params Params) (_ Plan, err error) {
 		}
 	}()
 
-	g, err := opGenRegistry.BuildGraph(initial)
+	g, err := opgen.BuildGraph(initial)
 	if err != nil {
 		return Plan{}, err
 	}
-
-	for _, dr := range depRules.rules {
-		q := dr.q.Prepare()
-		if err := q.Iterate(g.Database(), func(r rel.Result) error {
-			defer func() {
-				if r := recover(); r != nil {
-					panic(errors.AssertionFailedf("%s: %v", dr.name, r))
-				}
-			}()
-
-			from := r.Var(dr.from).(*scpb.Node)
-			to := r.Var(dr.to).(*scpb.Node)
-			g.AddDepEdge(from.Target, from.Status, to.Target, to.Status)
-			return nil
-		}); err != nil {
-			return Plan{}, err
-		}
+	if err := deprules.Apply(g); err != nil {
+		return Plan{}, err
 	}
 
 	stages, err := buildStages(initial, g)

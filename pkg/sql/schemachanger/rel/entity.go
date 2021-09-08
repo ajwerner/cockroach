@@ -105,7 +105,7 @@ func (e *entity) getTypedValue(attr Attribute, entities map[uintptr]*entity) (ty
 		return typedValue{}, false
 	}
 	var typ reflect.Type
-	if attr == TypeAttribute {
+	if attr == Type {
 		typ = schemaTypePtrType
 	} else if fi, ok := e.getTypeInfo().scalarAttrFields[attr]; ok {
 		typ = fi.typ
@@ -147,8 +147,8 @@ func asEntities(s *Schema, toPopulate ordinalSet, v interface{}, f func(child en
 	e.ptr = value.Pointer()
 	e.typ = uintptr(unsafe.Pointer(ti))
 	e.valuesMap.m = make(map[Ordinal]interface{})
-	e.add(TypeAttribute.Ordinal(), &e.typ)
-	e.add(SelfAttribute.Ordinal(), &e.ptr)
+	e.add(Type.Ordinal(), &e.typ)
+	e.add(Self.Ordinal(), &e.ptr)
 	for _, field := range ti.fields {
 		if field.isEntity {
 			val := field.value(e.ptr)

@@ -2,6 +2,7 @@ package rel
 
 import (
 	"reflect"
+	"sort"
 
 	"github.com/cockroachdb/errors"
 )
@@ -26,6 +27,54 @@ type queryBuilder struct {
 	slotIsEntity []bool
 }
 
+func newQuery(sc *Schema, clauses Clauses) *Query {
+	p := &queryBuilder{
+		sc:            sc,
+		variableSlots: map[Var]slotIdx{},
+	}
+	// Flatten away nested and clauses. We may need them at some point
+	// if we add something like or-join or not-join. At time of writing,
+	// the and case in processClause is an assertion failure.
+	clauses = clauses.flattened()
+	for _, t := range clauses {
+		p.processClause(t)
+	}
+
+	// Order the facts for unification. The ordering is first by variable
+	// variable and then by attribute.
+	//
+	// TODO(ajwerner): For disjunctions using Any, the code currently uses
+	// the index to constrain the search for each value in the "first"
+	// such fact for the variable. Maybe we should trust the user order of
+	// facts for a given variable rather than sorting by attribute ordinal.
+	// However, we do need all the facts with the same variable and attribute
+	// to be adjacent for the unification fixed point evaluation to work.
+	entities := p.findEntitySlots()
+	sort.SliceStable(p.facts, func(i, j int) bool {
+		if p.facts[i].variable == p.facts[j].variable {
+			return attrLess(p.facts[i].attr, p.facts[j].attr)
+		}
+		return p.facts[i].variable < p.facts[j].variable
+	})
+	// Ensure that the query does not already contain a contradiction as that
+	// is almost definitely a bug.
+	if contradictionFound, _, attr := unify(
+		p.facts, p.slots, nil,
+	); contradictionFound {
+		panic(errors.Errorf("query contains contradiction on %v", attr))
+	}
+	return &Query{
+		schema:        sc,
+		variables:     p.variables,
+		variableSlots: p.variableSlots,
+		clauses:       clauses,
+		entities:      entities,
+		facts:         p.facts,
+		slots:         p.slots,
+		filters:       p.filters,
+	}
+}
+
 func (p *queryBuilder) processClause(t Clause) {
 	switch t := t.(type) {
 	case *datomDecl:
@@ -33,9 +82,7 @@ func (p *queryBuilder) processClause(t Clause) {
 	case *eqDecl:
 		p.processEqDecl(t)
 	case *and:
-		for _, term := range *t {
-			p.processClause(term)
-		}
+		panic(errors.AssertionFailedf("and clauses should be flattened away"))
 	case *filterDecl:
 		p.processFilterDecl(t)
 	default:
@@ -51,6 +98,75 @@ func (p *queryBuilder) processFactDecl(fd *datomDecl) {
 	f.value = p.processValueExpr(fd.value)
 	p.typeCheck(f)
 	p.facts = append(p.facts, f)
+}
+
+func (p *queryBuilder) processEqDecl(t *eqDecl) {
+	varIdx := p.maybeAddVar(t.v, false)
+	valueIdx := p.processValueExpr(t.expr)
+	// This is somewhat inefficient but what it does is it lets
+	// us state that the variable is equal to itself and that it
+	// is equal to the value. It should be obvious that a variable
+	// is equal to itself, but we want to have the normal contradiction
+	// discovery machinery run.
+	//
+	// Note that there's no need to typeCheck because the Self accepts
+	// all types.
+	p.facts = append(p.facts,
+		fact{
+			variable: varIdx,
+			attr:     Self,
+			value:    valueIdx,
+		},
+		fact{
+			variable: varIdx,
+			attr:     Self,
+			value:    varIdx,
+		})
+}
+
+func (p *queryBuilder) processFilterDecl(t *filterDecl) {
+	fv := reflect.ValueOf(t.predicateFunc)
+	// Type check the function.
+	if err := checkNotNil(fv); err != nil {
+		panic(errors.Wrapf(err, "nil filter function for variables %s", t.vars))
+	}
+	if fv.Kind() != reflect.Func {
+		panic(errors.Errorf(
+			"non-function %T filter function for variables %s",
+			t.predicateFunc, t.vars,
+		))
+	}
+	ft := fv.Type()
+	if ft.NumOut() != 1 || ft.Out(0) != boolType {
+		panic(errors.Errorf(
+			"invalid non-bool return from %T filter function for variables %s",
+			t.predicateFunc, t.vars,
+		))
+	}
+	if ft.NumIn() != len(t.vars) {
+		panic(errors.Errorf(
+			"invalid %T filter function for variables %s accepts %d inputs",
+			t.predicateFunc, t.vars, ft.NumIn(),
+		))
+	}
+
+	slots := make([]slotIdx, len(t.vars))
+	for i, v := range t.vars {
+		slots[i] = p.maybeAddVar(v, false)
+		// TODO(ajwerner): This should end up constraining the slot type, but
+		// it currently doesn't. In fact, we have no way of constraining the
+		// type for a non-entity variable. Probably the way this should go is
+		// that the slots should carry constraints like types and any values.
+		// Then, when we go to populate them, we can enforce the constraints.
+		//
+		// Instead, as a hack, we've got a runtime check on the types to fail
+		// out if any of the types are not right.
+		checkSlotType(&p.slots[slots[i]], ft.In(i))
+	}
+	p.filters = append(p.filters, filter{
+		input:     slots,
+		predicate: fv,
+	})
 }
 
 func (p *queryBuilder) processValueExpr(rawValue Expr) slotIdx {
@@ -113,28 +229,6 @@ func (p *queryBuilder) findEntitySlots() (entitySlots []slotIdx) {
 	return entitySlots
 }
 
-func (p *queryBuilder) processEqDecl(t *eqDecl) {
-	varIdx := p.maybeAddVar(t.v, false)
-	valueIdx := p.processValueExpr(t.expr)
-	// This is somewhat inefficient but what it does is it lets
-	// us state that the variable is equal to itself and that it
-	// is equal to the value.
-	//
-	// Note that there's no need to typeCheck because the SelfAttribute accepts
-	// all types. We'll do a pass of type-checking at the end.
-	p.facts = append(p.facts,
-		fact{
-			variable: varIdx,
-			attr:     SelfAttribute,
-			value:    valueIdx,
-		},
-		fact{
-			variable: varIdx,
-			attr:     SelfAttribute,
-			value:    varIdx,
-		})
-}
-
 // typeCheck asserts that the value types for the fact are sane given the
 // attribute.
 func (p *queryBuilder) typeCheck(f fact) {
@@ -143,7 +237,7 @@ func (p *queryBuilder) typeCheck(f fact) {
 		return
 	}
 	switch f.attr {
-	case TypeAttribute:
+	case Type:
 		checkSlotType(s, schemaTypePtrType)
 	default:
 		checkSlotType(s, p.sc.attributeTypes[f.attr])
@@ -151,51 +245,6 @@ func (p *queryBuilder) typeCheck(f fact) {
 }
 
 var boolType = reflect.TypeOf((*bool)(nil)).Elem()
-
-func (p *queryBuilder) processFilterDecl(t *filterDecl) {
-	fv := reflect.ValueOf(t.predicateFunc)
-	// Type check the function.
-	if err := checkNotNil(fv); err != nil {
-		panic(errors.Wrapf(err, "nil filter function for variables %s", t.vars))
-	}
-	if fv.Kind() != reflect.Func {
-		panic(errors.Errorf(
-			"non-function %T filter function for variables %s",
-			t.predicateFunc, t.vars,
-		))
-	}
-	ft := fv.Type()
-	if ft.NumOut() != 1 || ft.Out(0) != boolType {
-		panic(errors.Errorf(
-			"invalid non-bool return from %T filter function for variables %s",
-			t.predicateFunc, t.vars,
-		))
-	}
-	if ft.NumIn() != len(t.vars) {
-		panic(errors.Errorf(
-			"invalid %T filter function for variables %s accepts %d inputs",
-			t.predicateFunc, t.vars, ft.NumIn(),
-		))
-	}
-
-	slots := make([]slotIdx, len(t.vars))
-	for i, v := range t.vars {
-		slots[i] = p.maybeAddVar(v, false)
-		// TODO(ajwerner): This should end up constraining the slot type, but
-		// it currently doesn't. In fact, we have no way of constraining the
-		// type for a non-entity variable. Probably the way this should go is
-		// that the slots should carry constraints like types and any values.
-		// Then, when we go to populate them, we can enforce the constraints.
-		//
-		// Instead, as a hack, we've got a runtime check on the types to fail
-		// out if any of the types are not right.
-		checkSlotType(&p.slots[slots[i]], ft.In(i))
-	}
-	p.filters = append(p.filters, filter{
-		input:     slots,
-		predicate: fv,
-	})
-}
 
 func checkSlotType(s *slot, exp reflect.Type) {
 	if !s.empty() {

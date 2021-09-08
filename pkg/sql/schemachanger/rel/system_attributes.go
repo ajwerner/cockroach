@@ -19,11 +19,11 @@ func (s SystemAttribute) Ordinal() Ordinal {
 const (
 	_ SystemAttribute = 64 - iota
 
-	// TypeAttribute is an attribute which stores the type of an variable.
-	TypeAttribute
+	// Type is an attribute which stores the type of an variable.
+	Type
 
-	// SelfAttribute is an attribute which stores the ID of an variable.
-	SelfAttribute
+	// Self is an attribute which stores the variable itself.
+	Self
 
 	maxUserAttribute Ordinal = 64 - iota
 )

@@ -1,11 +1,5 @@
 package rel
 
-import (
-	"sort"
-
-	"github.com/cockroachdb/errors"
-)
-
 // Query searches for sets of entities which uphold A set of constraints.
 type Query struct {
 	schema *Schema
@@ -63,64 +57,13 @@ func NewQuery(sc *Schema, clauses ...Clause) (_ *Query, err error) {
 	return q, nil
 }
 
-func newQuery(sc *Schema, clauses []Clause) *Query {
-	p := &queryBuilder{
-		sc:            sc,
-		variableSlots: map[Var]slotIdx{},
-	}
-	for _, t := range clauses {
-		p.processClause(t)
-	}
-
-	// Order the facts for unification. The ordering is first by variable
-	// variable and then by attribute.
-	//
-	// TODO(ajwerner): For disjunctions using Any, the code currently uses
-	// the index to constrain the search for each value in the "first"
-	// such fact for the variable. Maybe we should trust the user order of
-	// facts for a given variable rather than sorting by attribute ordinal.
-	// However, we do need all the facts with the same variable and attribute
-	// to be adjacent for the unification fixed point evaluation to work.
-	entities := p.findEntitySlots()
-	sort.SliceStable(p.facts, func(i, j int) bool {
-		if p.facts[i].variable == p.facts[j].variable {
-			return attrLess(p.facts[i].attr, p.facts[j].attr)
-		}
-		return p.facts[i].variable < p.facts[j].variable
-	})
-	// Ensure that the query does not already contain a contradiction as that
-	// is almost definitely a bug.
-	if contradictionFound, _, attr := unify(p.facts, p.slots, nil); contradictionFound {
-		panic(errors.Errorf("query contains contradiction on %v", attr))
-	}
-	return &Query{
-		schema:        sc,
-		variables:     p.variables,
-		variableSlots: p.variableSlots,
-		clauses:       clauses,
-		entities:      entities,
-		facts:         p.facts,
-		slots:         p.slots,
-		filters:       p.filters,
-	}
-}
-
-func attrLess(a, b Attribute) bool {
-	switch {
-	case a != nil && b != nil:
-		return a.Ordinal() < b.Ordinal()
-	case a != nil:
-		return false
-	case b != nil:
-		return true
-	default:
-		return false
-	}
-}
-
 // Prepare constructs a prepared query which can be used to iterate the results
 // of a database. Prepare is safe for concurrent use. The returned
 // PreparedQuery may not be used concurrently.
 func (q *Query) Prepare() PreparedQuery {
 	return newEvalContext(q)
+}
+
+func (q *Query) Clauses() Clauses {
+	return q.clauses
 }

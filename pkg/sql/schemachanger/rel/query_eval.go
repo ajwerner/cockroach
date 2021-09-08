@@ -100,7 +100,7 @@ func (ec *evalContext) visit(e *entity) error {
 	var slotsFilled util.FastIntSet
 	defer func() {
 		slotsFilled.ForEach(func(i int) {
-			ec.slots[i] = slot{}
+			ec.slots[i].typedValue = typedValue{}
 		})
 	}()
 
@@ -140,8 +140,10 @@ func (ec *evalContext) maybeFoundResult() (done bool, _ error) {
 	for _, f := range ec.q.filters {
 		// TODO(ajwerner): Catch panics here and convert them to errors.
 		ins := make([]reflect.Value, len(f.input))
+		insI := make([]interface{}, len(f.input))
 		for i, idx := range f.input {
-			in := reflect.ValueOf(ec.slots[idx].typedValue.toInterface())
+			inI := ec.slots[idx].typedValue.toInterface()
+			in := reflect.ValueOf(inI)
 			// Note that this will enforce that the type of the input to the filter
 			// matches the expectation by omitting results of the wrong type. This
 			// may or may not be the right behavior.
@@ -157,6 +159,7 @@ func (ec *evalContext) maybeFoundResult() (done bool, _ error) {
 				}
 			}
 			ins[i] = in
+			insI[i] = inI
 		}
 		outs := f.predicate.Call(ins)
 		if !outs[0].Bool() {
@@ -265,7 +268,7 @@ func (ec *evalContext) setEntitySlot(
 ) (foundContradiction bool) {
 	eSlot := ec.q.entities[ec.cur]
 	s := &ec.slots[eSlot]
-	idVal := e.get(SelfAttribute)
+	idVal := e.get(Self)
 	ok, foundContradiction := s.shouldSet(idVal)
 	if foundContradiction {
 		return true

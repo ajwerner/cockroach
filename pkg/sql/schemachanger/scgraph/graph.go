@@ -68,8 +68,8 @@ func New(initial scpb.State) (*Graph, error) {
 		nodeDepEdges: map[*scpb.Node][]*DepEdge{},
 		opToNode:     map[scop.Op]*scpb.Node{},
 		entities: rel.NewDatabase(screl.Schema, [][]rel.Attribute{
-			{rel.TypeAttribute, screl.DescID},
-			{screl.DescID, rel.TypeAttribute},
+			{rel.Type, screl.DescID},
+			{screl.DescID, rel.Type},
 			{screl.Element},
 			{screl.Target},
 			// TODO(ajwerner): Decide what more predicates are needed
@@ -170,9 +170,14 @@ func (g *Graph) GetNodeFromOp(op scop.Op) *scpb.Node {
 // AddDepEdge adds a dep edge connecting two nodes (specified by their targets
 // and statuses).
 func (g *Graph) AddDepEdge(
-	fromTarget *scpb.Target, fromStatus scpb.Status, toTarget *scpb.Target, toStatus scpb.Status,
+	rule string,
+	fromTarget *scpb.Target,
+	fromStatus scpb.Status,
+	toTarget *scpb.Target,
+	toStatus scpb.Status,
 ) {
 	de := &DepEdge{
+		rule: rule,
 		from: g.getOrCreateNode(fromTarget, fromStatus),
 		to:   g.getOrCreateNode(toTarget, toStatus),
 	}
@@ -212,6 +217,7 @@ func (oe *OpEdge) Revertible() bool { return oe.revertible }
 // implies that the To() node cannot be reached before the From() node. It
 // can be reached concurrently.
 type DepEdge struct {
+	rule     string
 	from, to *scpb.Node
 }
 
@@ -220,3 +226,5 @@ func (de *DepEdge) From() *scpb.Node { return de.from }
 
 // To implements the Edge interface.
 func (de *DepEdge) To() *scpb.Node { return de.to }
+
+func (de *DepEdge) Name() string { return de.rule }

@@ -19,8 +19,12 @@ type slot struct {
 
 	// any holds the acceptable valuesMap which may occupy this slot as
 	// indicated from an Any value.
-	//
-	// TODO(ajwerner): Consider boxing this inside of typedValue.
+	// TODO(ajwerner): Consider pulling this out into a set of constraints
+	// on the slot. Then we could potentially also have the type act as a
+	// constraint on the value. This mostly arises in the context of the
+	// filter functions but conceivably could arise also when we have
+	// equality filters and then variables used in attributes which require
+	// types.
 	any []typedValue
 }
 

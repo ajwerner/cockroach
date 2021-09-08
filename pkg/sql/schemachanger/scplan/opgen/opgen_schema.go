@@ -8,25 +8,30 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package scplan
+package opgen
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan/opgen"
 )
 
 func init() {
-	opGenRegistry.Register(
-		(*scpb.RelationDependedOnBy)(nil),
+	opRegistry.register(
+		(*scpb.Schema)(nil),
 		scpb.Target_DROP,
 		scpb.Status_PUBLIC,
-		opgen.To(scpb.Status_ABSENT,
-			opgen.Revertible(false),
-			opgen.Emit(func(this *scpb.RelationDependedOnBy) scop.Op {
-				return &scop.RemoveRelationDependedOnBy{
-					TableID:      this.TableID,
-					DependedOnBy: this.DependedOnBy,
+		to(scpb.Status_DELETE_ONLY,
+			revertible(false),
+			emit(func(this *scpb.Schema) scop.Op {
+				return &scop.MarkDescriptorAsDropped{
+					TableID: this.SchemaID,
+				}
+			})),
+		to(scpb.Status_ABSENT,
+			revertible(false),
+			emit(func(this *scpb.Schema) scop.Op {
+				return &scop.DrainDescriptorName{
+					TableID: this.SchemaID,
 				}
 			})),
 	)

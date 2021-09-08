@@ -29,7 +29,7 @@ var _ rel.Attribute = Attr(0)
 
 //go:generate stringer -type=Attr -trimprefix=Attr
 const (
-	_ Attr = iota // reserve 0 for rel.TypeAttribute
+	_ Attr = iota // reserve 0 for rel.Type
 	// DescID is the descriptor ID to which this element belongs.
 	DescID
 	// ReferencedDescID is the descriptor ID to which this element refers.

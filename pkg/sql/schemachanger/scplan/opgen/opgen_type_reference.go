@@ -8,30 +8,37 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package scplan
+package opgen
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan/opgen"
 )
 
 func init() {
-	opGenRegistry.Register(
-		(*scpb.DefaultExpression)(nil),
+	opRegistry.register(
+		(*scpb.TypeReference)(nil),
 		scpb.Target_DROP,
 		scpb.Status_PUBLIC,
-		opgen.To(scpb.Status_ABSENT,
-			opgen.Revertible(false),
-			opgen.Emit(func(this *scpb.DefaultExpression) scop.Op {
-				return &scop.RemoveColumnDefaultExpression{
-					TableID:  this.TableID,
-					ColumnID: this.ColumnID,
+		to(scpb.Status_ABSENT,
+			revertible(false),
+			emit(func(this *scpb.TypeReference) scop.Op {
+				return &scop.RemoveTypeBackRef{
+					TypeID: this.TypeID,
+					DescID: this.DescID,
 				}
-			}),
-			opgen.Emit(func(this *scpb.DefaultExpression) scop.Op {
-				return &scop.UpdateRelationDeps{
-					TableID: this.TableID,
+			})),
+	)
+
+	opRegistry.register(
+		(*scpb.TypeReference)(nil),
+		scpb.Target_ADD,
+		scpb.Status_ABSENT,
+		to(scpb.Status_PUBLIC,
+			emit(func(this *scpb.TypeReference) scop.Op {
+				return &scop.AddTypeBackRef{
+					TypeID: this.TypeID,
+					DescID: this.DescID,
 				}
 			})),
 	)

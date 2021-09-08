@@ -8,26 +8,29 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package scplan
+package opgen
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan/opgen"
 )
 
 func init() {
-	opGenRegistry.Register(
-		(*scpb.InboundForeignKey)(nil),
+	opRegistry.register(
+		(*scpb.DefaultExpression)(nil),
 		scpb.Target_DROP,
 		scpb.Status_PUBLIC,
-		opgen.To(scpb.Status_ABSENT,
-			opgen.Revertible(false),
-			opgen.Emit(func(this *scpb.InboundForeignKey) scop.Op {
-				return &scop.DropForeignKeyRef{
-					TableID:  this.OriginID,
-					Name:     this.Name,
-					Outbound: false,
+		to(scpb.Status_ABSENT,
+			revertible(false),
+			emit(func(this *scpb.DefaultExpression) scop.Op {
+				return &scop.RemoveColumnDefaultExpression{
+					TableID:  this.TableID,
+					ColumnID: this.ColumnID,
+				}
+			}),
+			emit(func(this *scpb.DefaultExpression) scop.Op {
+				return &scop.UpdateRelationDeps{
+					TableID: this.TableID,
 				}
 			})),
 	)

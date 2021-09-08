@@ -1,18 +1,27 @@
-package scplan
+// Copyright 2021 The Cockroach Authors.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
+package opgen
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
-	. "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scplan/opgen"
 )
 
 func init() {
-	opGenRegistry.Register(
+	opRegistry.register(
 		(*scpb.Column)(nil),
 		scpb.Target_ADD,
 		scpb.Status_ABSENT,
-		To(scpb.Status_DELETE_ONLY,
-			Emit(func(this *scpb.Column) scop.Op {
+		to(scpb.Status_DELETE_ONLY,
+			emit(func(this *scpb.Column) scop.Op {
 				return &scop.MakeAddedColumnDeleteOnly{
 					TableID:    this.TableID,
 					FamilyID:   this.FamilyID,
@@ -20,15 +29,15 @@ func init() {
 					Column:     this.Column,
 				}
 			})),
-		To(scpb.Status_DELETE_AND_WRITE_ONLY,
-			Emit(func(this *scpb.Column) scop.Op {
+		to(scpb.Status_DELETE_AND_WRITE_ONLY,
+			emit(func(this *scpb.Column) scop.Op {
 				return &scop.MakeAddedColumnDeleteAndWriteOnly{
 					TableID:  this.TableID,
 					ColumnID: this.Column.ID,
 				}
 			})),
-		To(scpb.Status_PUBLIC,
-			Emit(func(this *scpb.Column) scop.Op {
+		to(scpb.Status_PUBLIC,
+			emit(func(this *scpb.Column) scop.Op {
 				return &scop.MakeColumnPublic{
 					TableID:  this.TableID,
 					ColumnID: this.Column.ID,
@@ -36,26 +45,26 @@ func init() {
 			})),
 	)
 
-	opGenRegistry.Register(
+	opRegistry.register(
 		(*scpb.Column)(nil),
 		scpb.Target_DROP,
 		scpb.Status_PUBLIC,
-		To(scpb.Status_DELETE_AND_WRITE_ONLY,
-			Emit(func(this *scpb.Column) scop.Op {
+		to(scpb.Status_DELETE_AND_WRITE_ONLY,
+			emit(func(this *scpb.Column) scop.Op {
 				return &scop.MakeDroppedColumnDeleteAndWriteOnly{
 					TableID:  this.TableID,
 					ColumnID: this.Column.ID,
 				}
 			})),
-		To(scpb.Status_DELETE_AND_WRITE_ONLY,
-			Emit(func(this *scpb.Column) scop.Op {
+		to(scpb.Status_DELETE_AND_WRITE_ONLY,
+			emit(func(this *scpb.Column) scop.Op {
 				return &scop.MakeDroppedColumnDeleteOnly{
 					TableID:  this.TableID,
 					ColumnID: this.Column.ID,
 				}
 			})),
-		To(scpb.Status_ABSENT,
-			Emit(func(this *scpb.Column) scop.Op {
+		to(scpb.Status_ABSENT,
+			emit(func(this *scpb.Column) scop.Op {
 				return &scop.MakeColumnAbsent{
 					TableID:  this.TableID,
 					ColumnID: this.Column.ID,

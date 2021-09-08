@@ -119,8 +119,7 @@ func TestMusicInfo(t *testing.T) {
 	var a Var = "a"
 	q, err := NewQuery(sc,
 		a.Attr(A("artist"), Value(ArtistName("The Beatles!"))),
-		Filter("a")(func(artist *Artist) bool {
-			fmt.Println("hi", artist)
+		Filter("filter", "a")(func(artist *Artist) bool {
 			return true
 		}),
 	)
