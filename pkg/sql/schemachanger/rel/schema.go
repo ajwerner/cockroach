@@ -191,36 +191,48 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]A
 			}
 		}
 		isScalarPtr := isPtr && isSupportScalarKind(cur.Elem().Kind())
+		typ := cur
 		if isScalarPtr {
-
+			typ = cur.Elem()
 		}
-		sb.maybeAddAttribute(attr, cur)
+		sb.maybeAddAttribute(attr, typ)
 		f := fieldInfo{
 			path:     fieldName,
 			attr:     attr,
 			isEntity: isStructPtr,
-			typ:      cur,
+			typ:      typ,
+		}
+		getPtrValue := func(vg func(uintptr) reflect.Value) func(u uintptr) interface{} {
+			return func(u uintptr) interface{} {
+				got := vg(u)
+				if got.Elem().IsNil() {
+					return nil
+				}
+				return got.Elem().Interface()
+			}
 		}
 		{
 			vg := makeValueGetter(cur, offset)
 			if isPtr {
-				f.value = func(u uintptr) interface{} {
-					got := vg(u)
-					if got.Elem().IsNil() {
-						return nil
-					}
-					return got.Elem().Interface()
-				}
+				f.value = getPtrValue(vg)
 			} else {
 				f.value = func(u uintptr) interface{} { return vg(u).Interface() }
 			}
 		}
 		{
-			compType := sb.getComparableTypeMapping(cur)
-			vg := makeValueGetter(compType, offset)
-			f.comparableValue = func(u uintptr) interface{} {
-				return vg(u).Interface()
+			compType := sb.getComparableTypeMapping(typ)
+			if isScalarPtr {
+				compType = reflect.PtrTo(compType)
 			}
+			vg := makeValueGetter(compType, offset)
+			if isScalarPtr {
+				f.comparableValue = getPtrValue(vg)
+			} else {
+				f.comparableValue = func(u uintptr) interface{} {
+					return vg(u).Interface()
+				}
+			}
+
 		}
 		fieldInfos = append(fieldInfos, f)
 	}

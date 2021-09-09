@@ -1,6 +1,8 @@
 package rel_test
 
 import (
+	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
@@ -15,10 +17,6 @@ func TestRel(t *testing.T) {
 		require.NoError(t, yaml.Unmarshal([]byte(data), &e))
 		return &e
 	}
-	var (
-		a = mkEntity(t, `{pi8: 1, i8: 1}`)
-		b = mkEntity(t, `{pi8: 2, i8: 2}`)
-	)
 
 	type queryCase struct {
 		name    string
@@ -41,7 +39,23 @@ func TestRel(t *testing.T) {
 			results = append(results, cur)
 			return nil
 		}))
-		require.ElementsMatch(t, qc.results, results)
+		expResults := append(qc.results[:0:0], qc.results...)
+		findResulInExp := func(res []interface{}) (found bool) {
+			for i, exp := range expResults {
+				if reflect.DeepEqual(exp, res) {
+					expResults = append(expResults[:i], expResults[i+1:]...)
+					return true
+				}
+			}
+			return false
+		}
+
+		for _, res := range results {
+			if !findResulInExp(res) {
+				t.Fatalf("failed to find %v in %v", res, expResults)
+			}
+		}
+		require.Empty(t, expResults)
 	}
 	runTestCase := func(t *testing.T, tc testCase) {
 		db := rel.NewDatabase(Schema, nil)
@@ -54,6 +68,15 @@ func TestRel(t *testing.T) {
 			})
 		}
 	}
+	var (
+		a = mkEntity(t, `{i16: 1, i8: 1, pi8: 1}`)
+		b = mkEntity(t, `{i16: 2, i8: 2}`)
+	)
+
+	Schema.IterateAttributes(a, func(attribute rel.Attribute, value interface{}) error {
+		fmt.Printf("%s %T %v\n", attribute, value, value)
+		return nil
+	})
 	type v = rel.Var
 	for _, tc := range []testCase{
 		{
@@ -64,12 +87,13 @@ func TestRel(t *testing.T) {
 					name: "basic",
 					q: rel.MustQuery(
 						Schema,
-						v("a").Attr(PI8, rel.Value(int8(1))),
+						v("a").Attr(I16, rel.Value(int16(1))),
 						v("a").Attr(I8, v("ai8")),
+						v("a").Attr(PI8, v("api8")),
 					),
-					resVars: []v{"a", "ai8"},
+					resVars: []v{"a", "ai8", "api8"},
 					results: [][]interface{}{
-						{a, int8(1)},
+						{a, int8(1), int8(1)},
 					},
 				},
 			},
