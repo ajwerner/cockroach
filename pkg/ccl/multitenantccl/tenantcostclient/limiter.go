@@ -10,9 +10,7 @@ package tenantcostclient
 
 import (
 	"context"
-	"math"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcostmodel"
@@ -28,10 +26,6 @@ type limiter struct {
 	timeSource timeutil.TimeSource
 	tb         tokenBucket
 	qp         *quotapool.AbstractPool
-
-	// Total (rounded) RU needed for all currently waiting requests (or requests
-	// that are in the process of being fulfilled).
-	waitingRU int64
 }
 
 // Initial settings for the local token bucket. They are used only until the
@@ -49,14 +43,6 @@ func (l *limiter) Init(timeSource timeutil.TimeSource, notifyChan chan struct{})
 
 	l.tb.Init(timeSource.Now(), notifyChan, initialRate, initialRUs)
 
-	onWaitStartFn := func(ctx context.Context, poolName string, r quotapool.Request) {
-		atomic.AddInt64(&l.waitingRU, r.(*waitRequest).neededCeil())
-	}
-	onWaitFinishFn := func(
-		ctx context.Context, poolName string, r quotapool.Request, start time.Time,
-	) {
-		atomic.AddInt64(&l.waitingRU, -r.(*waitRequest).neededCeil())
-	}
 	// We use OnWaitStartLocked because otherwise we have a race between the token
 	// bucket noticing that it can't fulfill a request, and AvailableTokens()
 	// accounting for the RUs that are waiting.
@@ -66,8 +52,6 @@ func (l *limiter) Init(timeSource timeutil.TimeSource, notifyChan chan struct{})
 	l.qp = quotapool.New(
 		"tenant-side-limiter", l,
 		quotapool.WithTimeSource(timeSource),
-		quotapool.OnWaitStartLocked(onWaitStartFn),
-		quotapool.OnWaitFinish(onWaitFinishFn),
 	)
 }
 
@@ -118,8 +102,6 @@ func (l *limiter) AvailableTokens(now time.Time) tenantcostmodel.RU {
 		result = l.tb.AvailableTokens(now)
 		return false
 	})
-	// Subtract the RUs for currently waiting requests.
-	result -= tenantcostmodel.RU(atomic.LoadInt64(&l.waitingRU))
 	return result
 }
 
@@ -139,7 +121,7 @@ type waitRequest struct {
 	needed tenantcostmodel.RU
 }
 
-var _ quotapool.Request = (*waitRequest)(nil)
+var _ quotapool.OnCancelRequest = (*waitRequest)(nil)
 
 var waitRequestSyncPool = sync.Pool{
 	New: func() interface{} { return new(waitRequest) },
@@ -158,21 +140,21 @@ func putWaitRequest(r *waitRequest) {
 	waitRequestSyncPool.Put(r)
 }
 
-// neededCeil returns the amount of needed RUs, rounded up to an integer.
-func (req *waitRequest) neededCeil() int64 {
-	return int64(math.Ceil(float64(req.needed)))
-}
-
 // Acquire is part of quotapool.Request.
 func (req *waitRequest) Acquire(
-	ctx context.Context, res quotapool.Resource,
+	ctx context.Context, r quotapool.Resource, waited bool,
 ) (fulfilled bool, tryAgainAfter time.Duration) {
-	l := res.(*limiter)
+	l := r.(*limiter)
 	now := l.timeSource.Now()
-	return l.tb.TryToFulfill(now, req.needed)
+	return l.tb.TryToFulfill(now, req.needed, !waited)
 }
 
 // ShouldWait is part of quotapool.Request.
 func (req *waitRequest) ShouldWait() bool {
 	return true
+}
+
+// OnCancel is part of quotapool.OnCancelRequest.
+func (req *waitRequest) OnCancel(ctx context.Context, r quotapool.Resource) {
+	r.(*limiter).tb.waiting -= req.needed
 }

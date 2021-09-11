@@ -191,9 +191,9 @@ func putWaitRequest(r *waitRequest) {
 
 // Acquire is part of quotapool.Request.
 func (req *waitRequest) Acquire(
-	ctx context.Context, res quotapool.Resource,
+	ctx context.Context, r quotapool.Resource, waited bool,
 ) (fulfilled bool, tryAgainAfter time.Duration) {
-	tb := res.(*tokenBucket)
+	tb := r.(*tokenBucket)
 	needed := tb.config.CostModel.RequestCost(req.info)
 	return tb.TryToFulfill(quotapool.Tokens(needed))
 }

@@ -287,9 +287,9 @@ var _ quotapool.Request = (*bufferEntry)(nil)
 
 // Acquire implements quotapool.Request interface.
 func (be *bufferEntry) Acquire(
-	ctx context.Context, resource quotapool.Resource,
+	ctx context.Context, r quotapool.Resource, waited bool,
 ) (fulfilled bool, tryAgainAfter time.Duration) {
-	quota := resource.(*memQuota)
+	quota := r.(*memQuota)
 	if quota.canAllocateBelow > 0 {
 		if quota.allocated > quota.canAllocateBelow {
 			return false, 0

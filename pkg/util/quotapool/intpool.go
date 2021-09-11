@@ -451,9 +451,9 @@ type intRequest struct {
 }
 
 func (r *intRequest) Acquire(
-	ctx context.Context, v Resource,
+	ctx context.Context, res Resource, waited bool,
 ) (fulfilled bool, tryAgainAfter time.Duration) {
-	ia := v.(*intAlloc)
+	ia := res.(*intAlloc)
 	want := min(int64(r.want), int64(ia.p.Capacity()))
 	if ia.alloc < want {
 		return false, 0
@@ -468,9 +468,9 @@ func (r *intRequest) ShouldWait() bool { return true }
 type intRequestNoWait intRequest
 
 func (r *intRequestNoWait) Acquire(
-	ctx context.Context, v Resource,
+	ctx context.Context, res Resource, waited bool,
 ) (fulfilled bool, tryAgainAfter time.Duration) {
-	return (*intRequest)(r).Acquire(ctx, v)
+	return (*intRequest)(r).Acquire(ctx, res, waited)
 }
 
 func (r *intRequestNoWait) ShouldWait() bool { return false }
@@ -486,9 +486,9 @@ type intFuncRequest struct {
 }
 
 func (r *intFuncRequest) Acquire(
-	ctx context.Context, v Resource,
+	ctx context.Context, res Resource, waited bool,
 ) (fulfilled bool, tryAgainAfter time.Duration) {
-	ia := v.(*intAlloc)
+	ia := res.(*intAlloc)
 	pi := PoolInfo{
 		Available: uint64(max(0, ia.alloc)),
 		Capacity:  ia.p.Capacity(),
@@ -532,9 +532,9 @@ func (r *intFuncRequest) ShouldWait() bool { return true }
 type intFuncRequestNoWait intFuncRequest
 
 func (r *intFuncRequestNoWait) Acquire(
-	ctx context.Context, v Resource,
+	ctx context.Context, res Resource, waited bool,
 ) (fulfilled bool, tryAgainAfter time.Duration) {
-	return (*intFuncRequest)(r).Acquire(ctx, v)
+	return (*intFuncRequest)(r).Acquire(ctx, res, waited)
 }
 
 func (r *intFuncRequestNoWait) ShouldWait() bool { return false }

@@ -48,13 +48,25 @@ type Request interface {
 	// If tryAgainAfter is positive, acquisition will be attempted again after
 	// the specified duration. This is critical for the implementation of
 	// rate limiters on top of this package.
-	Acquire(context.Context, Resource) (fulfilled bool, tryAgainAfter time.Duration)
+	Acquire(ctx context.Context, r Resource, waited bool) (fulfilled bool, tryAgainAfter time.Duration)
 
 	// ShouldWait indicates whether this request should be queued. If this method
 	// returns false and there is insufficient capacity in the pool when the
 	// request is queued then ErrNotEnoughQuota will be returned from calls to
 	// Acquire.
 	ShouldWait() bool
+}
+
+// OnCancelRequest is an extension interface of Request which can be used to
+// perform a bookkeeping action in the case that the request is canceled.
+type OnCancelRequest interface {
+	Request
+
+	// OnCancel is called after a request has been canceled while it is waiting.
+	// This callback is called under the quotapool mutex and provides exclusive
+	// access to the resource. It will only be called if the request has done
+	// some waiting.
+	OnCancel(ctx context.Context, r Resource)
 }
 
 // ErrClosed is returned from Acquire after Close has been called.
@@ -291,7 +303,7 @@ func (qp *AbstractPool) Acquire(ctx context.Context, r Request) (err error) {
 		case <-qp.closer:
 			qp.Close("closer")
 		case <-ctx.Done():
-			qp.cleanupOnCancel(n)
+			qp.cleanupOnCancel(ctx, r, n)
 			return ctx.Err()
 		case <-qp.done:
 			// We don't need to 'unregister' ourselves as in the case when the
@@ -322,15 +334,12 @@ func (qp *AbstractPool) acquireFastPath(
 		return false, nil, 0, qp.closeErr
 	}
 	if qp.mu.q.len == 0 {
-		if fulfilled, tryAgainAfter = r.Acquire(ctx, qp.mu.quota); fulfilled {
+		if fulfilled, tryAgainAfter = r.Acquire(ctx, qp.mu.quota, false); fulfilled {
 			return true, nil, tryAgainAfter, nil
 		}
 	}
 	if !r.ShouldWait() {
 		return false, nil, 0, ErrNotEnoughQuota
-	}
-	if qp.onWaitStartLocked != nil {
-		qp.onWaitStartLocked(ctx, qp.name, r)
 	}
 	c := chanSyncPool.Get().(chan struct{})
 	return false, qp.mu.q.enqueue(c), tryAgainAfter, nil
@@ -355,21 +364,27 @@ func (qp *AbstractPool) tryAcquireOnNotify(
 	if len(n.c) > 0 {
 		<-n.c
 	}
-	if fulfilled, tryAgainAfter = r.Acquire(ctx, qp.mu.quota); fulfilled {
+	if fulfilled, tryAgainAfter = r.Acquire(ctx, qp.mu.quota, true); fulfilled {
 		n.c = nil
 		qp.notifyNextLocked()
 	}
 	return fulfilled, tryAgainAfter
 }
 
-func (qp *AbstractPool) cleanupOnCancel(n *notifyee) {
+func (qp *AbstractPool) cleanupOnCancel(ctx context.Context, r Request, n *notifyee) {
 	// No matter what, we're going to want to put our notify channel back in to
 	// the sync pool. Note that this defer call evaluates n.c here and is not
 	// affected by later code that sets n.c to nil.
 	defer chanSyncPool.Put(n.c)
 
+	onCancel, hasOnCancel := r.(OnCancelRequest)
+
 	qp.mu.Lock()
 	defer qp.mu.Unlock()
+
+	if hasOnCancel {
+		defer onCancel.OnCancel(ctx, qp.mu.quota)
+	}
 
 	// It we're not the head, prevent ourselves from being notified and move
 	// along.

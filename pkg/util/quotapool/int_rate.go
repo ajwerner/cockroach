@@ -134,9 +134,9 @@ func (rl *RateLimiter) putRateRequest(r *rateRequest) {
 }
 
 func (i *rateRequest) Acquire(
-	ctx context.Context, res Resource,
+	ctx context.Context, r Resource, waited bool,
 ) (fulfilled bool, tryAgainAfter time.Duration) {
-	tb := res.(*TokenBucket)
+	tb := r.(*TokenBucket)
 	return tb.TryToFulfill(Tokens(i.want))
 }
 
@@ -163,10 +163,10 @@ func (rl *RateLimiter) putRateAlloc(a *rateAlloc) {
 // quota.
 type rateRequestNoWait rateRequest
 
-func (r *rateRequestNoWait) Acquire(
-	ctx context.Context, resource Resource,
+func (req *rateRequestNoWait) Acquire(
+	ctx context.Context, r Resource, waited bool,
 ) (fulfilled bool, tryAgainAfter time.Duration) {
-	return (*rateRequest)(r).Acquire(ctx, resource)
+	return (*rateRequest)(req).Acquire(ctx, r, waited)
 }
 
 func (r *rateRequestNoWait) ShouldWait() bool {

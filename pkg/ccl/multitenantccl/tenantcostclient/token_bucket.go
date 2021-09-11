@@ -37,6 +37,10 @@ type tokenBucket struct {
 	// Currently available RUs. Can be negative (indicating debt).
 	available tenantcostmodel.RU
 
+	// Total RU needed for all currently waiting requests (or requests
+	// that are in the process of being fulfilled).
+	waiting tenantcostmodel.RU
+
 	lastUpdated time.Time
 }
 
@@ -121,14 +125,21 @@ func (tb *tokenBucket) SetupNotification(now time.Time, threshold tenantcostmode
 // TryToFulfill either removes the given amount if is available, or returns a
 // time after which the request should be retried.
 func (tb *tokenBucket) TryToFulfill(
-	now time.Time, amount tenantcostmodel.RU,
+	now time.Time, amount tenantcostmodel.RU, firstAttempt bool,
 ) (fulfilled bool, tryAgainAfter time.Duration) {
 	tb.update(now)
 
 	if amount <= tb.available {
 		tb.available -= amount
+		if !firstAttempt {
+			tb.waiting -= amount
+		}
 		tb.maybeNotify(now)
 		return true, 0
+	}
+
+	if firstAttempt {
+		tb.waiting += amount
 	}
 
 	// We have run out of available tokens; notify if we haven't already. This is
@@ -153,8 +164,8 @@ func (tb *tokenBucket) TryToFulfill(
 }
 
 // AvailableTokens returns the current number of available RUs. This can be
-// negative if we accumulated debt.
+// negative if we accumulated debt or have outstanding requests.
 func (tb *tokenBucket) AvailableTokens(now time.Time) tenantcostmodel.RU {
 	tb.update(now)
-	return tb.available
+	return tb.available - tb.waiting
 }
