@@ -17,7 +17,8 @@ import "sync"
 // It stores the data in a format which is convenient for performing
 // comparisons and lookups. If you want strongly typed data out of it,
 // you need to use a Schema to retrieve that data. Note that the library
-// expects all values to be stored in the map in the
+// expects all values to be stored in the map in the comparable, primitive
+// form and not in the strongly typed format.
 type valuesMap struct {
 	attrs ordinalSet
 	m     map[Ordinal]interface{}

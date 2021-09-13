@@ -6,6 +6,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
 )
 
+type OneOf struct {
+	E *Entity
+	N *Node
+}
+
 type Entity struct {
 	I8       int8
 	PI8      *int8
@@ -23,14 +28,15 @@ type Entity struct {
 	PUI32    *uint32
 	UI64     uint64
 	PUI64    *uint64
-	S        string
+	String   string
 	PS       *string
 	Uintptr  uintptr
 	PUintptr *uintptr
 }
 
-type Pair struct {
-	A, B *Entity
+type Node struct {
+	E    *Entity
+	L, R *Node
 }
 
 var Schema = rel.MustSchema("testschema", rel.Mappings{
@@ -52,14 +58,19 @@ var Schema = rel.MustSchema("testschema", rel.Mappings{
 			"PUI32":    PUI32,
 			"UI64":     UI64,
 			"PUI64":    PUI64,
-			"S":        S,
+			"String":   String,
 			"PS":       PS,
 			"Uintptr":  Uintptr,
 			"PUintptr": PUintptr,
 		},
-		reflect.TypeOf((*Pair)(nil)): {
-			"A": A,
-			"B": B,
+		reflect.TypeOf((*Node)(nil)): {
+			"E": E,
+			"L": L,
+			"R": R,
+		},
+		reflect.TypeOf((*OneOf)(nil)): {
+			"E": E,
+			"N": N,
 		},
 	},
 })

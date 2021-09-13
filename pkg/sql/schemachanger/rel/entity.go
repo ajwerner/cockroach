@@ -11,17 +11,21 @@ import (
 // entity is the internal representation of a struct pointer.
 // The idea is that ptr is the pointer itself and typ is a
 // pointer to the entityTypeSchema.
-type entity struct {
-	// Part of the reason ptr exists her and not just in the map is that we need
-	// to store a pointer to a value everywhere. Where better to attach that
-	// pointer than here, to this struct? The value stored in valuesMap will be
-	// pointing to this field.
-	ptr uintptr // interface{}
-	typ uintptr // *entityTypeSchema
+type entity valuesMap
 
-	// valuesMap stores all the attributes, including the types and pointer.
-	valuesMap
-}
+// Part of the reason ptr exists here and not just in the map is that we need
+// to store a pointer to a value everywhere. Where better to attach that
+// pointer than here, to this struct? The value stored in valuesMap will be
+// pointing to this field. The other approach to all of this might be to
+// just have the map and in it just store the object we've used to construct
+// this. In practice, the interface header is the pointer and the type info.
+// Then, to be honest, we could just use the schema to look up the field information.
+//	ptr uintptr // interface{}
+//typ uintptr // *entityTypeSchema
+
+// valuesMap stores all the attributes, including the types and pointer.
+//valuesMap
+//}
 
 func (sc *Schema) EqualOn(attrs []Attribute, a, b interface{}) (eq bool) {
 	_, eq = sc.CompareOn(attrs, a, b)
@@ -32,9 +36,9 @@ func (sc *Schema) EqualOn(attrs []Attribute, a, b interface{}) (eq bool) {
 // is malformed.
 func (sc *Schema) CompareOn(attrs []Attribute, a, b interface{}) (less, eq bool) {
 	toPopulate := makeOrdinalSetWithAttributes(attrs)
-	var ae, be entity
-	set := func(v interface{}, e *entity) {
-		if err := asEntities(sc, toPopulate, v, func(child entity) error {
+	var ae, be *entity
+	set := func(v interface{}, e **entity) {
+		if err := asEntities(sc, toPopulate, v, func(child *entity) error {
 			*e = child
 			return nil
 		}); err != nil {
@@ -43,8 +47,10 @@ func (sc *Schema) CompareOn(attrs []Attribute, a, b interface{}) (less, eq bool)
 	}
 	set(a, &ae)
 	set(b, &be)
+	defer putValues((*valuesMap)(ae))
+	defer putValues((*valuesMap)(be))
 	for _, a := range attrs {
-		if less, eq = compareOn(a, &ae.valuesMap, &be.valuesMap); !eq {
+		if less, eq = compareOn(a, (*valuesMap)(ae), (*valuesMap)(be)); !eq {
 			return less, eq
 		}
 	}
@@ -54,21 +60,22 @@ func (sc *Schema) CompareOn(attrs []Attribute, a, b interface{}) (less, eq bool)
 func (sc *Schema) IterateAttributes(
 	entityI interface{}, f func(attribute Attribute, value interface{}) error,
 ) (err error) {
-	var v entity
-	if err := asEntities(sc, allOrdinals, entityI, func(child entity) error {
+	var v *entity
+	if err := asEntities(sc, allOrdinals, entityI, func(child *entity) error {
+		if v != nil {
+			putValues((*valuesMap)(v))
+			v = nil
+		}
 		v = child
 		return nil
 	}); err != nil {
 		return err
 	}
-	ti := v.getTypeInfo()
 	v.attrs.ForEach(sc, func(a Attribute) (wantMore bool) {
-		if _, isScalar := ti.scalarAttrFields[a]; !isScalar ||
-			// Only propagate user attributes.
-			a.Ordinal() >= maxUserAttribute {
+		if a.Ordinal() >= maxUserAttribute {
 			return true
 		}
-		tv, ok := v.getTypedValue(a, nil)
+		tv, ok := v.getTypedValue(sc, a)
 		if !ok {
 			err = errors.AssertionFailedf(
 				"failed to get typed value for populated scalar attribute %v for %T",
@@ -85,8 +92,17 @@ func (sc *Schema) IterateAttributes(
 	return err
 }
 
-func (e *entity) getTypeInfo() *entityTypeSchema {
-	return (*entityTypeSchema)(unsafe.Pointer(e.typ))
+func (e *entity) get(attribute Attribute) interface{} {
+	switch attribute {
+	case Type:
+		return reflect.TypeOf(e.get(Self))
+	default:
+		return (*valuesMap)(e).get(attribute)
+	}
+}
+
+func (e *entity) getTypeInfo(sc *Schema) *entityTypeSchema {
+	return sc.entityTypeSchemas[e.get(Type).(reflect.Type)]
 }
 
 // TODO(ajwerner): document what's going on here. For scalar fields we know
@@ -99,24 +115,20 @@ func (e *entity) getTypeInfo() *entityTypeSchema {
 // Another approach would be to store entities by the pointer to their
 // box rather than its value. That way, we could avoid needing the database
 // at the expense of allocating the box every time we decompose into an entity.
-func (e *entity) getTypedValue(attr Attribute, entities map[uintptr]*entity) (typedValue, bool) {
+func (e *entity) getTypedValue(sc *Schema, attr Attribute) (typedValue, bool) {
 	val := e.get(attr)
 	if val == nil {
 		return typedValue{}, false
 	}
 	var typ reflect.Type
 	if attr == Type {
-		typ = schemaTypePtrType
-	} else if fi, ok := e.getTypeInfo().scalarAttrFields[attr]; ok {
-		typ = fi.typ
+		typ = reflectTypeType
+	} else if fi, ok := e.getTypeInfo(sc).attrFields[attr]; ok && !fi[0].isEntity {
+		// This is a bit of a hack to deal with the fact that an attribute
+		// might have multiple fields which can lead to its value.
+		typ = fi[0].typ
 	} else {
-		ee, ok := entities[*val.(*uintptr)]
-		if !ok {
-			panic(errors.AssertionFailedf(
-				"variable references an entity not stored in the database",
-			))
-		}
-		val, typ = &ee.ptr, ee.getTypeInfo().typ
+		typ = reflect.TypeOf(val)
 	}
 	return typedValue{
 		typ:   typ,
@@ -124,34 +136,24 @@ func (e *entity) getTypedValue(attr Attribute, entities map[uintptr]*entity) (ty
 	}, true
 }
 
-func (sc *Schema) GetScalarField(attribute Attribute, v interface{}) (interface{}, error) {
-	ti, value, err := getEntityValueInfo(sc, v)
-	if err != nil {
-		return nil, err
-	}
-	fi, ok := ti.scalarAttrFields[attribute]
-	if !ok {
-		return nil, errors.Errorf("no scalar field defined on %v for %v", ti.typ, attribute)
-	}
-	return fi.value(value.Pointer()), nil
+func (e *entity) asMap() *valuesMap {
+	return (*valuesMap)(e)
 }
 
-// asEntities decomposes
-func asEntities(s *Schema, toPopulate ordinalSet, v interface{}, f func(child entity) error) error {
+func asEntities(
+	s *Schema, toPopulate ordinalSet, v interface{}, f func(child *entity) error,
+) error {
 	ti, value, err := getEntityValueInfo(s, v)
 	if err != nil {
 		return err
 	}
 
-	var e entity
-	e.ptr = value.Pointer()
-	e.typ = uintptr(unsafe.Pointer(ti))
-	e.valuesMap.m = make(map[Ordinal]interface{})
-	e.add(Type.Ordinal(), &e.typ)
-	e.add(Self.Ordinal(), &e.ptr)
+	e := getValues()
+	e.add(Type.Ordinal(), value.Type())
+	e.add(Self.Ordinal(), v)
 	for _, field := range ti.fields {
 		if field.isEntity {
-			val := field.value(e.ptr)
+			val := field.value(value.Pointer())
 			if val == nil {
 				continue
 			}
@@ -161,11 +163,20 @@ func asEntities(s *Schema, toPopulate ordinalSet, v interface{}, f func(child en
 			if e.attrs.Contains(field.attr.Ordinal()) {
 				return errors.Errorf("%v contains more than one non-nil entry for %v at %s", ti.typ, field.attr, field)
 			}
+			e.add(field.attr.Ordinal(), val)
+			continue
+		} else {
+			compVal := field.comparableValue(value.Pointer())
+			if field.isPtr && compVal == nil {
+				continue
+			}
+			if compVal == nil {
+				return errors.AssertionFailedf("got nil value for non-pointer scalar attribute %s of type %s", field.attr, ti.typ)
+			}
+			e.add(field.attr.Ordinal(), compVal)
 		}
-		compVal := field.comparableValue(e.ptr)
-		e.add(field.attr.Ordinal(), compVal)
 	}
-	return f(e)
+	return f((*entity)(e))
 }
 
 func getEntityValueInfo(s *Schema, v interface{}) (*entityTypeSchema, reflect.Value, error) {
@@ -179,8 +190,6 @@ func getEntityValueInfo(s *Schema, v interface{}) (*entityTypeSchema, reflect.Va
 	}
 	// Note that the fact that we have an entry for this variable type is
 	// how we get to assume that this type must be a struct pointer.
-	// TODO(ajwerner): Consider how do deal with non-pointer structs here.
-	// We could allocate a pointer here and take a shallow clone.
 	if vv.IsNil() {
 		return nil, reflect.Value{}, errors.Errorf("invalid nil %T variable value", vv.Type())
 	}

@@ -246,7 +246,7 @@ func (ec *evalContext) propagateCurEntityValues(
 		if f.variable != ec.q.entities[ec.cur] {
 			continue
 		}
-		tv, ok := e.getTypedValue(f.attr, ec.db.entities)
+		tv, ok := e.getTypedValue(ec.db.schema, f.attr)
 		if !ok {
 			return true // we have no value for this attribute, contradiction
 		}
@@ -275,7 +275,7 @@ func (ec *evalContext) setEntitySlot(
 	}
 	if ok {
 		s.set(typedValue{
-			typ:   e.getTypeInfo().typ,
+			typ:   e.getTypeInfo(ec.db.Schema()).typ,
 			value: idVal,
 		})
 		slotsFilled.Add(int(eSlot))
@@ -285,19 +285,14 @@ func (ec *evalContext) setEntitySlot(
 
 // Check if the slot is already filled with a value because it was
 // already bound. If it does not exist in the database, then there's
-// a contraction and we can return. If it does, then we can
+// a contraction, and we can return. If it does, then we can visit
+// the entity as opposed to needing to find it.
 func (ec *evalContext) maybeVisitAlreadyBoundEntity() (done bool, _ error) {
 	s := &ec.slots[ec.q.entities[ec.cur]]
 	if s.empty() {
 		return false, nil
 	}
-	v, ok := s.value.(*uintptr)
-	if !ok {
-		return true, errors.AssertionFailedf(
-			"expected *uintptr for variable value, found %T", s.value,
-		)
-	}
-	e, ok := ec.db.entities[*v]
+	e, ok := ec.db.entities[s.value]
 	if !ok {
 		return true, nil // contradiction
 	}

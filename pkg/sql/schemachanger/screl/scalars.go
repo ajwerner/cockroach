@@ -7,7 +7,7 @@ import (
 )
 
 func GetDescID(e scpb.Element) descpb.ID {
-	id, err := Schema.GetScalarField(DescID, e)
+	id, err := Schema.GetAttribute(DescID, e)
 	if err != nil {
 		panic(errors.NewAssertionErrorWithWrappedErrf(
 			err, "failed to retrieve descriptor ID for %T", e,

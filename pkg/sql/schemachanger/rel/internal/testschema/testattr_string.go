@@ -24,17 +24,19 @@ func _() {
 	_ = x[PUI32-13]
 	_ = x[UI64-14]
 	_ = x[PUI64-15]
-	_ = x[S-16]
+	_ = x[String-16]
 	_ = x[PS-17]
 	_ = x[Uintptr-18]
 	_ = x[PUintptr-19]
-	_ = x[A-20]
-	_ = x[B-21]
+	_ = x[E-20]
+	_ = x[L-21]
+	_ = x[R-22]
+	_ = x[N-23]
 }
 
-const _TestAttr_name = "I8PI8I16PI16I32PI32I64PI64UI8PUI8UI16PUI16UI32PUI32UI64PUI64SPSUintptrPUintptrAB"
+const _TestAttr_name = "I8PI8I16PI16I32PI32I64PI64UI8PUI8UI16PUI16UI32PUI32UI64PUI64StringPSUintptrPUintptrELRN"
 
-var _TestAttr_index = [...]uint8{0, 2, 5, 8, 12, 15, 19, 22, 26, 29, 33, 37, 42, 46, 51, 55, 60, 61, 63, 70, 78, 79, 80}
+var _TestAttr_index = [...]uint8{0, 2, 5, 8, 12, 15, 19, 22, 26, 29, 33, 37, 42, 46, 51, 55, 60, 66, 68, 75, 83, 84, 85, 86, 87}
 
 func (i TestAttr) String() string {
 	if i < 0 || i >= TestAttr(len(_TestAttr_index)-1) {

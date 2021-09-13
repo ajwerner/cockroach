@@ -26,10 +26,12 @@ const (
 	PUI32
 	UI64
 	PUI64
-	S
+	String
 	PS
 	Uintptr
 	PUintptr
-	A
-	B
+	E
+	L
+	R
+	N
 )

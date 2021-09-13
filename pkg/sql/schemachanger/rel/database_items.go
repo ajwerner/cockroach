@@ -1,6 +1,7 @@
 package rel
 
 import (
+	"fmt"
 	"math"
 	"sync"
 
@@ -20,6 +21,9 @@ var _ item = (*containerItem)(nil)
 var _ item = (*valuesItem)(nil)
 
 func compareItems(a, b item) (less bool) {
+	defer func() {
+		fmt.Printf("%v %v %v\n", less, a.getValues(), b.getValues())
+	}()
 	// Compare on the index attributes first.
 	index := a.getIndexSpec()
 	toCompare := a.compareAttrs().Intersection(b.compareAttrs())
@@ -27,6 +31,7 @@ func compareItems(a, b item) (less bool) {
 		if !toCompare.Contains(at.Ordinal()) {
 			break
 		}
+
 		var eq bool
 		less, eq = compareOn(at, a.getValues(), b.getValues())
 		if !eq {
@@ -55,7 +60,7 @@ type containerItem struct {
 	*entity
 }
 
-func (c *containerItem) getValues() *valuesMap { return &c.valuesMap }
+func (c *containerItem) getValues() *valuesMap { return c.asMap() }
 
 // TODO(ajwerner): We are returning MaxUint64 here to say that we do
 // store nil valuesMap in the index. I don't think there's any value in this

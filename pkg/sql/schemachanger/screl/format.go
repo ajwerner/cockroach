@@ -30,8 +30,6 @@ func FormatElement(e scpb.Element, w io.Writer) (err error) {
 	panicIfN(io.WriteString(w, reflect.TypeOf(e).Elem().Name()))
 	panicIfN(io.WriteString(w, ": {"))
 
-	// TODO(ajwerner): This is totally janky. Instead we ought to just iterate
-	// the variables we do have.
 	var written int
 	if err := Schema.IterateAttributes(e, func(attr rel.Attribute, value interface{}) error {
 		if written > 0 {

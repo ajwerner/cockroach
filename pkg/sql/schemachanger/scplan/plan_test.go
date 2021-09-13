@@ -106,7 +106,7 @@ func TestPlanAlterTable(t *testing.T) {
 					scplan.Params{
 						ExecutionPhase: scop.PostCommitPhase,
 					})
-				require.NoError(t, err)
+				require.NoError(t, err, "%+v", err)
 
 				if d.Cmd == "ops" {
 					return marshalOps(t, &plan)

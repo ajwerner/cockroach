@@ -1,9 +1,6 @@
 package rel
 
-import (
-	"reflect"
-	"unsafe"
-)
+import "reflect"
 
 type slotIdx int
 
@@ -37,12 +34,12 @@ type typedValue struct {
 }
 
 func (tv typedValue) toInterface() interface{} {
-	if tv.typ == schemaTypePtrType {
-		return (*entityTypeSchema)(unsafe.Pointer(*tv.value.(*uintptr))).typ
+	if tv.typ == reflectTypeType {
+		return tv.value.(reflect.Type)
 	}
 	if tv.typ.Kind() == reflect.Ptr {
 		if tv.typ.Elem().Kind() == reflect.Struct {
-			return reflect.NewAt(tv.typ.Elem(), unsafe.Pointer(*tv.value.(*uintptr))).Interface()
+			return tv.value
 		}
 		return reflect.ValueOf(tv.value).Convert(tv.typ).Interface()
 	}

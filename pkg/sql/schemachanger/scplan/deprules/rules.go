@@ -194,9 +194,6 @@ func init() {
 
 			id.Entities(screl.DescID, column, index),
 
-			direction.Entities(screl.Direction, columnTarget, indexTarget),
-			status.Entities(screl.Status, columnNode, indexNode),
-
 			rel.Filter(
 				"column-in-index", column, index,
 			)(func(from *Column, to Entity) bool {
@@ -211,6 +208,9 @@ func init() {
 				}
 				return indexContainsColumn(idx, from.Column.ID)
 			}),
+
+			direction.Entities(screl.Direction, columnTarget, indexTarget),
+			status.Entities(screl.Status, columnNode, indexNode),
 
 			screl.JoinTargetNode(column, columnTarget, columnNode),
 			screl.JoinTargetNode(index, indexTarget, indexNode),

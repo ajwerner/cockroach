@@ -17,41 +17,28 @@
 // queried using an embedded query language modeled on a non-recursive datalog
 // and inspired heavily by datomic.
 //
-// Terminology
+// Why rel?
 //
-// TODO(ajwerner)
-// Clause, Entity, Attribute, Value, Fact.
+// 1) Explainability, maintainability, observability
 //
-// Design
+// The optimizer team gets a lot of bang for its buck being able to
+// think about complex rules in a declarative way. Furthermore, when
+// a plan is selected, the rules can be introspected. That's extremely
+// valuable. The rules produced by rel are deterministic and much more
+// compact than efficient go code. Because the rules represent pure
+// functions, they omit many of the concerns of imperative programming.
 //
-// TODO(ajwerner):
-//  * Be reasonably general, should be able to model everything in protos.
-//  * Use underlying fields of structs to avoid allocating like crazy.
-//  * Use the go type system, erase it internally.
+// Uniformity dealing with heterogeneous data
 //
-// Query Language
+// The schema is fundamentally full of heterogeneous data with a number of cross
+// references. Having a uniform mechanism to describe and interact with this
+// complexity will yield benefits over time as we need to migrate and support
+// different versions with different representations of these structures.
 //
-// The query language provides a mechanism to reason relationally about data
-// stored in regular structs which may themselves have hierarchy between them.
-// The structure of the query language is motivated by datomic which is itself
-// motivated by datalog. However, the implementation requirements are simpler
-// than datomic. We don't need durability and we know that we're embedded in a
-// running program. The language is not a true datalog: it does not really
-// have the notion of a rule and it certainly doesn't have a means to express
-// recursion during the execution of queries. This means that the queries can
-// only represent fixed depth joins between relations. Of course, users of
-// libraries can generate queries of an arbitrary depth. Furthermore, users
-// can implement their own forms of recursion.
+// Go lacks both generic and pattern-matching which is demanded by this style
+// of program.
 //
-// Future work
-//
-// * Arrays, Maps, Slices
-//
-// TODO(ajwerner): Note that arrays of bytes can probably be used as slice but
-// that would probably be unfortunate. We'd probably prefer to shove them into
-// a string using some unsafe magic
-//
-// Motivation
+// 2) Runtime considerations
 //
 // The primary motivation for this package was the relatively straightforward
 // problem of determining the set of dependency edges which need to exist in
@@ -103,4 +90,64 @@
 // indexes in O(N*log(N)) per statement meaning at worst N^2 log(N) which is
 // acceptable for an N of ~1000 as opposed to N^3 which isn't really.
 //
+// Design Goals
+//
+//  * Generality: the library was designed such that, over time we could model
+//    and query all data that one might be able to represent in protobufs.
+//  * Relative efficiency: The library should be somewhat efficient such that
+//    you wouldn't reject using it outright because it's so inefficient. In
+//    particular, this means big-O runtime, but also it means being within
+//    an order of magnitude or two of writing the code by hand.
+//  * Observability.
+//  * Declarative.
+//  * Embedded in go in the go type system.
+//
+// Terminology
+//
+// The basic design of the library is that we want to index and find tuples of
+// struct pointers, which we term entities. These entities have attribute
+// values which can be queries and compared. Readers familiar with RDF triples
+// should feel comfortable with these concepts.
+//
+// Before we can construct a database, we need to define a mapping from entity
+// type fields to attributes. The NewSchema constructor will infer types based
+// on the fields which carry the given attributes.
+//
+// There are a couple of builtin attributes which all entities carry: Self and
+// Type.
+//
+// Internally, we can think of a database as being a set of facts which is just
+// the set of these (Entity, Attribute, Value) 3-tuples. The query language
+// provides a mechanism to iterate all assignments of entities named by
+// variables in the query such that all of the constraints of the query are
+// upheld. The language is inspired heavily by but is simpler than datomic.
+// The language does not permit any recursion or runtime creation of facts.
+//
+// Query Language
+//
+// The query language provides a mechanism to reason relationally about data
+// stored in regular structs which may themselves have hierarchy between them.
+// The structure of the query language is motivated by datomic which is itself
+// motivated by datalog. However, the implementation requirements are simpler
+// than datomic. We don't need durability and we know that we're embedded in a
+// running program. The language is not a true datalog: it does not really
+// have the notion of a rule and it certainly doesn't have a means to express
+// recursion during the execution of queries. This means that the queries can
+// only represent fixed depth joins between relations. Of course, users of
+// libraries can generate queries of an arbitrary depth. Furthermore, users
+// can implement their own forms of recursion.
+//
+// Future work
+//
+// * Arrays, Maps, Slices
+// * Variable binding
+//    - If we wanted to make recusion more sane, it'd be better to plan a query
+//      with some input parameters and then be able to invoke it on those
+//      parameters. In that way, we could imagine invoking a query recursively.
+//
+// TODO(ajwerner): Note that arrays of bytes can probably be used as slice but
+// that would probably be unfortunate. We'd probably prefer to shove them into
+// a string using some unsafe magic
+//
+
 package rel

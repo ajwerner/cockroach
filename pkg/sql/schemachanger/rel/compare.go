@@ -93,8 +93,28 @@ func compare(a, b interface{}) (less, eq bool) {
 			return true, false
 		}
 		return false, *a == *b
+	case reflect.Type:
+		b := b.(reflect.Type)
+		switch {
+		case a == b:
+			return false, true
+		case a.PkgPath() == b.PkgPath():
+			return a.Name() < b.Name(), false
+		default:
+			return a.PkgPath() < b.PkgPath(), false
+		}
 	default:
-		panic(errors.AssertionFailedf("incomparable types %T and %T", a, b))
+		// We expect this to be two struct pointers, probably of the same kind but,
+		// we don't care. If it's a struct pointer, we're going to compare on
+		// pointer value
+		av := reflect.ValueOf(a)
+		bv := reflect.ValueOf(b)
+		if av.Type().Kind() != reflect.Ptr || av.Type().Elem().Kind() != reflect.Struct ||
+			bv.Type().Kind() != reflect.Ptr || bv.Type().Elem().Kind() != reflect.Struct {
+			panic(errors.AssertionFailedf("incomparable types %T and %T", a, b))
+		}
+		ap, bp := av.Pointer(), bv.Pointer()
+		return ap < bp, ap == bp
 	}
 }
 
@@ -111,7 +131,6 @@ var kindTypeMap = map[reflect.Kind]reflect.Type{
 	reflect.Uint8:   reflect.TypeOf((*uint8)(nil)).Elem(),
 	reflect.Uintptr: reflect.TypeOf((*uintptr)(nil)).Elem(),
 	reflect.String:  reflect.TypeOf((*string)(nil)).Elem(),
-	reflect.Ptr:     reflect.TypeOf((*uintptr)(nil)).Elem(),
 
 	// TODO(ajwerner): Fill out all of the kinds.
 }
@@ -155,13 +174,13 @@ func compareOn(attr Attribute, a, b *valuesMap) (less, eq bool) {
 
 // Compare compares two elements by their attributes.
 func compareEntities(s *Schema, a, b *entity) (less, eq bool) {
-	if a.ptr == b.ptr {
+	if a.get(Self) == b.get(Self) {
 		return false, true
 	}
 	ordinalSet.Union(
 		a.attrs, b.attrs,
 	).ForEach(s, func(attr Attribute) (wantMore bool) {
-		less, eq = compareOn(attr, &a.valuesMap, &b.valuesMap)
+		less, eq = compareOn(attr, a.asMap(), b.asMap())
 		return eq
 	})
 	return less, eq

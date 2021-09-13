@@ -14,7 +14,7 @@ func TestRulesYAML(t *testing.T) {
 		if d.Cmd != "rules" {
 			d.Fatalf(t, "rules is the only command")
 		}
-		out, err := yaml.Marshal(depRules.rules)
+		out, err := yaml.Marshal(depRules)
 		if err != nil {
 			d.Fatalf(t, "failed to marshal: %v", err)
 		}

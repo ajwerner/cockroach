@@ -12,40 +12,20 @@ package rel
 
 import (
 	"reflect"
-	"unsafe"
 
 	"github.com/cockroachdb/errors"
 )
 
-// schemaTypePtr is an internal type used to mark pointers to
-// entityTypeSchema but which want to ultimately return a value
-// of reflect.Type
-type schemaTypePtr uintptr
-
 var (
-	schemaTypePtrType  = reflect.TypeOf((*schemaTypePtr)(nil)).Elem()
 	reflectTypeType    = reflect.TypeOf((*reflect.Type)(nil)).Elem()
 	emptyInterfaceType = reflect.TypeOf((*interface{})(nil)).Elem()
 )
 
-func makeComparableValue(sc *Schema, val interface{}) (typedValue, error) {
-	// We want to accept only valuesMap of type reflect.Type but even
-	// then we only want to accept the types we know about as they
-	// are the only types we'll ever accept for entities (right?).
-	// I think there's some oddness when it comes to interfaces.
-	// Like, ideally you could specify an interface type. For now
-	// we could say that we do not support that.
+func makeComparableValue(val interface{}) (typedValue, error) {
 	if typ, isType := val.(reflect.Type); isType {
-		ti, ok := sc.entityTypeSchemas[typ]
-		if !ok {
-			// We have A problem here with the typing.
-			return typedValue{}, errors.Errorf(
-				"unknown variable type %T", val)
-		}
-		typPtr := uintptr(unsafe.Pointer(ti))
 		return typedValue{
-			typ:   schemaTypePtrType,
-			value: &typPtr,
+			typ:   reflectTypeType,
+			value: typ,
 		}, nil
 	}
 	vv := reflect.ValueOf(val)

@@ -26,7 +26,7 @@ type Database struct {
 	// based on all attributes.
 	indexes []index
 	// entities stores all the entities keyed on its pointer value.
-	entities map[uintptr]*entity
+	entities map[interface{}]*entity
 }
 
 // Schema returns the schema associated with the tree.
@@ -40,7 +40,7 @@ func NewDatabase(sc *Schema, indexes [][]Attribute) *Database {
 	t := &Database{
 		schema:   sc,
 		indexes:  make([]index, len(indexes)+1),
-		entities: make(map[uintptr]*entity),
+		entities: make(map[interface{}]*entity),
 	}
 	// Index everything by all of the attributes. This serves as the primary
 	// index.
@@ -72,14 +72,14 @@ func NewDatabase(sc *Schema, indexes [][]Attribute) *Database {
 // extensional, as in, does some variable exist with the same attributes
 // ignoring pointer value? Either way, what we have here does not fly.
 func (t *Database) Insert(e interface{}) error {
-	return asEntities(t.schema, allOrdinals, e, func(entity entity) error {
-		return t.insert(&entity)
+	return asEntities(t.schema, allOrdinals, e, func(entity *entity) error {
+		return t.insert(entity)
 	})
 }
 
 // TODO(ajwerner): Deal with already inserted data.
 func (t *Database) insert(e *entity) error {
-	t.entities[e.ptr] = e
+	t.entities[e.get(Self)] = e
 	removedItem := t.indexes[0].tree.ReplaceOrInsert(&containerItem{
 		entity:    e,
 		indexSpec: &t.indexes[0].indexSpec,
@@ -150,7 +150,7 @@ func (t *Database) iterate(where *valuesMap, f entityIterator) (err error) {
 		}
 		var failed bool
 		toCheck.ForEach(t.schema, func(a Attribute) (wantMore bool) {
-			_, eq := compareOn(a, &c.valuesMap, where)
+			_, eq := compareOn(a, (*valuesMap)(c.entity), where)
 			failed = !eq
 			return !failed
 		})

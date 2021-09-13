@@ -42,8 +42,8 @@ const (
 var _ rel.Attribute = llAttrs(0)
 
 func forEachListDepth(f func(lists, depth int)) {
-	for _, lists := range []int{32, 64, 128, 256, 512, 1024, 2048, 4096, 8192} {
-		for _, depth := range []int{1, 2, 4, 8, 16, 32} {
+	for _, lists := range []int{128, 512, 2048, 8192} {
+		for _, depth := range []int{1, 4, 16} {
 			f(lists, depth)
 		}
 	}

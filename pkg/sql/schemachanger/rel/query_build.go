@@ -52,7 +52,7 @@ func newQuery(sc *Schema, clauses Clauses) *Query {
 	entities := p.findEntitySlots()
 	sort.SliceStable(p.facts, func(i, j int) bool {
 		if p.facts[i].variable == p.facts[j].variable {
-			return attrLess(p.facts[i].attr, p.facts[j].attr)
+			return p.facts[i].attr.Ordinal() < p.facts[j].attr.Ordinal()
 		}
 		return p.facts[i].variable < p.facts[j].variable
 	})
@@ -178,7 +178,7 @@ func (p *queryBuilder) processValueExpr(rawValue Expr) slotIdx {
 			any: make([]typedValue, len(v)),
 		}
 		for i, vv := range v {
-			tv, err := makeComparableValue(p.sc, vv)
+			tv, err := makeComparableValue(vv)
 			if err != nil {
 				panic(err)
 			}
@@ -186,7 +186,7 @@ func (p *queryBuilder) processValueExpr(rawValue Expr) slotIdx {
 		}
 		return p.fillSlot(sd, false)
 	case valueExpr:
-		tv, err := makeComparableValue(p.sc, v.value)
+		tv, err := makeComparableValue(v.value)
 		if err != nil {
 			panic(err)
 		}
@@ -238,7 +238,7 @@ func (p *queryBuilder) typeCheck(f fact) {
 	}
 	switch f.attr {
 	case Type:
-		checkSlotType(s, schemaTypePtrType)
+		checkSlotType(s, reflectTypeType)
 	default:
 		checkSlotType(s, p.sc.attributeTypes[f.attr])
 	}

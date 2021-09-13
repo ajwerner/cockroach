@@ -24,16 +24,3 @@ type Attribute interface {
 // Ordinal is used to correlate attributes in a schema.
 // It enables use of the ordinalSet.
 type Ordinal uint64
-
-func attrLess(a, b Attribute) bool {
-	switch {
-	case a != nil && b != nil:
-		return a.Ordinal() < b.Ordinal()
-	case a != nil:
-		return false
-	case b != nil:
-		return true
-	default:
-		return false
-	}
-}

@@ -2,6 +2,7 @@ package rel
 
 import (
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/cockroachdb/errors"
@@ -35,7 +36,7 @@ type Mappings struct {
 	// values. Interface values get tricky.
 	TypeMappings map[reflect.Type]map[string]Attribute
 
-	// TODO(ajwerner): add sorting preferences.
+	// TODO(ajwerner): consider add sorting preferences or primary keys.
 }
 
 // Schema defines a mapping of entities to their attributes and decomposition.
@@ -65,10 +66,9 @@ func MustSchema(name string, m Mappings) *Schema {
 }
 
 type entityTypeSchema struct {
-	sc               *Schema
-	typ              reflect.Type
-	fields           []fieldInfo
-	scalarAttrFields map[Attribute]*fieldInfo
+	typ        reflect.Type
+	fields     []fieldInfo
+	attrFields map[Attribute][]fieldInfo
 }
 
 type fieldInfo struct {
@@ -77,7 +77,7 @@ type fieldInfo struct {
 	attr            Attribute
 	comparableValue func(uintptr) interface{}
 	value           func(uintptr) interface{}
-	isEntity        bool
+	isPtr, isEntity bool
 }
 
 func buildSchema(name string, m Mappings) *Schema {
@@ -124,9 +124,6 @@ func (sb *schemaBuilder) maybeAddAttribute(a Attribute, typ reflect.Type) {
 }
 
 func checkType(typ, exp reflect.Type) error {
-	if typ == schemaTypePtrType && exp == reflectTypeType {
-		return nil
-	}
 	switch exp.Kind() {
 	case reflect.Interface:
 		if !typ.Implements(exp) {
@@ -200,6 +197,7 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]A
 			path:     fieldName,
 			attr:     attr,
 			isEntity: isStructPtr,
+			isPtr:    isPtr,
 			typ:      typ,
 		}
 		getPtrValue := func(vg func(uintptr) reflect.Value) func(u uintptr) interface{} {
@@ -216,38 +214,69 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]A
 			if isPtr {
 				f.value = getPtrValue(vg)
 			} else {
-				f.value = func(u uintptr) interface{} { return vg(u).Interface() }
-			}
-		}
-		{
-			compType := sb.getComparableTypeMapping(typ)
-			if isScalarPtr {
-				compType = reflect.PtrTo(compType)
-			}
-			vg := makeValueGetter(compType, offset)
-			if isScalarPtr {
-				f.comparableValue = getPtrValue(vg)
-			} else {
-				f.comparableValue = func(u uintptr) interface{} {
+				f.value = func(u uintptr) interface{} {
 					return vg(u).Interface()
 				}
 			}
-
+		}
+		{
+			if isStructPtr {
+				f.comparableValue = getPtrValue(makeValueGetter(cur, offset))
+			} else {
+				compType := sb.getComparableTypeMapping(typ)
+				if isScalarPtr {
+					compType = reflect.PtrTo(compType)
+				}
+				vg := makeValueGetter(compType, offset)
+				if isScalarPtr {
+					f.comparableValue = getPtrValue(vg)
+				} else {
+					f.comparableValue = func(u uintptr) interface{} {
+						return vg(u).Interface()
+					}
+				}
+			}
 		}
 		fieldInfos = append(fieldInfos, f)
 	}
-	scalarAttrFields := make(map[Attribute]*fieldInfo)
-	for i := range fieldInfos {
-		fi := &fieldInfos[i]
-		if fi.isEntity {
-			continue
+	sort.Slice(fieldInfos, func(i, j int) bool {
+		return fieldInfos[i].attr.Ordinal() < fieldInfos[j].attr.Ordinal()
+	})
+	attributeFields := make(map[Attribute][]fieldInfo)
+
+	for i := 0; i < len(fieldInfos); {
+		cur := fieldInfos[i].attr
+		j := i + 1
+		for ; j < len(fieldInfos); j++ {
+			if fieldInfos[j].attr != cur {
+				break
+			}
 		}
-		scalarAttrFields[fi.attr] = fi
+		attributeFields[cur] = fieldInfos[i:j]
+		i = j
 	}
 	sb.entityTypeSchemas[t] = &entityTypeSchema{
-		typ:              t,
-		sc:               sb.Schema,
-		fields:           fieldInfos,
-		scalarAttrFields: scalarAttrFields,
+		typ:        t,
+		fields:     fieldInfos,
+		attrFields: attributeFields,
 	}
+}
+
+func (sc *Schema) GetAttribute(attribute Attribute, v interface{}) (interface{}, error) {
+	ti, value, err := getEntityValueInfo(sc, v)
+	if err != nil {
+		return nil, err
+	}
+
+	fi, ok := ti.attrFields[attribute]
+	if !ok {
+		return nil, errors.Errorf("no scalar field defined on %v for %v", ti.typ, attribute)
+	}
+	for i := range fi {
+		got := fi[i].value(value.Pointer())
+		if got != nil {
+			return got, nil
+		}
+	}
+	return nil, nil
 }
