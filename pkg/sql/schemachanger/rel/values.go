@@ -21,13 +21,13 @@ import "sync"
 // form and not in the strongly typed format.
 type valuesMap struct {
 	attrs ordinalSet
-	m     map[Ordinal]interface{}
+	m     map[ordinal]interface{}
 }
 
 var valuesSyncPool = sync.Pool{
 	New: func() interface{} {
 		return &valuesMap{
-			m: make(map[Ordinal]interface{}),
+			m: make(map[ordinal]interface{}),
 		}
 	},
 }
@@ -50,19 +50,11 @@ func (v *valuesMap) clear() {
 
 // get retrieves the primitive valuesMap stores in the valuesMap
 // struct.
-func (v valuesMap) get(a Attribute) interface{} {
-	return v.m[a.Ordinal()]
+func (v valuesMap) get(a ordinal) interface{} {
+	return v.m[a]
 }
 
-func (vv *valuesMap) copyFrom(values valuesMap) {
-	for ord, v := range values.m {
-		if ord < maxUserAttribute {
-			vv.add(ord, v)
-		}
-	}
-}
-
-func (vm *valuesMap) add(ord Ordinal, v interface{}) {
+func (vm *valuesMap) add(ord ordinal, v interface{}) {
 	vm.attrs = vm.attrs.Add(ord)
 	vm.m[ord] = v
 }

@@ -32,8 +32,6 @@ var attrNames = []string{"id", "next"}
 
 func (l llAttrs) String() string { return attrNames[l] }
 
-func (l llAttrs) Ordinal() rel.Ordinal { return rel.Ordinal(l) }
-
 const (
 	idAttr   llAttrs = 0
 	nextAttr llAttrs = 1

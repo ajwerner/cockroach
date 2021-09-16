@@ -157,7 +157,7 @@ func getComparableType(t reflect.Type) reflect.Type {
 // either or both do not contain this attribute. The lack of A
 // value is considered the highest value; you can think of this
 // library as sorting with NULLS LAST.
-func compareOn(attr Attribute, a, b *valuesMap) (less, eq bool) {
+func compareOn(attr ordinal, a, b *valuesMap) (less, eq bool) {
 	av := a.get(attr)
 	bv := b.get(attr)
 	switch {
@@ -174,12 +174,12 @@ func compareOn(attr Attribute, a, b *valuesMap) (less, eq bool) {
 
 // Compare compares two elements by their attributes.
 func compareEntities(s *Schema, a, b *entity) (less, eq bool) {
-	if a.get(Self) == b.get(Self) {
+	if a.getAttribute(s, Self) == b.getAttribute(s, Self) {
 		return false, true
 	}
 	ordinalSet.Union(
 		a.attrs, b.attrs,
-	).ForEach(s, func(attr Attribute) (wantMore bool) {
+	).ForEach(func(attr ordinal) (wantMore bool) {
 		less, eq = compareOn(attr, a.asMap(), b.asMap())
 		return eq
 	})

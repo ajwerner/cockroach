@@ -1,10 +1,8 @@
-package testschema
+package entitynodetest
 
 import "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
 
 type TestAttr int8
-
-func (i TestAttr) Ordinal() rel.Ordinal { return rel.Ordinal(i) }
 
 var _ rel.Attribute = TestAttr(0)
 

@@ -9,14 +9,15 @@ package execinfrapb
 
 import (
 	fmt "fmt"
+	io "io"
+	math "math"
+	math_bits "math/bits"
+
 	descpb "github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	inverted "github.com/cockroachdb/cockroach/pkg/sql/inverted"
 	types "github.com/cockroachdb/cockroach/pkg/sql/types"
 	_ "github.com/gogo/protobuf/gogoproto"
 	proto "github.com/gogo/protobuf/proto"
-	io "io"
-	math "math"
-	math_bits "math/bits"
 )
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -946,7 +947,7 @@ type JoinReaderSpec struct {
 	// the comment above.
 	LeftJoinWithPairedJoiner bool `protobuf:"varint,14,opt,name=left_join_with_paired_joiner,json=leftJoinWithPairedJoiner" json:"left_join_with_paired_joiner"`
 	// OutputGroupContinuationForLeftRow indicates that this join is the first
-	// join in the paired-joins. At most one of OutputGroupContinuationForLeftRow
+	// join in the paired-joins. at most one of OutputGroupContinuationForLeftRow
 	// and LeftJoinWithPairedJoiner must be true. Additionally, if
 	// OutputGroupContinuationForLeftRow is true, MaintainOrdering must also
 	// be true.
@@ -1552,7 +1553,9 @@ func (*InvertedFiltererSpec_PreFiltererSpec) Descriptor() ([]byte, []int) {
 func (m *InvertedFiltererSpec_PreFiltererSpec) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
 }
-func (m *InvertedFiltererSpec_PreFiltererSpec) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+func (m *InvertedFiltererSpec_PreFiltererSpec) XXX_Marshal(
+	b []byte, deterministic bool,
+) ([]byte, error) {
 	b = b[:cap(b)]
 	n, err := m.MarshalToSizedBuffer(b)
 	if err != nil {

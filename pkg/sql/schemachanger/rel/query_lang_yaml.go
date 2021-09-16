@@ -3,6 +3,7 @@ package rel
 import (
 	"fmt"
 	"reflect"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -33,42 +34,36 @@ func (v Var) forYAML() interface{} {
 }
 
 func (e *eqDecl) MarshalYAML() (interface{}, error) {
+	return clauseStr("$"+string(e.v), e.expr)
+}
+
+func exprToString(e Expr) (string, error) {
 	var expr yaml.Node
-	if err := expr.Encode(e.expr.forYAML()); err != nil {
-		return nil, err
+	if err := expr.Encode(e.forYAML()); err != nil {
+		return "", err
 	}
-	return &yaml.Node{
-		Kind:  yaml.SequenceNode,
-		Style: yaml.FlowStyle,
-		Content: []*yaml.Node{
-			{Kind: yaml.ScalarNode, Value: "="},
-			{Kind: yaml.ScalarNode, Value: "$" + string(e.v)},
-			&expr,
-		},
-	}, nil
+	expr.Style = yaml.FlowStyle
+	out, err := yaml.Marshal(&expr)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), err
 }
 
 func (f *datomDecl) MarshalYAML() (interface{}, error) {
-	var expr yaml.Node
-	if v, isVar := f.value.(Var); isVar {
-		expr = yaml.Node{
-			Kind:  yaml.ScalarNode,
-			Value: "$" + string(v),
-		}
-	} else {
-		if err := expr.Encode(f.value.forYAML()); err != nil {
-			return nil, err
-		}
+	return clauseStr(fmt.Sprintf("$%s[%s]", f.entity, f.attribute), f.value)
+}
+
+func clauseStr(lhs string, rhs Expr) (string, error) {
+	rhsStr, err := exprToString(rhs)
+	if err != nil {
+		return "", err
 	}
-	return &yaml.Node{
-		Kind:  yaml.SequenceNode,
-		Style: yaml.FlowStyle,
-		Content: []*yaml.Node{
-			{Kind: yaml.ScalarNode, Value: f.attribute.String()},
-			{Kind: yaml.ScalarNode, Value: "$" + string(f.entity)},
-			&expr,
-		},
-	}, nil
+	op := "="
+	if _, isAny := rhs.(anyExpr); isAny {
+		op = "IN"
+	}
+	return fmt.Sprintf("%s %s %s", lhs, op, rhsStr), nil
 }
 
 func (a *and) MarshalYAML() (interface{}, error) {

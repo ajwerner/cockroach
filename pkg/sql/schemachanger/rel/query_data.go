@@ -6,7 +6,7 @@ type slotIdx int
 
 type fact struct {
 	variable slotIdx
-	attr     Attribute
+	attr     ordinal
 	value    slotIdx
 }
 

@@ -22,9 +22,6 @@ import (
 // for comparing uniqueness
 type Attr int
 
-// Ordinal is part of the eavasdf.Attribute interface.
-func (i Attr) Ordinal() rel.Ordinal { return rel.Ordinal(i) }
-
 var _ rel.Attribute = Attr(0)
 
 //go:generate stringer -type=Attr -trimprefix=Attr

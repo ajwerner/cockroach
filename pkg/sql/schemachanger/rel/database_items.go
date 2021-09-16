@@ -1,7 +1,6 @@
 package rel
 
 import (
-	"fmt"
 	"math"
 	"sync"
 
@@ -21,14 +20,11 @@ var _ item = (*containerItem)(nil)
 var _ item = (*valuesItem)(nil)
 
 func compareItems(a, b item) (less bool) {
-	defer func() {
-		fmt.Printf("%v %v %v\n", less, a.getValues(), b.getValues())
-	}()
 	// Compare on the index attributes first.
 	index := a.getIndexSpec()
 	toCompare := a.compareAttrs().Intersection(b.compareAttrs())
 	for _, at := range index.attrs {
-		if !toCompare.Contains(at.Ordinal()) {
+		if !toCompare.Contains(at) {
 			break
 		}
 

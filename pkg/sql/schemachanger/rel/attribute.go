@@ -16,11 +16,4 @@ type Attribute interface {
 
 	// String is used when formatting the attribute.
 	String() string
-
-	// Ordinal is used to cheaply identify the attribute.
-	Ordinal() Ordinal
 }
-
-// Ordinal is used to correlate attributes in a schema.
-// It enables use of the ordinalSet.
-type Ordinal uint64

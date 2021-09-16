@@ -65,17 +65,17 @@ var attrs = [...]A{
 	"duration",
 }
 
-var attrOrdinals = func() map[A]Ordinal {
-	ret := make(map[A]Ordinal, len(attrs))
+var attrOrdinals = func() map[A]ordinal {
+	ret := make(map[A]ordinal, len(attrs))
 	for i, v := range attrs {
-		ret[v] = Ordinal(i + 1)
+		ret[v] = ordinal(i + 1)
 	}
 	return ret
 }()
 
 func (a A) String() string { return string(a) }
 
-func (a A) Ordinal() Ordinal {
+func (a A) Ordinal() ordinal {
 	ord, ok := attrOrdinals[a]
 	if !ok {
 		panic(errors.AssertionFailedf("unknown attribute %s", a))

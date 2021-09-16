@@ -6,11 +6,12 @@ package geoindex
 import (
 	encoding_binary "encoding/binary"
 	fmt "fmt"
-	_ "github.com/gogo/protobuf/gogoproto"
-	proto "github.com/gogo/protobuf/proto"
 	io "io"
 	math "math"
 	math_bits "math/bits"
+
+	_ "github.com/gogo/protobuf/gogoproto"
+	proto "github.com/gogo/protobuf/proto"
 )
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -27,7 +28,7 @@ const _ = proto.GoGoProtoPackageIsVersion3 // please upgrade the proto package
 // Config is the information used to tune one instance of a geospatial index.
 // Each SQL index will have its own config.
 //
-// At the moment, only one major indexing strategy is implemented (S2 cells).
+// at the moment, only one major indexing strategy is implemented (S2 cells).
 type Config struct {
 	S2Geography *S2GeographyConfig `protobuf:"bytes,1,opt,name=s2_geography,json=s2Geography,proto3" json:"s2_geography,omitempty"`
 	S2Geometry  *S2GeometryConfig  `protobuf:"bytes,2,opt,name=s2_geometry,json=s2Geometry,proto3" json:"s2_geometry,omitempty"`

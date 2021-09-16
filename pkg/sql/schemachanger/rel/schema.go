@@ -41,15 +41,11 @@ type Mappings struct {
 
 // Schema defines a mapping of entities to their attributes and decomposition.
 type Schema struct {
-	name                string
-	attributesByOrdinal map[Ordinal]Attribute
-	attributeTypes      map[Attribute]reflect.Type
-	entityTypeSchemas   map[reflect.Type]*entityTypeSchema
-}
-
-func (s *Schema) At(o Ordinal) Attribute {
-	attr, _ := s.attributesByOrdinal[o]
-	return attr
+	name               string
+	attributes         []Attribute
+	attributeTypes     []reflect.Type
+	attributeToOrdinal map[Attribute]ordinal
+	entityTypeSchemas  map[reflect.Type]*entityTypeSchema
 }
 
 // NewSchema constructs a new schema from mappings.
@@ -68,13 +64,13 @@ func MustSchema(name string, m Mappings) *Schema {
 type entityTypeSchema struct {
 	typ        reflect.Type
 	fields     []fieldInfo
-	attrFields map[Attribute][]fieldInfo
+	attrFields map[ordinal][]fieldInfo
 }
 
 type fieldInfo struct {
 	path            string
 	typ             reflect.Type
-	attr            Attribute
+	attr            ordinal
 	comparableValue func(uintptr) interface{}
 	value           func(uintptr) interface{}
 	isPtr, isEntity bool
@@ -83,19 +79,18 @@ type fieldInfo struct {
 func buildSchema(name string, m Mappings) *Schema {
 	sb := &schemaBuilder{
 		Schema: &Schema{
-			name:                name,
-			attributesByOrdinal: make(map[Ordinal]Attribute),
-			attributeTypes:      make(map[Attribute]reflect.Type),
-			entityTypeSchemas:   make(map[reflect.Type]*entityTypeSchema),
+			name:               name,
+			attributeToOrdinal: make(map[Attribute]ordinal),
+			entityTypeSchemas:  make(map[reflect.Type]*entityTypeSchema),
 		},
 		m: m,
 	}
 
+	sb.maybeAddAttribute(Self, emptyInterfaceType)
+	sb.maybeAddAttribute(Type, reflectTypeType)
 	for a, t := range m.AttributeTypes {
 		sb.maybeAddAttribute(a, t)
 	}
-	sb.maybeAddAttribute(Type, reflectTypeType)
-	sb.maybeAddAttribute(Self, emptyInterfaceType)
 
 	// We want to know what all the variable types are.
 	for t, fields := range m.TypeMappings {
@@ -109,18 +104,25 @@ type schemaBuilder struct {
 	m Mappings
 }
 
-func (sb *schemaBuilder) maybeAddAttribute(a Attribute, typ reflect.Type) {
+func (sb *schemaBuilder) maybeAddAttribute(a Attribute, typ reflect.Type) ordinal {
 	// TODO(ajwerner): Validate that t is an okay type for an attribute
 	// to be.
-	prev, exists := sb.attributeTypes[a]
+	ord, exists := sb.attributeToOrdinal[a]
 	if !exists {
-		sb.attributeTypes[a] = typ
-		sb.attributesByOrdinal[a.Ordinal()] = a
-		return
+		ord = ordinal(len(sb.attributes))
+		if ord >= maxUserAttribute {
+			panic(errors.Errorf("too many attributes"))
+		}
+		sb.attributes = append(sb.attributes, a)
+		sb.attributeTypes = append(sb.attributeTypes, typ)
+		sb.attributeToOrdinal[a] = ord
+		return ord
 	}
+	prev := sb.attributeTypes[ord]
 	if err := checkType(typ, prev); err != nil {
 		panic(errors.Wrapf(err, "type mismatch for %v", a))
 	}
+	return ord
 }
 
 func checkType(typ, exp reflect.Type) error {
@@ -135,10 +137,6 @@ func checkType(typ, exp reflect.Type) error {
 		}
 	}
 	return nil
-}
-
-func (sb *schemaBuilder) getComparableTypeMapping(typ reflect.Type) reflect.Type {
-	return getComparableType(typ)
 }
 
 func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]Attribute) {
@@ -180,6 +178,14 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]A
 		}
 		// TODO(ajwerner): Deal with making entities out of structs themselves.
 		isPtr := cur.Kind() == reflect.Ptr
+		isScalarPtr := isPtr && isSupportScalarKind(cur.Elem().Kind())
+
+		typ := cur
+		if isScalarPtr {
+			typ = cur.Elem()
+		}
+
+		ord := sb.maybeAddAttribute(attr, typ)
 		isStructPtr := isPtr && cur.Elem().Kind() == reflect.Struct
 		if isStructPtr {
 			curFields, ok := sb.m.TypeMappings[cur]
@@ -187,15 +193,10 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]A
 				sb.maybeAddTypeMapping(cur, curFields)
 			}
 		}
-		isScalarPtr := isPtr && isSupportScalarKind(cur.Elem().Kind())
-		typ := cur
-		if isScalarPtr {
-			typ = cur.Elem()
-		}
-		sb.maybeAddAttribute(attr, typ)
+
 		f := fieldInfo{
 			path:     fieldName,
-			attr:     attr,
+			attr:     ord,
 			isEntity: isStructPtr,
 			isPtr:    isPtr,
 			typ:      typ,
@@ -223,7 +224,7 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]A
 			if isStructPtr {
 				f.comparableValue = getPtrValue(makeValueGetter(cur, offset))
 			} else {
-				compType := sb.getComparableTypeMapping(typ)
+				compType := getComparableType(typ)
 				if isScalarPtr {
 					compType = reflect.PtrTo(compType)
 				}
@@ -240,9 +241,9 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]A
 		fieldInfos = append(fieldInfos, f)
 	}
 	sort.Slice(fieldInfos, func(i, j int) bool {
-		return fieldInfos[i].attr.Ordinal() < fieldInfos[j].attr.Ordinal()
+		return fieldInfos[i].attr < fieldInfos[j].attr
 	})
-	attributeFields := make(map[Attribute][]fieldInfo)
+	attributeFields := make(map[ordinal][]fieldInfo)
 
 	for i := 0; i < len(fieldInfos); {
 		cur := fieldInfos[i].attr
@@ -263,12 +264,13 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]A
 }
 
 func (sc *Schema) GetAttribute(attribute Attribute, v interface{}) (interface{}, error) {
+	ord := sc.getOrd(attribute)
 	ti, value, err := getEntityValueInfo(sc, v)
 	if err != nil {
 		return nil, err
 	}
 
-	fi, ok := ti.attrFields[attribute]
+	fi, ok := ti.attrFields[ord]
 	if !ok {
 		return nil, errors.Errorf("no scalar field defined on %v for %v", ti.typ, attribute)
 	}
@@ -279,4 +281,12 @@ func (sc *Schema) GetAttribute(attribute Attribute, v interface{}) (interface{},
 		}
 	}
 	return nil, nil
+}
+
+func (sc *Schema) getOrd(attribute Attribute) ordinal {
+	ord, ok := sc.attributeToOrdinal[attribute]
+	if !ok {
+		panic(errors.Errorf("unknown attribute %s in schema %s", attribute, sc.name))
+	}
+	return ord
 }

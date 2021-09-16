@@ -1,6 +1,6 @@
 package rel
 
-import "gopkg.in/yaml.v2"
+import "gopkg.in/yaml.v3"
 
 // Clause is the basic building block of a query. The most foundational
 // clause is datom which declares some fact about an attribute of a named
@@ -40,6 +40,15 @@ func (c Clauses) hasAnd() bool {
 		}
 	}
 	return false
+}
+
+func (c Clauses) MarshalYAML() (interface{}, error) {
+	var n yaml.Node
+	if err := n.Encode([]Clause(c)); err != nil {
+		return nil, err
+	}
+	n.Style = yaml.LiteralStyle
+	return &n, nil
 }
 
 // datom is a basic Clause. It declares that the provided attribute of the

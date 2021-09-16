@@ -15,13 +15,21 @@ import (
 	"math/bits"
 )
 
-// makeOrdinalSetWithAttributes constructs an ordinalSet with A slice of
-// Attribute.
-func makeOrdinalSetWithAttributes(attrs []Attribute) (m ordinalSet) {
-	for _, a := range attrs {
-		m = m.Add(a.Ordinal())
+// ordinal is used to correlate attributes in a schema.
+// It enables use of the ordinalSet.
+type ordinal uint64
+
+// attributesToOrdinals constructs a slice of ordinals and the corresponding
+// ordinalSet from a slice of Attribute.
+func (sc *Schema) attributesToOrdinals(attrs []Attribute) ([]ordinal, ordinalSet) {
+	var set ordinalSet
+	ret := make([]ordinal, len(attrs))
+	for i, a := range attrs {
+		ord := sc.getOrd(a)
+		set = set.Add(ord)
+		ret[i] = ord
 	}
-	return m
+	return ret, set
 }
 
 // ordinalSet represents A bitmask over ordinals.
@@ -31,11 +39,11 @@ type ordinalSet uint64
 const allOrdinals = math.MaxUint64
 
 // ForEach iterates the set of attributes.
-func (m ordinalSet) ForEach(s *Schema, f func(a Attribute) (wantMore bool)) {
+func (m ordinalSet) ForEach(f func(a ordinal) (wantMore bool)) {
 	rem := m
 	for rem > 0 {
-		ord := Ordinal(bits.TrailingZeros64(uint64(rem)))
-		if !f(s.At(ord)) {
+		ord := ordinal(bits.TrailingZeros64(uint64(rem)))
+		if !f(ord) {
 			return
 		}
 		rem = rem.Remove(ord)
@@ -43,17 +51,17 @@ func (m ordinalSet) ForEach(s *Schema, f func(a Attribute) (wantMore bool)) {
 }
 
 // Remove returns the set constructed by removing ord from m.
-func (m ordinalSet) Remove(ord Ordinal) ordinalSet {
+func (m ordinalSet) Remove(ord ordinal) ordinalSet {
 	return m & ^(1 << ord)
 }
 
 // Contains tests if m contains ord.
-func (m ordinalSet) Contains(ord Ordinal) bool {
+func (m ordinalSet) Contains(ord ordinal) bool {
 	return m&(1<<ord) != 0
 }
 
 // Add returns the set constructed by adding ord to m.
-func (m ordinalSet) Add(ord Ordinal) ordinalSet {
+func (m ordinalSet) Add(ord ordinal) ordinalSet {
 	return m | (1 << ord)
 }
 

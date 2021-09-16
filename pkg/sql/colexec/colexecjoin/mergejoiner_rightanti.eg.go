@@ -12677,7 +12677,7 @@ func (o *mergeJoinRightAntiOp) Next() coldata.Batch {
 			// batches from now on.
 			o.builderState.lGroups = o.builderState.lGroups[:0]
 			o.builderState.rGroups = o.builderState.rGroups[:0]
-			// At least one of the sources is finished. If it was the left one,
+			// at least one of the sources is finished. If it was the left one,
 			// then we need to emit remaining tuples from the right source with
 			// nulls corresponding to the left one. But if the right source is
 			// finished, then there is nothing left to do.

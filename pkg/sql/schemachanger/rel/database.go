@@ -54,8 +54,8 @@ func NewDatabase(sc *Schema, indexes [][]Attribute) *Database {
 	}
 	secondaryIndexes := t.indexes[1:]
 	for i, attrs := range indexes {
-		m := makeOrdinalSetWithAttributes(attrs)
-		spec := indexSpec{mask: m, attrs: attrs, s: sc}
+		ords, set := sc.attributesToOrdinals(attrs)
+		spec := indexSpec{mask: set, attrs: ords, s: sc}
 		secondaryIndexes[i] = index{
 			indexSpec: spec,
 			tree:      btree.NewWithFreeList(degree, fl),
@@ -79,7 +79,7 @@ func (t *Database) Insert(e interface{}) error {
 
 // TODO(ajwerner): Deal with already inserted data.
 func (t *Database) insert(e *entity) error {
-	t.entities[e.get(Self)] = e
+	t.entities[e.getAttribute(t.schema, Self)] = e
 	removedItem := t.indexes[0].tree.ReplaceOrInsert(&containerItem{
 		entity:    e,
 		indexSpec: &t.indexes[0].indexSpec,
@@ -112,7 +112,7 @@ type index struct {
 type indexSpec struct {
 	s     *Schema
 	mask  ordinalSet
-	attrs []Attribute
+	attrs []ordinal
 }
 
 // entityIterator is used to iterate Entities.
@@ -127,9 +127,9 @@ func (t *Database) iterate(where *valuesMap, f entityIterator) (err error) {
 	var all, nils, nonNils ordinalSet
 	{
 		all = where.attrs
-		all.ForEach(t.schema, func(a Attribute) (wantMore bool) {
+		all.ForEach(func(a ordinal) (wantMore bool) {
 			if where.get(a) == nil {
-				nils = nils.Add(a.Ordinal())
+				nils = nils.Add(a)
 			}
 			return true
 		})
@@ -149,7 +149,7 @@ func (t *Database) iterate(where *valuesMap, f entityIterator) (err error) {
 			return true
 		}
 		var failed bool
-		toCheck.ForEach(t.schema, func(a Attribute) (wantMore bool) {
+		toCheck.ForEach(func(a ordinal) (wantMore bool) {
 			_, eq := compareOn(a, (*valuesMap)(c.entity), where)
 			failed = !eq
 			return !failed
@@ -189,8 +189,8 @@ func (t *Database) chooseIndex(m ordinalSet) (_ *index, toCheck ordinalSet) {
 func (s *indexSpec) overlap(m ordinalSet) ordinalSet {
 	var overlap ordinalSet
 	for _, a := range s.attrs {
-		if m.Contains(a.Ordinal()) {
-			overlap = overlap.Add(a.Ordinal())
+		if m.Contains(a) {
+			overlap = overlap.Add(a)
 		} else {
 			break
 		}

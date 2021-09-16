@@ -1,9 +1,12 @@
-package testschema
+package entitynodetest
 
 import (
 	"reflect"
+	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel/internal/reltest"
+	"gopkg.in/yaml.v3"
 )
 
 type OneOf struct {
@@ -38,6 +41,30 @@ type Node struct {
 	E    *Entity
 	L, R *Node
 }
+
+func (n *Node) EncodeToYAML(t *testing.T, r *reltest.DataRegistry) interface{} {
+	yn := yaml.Node{Kind: yaml.MappingNode, Style: yaml.FlowStyle}
+	for _, f := range []struct {
+		name  string
+		field interface{}
+		ok    bool
+	}{
+		{"E", n.E, n.E != nil},
+		{"L", n.L, n.L != nil},
+		{"R", n.R, n.R != nil},
+	} {
+		if !f.ok {
+			continue
+		}
+		yn.Content = append(yn.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: f.name},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: r.MustGetName(t, f.field)},
+		)
+	}
+	return &yn
+}
+
+var _ reltest.RegistryYAMLEncoder = (*Node)(nil)
 
 var Schema = rel.MustSchema("testschema", rel.Mappings{
 	TypeMappings: map[reflect.Type]map[string]rel.Attribute{

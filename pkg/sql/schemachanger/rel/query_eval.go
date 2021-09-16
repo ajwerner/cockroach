@@ -82,11 +82,11 @@ func (ec *evalContext) iterateNext() error {
 	}
 	where, anyAttr, anyValues := ec.buildWhere()
 	defer putValues(where)
-	if anyAttr == nil {
+	if anyValues == nil {
 		return ec.db.iterate(where, ec)
 	}
 	for _, v := range anyValues {
-		where.add(anyAttr.Ordinal(), v.value)
+		where.add(anyAttr, v.value)
 		if err := ec.db.iterate(where, ec); err != nil {
 			return err
 		}
@@ -175,7 +175,7 @@ func (ec *evalContext) maybeFoundResult() (done bool, _ error) {
 // it will help if we have an index that covers the current facts plus this
 // value. There may be more than one any, in which case, this is not going
 // to be very smart.
-func (ec *evalContext) buildWhere() (where *valuesMap, anyAttr Attribute, anyValues []typedValue) {
+func (ec *evalContext) buildWhere() (where *valuesMap, anyAttr ordinal, anyValues []typedValue) {
 	where = getValues()
 
 	// TODO(ajwerner): Make this filter push-down smarter based on the indexes
@@ -187,8 +187,8 @@ func (ec *evalContext) buildWhere() (where *valuesMap, anyAttr Attribute, anyVal
 
 		s := ec.slots[f.value]
 		if !s.empty() {
-			where.add(f.attr.Ordinal(), s.value)
-		} else if anyAttr == nil && s.any != nil {
+			where.add(f.attr, s.value)
+		} else if anyValues == nil && s.any != nil {
 			anyAttr, anyValues = f.attr, s.any
 		}
 	}
@@ -197,7 +197,7 @@ func (ec *evalContext) buildWhere() (where *valuesMap, anyAttr Attribute, anyVal
 
 func unify(
 	facts []fact, s []slot, set *util.FastIntSet,
-) (contradictionFound bool, eIdx slotIdx, attr Attribute) {
+) (contradictionFound bool, eIdx slotIdx, attr ordinal) {
 	// TODO(ajwerner): As we unify we could determine that some facts are no
 	// longer relevant. When we do that we could move them to the front and keep
 	// track of some offset. In principle, we could do this and then each time
@@ -233,7 +233,7 @@ func unify(
 			somethingChanged = true
 		}
 		if !somethingChanged {
-			return false, 0, nil
+			return false, 0, 0
 		}
 	}
 }
@@ -268,7 +268,7 @@ func (ec *evalContext) setEntitySlot(
 ) (foundContradiction bool) {
 	eSlot := ec.q.entities[ec.cur]
 	s := &ec.slots[eSlot]
-	idVal := e.get(Self)
+	idVal := e.getAttribute(ec.db.schema, Self)
 	ok, foundContradiction := s.shouldSet(idVal)
 	if foundContradiction {
 		return true

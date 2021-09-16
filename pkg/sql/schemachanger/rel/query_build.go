@@ -52,7 +52,7 @@ func newQuery(sc *Schema, clauses Clauses) *Query {
 	entities := p.findEntitySlots()
 	sort.SliceStable(p.facts, func(i, j int) bool {
 		if p.facts[i].variable == p.facts[j].variable {
-			return p.facts[i].attr.Ordinal() < p.facts[j].attr.Ordinal()
+			return p.facts[i].attr < p.facts[j].attr
 		}
 		return p.facts[i].variable < p.facts[j].variable
 	})
@@ -93,7 +93,7 @@ func (p *queryBuilder) processClause(t Clause) {
 func (p *queryBuilder) processFactDecl(fd *datomDecl) {
 	f := fact{
 		variable: p.maybeAddVar(fd.entity, true),
-		attr:     fd.attribute,
+		attr:     p.sc.getOrd(fd.attribute),
 	}
 	f.value = p.processValueExpr(fd.value)
 	p.typeCheck(f)
@@ -114,12 +114,12 @@ func (p *queryBuilder) processEqDecl(t *eqDecl) {
 	p.facts = append(p.facts,
 		fact{
 			variable: varIdx,
-			attr:     Self,
+			attr:     p.sc.getOrd(Self),
 			value:    valueIdx,
 		},
 		fact{
 			variable: varIdx,
-			attr:     Self,
+			attr:     p.sc.getOrd(Self),
 			value:    varIdx,
 		})
 }
@@ -237,7 +237,7 @@ func (p *queryBuilder) typeCheck(f fact) {
 		return
 	}
 	switch f.attr {
-	case Type:
+	case p.sc.getOrd(Type):
 		checkSlotType(s, reflectTypeType)
 	default:
 		checkSlotType(s, p.sc.attributeTypes[f.attr])

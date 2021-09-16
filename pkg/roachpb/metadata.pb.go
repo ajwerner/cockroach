@@ -6,13 +6,14 @@ package roachpb
 import (
 	encoding_binary "encoding/binary"
 	fmt "fmt"
+	io "io"
+	math "math"
+	math_bits "math/bits"
+
 	util "github.com/cockroachdb/cockroach/pkg/util"
 	hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
 	_ "github.com/gogo/protobuf/gogoproto"
 	proto "github.com/gogo/protobuf/proto"
-	io "io"
-	math "math"
-	math_bits "math/bits"
 )
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -379,7 +380,7 @@ type RangeDescriptor struct {
 	// is at generation 12 and [d, f) is at generation 17, then the resulting
 	// merged range [c,f) will have generation 18.
 	//
-	// At the end of the day, for incoming snapshots, this means that we only have
+	// at the end of the day, for incoming snapshots, this means that we only have
 	// to collect the overlapping replicas and their generations. Any replica with
 	// a smaller generation is stale by the above argument and can be replicaGC'ed
 	// right away. Any replica with a larger generation indicates that the snapshot

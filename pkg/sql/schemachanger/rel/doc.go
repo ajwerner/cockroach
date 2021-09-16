@@ -21,8 +21,8 @@
 //
 // 1) Explainability, maintainability, observability
 //
-// The optimizer team gets a lot of bang for its buck being able to
-// think about complex rules in a declarative way. Furthermore, when
+// The optimizer gets a lot of bang for its buck being able to think
+// about complex rules in a declarative way. Furthermore, when
 // a plan is selected, the rules can be introspected. That's extremely
 // valuable. The rules produced by rel are deterministic and much more
 // compact than efficient go code. Because the rules represent pure
@@ -139,8 +139,8 @@
 //
 // Future work
 //
-// * Arrays, Maps, Slices
-// * Variable binding
+//  * Arrays, Maps, Slices
+//  * Variable binding
 //    - If we wanted to make recusion more sane, it'd be better to plan a query
 //      with some input parameters and then be able to invoke it on those
 //      parameters. In that way, we could imagine invoking a query recursively.
@@ -149,5 +149,4 @@
 // that would probably be unfortunate. We'd probably prefer to shove them into
 // a string using some unsafe magic
 //
-
 package rel
