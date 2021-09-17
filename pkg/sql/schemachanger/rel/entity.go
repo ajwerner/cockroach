@@ -1,3 +1,13 @@
+// Copyright 2021 The Cockroach Authors.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
 package rel
 
 import (
@@ -43,9 +53,17 @@ func (sc *Schema) CompareOn(attrs []Attribute, a, b interface{}) (less, eq bool)
 	return false, true
 }
 
+// IterateAttributes calls the callback for each defined attribute of the
+// passed entity. If the entity's type is not defined in the schema, an error
+// will be returned.
 func (sc *Schema) IterateAttributes(
 	entityI interface{}, f func(attribute Attribute, value interface{}) error,
 ) (err error) {
+
+	// Iterate all the children recursively because, well, there's not
+	// a way to short-circuit the recursion below one level currently.
+	// The last entity will be the outermost parent corresponding to the
+	// input argument.
 	var v *entity
 	if err := asEntities(sc, allOrdinals, entityI, func(child *entity) error {
 		if v != nil {
@@ -57,7 +75,7 @@ func (sc *Schema) IterateAttributes(
 	}); err != nil {
 		return err
 	}
-	v.attrs.ForEach(func(ord ordinal) (wantMore bool) {
+	v.attrs.forEach(func(ord ordinal) (wantMore bool) {
 		a := sc.attributes[ord]
 		if isSystemAttribute(a) {
 			return true
@@ -79,30 +97,33 @@ func (sc *Schema) IterateAttributes(
 	return err
 }
 
-func (e *entity) getAttribute(sc *Schema, attribute Attribute) interface{} {
+// getComparableValue gets the value in its type-erased form from the
+// entity.
+func (e *entity) getComparableValue(sc *Schema, attribute Attribute) interface{} {
 	return (*valuesMap)(e).get(sc.getOrd(attribute))
 }
 
 func (e *entity) getTypeInfo(sc *Schema) *entityTypeSchema {
-	return sc.entityTypeSchemas[e.getAttribute(sc, Type).(reflect.Type)]
+	return sc.entityTypeSchemas[e.getComparableValue(sc, Type).(reflect.Type)]
 }
 
-// TODO(ajwerner): document what's going on here. For scalar fields we know
-// the type because we do not permit oneOf behavior. For entity fields, we
-// don't store the type because it's dynamic. Instead we know that if the
-// field points to an entity, then the database has the entity indexed by
-// its address and the entity knows its type. Because of that, typ will
-// be nil if isEntity is true.
-//
-// Another approach would be to store entities by the pointer to their
-// box rather than its value. That way, we could avoid needing the database
-// at the expense of allocating the box every time we decompose into an entity.
+// getTypedValue returns the typedValue for the attribute of the entity.
+// Recall that the entity stores in its values type-erased primitive values
+// for comparison (so-called comparableValues). We annotate these comparable
+// values in typedValue.
 func (e *entity) getTypedValue(sc *Schema, attr ordinal) (typedValue, bool) {
 	val := (*valuesMap)(e).get(attr)
 	if val == nil {
 		return typedValue{}, false
 	}
 	var typ reflect.Type
+
+	// To set the type, there's some disparate logic based on what attribute
+	// we're looking at. For the Type attribute, it's a reflect.Type.
+	// For scalar fields we know the type because we do not permit oneOf behavior.
+	// For entity fields, we don't store the type because it's dynamic. Instead we
+	// know that if the field points to an entity, then the value has not had its
+	// type erased for comparison.
 	if sc.attributes[attr] == Type {
 		typ = reflectTypeType
 	} else if fi, ok := e.getTypeInfo(sc).attrFields[attr]; ok && !fi[0].isEntity {
@@ -142,7 +163,7 @@ func asEntities(
 			if err := asEntities(s, toPopulate, val, f); err != nil {
 				return errors.Wrapf(err, "field %s", field.path)
 			}
-			if e.attrs.Contains(field.attr) {
+			if e.attrs.contains(field.attr) {
 				return errors.Errorf("%v contains more than one non-nil entry for %v at %s", ti.typ, field.attr, field)
 			}
 			e.add(field.attr, val)
@@ -167,7 +188,7 @@ func asEntities(
 func getEntityValueInfo(s *Schema, v interface{}) (*entityTypeSchema, reflect.Value, error) {
 	vv := reflect.ValueOf(v)
 	if !vv.IsValid() {
-		return nil, reflect.Value{}, errors.Errorf("invalid nil variable value")
+		return nil, reflect.Value{}, errors.Errorf("invalid nil value")
 	}
 	t, ok := s.entityTypeSchemas[vv.Type()]
 	if !ok {
@@ -176,7 +197,7 @@ func getEntityValueInfo(s *Schema, v interface{}) (*entityTypeSchema, reflect.Va
 	// Note that the fact that we have an entry for this variable type is
 	// how we get to assume that this type must be a struct pointer.
 	if vv.IsNil() {
-		return nil, reflect.Value{}, errors.Errorf("invalid nil %T variable value", vv.Type())
+		return nil, reflect.Value{}, errors.Errorf("invalid nil %T value", v)
 	}
 	return t, vv, nil
 }

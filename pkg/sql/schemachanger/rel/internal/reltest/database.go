@@ -1,3 +1,13 @@
+// Copyright 2021 The Cockroach Authors.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
 package reltest
 
 import (
@@ -13,28 +23,45 @@ import (
 // DatabaseTest tests a set of queries in the context of a database which
 // has items specified in Data in a Database.
 type DatabaseTest struct {
-	Name string
+
+	// Data is the set of data stored in the registry to insert
+	// into the database for the purpose of querying.
 	Data []string
 	// Each of the QueryCases will be run with the set of indexes.
-	Indexes    [][][]rel.Attribute
+	Indexes [][][]rel.Attribute
+
 	QueryCases []QueryTest
 }
 
 // QueryTest is a subtest of a DatabaseTest which ensures that the results
 // of a query match the expectations.
 type QueryTest struct {
-	Name    string
-	Query   *rel.Query
+	// Name is the name of the subtest.
+	Name string
+	// Query are the clauses of the query.
+	Query rel.Clauses
+
+	// ResVars are the variables which should be examined as a part of the
+	// result.
 	ResVars []rel.Var
+
+	// Results are the expected set of results. Order does not matter.
 	Results [][]interface{}
+
+	// Entities is the set of entities of the query in their join order.
+	Entities []rel.Var
+
+	// ErrorRE is used to indicate that the query is invalid and will
+	// result in an error that must match this pattern.
+	ErrorRE string
 }
 
-func (tc DatabaseTest) run(t *testing.T, ec execContext) {
+func (tc DatabaseTest) run(t *testing.T, s Suite) {
 	for _, databaseIndexes := range tc.databaseIndexes() {
 		t.Run(fmt.Sprintf("%s", databaseIndexes), func(t *testing.T) {
-			db := rel.NewDatabase(ec.Schema, databaseIndexes)
+			db := rel.NewDatabase(s.Schema, databaseIndexes)
 			for _, k := range tc.Data {
-				v := ec.MustGetByName(t, k)
+				v := s.Registry.MustGetByName(t, k)
 				require.NoError(t, db.Insert(v))
 			}
 			for _, qc := range tc.QueryCases {
@@ -48,7 +75,15 @@ func (tc DatabaseTest) run(t *testing.T, ec execContext) {
 
 func (qc QueryTest) run(t *testing.T, db *rel.Database) {
 	var results [][]interface{}
-	require.NoError(t, qc.Query.Prepare().Iterate(db, func(r rel.Result) error {
+	q, err := rel.NewQuery(db.Schema(), qc.Query...)
+	if qc.ErrorRE != "" {
+		require.Regexp(t, qc.ErrorRE, err)
+		return
+	} else {
+		require.NoError(t, err)
+	}
+	require.Equal(t, qc.Entities, q.Entities())
+	require.NoError(t, q.Prepare().Iterate(db, func(r rel.Result) error {
 		var cur []interface{}
 		for _, v := range qc.ResVars {
 			cur = append(cur, r.Var(v))
@@ -75,6 +110,36 @@ func (qc QueryTest) run(t *testing.T, db *rel.Database) {
 	require.Empty(t, expResults, "got", results)
 }
 
+func (tc DatabaseTest) encode(t *testing.T, r *DataRegistry) *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Content: []*yaml.Node{
+			scalarYAML("indexes"),
+			tc.encodeIndexes(),
+			scalarYAML("data"),
+			tc.encodeData(),
+			scalarYAML("queries"),
+			tc.encodeQueries(t, r),
+		},
+	}
+}
+
+func (tc DatabaseTest) encodeIndexes() *yaml.Node {
+	databaseIndexesNode := yaml.Node{Kind: yaml.SequenceNode}
+	for _, indexes := range tc.databaseIndexes() {
+		indexesNode := yaml.Node{Kind: yaml.SequenceNode}
+		for _, idx := range indexes {
+			indexNode := yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
+			for _, attr := range idx {
+				indexNode.Content = append(indexNode.Content, scalarYAML(attr.String()))
+			}
+			indexesNode.Content = append(indexesNode.Content, &indexNode)
+		}
+		databaseIndexesNode.Content = append(databaseIndexesNode.Content, &indexesNode)
+	}
+	return &databaseIndexesNode
+}
+
 func (tc DatabaseTest) encodeData() *yaml.Node {
 	dataNode := yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
 	for _, k := range tc.Data {
@@ -83,7 +148,7 @@ func (tc DatabaseTest) encodeData() *yaml.Node {
 	return &dataNode
 }
 
-func (tc DatabaseTest) encodeQueries(t *testing.T, ec execContext) *yaml.Node {
+func (tc DatabaseTest) encodeQueries(t *testing.T, r *DataRegistry) *yaml.Node {
 	queriesNode := yaml.Node{Kind: yaml.MappingNode}
 
 	encodeValues := func(t *testing.T, v []interface{}) *yaml.Node {
@@ -91,7 +156,7 @@ func (tc DatabaseTest) encodeQueries(t *testing.T, ec execContext) *yaml.Node {
 		seq.Kind = yaml.SequenceNode
 		seq.Style = yaml.FlowStyle
 		for _, v := range v {
-			name, ok := ec.GetName(v)
+			name, ok := r.GetName(v)
 			if ok {
 				seq.Content = append(seq.Content, scalarYAML(name))
 			} else if typ, isType := v.(reflect.Type); isType {
@@ -112,29 +177,46 @@ func (tc DatabaseTest) encodeQueries(t *testing.T, ec execContext) *yaml.Node {
 		}
 		return &res
 	}
-	encodeResultVars := func(resultVars []rel.Var) *yaml.Node {
+	encodeVars := func(vars []rel.Var) *yaml.Node {
 		n := yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
-		for _, v := range resultVars {
+		for _, v := range vars {
 			n.Content = append(n.Content, scalarYAML("$"+string(v)))
 		}
 		return &n
 	}
-	addQuery := func(t *testing.T, qc QueryTest) {
+	addQuery := func(t *testing.T, qt QueryTest) {
 		var query yaml.Node
-		require.NoError(t, query.Encode(qc.Query.Clauses()))
-		queriesNode.Content = append(queriesNode.Content,
-			scalarYAML(qc.Name),
-			&yaml.Node{
+		require.NoError(t, query.Encode(qt.Query))
+
+		var qtNode *yaml.Node
+		if qt.ErrorRE != "" {
+			qtNode = &yaml.Node{
 				Kind: yaml.MappingNode,
 				Content: []*yaml.Node{
 					scalarYAML("query"),
 					&query,
-					scalarYAML("result-vars"),
-					encodeResultVars(qc.ResVars),
-					scalarYAML("results"),
-					encodeResults(t, qc.Results),
+					scalarYAML("error"),
+					scalarYAML(qt.ErrorRE),
 				},
-			})
+			}
+		} else {
+			qtNode = &yaml.Node{
+				Kind: yaml.MappingNode,
+				Content: []*yaml.Node{
+					scalarYAML("query"),
+					&query,
+					scalarYAML("entities"),
+					encodeVars(qt.Entities),
+					scalarYAML("result-vars"),
+					encodeVars(qt.ResVars),
+					scalarYAML("results"),
+					encodeResults(t, qt.Results),
+				},
+			}
+		}
+		queriesNode.Content = append(queriesNode.Content,
+			scalarYAML(qt.Name), qtNode,
+		)
 	}
 	for _, qc := range tc.QueryCases {
 		addQuery(t, qc)
@@ -147,34 +229,4 @@ func (tc DatabaseTest) databaseIndexes() [][][]rel.Attribute {
 		return [][][]rel.Attribute{{}}
 	}
 	return tc.Indexes
-}
-
-func (tc DatabaseTest) encode(t *testing.T, ec execContext) *yaml.Node {
-	return &yaml.Node{
-		Kind: yaml.MappingNode,
-		Content: []*yaml.Node{
-			scalarYAML("indexes"),
-			tc.encodeIndexes(),
-			scalarYAML("data"),
-			tc.encodeData(),
-			scalarYAML("queries"),
-			tc.encodeQueries(t, ec),
-		},
-	}
-}
-
-func (tc DatabaseTest) encodeIndexes() *yaml.Node {
-	databaseIndexesNode := yaml.Node{Kind: yaml.SequenceNode}
-	for _, indexes := range tc.databaseIndexes() {
-		indexesNode := yaml.Node{Kind: yaml.SequenceNode}
-		for _, idx := range indexes {
-			indexNode := yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
-			for _, attr := range idx {
-				indexNode.Content = append(indexNode.Content, scalarYAML(attr.String()))
-			}
-			indexesNode.Content = append(indexesNode.Content, &indexNode)
-		}
-		databaseIndexesNode.Content = append(databaseIndexesNode.Content, &indexesNode)
-	}
-	return &databaseIndexesNode
 }

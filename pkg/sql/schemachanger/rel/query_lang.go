@@ -10,17 +10,25 @@
 
 package rel
 
+// Clause is the basic building block of a query. A query is defined as
+// the conjunction of clauses.
+type Clause interface {
+	// clause is a marker interface to prevent external package from implementing
+	// the interface.
+	clause()
+}
+
 // Attr declares that an attribute of the entity represented by this var
 // should have a value equal to expr.
 func (v Var) Attr(a Attribute, e Expr) Clause {
-	return datom(v, a, e)
+	return &tripleDecl{v, a, e}
 }
 
 // Type returns a clause enforcing that the variable has one of the types
 // passed by constraining its Type to the output of passing the
-// args to Types.
-func (v Var) Type(valuesForTypeOf ...interface{}) Clause {
-	return datom(v, Type, Types(valuesForTypeOf...))
+// args to Types. It is syntactic sugar around existing primitives.
+func (v Var) Type(valueForTypeOf interface{}, moreValuesForTypeOf ...interface{}) Clause {
+	return v.Attr(Type, Types(valueForTypeOf, moreValuesForTypeOf...))
 }
 
 // Eq return a clause enforcing that the var has the value
@@ -44,7 +52,7 @@ func (v Var) Entities(attr Attribute, entities ...Var) Clause {
 // And constructs a clause represents a set of clauses which should
 // be taken in conjunction and exist so that go functions can be written to
 // return a single clause without needing to get involved in appending to
-// lists. It can be viewed as syntactic sugar.
+// a slice of clauses.
 func And(terms ...Clause) Clause {
 	return (*and)(&terms)
 }

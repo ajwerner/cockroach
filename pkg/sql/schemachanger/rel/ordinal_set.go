@@ -26,7 +26,7 @@ func (sc *Schema) attributesToOrdinals(attrs []Attribute) ([]ordinal, ordinalSet
 	ret := make([]ordinal, len(attrs))
 	for i, a := range attrs {
 		ord := sc.getOrd(a)
-		set = set.Add(ord)
+		set = set.add(ord)
 		ret[i] = ord
 	}
 	return ret, set
@@ -39,48 +39,48 @@ type ordinalSet uint64
 const allOrdinals = math.MaxUint64
 
 // ForEach iterates the set of attributes.
-func (m ordinalSet) ForEach(f func(a ordinal) (wantMore bool)) {
+func (m ordinalSet) forEach(f func(a ordinal) (wantMore bool)) {
 	rem := m
 	for rem > 0 {
 		ord := ordinal(bits.TrailingZeros64(uint64(rem)))
 		if !f(ord) {
 			return
 		}
-		rem = rem.Remove(ord)
+		rem = rem.remove(ord)
 	}
 }
 
-// Remove returns the set constructed by removing ord from m.
-func (m ordinalSet) Remove(ord ordinal) ordinalSet {
+// remove returns the set constructed by removing ord from m.
+func (m ordinalSet) remove(ord ordinal) ordinalSet {
 	return m & ^(1 << ord)
 }
 
-// Contains tests if m contains ord.
-func (m ordinalSet) Contains(ord ordinal) bool {
+// contains tests if m contains ord.
+func (m ordinalSet) contains(ord ordinal) bool {
 	return m&(1<<ord) != 0
 }
 
-// Add returns the set constructed by adding ord to m.
-func (m ordinalSet) Add(ord ordinal) ordinalSet {
+// add returns the set constructed by adding ord to m.
+func (m ordinalSet) add(ord ordinal) ordinalSet {
 	return m | (1 << ord)
 }
 
-// Without returns the set constructed by removing the members of other from m.
-func (m ordinalSet) Without(other ordinalSet) ordinalSet {
+// without returns the set constructed by removing the members of other from m.
+func (m ordinalSet) without(other ordinalSet) ordinalSet {
 	return m & ^other
 }
 
-// Intersection returns the set constructing with the intersection of m and other.
-func (m ordinalSet) Intersection(other ordinalSet) ordinalSet {
+// intersection returns the set constructing with the intersection of m and other.
+func (m ordinalSet) intersection(other ordinalSet) ordinalSet {
 	return m & other
 }
 
-// Union returns the set constructing with the union of m and other.
-func (m ordinalSet) Union(other ordinalSet) ordinalSet {
+// union returns the set constructing with the union of m and other.
+func (m ordinalSet) union(other ordinalSet) ordinalSet {
 	return m | other
 }
 
-// Len returns the number of ordinals in the set.
-func (m ordinalSet) Len() int {
+// len returns the number of ordinals in the set.
+func (m ordinalSet) len() int {
 	return bits.OnesCount64(uint64(m))
 }

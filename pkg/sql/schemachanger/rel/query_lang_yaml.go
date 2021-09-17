@@ -17,11 +17,11 @@ func valueForYAML(v interface{}) interface{} {
 	}
 }
 
-func (v valueExpr) forYAML() interface{} {
+func (v valueExpr) encoded() interface{} {
 	return valueForYAML(v.value)
 }
 
-func (a anyExpr) forYAML() interface{} {
+func (a anyExpr) encoded() interface{} {
 	ret := make([]interface{}, 0, len(a))
 	for _, v := range a {
 		ret = append(ret, valueForYAML(v))
@@ -29,8 +29,8 @@ func (a anyExpr) forYAML() interface{} {
 	return ret
 }
 
-func (v Var) forYAML() interface{} {
-	return string(v)
+func (v Var) encoded() interface{} {
+	return "$" + string(v)
 }
 
 func (e *eqDecl) MarshalYAML() (interface{}, error) {
@@ -39,7 +39,7 @@ func (e *eqDecl) MarshalYAML() (interface{}, error) {
 
 func exprToString(e Expr) (string, error) {
 	var expr yaml.Node
-	if err := expr.Encode(e.forYAML()); err != nil {
+	if err := expr.Encode(e.encoded()); err != nil {
 		return "", err
 	}
 	expr.Style = yaml.FlowStyle
@@ -50,7 +50,7 @@ func exprToString(e Expr) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-func (f *datomDecl) MarshalYAML() (interface{}, error) {
+func (f *tripleDecl) MarshalYAML() (interface{}, error) {
 	return clauseStr(fmt.Sprintf("$%s[%s]", f.entity, f.attribute), f.value)
 }
 
@@ -71,22 +71,24 @@ func (a *and) MarshalYAML() (interface{}, error) {
 }
 
 func (f filterDecl) MarshalYAML() (interface{}, error) {
-	var paramTypes []interface{}
-	{
-		ft := reflect.TypeOf(f.predicateFunc)
-		for i := 0; i < ft.NumIn(); i++ {
-			paramTypes = append(paramTypes, ft.In(i).String())
+	var buf strings.Builder
+	buf.WriteString(f.name)
+	buf.WriteString("(")
+	ft := reflect.TypeOf(f.predicateFunc)
+	for i := 0; i < ft.NumIn(); i++ {
+		if i > 0 {
+			buf.WriteString(", ")
 		}
+		buf.WriteString(ft.In(i).String())
 	}
-	l := make([]interface{}, 0, len(f.vars)+1)
-	l = append(l, []interface{}{"func", f.name, paramTypes})
-	for _, v := range f.vars {
-		l = append(l, "$"+string(v))
+	buf.WriteString(")(")
+	for i, v := range f.vars {
+		if i > 0 {
+			buf.WriteString(", ")
+		}
+		buf.WriteString("$")
+		buf.WriteString(string(v))
 	}
-	var ret yaml.Node
-	if err := ret.Encode(l); err != nil {
-		return nil, err
-	}
-	ret.Style = yaml.FlowStyle
-	return &ret, nil
+	buf.WriteString(")")
+	return buf.String(), nil
 }

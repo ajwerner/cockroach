@@ -55,6 +55,6 @@ func (v valuesMap) get(a ordinal) interface{} {
 }
 
 func (vm *valuesMap) add(ord ordinal, v interface{}) {
-	vm.attrs = vm.attrs.Add(ord)
+	vm.attrs = vm.attrs.add(ord)
 	vm.m[ord] = v
 }

@@ -52,19 +52,18 @@ func makeComparableValue(val interface{}) (typedValue, error) {
 				value: vv.Convert(reflect.PtrTo(compType)).Interface(),
 			}, nil
 		case typ.Elem().Kind() == reflect.Struct:
-			ptr := vv.Pointer()
 			return typedValue{
 				typ:   vv.Type(),
-				value: &ptr,
+				value: val,
 			}, nil
 		default:
 			return typedValue{}, errors.Errorf(
-				"unsupported scalar kind %v for type %T", typ.Elem().Kind(), val,
+				"unsupported pointer kind %v for type %T", typ.Elem().Kind(), val,
 			)
 		}
 	default:
 		return typedValue{}, errors.Errorf(
-			"unsupported scalar kind %v for type %T", typ.Kind(), val,
+			"unsupported kind %v for type %T", typ.Kind(), val,
 		)
 	}
 }

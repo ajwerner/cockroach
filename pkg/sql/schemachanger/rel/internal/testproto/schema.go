@@ -9,3 +9,45 @@
 // licenses/APL.txt.
 
 package testproto
+
+import (
+	"reflect"
+
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/rel"
+)
+
+// testAttr is a rel.Attribute used for testing.
+type testAttr int8
+
+var _ rel.Attribute = testAttr(0)
+
+//go:generate stringer --type testAttr  --tags test
+const (
+	m testAttr = iota
+	m1
+	m2
+	c
+	name
+)
+
+// This schema exercises cyclic references.
+var schema = rel.MustSchema("testschema", rel.Mappings{
+	TypeMappings: map[reflect.Type]map[string]rel.Attribute{
+		reflect.TypeOf((*M1)(nil)): {
+			"C":    c,
+			"M1":   m1,
+			"M2":   m2,
+			"Name": name,
+		},
+		reflect.TypeOf((*M2)(nil)): {
+			"C":    c,
+			"M1":   m1,
+			"M2":   m2,
+			"Name": name,
+		},
+		reflect.TypeOf((*Container)(nil)): {
+			"M1": m,
+			"M2": m,
+		},
+	},
+})

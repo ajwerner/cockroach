@@ -1,6 +1,6 @@
 package rel
 
-// systemAttribute is a type which represents attributes offerred by the
+// systemAttribute is a type which represents attributes offered by the
 // system for all entities stored in a database. In particular they capture
 // the type and address of the variable.
 //

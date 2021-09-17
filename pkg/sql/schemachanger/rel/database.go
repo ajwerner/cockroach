@@ -24,6 +24,10 @@ type Database struct {
 	// When an entity is inserted, it is inserted into each of the indexes. The
 	// first entry in the list is the "primary index" which compares entities
 	// based on all attributes.
+	//
+	// Note that the use of btree-tree backed indexes is far from fundamental.
+	// One could easily envision a map-backed indexing structure which may well
+	// perform much better given the general lack of
 	indexes []index
 	// entities stores all the entities keyed on its pointer value.
 	entities map[interface{}]*entity
@@ -42,7 +46,7 @@ func NewDatabase(sc *Schema, indexes [][]Attribute) *Database {
 		indexes:  make([]index, len(indexes)+1),
 		entities: make(map[interface{}]*entity),
 	}
-	// Index everything by all of the attributes. This serves as the primary
+	// Index everything by all the attributes. This serves as the "primary"
 	// index.
 	const degree = 8
 	fl := btree.NewFreeList(len(indexes) + 1)
@@ -64,13 +68,16 @@ func NewDatabase(sc *Schema, indexes [][]Attribute) *Database {
 	return t
 }
 
-// Insert inserts an variable.
+// Insert inserts an entity. Note that entities are defined
+// by their pointer value. If you want to avoid inserting an
+// entity because a different entity exists with some of the
+// same attribute values, this must be done above this call.
+// Note also that entities may point to other entities. This
+// call will recursively insert all entities referenced by the
+// passed entity which do not already exist in the database.
 //
-// TODO(ajwerner): Figure out what to do if the variable already
-// exists. We need to nail down what existence means: is it
-// intentional, as in, does the unique pointer exist, or is it
-// extensional, as in, does some variable exist with the same attributes
-// ignoring pointer value? Either way, what we have here does not fly.
+// It is a no-op and not an error to insert an entity which
+// already exists.
 func (t *Database) Insert(e interface{}) error {
 	return asEntities(t.schema, allOrdinals, e, func(entity *entity) error {
 		return t.insert(entity)
@@ -79,25 +86,25 @@ func (t *Database) Insert(e interface{}) error {
 
 // TODO(ajwerner): Deal with already inserted data.
 func (t *Database) insert(e *entity) error {
-	t.entities[e.getAttribute(t.schema, Self)] = e
-	removedItem := t.indexes[0].tree.ReplaceOrInsert(&containerItem{
-		entity:    e,
-		indexSpec: &t.indexes[0].indexSpec,
-	})
-	if removedItem != nil && !equal(t.schema, removedItem.(*containerItem).entity, e) {
-		return errors.AssertionFailedf(
-			"expected to remove the item each time: %v", removedItem,
-		)
+	self := e.getComparableValue(t.schema, Self)
+	if existing, exists := t.entities[self]; exists {
+		// Sanity check that the entities really are equal.
+		if _, eq := compareEntities(t.schema, e, existing); !eq {
+			return errors.AssertionFailedf(
+				"expected entity %v to equal its already inserted value", self,
+			)
+		}
+		return nil
 	}
-	secondaryIndexes := t.indexes[1:]
-	for i := range secondaryIndexes {
-		idx := &secondaryIndexes[i]
+	t.entities[self] = e
+	for i := range t.indexes {
+		idx := &t.indexes[i]
 		if g := idx.tree.ReplaceOrInsert(&containerItem{
 			entity:    e,
 			indexSpec: &idx.indexSpec,
-		}); (removedItem == nil) != (g == nil) {
+		}); g != nil {
 			return errors.AssertionFailedf(
-				"expected to remove the item each time: %v %v", removedItem, g,
+				"expected entity %T(%v) to not exist", self, self,
 			)
 		}
 	}
@@ -124,32 +131,18 @@ type entityIterator interface {
 
 // Iterate will iterate the containers which match the specified valuesMap.
 func (t *Database) iterate(where *valuesMap, f entityIterator) (err error) {
-	var all, nils, nonNils ordinalSet
-	{
-		all = where.attrs
-		all.ForEach(func(a ordinal) (wantMore bool) {
-			if where.get(a) == nil {
-				nils = nils.Add(a)
-			}
-			return true
-		})
-		nonNils = all.Without(nils)
-	}
-
-	idx, toCheck := t.chooseIndex(all)
-	from, to := getValuesItems(&idx.indexSpec, where, all)
+	idx, toCheck := t.chooseIndex(where.attrs)
+	from, to := getValuesItems(&idx.indexSpec, where, where.attrs)
 	defer putValuesItems(from, to)
 	idx.tree.AscendRange(from, to, func(i btree.Item) (wantMore bool) {
 		c := i.(*containerItem)
-		// We want to skip items which do not have valuesMap set for
-		// all members of the where clause or which have valuesMap set
-		// for attributes where we explicitly do not want them.
-		if cAttrs := c.entity.attrs; nonNils.Without(cAttrs) != 0 ||
-			nils.Intersection(cAttrs) != 0 {
+		// We want to skip items which do not have values set for
+		// all members of the where clause.
+		if where.attrs.without(c.entity.attrs) != 0 {
 			return true
 		}
 		var failed bool
-		toCheck.ForEach(func(a ordinal) (wantMore bool) {
+		toCheck.forEach(func(a ordinal) (wantMore bool) {
 			_, eq := compareOn(a, (*valuesMap)(c.entity), where)
 			failed = !eq
 			return !failed
@@ -177,11 +170,11 @@ func (t *Database) chooseIndex(m ordinalSet) (_ *index, toCheck ordinalSet) {
 	best, bestOverlap := 0, ordinalSet(0)
 	dims := t.indexes[1:]
 	for i := range dims {
-		if overlap := dims[i].overlap(m); overlap.Len() > bestOverlap.Len() {
+		if overlap := dims[i].overlap(m); overlap.len() > bestOverlap.len() {
 			best, bestOverlap = i+1, overlap
 		}
 	}
-	return &t.indexes[best], m.Without(bestOverlap)
+	return &t.indexes[best], m.without(bestOverlap)
 }
 
 // overlap returns the ordinals from m which overlap with a prefix of
@@ -189,8 +182,8 @@ func (t *Database) chooseIndex(m ordinalSet) (_ *index, toCheck ordinalSet) {
 func (s *indexSpec) overlap(m ordinalSet) ordinalSet {
 	var overlap ordinalSet
 	for _, a := range s.attrs {
-		if m.Contains(a) {
-			overlap = overlap.Add(a)
+		if m.contains(a) {
+			overlap = overlap.add(a)
 		} else {
 			break
 		}

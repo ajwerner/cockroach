@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/cockroachdb/errors"
+	"gopkg.in/yaml.v2"
 )
 
 type filter struct {
@@ -35,7 +36,7 @@ func newQuery(sc *Schema, clauses Clauses) *Query {
 	// Flatten away nested and clauses. We may need them at some point
 	// if we add something like or-join or not-join. At time of writing,
 	// the and case in processClause is an assertion failure.
-	clauses = clauses.flattened()
+	clauses = flattened(clauses)
 	for _, t := range clauses {
 		p.processClause(t)
 	}
@@ -61,7 +62,9 @@ func newQuery(sc *Schema, clauses Clauses) *Query {
 	if contradictionFound, _, attr := unify(
 		p.facts, p.slots, nil,
 	); contradictionFound {
-		panic(errors.Errorf("query contains contradiction on %v", attr))
+		panic(errors.Errorf(
+			"query contains contradiction on %v", sc.attributes[attr],
+		))
 	}
 	return &Query{
 		schema:        sc,
@@ -76,9 +79,27 @@ func newQuery(sc *Schema, clauses Clauses) *Query {
 }
 
 func (p *queryBuilder) processClause(t Clause) {
+	defer func() {
+		if r := recover(); r != nil {
+			if rErr, ok := r.(error); ok {
+				encoded, err := yaml.Marshal(t)
+				if err != nil {
+					panic(errors.CombineErrors(
+						rErr,
+						errors.Wrap(err, "failed to encode clause"),
+					))
+				}
+				panic(errors.Wrapf(
+					rErr, "failed to process invalid clause %s", encoded,
+				))
+			} else {
+				panic(r)
+			}
+		}
+	}()
 	switch t := t.(type) {
-	case *datomDecl:
-		p.processFactDecl(t)
+	case *tripleDecl:
+		p.processTripleDecl(t)
 	case *eqDecl:
 		p.processEqDecl(t)
 	case *and:
@@ -90,7 +111,7 @@ func (p *queryBuilder) processClause(t Clause) {
 	}
 }
 
-func (p *queryBuilder) processFactDecl(fd *datomDecl) {
+func (p *queryBuilder) processTripleDecl(fd *tripleDecl) {
 	f := fact{
 		variable: p.maybeAddVar(fd.entity, true),
 		attr:     p.sc.getOrd(fd.attribute),
@@ -109,8 +130,7 @@ func (p *queryBuilder) processEqDecl(t *eqDecl) {
 	// is equal to itself, but we want to have the normal contradiction
 	// discovery machinery run.
 	//
-	// Note that there's no need to typeCheck because the Self accepts
-	// all types.
+	// Note that there's no need to typeCheck because Self accepts all types.
 	p.facts = append(p.facts,
 		fact{
 			variable: varIdx,
@@ -192,7 +212,7 @@ func (p *queryBuilder) processValueExpr(rawValue Expr) slotIdx {
 		}
 		return p.fillSlot(slot{typedValue: tv}, false)
 	default:
-		panic(errors.Errorf("unknown expr type %T", rawValue))
+		panic(errors.AssertionFailedf("unknown expr type %T", rawValue))
 	}
 }
 
@@ -233,7 +253,7 @@ func (p *queryBuilder) findEntitySlots() (entitySlots []slotIdx) {
 // attribute.
 func (p *queryBuilder) typeCheck(f fact) {
 	s := &p.slots[f.value]
-	if s.empty() {
+	if s.empty() && s.any == nil {
 		return
 	}
 	switch f.attr {

@@ -17,9 +17,9 @@
 // queried using an embedded query language modeled on a non-recursive datalog
 // and inspired heavily by datomic.
 //
-// Why rel?
+// Why rel
 //
-// 1) Explainability, maintainability, observability
+// Explainability, maintainability, observability
 //
 // The optimizer gets a lot of bang for its buck being able to think
 // about complex rules in a declarative way. Furthermore, when

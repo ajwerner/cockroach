@@ -149,17 +149,6 @@ func TestQueryBasic(t *testing.T) {
 	}
 }
 
-func TestContradiction(t *testing.T) {
-	var a, b, typ rel.Var = "a", "b", "typ"
-	_, err := rel.NewQuery(screl.Schema,
-		a.Type((*scpb.Type)(nil)),
-		b.Type((*scpb.Table)(nil)),
-		a.Attr(rel.Type, typ),
-		b.Attr(rel.Type, typ),
-	)
-	require.Regexp(t, "failed to construct query: query contains contradiction on Type", err)
-}
-
 func formatResults(r rel.Result, nodes []rel.Var) string {
 	var buf strings.Builder
 	for _, n := range nodes {

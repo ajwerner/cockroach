@@ -73,13 +73,27 @@ func (ec *evalContext) Iterate(db *Database, ri ResultIterator) error {
 	return ec.iterateNext()
 }
 
+// iterateNext steps down in the join to either decide that we've
+// iterated through all the entity variables and need to process
+// filters and pass along the result or that we need to go on and
+// join the next entity.
 func (ec *evalContext) iterateNext() error {
-	if done, err := ec.maybeFoundResult(); done || err != nil {
-		return err
+
+	// We're at the bottom of the iteration, check if all conditions have
+	// been satisfied, and then invoke the client.
+	if ec.cur == ec.depth {
+		if ec.haveUnboundSlots() || ec.checkFilters() {
+			return nil
+		}
+		return ec.ri((*evalResult)(ec))
 	}
+
+	// If we've already populated the next entity in the join as variable,
+	// skip iterating the database.
 	if done, err := ec.maybeVisitAlreadyBoundEntity(); done || err != nil {
 		return err
 	}
+
 	where, anyAttr, anyValues := ec.buildWhere()
 	defer putValues(where)
 	if anyValues == nil {
@@ -125,18 +139,18 @@ func (ec *evalContext) visit(e *entity) error {
 	return ec.iterateNext()
 }
 
-func (ec *evalContext) maybeFoundResult() (done bool, _ error) {
-	if ec.cur != ec.depth {
-		return false, nil
-	}
-	// We're at the bottom of the join.
-	// Check to see if all the variableSlots have been assigned a value.
-	// If not, then we did not successfully unify everything (right?).
+// Check to see if all the variableSlots have been assigned a value.
+// If not, then we did not successfully unify everything.
+func (ec *evalContext) haveUnboundSlots() bool {
 	for _, v := range ec.q.variableSlots {
 		if ec.slots[v].value == nil {
-			return true, nil
+			return true
 		}
 	}
+	return false
+}
+
+func (ec *evalContext) checkFilters() (done bool) {
 	for _, f := range ec.q.filters {
 		// TODO(ajwerner): Catch panics here and convert them to errors.
 		ins := make([]reflect.Value, len(f.input))
@@ -155,7 +169,7 @@ func (ec *evalContext) maybeFoundResult() (done bool, _ error) {
 				if in.Type().ConvertibleTo(inType) {
 					in = in.Convert(inType)
 				} else {
-					return true, nil
+					return true
 				}
 			}
 			ins[i] = in
@@ -163,10 +177,10 @@ func (ec *evalContext) maybeFoundResult() (done bool, _ error) {
 		}
 		outs := f.predicate.Call(ins)
 		if !outs[0].Bool() {
-			return true, nil
+			return true
 		}
 	}
-	return true, ec.ri((*evalResult)(ec))
+	return false
 }
 
 // Construct a where clause with all of the bound valuesMap.
@@ -184,7 +198,6 @@ func (ec *evalContext) buildWhere() (where *valuesMap, anyAttr ordinal, anyValue
 		if f.variable != ec.q.entities[ec.cur] {
 			continue
 		}
-
 		s := ec.slots[f.value]
 		if !s.empty() {
 			where.add(f.attr, s.value)
@@ -195,6 +208,9 @@ func (ec *evalContext) buildWhere() (where *valuesMap, anyAttr ordinal, anyValue
 	return where, anyAttr, anyValues
 }
 
+// unify attempts to unify away facts by assigning values to slots.
+// If a contradiction is found, the returned slot of the entity in
+// question and the ordinal of the attribute of conflict are returned.
 func unify(
 	facts []fact, s []slot, set *util.FastIntSet,
 ) (contradictionFound bool, eIdx slotIdx, attr ordinal) {
@@ -205,32 +221,50 @@ func unify(
 	// in that way, reduce the set of facts which need to be searched while
 	// still requiring only linear operations in the number of facts. As it
 	// stands, this algorithm is quadratic in the number of facts.
-	setSlot := func(dst, src slotIdx) {
-		s[dst] = s[src]
+	setSlot := func(dst, src slotIdx) (contradictionFound bool) {
+		shouldSet, contradictionFound := s[dst].shouldSet(s[src].value)
+		if contradictionFound || !shouldSet {
+			return contradictionFound
+		}
+		s[dst].set(s[src].typedValue)
 		if set != nil {
 			set.Add(int(dst))
 		}
+		return false
 	}
 	for {
 		var somethingChanged bool
 		var prev, cur *fact
 		for i := 1; i < len(facts); i++ {
 			prev, cur = &facts[i-1], &facts[i]
-			if prev.variable != cur.variable || prev.attr != cur.attr ||
-				// This case is weird. I guess we could do more to get
-				// rid of this case.
+			if prev.variable != cur.variable ||
+				prev.attr != cur.attr ||
+				// If the slots are the same, they've already been unified.
+				// TODO(ajwerner): We could probably prune equal facts elsewhere.
 				prev.value == cur.value ||
+				// Similarly, we could avoid looking at fully unified facts.
 				s[prev.value].eq(s[cur.value]) {
 				continue
 			}
-			if s[prev.value].empty() {
-				setSlot(prev.value, cur.value)
-			} else if s[cur.value].empty() {
-				setSlot(cur.value, prev.value)
+
+			var unified bool
+			for _, v := range []struct{ dst, src slotIdx }{
+				{prev.value, cur.value},
+				{cur.value, prev.value},
+			} {
+				if s[v.dst].empty() {
+					if contradictionFound = setSlot(v.dst, v.src); contradictionFound {
+						return true, cur.variable, cur.attr
+					}
+					unified = true
+					break
+				}
+			}
+			if unified {
+				somethingChanged = true
 			} else {
 				return true, cur.variable, cur.attr
 			}
-			somethingChanged = true
 		}
 		if !somethingChanged {
 			return false, 0, 0
@@ -268,7 +302,7 @@ func (ec *evalContext) setEntitySlot(
 ) (foundContradiction bool) {
 	eSlot := ec.q.entities[ec.cur]
 	s := &ec.slots[eSlot]
-	idVal := e.getAttribute(ec.db.schema, Self)
+	idVal := e.getComparableValue(ec.db.schema, Self)
 	ok, foundContradiction := s.shouldSet(idVal)
 	if foundContradiction {
 		return true
@@ -293,6 +327,13 @@ func (ec *evalContext) maybeVisitAlreadyBoundEntity() (done bool, _ error) {
 		return false, nil
 	}
 	e, ok := ec.db.entities[s.value]
+
+	// This is the case where we've somehow bound the entity to a
+	// value that does not exist in the database. This could happen
+	// if, say, the caller provided an entity as a value. I don't know
+	// if we need to permit this, but it's definitely an edge. The claim
+	// of the API is that we are going to iterate the set of entities in
+	// the database which conform to the query.
 	if !ok {
 		return true, nil // contradiction
 	}

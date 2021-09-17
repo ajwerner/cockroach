@@ -99,7 +99,7 @@ func compare(a, b interface{}) (less, eq bool) {
 		case a == b:
 			return false, true
 		case a.PkgPath() == b.PkgPath():
-			return a.Name() < b.Name(), false
+			return a.String() < b.String(), false
 		default:
 			return a.PkgPath() < b.PkgPath(), false
 		}
@@ -174,20 +174,14 @@ func compareOn(attr ordinal, a, b *valuesMap) (less, eq bool) {
 
 // Compare compares two elements by their attributes.
 func compareEntities(s *Schema, a, b *entity) (less, eq bool) {
-	if a.getAttribute(s, Self) == b.getAttribute(s, Self) {
+	if a.getComparableValue(s, Self) == b.getComparableValue(s, Self) {
 		return false, true
 	}
-	ordinalSet.Union(
+	ordinalSet.union(
 		a.attrs, b.attrs,
-	).ForEach(func(attr ordinal) (wantMore bool) {
+	).forEach(func(attr ordinal) (wantMore bool) {
 		less, eq = compareOn(attr, a.asMap(), b.asMap())
 		return eq
 	})
 	return less, eq
-}
-
-// equal returns true if the two elements have identical attributes.
-func equal(s *Schema, a, b *entity) bool {
-	_, eq := compareEntities(s, a, b)
-	return eq
 }

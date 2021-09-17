@@ -22,15 +22,15 @@ var _ item = (*valuesItem)(nil)
 func compareItems(a, b item) (less bool) {
 	// Compare on the index attributes first.
 	index := a.getIndexSpec()
-	toCompare := a.compareAttrs().Intersection(b.compareAttrs())
+	toCompare := a.compareAttrs().intersection(b.compareAttrs())
 	for _, at := range index.attrs {
-		if !toCompare.Contains(at) {
+		if !toCompare.contains(at) {
 			break
 		}
 
-		var eq bool
-		less, eq = compareOn(at, a.getValues(), b.getValues())
-		if !eq {
+		if less, eq := compareOn(
+			at, a.getValues(), b.getValues(),
+		); !eq {
 			return less
 		}
 	}

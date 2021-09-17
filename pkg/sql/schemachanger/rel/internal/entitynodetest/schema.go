@@ -1,3 +1,13 @@
+// Copyright 2021 The Cockroach Authors.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
 package entitynodetest
 
 import (
@@ -9,12 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type OneOf struct {
-	E *Entity
-	N *Node
-}
-
-type Entity struct {
+type entity struct {
 	I8       int8
 	PI8      *int8
 	I16      int16
@@ -31,27 +36,27 @@ type Entity struct {
 	PUI32    *uint32
 	UI64     uint64
 	PUI64    *uint64
-	String   string
-	PS       *string
+	Str      string
+	PStr     *string
 	Uintptr  uintptr
 	PUintptr *uintptr
 }
 
-type Node struct {
-	E    *Entity
-	L, R *Node
+type node struct {
+	Value       *entity
+	Left, Right *node
 }
 
-func (n *Node) EncodeToYAML(t *testing.T, r *reltest.DataRegistry) interface{} {
+func (n *node) EncodeToYAML(t *testing.T, r *reltest.DataRegistry) interface{} {
 	yn := yaml.Node{Kind: yaml.MappingNode, Style: yaml.FlowStyle}
 	for _, f := range []struct {
 		name  string
 		field interface{}
 		ok    bool
 	}{
-		{"E", n.E, n.E != nil},
-		{"L", n.L, n.L != nil},
-		{"R", n.R, n.R != nil},
+		{"value", n.Value, n.Value != nil},
+		{"left", n.Left, n.Left != nil},
+		{"right", n.Right, n.Right != nil},
 	} {
 		if !f.ok {
 			continue
@@ -64,40 +69,68 @@ func (n *Node) EncodeToYAML(t *testing.T, r *reltest.DataRegistry) interface{} {
 	return &yn
 }
 
-var _ reltest.RegistryYAMLEncoder = (*Node)(nil)
+var _ reltest.RegistryYAMLEncoder = (*node)(nil)
 
-var Schema = rel.MustSchema("testschema", rel.Mappings{
+// testAttr is a rel.Attribute used for testing.
+type testAttr int8
+
+var _ rel.Attribute = testAttr(0)
+
+//go:generate stringer --type TestAttr  --tags test
+const (
+	i8 testAttr = iota
+	pi8
+	i16
+	pi16
+	i32
+	pi32
+	i64
+	pi64
+	ui8
+	pui8
+	ui16
+	pui16
+	ui32
+	pui32
+	ui64
+	pui64
+	str
+	pstr
+	_uintptr
+	puintptr
+	value
+	left
+	right
+)
+
+var schema = rel.MustSchema("testschema", rel.Mappings{
 	TypeMappings: map[reflect.Type]map[string]rel.Attribute{
-		reflect.TypeOf((*Entity)(nil)): {
-			"I8":       I8,
-			"PI8":      PI8,
-			"I16":      I16,
-			"PI16":     PI16,
-			"I32":      I32,
-			"PI32":     PI32,
-			"I64":      I64,
-			"PI64":     PI64,
-			"UI8":      UI8,
-			"PUI8":     PUI8,
-			"UI16":     UI16,
-			"PUI16":    PUI16,
-			"UI32":     UI32,
-			"PUI32":    PUI32,
-			"UI64":     UI64,
-			"PUI64":    PUI64,
-			"String":   String,
-			"PS":       PS,
-			"Uintptr":  Uintptr,
-			"PUintptr": PUintptr,
+		reflect.TypeOf((*entity)(nil)): {
+			"I8":       i8,
+			"PI8":      pi8,
+			"I16":      i16,
+			"PI16":     pi16,
+			"I32":      i32,
+			"PI32":     pi32,
+			"I64":      i64,
+			"PI64":     pi64,
+			"UI8":      ui8,
+			"PUI8":     pui8,
+			"UI16":     ui16,
+			"PUI16":    pui16,
+			"UI32":     ui32,
+			"PUI32":    pui32,
+			"UI64":     ui64,
+			"PUI64":    pui64,
+			"Str":      str,
+			"PStr":     pstr,
+			"Uintptr":  _uintptr,
+			"PUintptr": puintptr,
 		},
-		reflect.TypeOf((*Node)(nil)): {
-			"E": E,
-			"L": L,
-			"R": R,
-		},
-		reflect.TypeOf((*OneOf)(nil)): {
-			"E": E,
-			"N": N,
+		reflect.TypeOf((*node)(nil)): {
+			"Value": value,
+			"Left":  left,
+			"Right": right,
 		},
 	},
 })

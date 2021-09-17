@@ -69,7 +69,7 @@ func (s *slot) set(tv typedValue) {
 	s.typedValue = tv
 }
 
-func (s *slot) shouldSet(val interface{}) (unset, foundContradiction bool) {
+func (s *slot) shouldSet(val interface{}) (shouldSet, foundContradiction bool) {
 	if !s.empty() {
 		if _, eq := compare(s.value, val); !eq {
 			return false, true

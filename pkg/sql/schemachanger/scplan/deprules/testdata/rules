@@ -4,191 +4,191 @@ rules
   from: parent-node
   to: other-node
   query:
-    - [=, $direction, DROP]
-    - [=, $status, [DELETE_ONLY, DELETE_AND_WRITE_ONLY]]
-    - [Type, $parent, '*scpb.Database']
-    - [Type, $other, ['*scpb.Type', '*scpb.Table', '*scpb.View', '*scpb.Sequence', '*scpb.Schema']]
-    - [[func, depends-on, ['*scpb.Database', scpb.Element]], $parent, $other]
-    - [Direction, $parent-target, $direction]
-    - [Direction, $other-target, $direction]
-    - [Status, $parent-node, $status]
-    - [Status, $other-node, $status]
-    - [Type, $parent-target, '*scpb.Target']
-    - [Element, $parent-target, $parent]
-    - [Type, $parent-node, '*scpb.Node']
-    - [Target, $parent-node, $parent-target]
-    - [Type, $other-target, '*scpb.Target']
-    - [Element, $other-target, $other]
-    - [Type, $other-node, '*scpb.Node']
-    - [Target, $other-node, $other-target]
+    - $direction = DROP
+    - $status IN [DELETE_ONLY, DELETE_AND_WRITE_ONLY]
+    - $parent[Type] = '*scpb.Database'
+    - $other[Type] IN ['*scpb.Type', '*scpb.Table', '*scpb.View', '*scpb.Sequence', '*scpb.Schema']
+    - depends-on(*scpb.Database, scpb.Element)($parent, $other)
+    - $parent-target[Direction] = direction
+    - $other-target[Direction] = direction
+    - $parent-node[Status] = status
+    - $other-node[Status] = status
+    - $parent-target[Type] = '*scpb.Target'
+    - $parent-target[Element] = parent
+    - $parent-node[Type] = '*scpb.Node'
+    - $parent-node[Target] = parent-target
+    - $other-target[Type] = '*scpb.Target'
+    - $other-target[Element] = other
+    - $other-node[Type] = '*scpb.Node'
+    - $other-node[Target] = other-target
 - name: schema dependencies
   from: parent-node
   to: other-node
   query:
-    - [=, $direction, DROP]
-    - [=, $status, [DELETE_ONLY, DELETE_AND_WRITE_ONLY]]
-    - [Type, $parent, '*scpb.Schema']
-    - [Type, $other, ['*scpb.Type', '*scpb.Table', '*scpb.View', '*scpb.Sequence']]
-    - [[func, schema-depends-on, ['*scpb.Schema', scpb.Element]], $parent, $other]
-    - [Direction, $parent-target, $direction]
-    - [Direction, $other-target, $direction]
-    - [Status, $parent-node, $status]
-    - [Status, $other-node, $status]
-    - [Type, $parent-target, '*scpb.Target']
-    - [Element, $parent-target, $parent]
-    - [Type, $parent-node, '*scpb.Node']
-    - [Target, $parent-node, $parent-target]
-    - [Type, $other-target, '*scpb.Target']
-    - [Element, $other-target, $other]
-    - [Type, $other-node, '*scpb.Node']
-    - [Target, $other-node, $other-target]
+    - $direction = DROP
+    - $status IN [DELETE_ONLY, DELETE_AND_WRITE_ONLY]
+    - $parent[Type] = '*scpb.Schema'
+    - $other[Type] IN ['*scpb.Type', '*scpb.Table', '*scpb.View', '*scpb.Sequence']
+    - schema-depends-on(*scpb.Schema, scpb.Element)($parent, $other)
+    - $parent-target[Direction] = direction
+    - $other-target[Direction] = direction
+    - $parent-node[Status] = status
+    - $other-node[Status] = status
+    - $parent-target[Type] = '*scpb.Target'
+    - $parent-target[Element] = parent
+    - $parent-node[Type] = '*scpb.Node'
+    - $parent-node[Target] = parent-target
+    - $other-target[Type] = '*scpb.Target'
+    - $other-target[Element] = other
+    - $other-node[Type] = '*scpb.Node'
+    - $other-node[Target] = other-target
 - name: sequence owned by being dropped relies on sequence entering delete only
   from: owned-by-node
   to: seq-node
   query:
-    - [=, $direction, DROP]
-    - [Type, $owned-by, '*scpb.SequenceOwnedBy']
-    - [Type, $seq, '*scpb.Sequence']
-    - [DescID, $owned-by, $id]
-    - [DescID, $seq, $id]
-    - [Direction, $owned-by-target, $direction]
-    - [Direction, $seq-target, $direction]
-    - [Status, $seq-node, ABSENT]
-    - [Status, $owned-by-node, DELETE_ONLY]
-    - [Type, $owned-by-target, '*scpb.Target']
-    - [Element, $owned-by-target, $owned-by]
-    - [Type, $owned-by-node, '*scpb.Node']
-    - [Target, $owned-by-node, $owned-by-target]
-    - [Type, $seq-target, '*scpb.Target']
-    - [Element, $seq-target, $seq]
-    - [Type, $seq-node, '*scpb.Node']
-    - [Target, $seq-node, $seq-target]
+    - $direction = DROP
+    - $owned-by[Type] = '*scpb.SequenceOwnedBy'
+    - $seq[Type] = '*scpb.Sequence'
+    - $owned-by[DescID] = id
+    - $seq[DescID] = id
+    - $owned-by-target[Direction] = direction
+    - $seq-target[Direction] = direction
+    - $seq-node[Status] = ABSENT
+    - $owned-by-node[Status] = DELETE_ONLY
+    - $owned-by-target[Type] = '*scpb.Target'
+    - $owned-by-target[Element] = owned-by
+    - $owned-by-node[Type] = '*scpb.Node'
+    - $owned-by-node[Target] = owned-by-target
+    - $seq-target[Type] = '*scpb.Target'
+    - $seq-target[Element] = seq
+    - $seq-node[Type] = '*scpb.Node'
+    - $seq-node[Target] = seq-target
 - name: type reference something
   from: type-node
   to: type-ref-node
   query:
-    - [=, $direction, DROP]
-    - [Type, $type, '*scpb.Type']
-    - [Type, $type-ref, '*scpb.TypeReference']
-    - [DescID, $type, $id]
-    - [ReferencedDescID, $type-ref, $id]
-    - [Direction, $type-target, $direction]
-    - [Direction, $type-ref-target, $direction]
-    - [Status, $type-node, PUBLIC]
-    - [Status, $type-ref-node, DELETE_ONLY]
-    - [Type, $type-target, '*scpb.Target']
-    - [Element, $type-target, $type]
-    - [Type, $type-node, '*scpb.Node']
-    - [Target, $type-node, $type-target]
-    - [Type, $type-ref-target, '*scpb.Target']
-    - [Element, $type-ref-target, $type-ref]
-    - [Type, $type-ref-node, '*scpb.Node']
-    - [Target, $type-ref-node, $type-ref-target]
+    - $direction = DROP
+    - $type[Type] = '*scpb.Type'
+    - $type-ref[Type] = '*scpb.TypeReference'
+    - $type[DescID] = id
+    - $type-ref[ReferencedDescID] = id
+    - $type-target[Direction] = direction
+    - $type-ref-target[Direction] = direction
+    - $type-node[Status] = PUBLIC
+    - $type-ref-node[Status] = DELETE_ONLY
+    - $type-target[Type] = '*scpb.Target'
+    - $type-target[Element] = type
+    - $type-node[Type] = '*scpb.Node'
+    - $type-node[Target] = type-target
+    - $type-ref-target[Type] = '*scpb.Target'
+    - $type-ref-target[Element] = type-ref
+    - $type-ref-node[Type] = '*scpb.Node'
+    - $type-ref-node[Target] = type-ref-target
 - name: view depends on view
   from: from-node
   to: to-node
   query:
-    - [=, $direction, DROP]
-    - [=, $status, ABSENT]
-    - [Type, $from, '*scpb.View']
-    - [Type, $to, '*scpb.View']
-    - [[func, depended-on-by, ['*scpb.View', '*scpb.View']], $from, $to]
-    - [Direction, $from-target, $direction]
-    - [Direction, $to-target, $direction]
-    - [Status, $from-node, $status]
-    - [Status, $to-node, $status]
-    - [Type, $from-target, '*scpb.Target']
-    - [Element, $from-target, $from]
-    - [Type, $from-node, '*scpb.Node']
-    - [Target, $from-node, $from-target]
-    - [Type, $to-target, '*scpb.Target']
-    - [Element, $to-target, $to]
-    - [Type, $to-node, '*scpb.Node']
-    - [Target, $to-node, $to-target]
+    - $direction = DROP
+    - $status = ABSENT
+    - $from[Type] = '*scpb.View'
+    - $to[Type] = '*scpb.View'
+    - depended-on-by(*scpb.View, *scpb.View)($from, $to)
+    - $from-target[Direction] = direction
+    - $to-target[Direction] = direction
+    - $from-node[Status] = status
+    - $to-node[Status] = status
+    - $from-target[Type] = '*scpb.Target'
+    - $from-target[Element] = from
+    - $from-node[Type] = '*scpb.Node'
+    - $from-node[Target] = from-target
+    - $to-target[Type] = '*scpb.Target'
+    - $to-target[Element] = to
+    - $to-node[Type] = '*scpb.Node'
+    - $to-node[Target] = to-target
 - name: view depends on type
   from: from-node
   to: to-node
   query:
-    - [=, $direction, DROP]
-    - [=, $status, ABSENT]
-    - [Type, $from, '*scpb.View']
-    - [Type, $to, '*scpb.TypeReference']
-    - [DescID, $from, $id]
-    - [DescID, $to, $id]
-    - [Direction, $from-target, $direction]
-    - [Direction, $to-target, $direction]
-    - [Status, $from-node, $status]
-    - [Status, $to-node, $status]
-    - [Type, $from-target, '*scpb.Target']
-    - [Element, $from-target, $from]
-    - [Type, $from-node, '*scpb.Node']
-    - [Target, $from-node, $from-target]
-    - [Type, $to-target, '*scpb.Target']
-    - [Element, $to-target, $to]
-    - [Type, $to-node, '*scpb.Node']
-    - [Target, $to-node, $to-target]
+    - $direction = DROP
+    - $status = ABSENT
+    - $from[Type] = '*scpb.View'
+    - $to[Type] = '*scpb.TypeReference'
+    - $from[DescID] = id
+    - $to[DescID] = id
+    - $from-target[Direction] = direction
+    - $to-target[Direction] = direction
+    - $from-node[Status] = status
+    - $to-node[Status] = status
+    - $from-target[Type] = '*scpb.Target'
+    - $from-target[Element] = from
+    - $from-node[Type] = '*scpb.Node'
+    - $from-node[Target] = from-target
+    - $to-target[Type] = '*scpb.Target'
+    - $to-target[Element] = to
+    - $to-node[Type] = '*scpb.Node'
+    - $to-node[Target] = to-target
 - name: column depends on indexes
   from: column-node
   to: index-node
   query:
-    - [=, $status, [DELETE_AND_WRITE_ONLY, PUBLIC]]
-    - [=, $direction, ADD]
-    - [Type, $column, '*scpb.Column']
-    - [Type, $index, ['*scpb.PrimaryIndex', '*scpb.SecondaryIndex']]
-    - [DescID, $column, $id]
-    - [DescID, $index, $id]
-    - [[func, column-in-index, ['*scpb.Column', scpb.Entity]], $column, $index]
-    - [Direction, $column-target, $direction]
-    - [Direction, $index-target, $direction]
-    - [Status, $column-node, $status]
-    - [Status, $index-node, $status]
-    - [Type, $column-target, '*scpb.Target']
-    - [Element, $column-target, $column]
-    - [Type, $column-node, '*scpb.Node']
-    - [Target, $column-node, $column-target]
-    - [Type, $index-target, '*scpb.Target']
-    - [Element, $index-target, $index]
-    - [Type, $index-node, '*scpb.Node']
-    - [Target, $index-node, $index-target]
+    - $status IN [DELETE_AND_WRITE_ONLY, PUBLIC]
+    - $direction = ADD
+    - $column[Type] = '*scpb.Column'
+    - $index[Type] IN ['*scpb.PrimaryIndex', '*scpb.SecondaryIndex']
+    - $column[DescID] = id
+    - $index[DescID] = id
+    - column-in-index(*scpb.Column, scpb.Entity)($column, $index)
+    - $column-target[Direction] = direction
+    - $index-target[Direction] = direction
+    - $column-node[Status] = status
+    - $index-node[Status] = status
+    - $column-target[Type] = '*scpb.Target'
+    - $column-target[Element] = column
+    - $column-node[Type] = '*scpb.Node'
+    - $column-node[Target] = column-target
+    - $index-target[Type] = '*scpb.Target'
+    - $index-target[Element] = index
+    - $index-node[Type] = '*scpb.Node'
+    - $index-node[Target] = index-target
 - name: primary index add depends on drop
   from: add-node
   to: drop-node
   query:
-    - [Type, $add, '*scpb.PrimaryIndex']
-    - [Type, $drop, '*scpb.PrimaryIndex']
-    - [DescID, $add, $id]
-    - [DescID, $drop, $id]
-    - [[func, reference-each-other, ['*scpb.PrimaryIndex', '*scpb.PrimaryIndex']], $add, $drop]
-    - [Direction, $add-target, ADD]
-    - [Direction, $drop-target, DROP]
-    - [Status, $add-node, PUBLIC]
-    - [Status, $drop-node, DELETE_AND_WRITE_ONLY]
-    - [Type, $add-target, '*scpb.Target']
-    - [Element, $add-target, $add]
-    - [Type, $add-node, '*scpb.Node']
-    - [Target, $add-node, $add-target]
-    - [Type, $drop-target, '*scpb.Target']
-    - [Element, $drop-target, $drop]
-    - [Type, $drop-node, '*scpb.Node']
-    - [Target, $drop-node, $drop-target]
+    - $add[Type] = '*scpb.PrimaryIndex'
+    - $drop[Type] = '*scpb.PrimaryIndex'
+    - $add[DescID] = id
+    - $drop[DescID] = id
+    - reference-each-other(*scpb.PrimaryIndex, *scpb.PrimaryIndex)($add, $drop)
+    - $add-target[Direction] = ADD
+    - $drop-target[Direction] = DROP
+    - $add-node[Status] = PUBLIC
+    - $drop-node[Status] = DELETE_AND_WRITE_ONLY
+    - $add-target[Type] = '*scpb.Target'
+    - $add-target[Element] = add
+    - $add-node[Type] = '*scpb.Node'
+    - $add-node[Target] = add-target
+    - $drop-target[Type] = '*scpb.Target'
+    - $drop-target[Element] = drop
+    - $drop-node[Type] = '*scpb.Node'
+    - $drop-node[Target] = drop-target
 - name: primary index drop depends on add
   from: drop-node
   to: add-node
   query:
-    - [Type, $add, '*scpb.PrimaryIndex']
-    - [Type, $drop, '*scpb.PrimaryIndex']
-    - [DescID, $add, $id]
-    - [DescID, $drop, $id]
-    - [[func, reference-each-other, ['*scpb.PrimaryIndex', '*scpb.PrimaryIndex']], $add, $drop]
-    - [Direction, $add-target, ADD]
-    - [Direction, $drop-target, DROP]
-    - [Status, $add-node, PUBLIC]
-    - [Status, $drop-node, DELETE_AND_WRITE_ONLY]
-    - [Type, $add-target, '*scpb.Target']
-    - [Element, $add-target, $add]
-    - [Type, $add-node, '*scpb.Node']
-    - [Target, $add-node, $add-target]
-    - [Type, $drop-target, '*scpb.Target']
-    - [Element, $drop-target, $drop]
-    - [Type, $drop-node, '*scpb.Node']
-    - [Target, $drop-node, $drop-target]
+    - $add[Type] = '*scpb.PrimaryIndex'
+    - $drop[Type] = '*scpb.PrimaryIndex'
+    - $add[DescID] = id
+    - $drop[DescID] = id
+    - reference-each-other(*scpb.PrimaryIndex, *scpb.PrimaryIndex)($add, $drop)
+    - $add-target[Direction] = ADD
+    - $drop-target[Direction] = DROP
+    - $add-node[Status] = PUBLIC
+    - $drop-node[Status] = DELETE_AND_WRITE_ONLY
+    - $add-target[Type] = '*scpb.Target'
+    - $add-target[Element] = add
+    - $add-node[Type] = '*scpb.Node'
+    - $add-node[Target] = add-target
+    - $drop-target[Type] = '*scpb.Target'
+    - $drop-target[Element] = drop
+    - $drop-node[Type] = '*scpb.Node'
+    - $drop-node[Target] = drop-target

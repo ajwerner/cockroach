@@ -1,63 +1,39 @@
+// Copyright 2021 The Cockroach Authors.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
 package rel
 
-import "gopkg.in/yaml.v3"
-
-// Clause is the basic building block of a query. The most foundational
-// clause is datom which declares some fact about an attribute of a named
-// variable.
-type Clause interface {
-	// clause is a marker interface to prevent external package from implementing
-	// the interface.
-	clause()
-
-	yaml.Marshaler
+// tripleDecl is the primary syntactic element of the query language.
+// The content indicates that the entity to be bound has an attribute
+// value which conforms to the specified value.
+//
+// It declares that the provided attribute of the referenced variable
+// must be the provided value. The value can be a constant, a Var, or a
+// set of constants as returned from Any.
+type tripleDecl struct {
+	entity    Var
+	attribute Attribute
+	value     Expr
 }
 
-type Clauses []Clause
+func (f *tripleDecl) clause() {}
 
-func (c Clauses) flattened() Clauses {
-	if !c.hasAnd() {
-		return c
-	}
-	var ret Clauses
-	for _, cl := range c {
-		switch cl := cl.(type) {
-		case *and:
-			for _, cl := range Clauses(*cl).flattened() {
-				ret = append(ret, cl)
-			}
-		default:
-			ret = append(ret, cl)
-		}
-	}
-	return ret
-}
+var _ Clause = (*tripleDecl)(nil)
 
-func (c Clauses) hasAnd() bool {
-	for _, cl := range c {
-		if _, isAnd := cl.(*and); isAnd {
-			return true
-		}
-	}
-	return false
-}
-
-func (c Clauses) MarshalYAML() (interface{}, error) {
-	var n yaml.Node
-	if err := n.Encode([]Clause(c)); err != nil {
-		return nil, err
-	}
-	n.Style = yaml.LiteralStyle
-	return &n, nil
-}
-
-// datom is a basic Clause. It declares that the provided attribute of the
-// referenced variable must be the provided value. Value can be a constant,
-// a Var, or a set of constants as returned from Any.
-func datom(entity Var, attr Attribute, value Expr) Clause {
-	return &datomDecl{entity: entity, attribute: attr, value: value}
-}
-
+// eqDecl allows for the expression of a relationship between a variable
+// and an expression. A key distinction between eqDecl and tripleDecl is
+// that it allows for the introduction of independently constrained
+// non-entity variables. Internally, a eqDecl internally can be viewed as
+// introducing two triples: tripleDecl{v, Self, v}, triple{v, Self, expr}
+// to enable unification. The key distinction is that the variable is not
+// assumed to be an entity.
 type eqDecl struct {
 	v    Var
 	expr Expr
@@ -65,20 +41,23 @@ type eqDecl struct {
 
 func (e *eqDecl) clause() {}
 
-type datomDecl struct {
-	entity    Var
-	attribute Attribute
-	value     Expr
-}
-
-func (f *datomDecl) clause() {}
-
-var _ Clause = (*datomDecl)(nil)
-
+// and is a useful conjunctive construct which exists primarily as a tool
+// for libraries to write functions which emit clauses. At build time, the
+// clauses are flattened to remove any and clauses.
+//
+// If other disjunctive features are added later, and may become more
+// meaningful.
 type and []Clause
 
 func (a *and) clause() {}
 
+// filterDecl exposes user-defined predicates to the query language. The
+// predicateFunc should be a function value which takes arguments
+// corresponding to vars which returns a boolean value. Note that the types
+// of the variables will be enforced at runtime; if the values bound to the
+// specified vars do not conform the types of the function inputs, the
+// predicate is determined to have failed. This is in contrast to returning
+// an error.
 type filterDecl struct {
 	name          string
 	vars          []Var

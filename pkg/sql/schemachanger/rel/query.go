@@ -1,4 +1,21 @@
+// Copyright 2021 The Cockroach Authors.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
 package rel
+
+import (
+	"sort"
+
+	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/errors"
+)
 
 // Query searches for sets of entities which uphold A set of constraints.
 type Query struct {
@@ -52,7 +69,16 @@ func MustQuery(sc *Schema, clauses ...Clause) *Query {
 // conjunction of constraints on the results of the query when it is
 // evaluated against a database.
 func NewQuery(sc *Schema, clauses ...Clause) (_ *Query, err error) {
-	defer catchError(&err)
+	defer func() {
+		switch r := recover().(type) {
+		case nil:
+			return
+		case error:
+			err = errors.Wrap(r, "failed to construct query")
+		default:
+			err = errors.AssertionFailedf("failed to construct query: %v", r)
+		}
+	}()
 	q := newQuery(sc, clauses)
 	return q, nil
 }
@@ -64,6 +90,21 @@ func (q *Query) Prepare() PreparedQuery {
 	return newEvalContext(q)
 }
 
-func (q *Query) Clauses() Clauses {
-	return q.clauses
+// Entities returns the entities in the query in their join order.
+func (q *Query) Entities() []Var {
+	var entitySlots util.FastIntSet
+	for _, slotIdx := range q.entities {
+		entitySlots.Add(int(slotIdx))
+	}
+	vars := make([]Var, 0, len(q.entities))
+	for v, slotIdx := range q.variableSlots {
+		if !entitySlots.Contains(int(slotIdx)) {
+			continue
+		}
+		vars = append(vars, v)
+	}
+	sort.Slice(vars, func(i, j int) bool {
+		return q.variableSlots[vars[i]] < q.variableSlots[vars[j]]
+	})
+	return vars
 }

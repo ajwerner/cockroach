@@ -13,7 +13,29 @@ option go_package = "testproto";
 
 import "gogoproto/gogo.proto";
 
-message AllScalars {
-  int32 i32 = 1;
+// Container is a oneOf pointing to either and M1 or an M2.
+message Container {
+  option (gogoproto.onlyone) = true;
+  M1 m1 = 1;
+  M2 m2 = 2;
 }
 
+// M1 points up to a container, maybe that contains it, this is
+// for testing so the semantics don't really matter. It also
+// points potentially to another M1 or M2.
+message M1 {
+  string name = 1;
+  Container c = 2;
+  M1 m1 = 3;
+  M2 m2 = 4;
+}
+
+// M2 points up to a container, maybe that contains it, this is
+// for testing so the semantics don't really matter. It also
+// points potentially to another M1 or M2.
+message M2 {
+  string name = 1;
+  Container c = 2;
+  M1 m1 = 3;
+  M2 m2 = 4;
+}

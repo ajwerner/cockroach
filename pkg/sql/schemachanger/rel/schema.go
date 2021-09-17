@@ -1,3 +1,13 @@
+// Copyright 2021 The Cockroach Authors.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
 package rel
 
 import (
@@ -51,7 +61,16 @@ type Schema struct {
 // NewSchema constructs a new schema from mappings.
 // The name parameter is just used for debugging and error messages.
 func NewSchema(name string, m Mappings) (_ *Schema, err error) {
-	defer catchError(&err)
+	defer func() {
+		switch r := recover().(type) {
+		case nil:
+			return
+		case error:
+			err = errors.Wrap(r, "failed to construct schema")
+		default:
+			err = errors.AssertionFailedf("failed to construct schema: %v", r)
+		}
+	}()
 	sc := buildSchema(name, m)
 	return sc, nil
 }
@@ -125,6 +144,7 @@ func (sb *schemaBuilder) maybeAddAttribute(a Attribute, typ reflect.Type) ordina
 	return ord
 }
 
+// checkType determines whether, either, the
 func checkType(typ, exp reflect.Type) error {
 	switch exp.Kind() {
 	case reflect.Interface:
@@ -132,7 +152,7 @@ func checkType(typ, exp reflect.Type) error {
 			return errors.Errorf("%v does not implement %v", typ, exp)
 		}
 	default:
-		if typ != exp && !(exp.Kind() == reflect.Ptr && typ == exp.Elem()) {
+		if typ != exp && !(typ.Kind() == reflect.Ptr && typ.Elem() == exp) {
 			return errors.Errorf("%v is not %v", typ, exp)
 		}
 	}
@@ -144,7 +164,7 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]A
 		return tt.Kind() == reflect.Ptr && tt.Elem().Kind() == reflect.Struct
 	}
 
-	// We mark the type as being added by putting A nil entry in the map.
+	// We mark the type as being added by putting a nil entry in the map.
 	// This way, if we recurse into this closure, we'll detect the cycle.
 	// TODO(ajwerner): Better cycle error reporting.
 	{
@@ -163,34 +183,34 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]A
 	}
 	var fieldInfos []fieldInfo
 	for fieldName, attr := range fields {
-		names := strings.Split(fieldName, ".")
-		// TODO(ajwerner): Decide if we're willing to go pointer chasing
-		// and, if so, figure out how to reason about nil.
-		var offset uintptr
-		cur := t.Elem()
-		for _, n := range names {
-			sf, ok := cur.FieldByName(n)
-			if !ok {
-				panic(errors.Errorf("%v.%s is not a field", t, fieldName))
-			}
-			offset += sf.Offset
-			cur = sf.Type
-		}
+		offset, cur := getOffsetAndTypeFromSelector(t, fieldName)
+
 		// TODO(ajwerner): Deal with making entities out of structs themselves.
+		// This gets complicated given the pointer equality used to determine
+		// whether entities exist. We'd otherwise need some mechanism for interning
+		// structs or something like that.
 		isPtr := cur.Kind() == reflect.Ptr
+		isStructPtr := isPtr && cur.Elem().Kind() == reflect.Struct
 		isScalarPtr := isPtr && isSupportScalarKind(cur.Elem().Kind())
+		if !isScalarPtr && !isStructPtr && !isSupportScalarKind(cur.Kind()) {
+			panic(errors.Errorf(
+				"selector %q of %v has unsupported type %v",
+				fieldName, t, cur,
+			))
+		}
 
 		typ := cur
 		if isScalarPtr {
 			typ = cur.Elem()
 		}
-
 		ord := sb.maybeAddAttribute(attr, typ)
-		isStructPtr := isPtr && cur.Elem().Kind() == reflect.Struct
+
 		if isStructPtr {
-			curFields, ok := sb.m.TypeMappings[cur]
+			_, ok := sb.m.TypeMappings[cur]
 			if !ok {
-				sb.maybeAddTypeMapping(cur, curFields)
+				// This will teach the schema about a type with no declared fields.
+				// In the case of recursion, this
+				sb.maybeAddTypeMapping(cur, nil)
 			}
 		}
 
@@ -212,11 +232,21 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]A
 		}
 		{
 			vg := makeValueGetter(cur, offset)
-			if isPtr {
+			if isStructPtr {
 				f.value = getPtrValue(vg)
 			} else {
-				f.value = func(u uintptr) interface{} {
-					return vg(u).Interface()
+				if isScalarPtr {
+					f.value = func(u uintptr) interface{} {
+						got := vg(u)
+						if got.Elem().IsNil() {
+							return nil
+						}
+						return got.Elem().Elem().Interface()
+					}
+				} else {
+					f.value = func(u uintptr) interface{} {
+						return vg(u).Elem().Interface()
+					}
 				}
 			}
 		}
@@ -263,24 +293,25 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, fields map[string]A
 	}
 }
 
-func (sc *Schema) GetAttribute(attribute Attribute, v interface{}) (interface{}, error) {
-	ord := sc.getOrd(attribute)
-	ti, value, err := getEntityValueInfo(sc, v)
-	if err != nil {
-		return nil, err
-	}
-
-	fi, ok := ti.attrFields[ord]
-	if !ok {
-		return nil, errors.Errorf("no scalar field defined on %v for %v", ti.typ, attribute)
-	}
-	for i := range fi {
-		got := fi[i].value(value.Pointer())
-		if got != nil {
-			return got, nil
+// getOffsetAndTypeForSelector takes an entity (struct pointer) type and a
+// selector string and finds its offset within the struct. Note that this
+// allows one to select fields in struct members of the current struct but
+// not in referenced structs.
+func getOffsetAndTypeFromSelector(
+	structPointer reflect.Type, selector string,
+) (uintptr, reflect.Type) {
+	names := strings.Split(selector, ".")
+	var offset uintptr
+	cur := structPointer.Elem()
+	for _, n := range names {
+		sf, ok := cur.FieldByName(n)
+		if !ok {
+			panic(errors.Errorf("%v.%s is not a field", structPointer, selector))
 		}
+		offset += sf.Offset
+		cur = sf.Type
 	}
-	return nil, nil
+	return offset, cur
 }
 
 func (sc *Schema) getOrd(attribute Attribute) ordinal {
