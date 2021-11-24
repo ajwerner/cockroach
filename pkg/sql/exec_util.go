@@ -73,6 +73,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/querycache"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scdeps"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scrun"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -1156,6 +1157,9 @@ type ExecutorConfig struct {
 	// SpanConfigReconciliationJobDeps are used to drive the span config
 	// reconciliation job.
 	SpanConfigReconciliationJobDeps spanconfig.ReconciliationDependencies
+
+	// EventLogger is used to log events during schema changes.
+	EventLogger scdeps.EventLogger
 }
 
 // UpdateVersionSystemSettingHook provides a callback that allows us

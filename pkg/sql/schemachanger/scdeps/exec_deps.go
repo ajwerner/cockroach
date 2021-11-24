@@ -45,7 +45,7 @@ func NewExecutorDependencies(
 	indexBackfiller scexec.IndexBackfiller,
 	indexValidator scexec.IndexValidator,
 	cclCallbacks scexec.Partitioner,
-	logEventFn LogEventCallback,
+	eventLogger EventLogger,
 	statements []string,
 ) scexec.Dependencies {
 	return &execDeps{
@@ -56,7 +56,7 @@ func NewExecutorDependencies(
 			jobRegistry:     jobRegistry,
 			indexValidator:  indexValidator,
 			partitioner:     cclCallbacks,
-			eventLogWriter:  newEventLogWriter(txn, logEventFn),
+			eventLogWriter:  newEventLogWriter(txn, eventLogger),
 		},
 		indexBackfiller: indexBackfiller,
 		statements:      statements,
@@ -328,15 +328,19 @@ func (d *execDeps) Statements() []string {
 	return d.statements
 }
 
-// LogEventCallback call back to allow the new schema changer
-// to generate event log entries.
-type LogEventCallback func(ctx context.Context,
-	txn *kv.Txn,
-	depth int,
-	descID descpb.ID,
-	metadata scpb.ElementMetadata,
-	event eventpb.EventPayload,
-) error
+// EventLogger allows the new schema changer to generate event log entries.
+type EventLogger interface {
+
+	// LogEvent logs the event.
+	LogEvent(
+		ctx context.Context,
+		txn *kv.Txn,
+		depth int,
+		descID descpb.ID,
+		metadata scpb.ElementMetadata,
+		event eventpb.EventPayload,
+	) error
+}
 
 type eventPayload struct {
 	descID   descpb.ID
@@ -346,16 +350,16 @@ type eventPayload struct {
 
 type eventLogWriter struct {
 	txn               *kv.Txn
-	logEvent          LogEventCallback
+	eventLogger       EventLogger
 	eventStatementMap map[uint32][]eventPayload
 }
 
 // newEventLogWriter makes a new event log writer which will accumulate,
 // and emit events.
-func newEventLogWriter(txn *kv.Txn, logEvent LogEventCallback) *eventLogWriter {
+func newEventLogWriter(txn *kv.Txn, eventLogger EventLogger) *eventLogWriter {
 	return &eventLogWriter{
 		txn:               txn,
-		logEvent:          logEvent,
+		eventLogger:       eventLogger,
 		eventStatementMap: make(map[uint32][]eventPayload),
 	}
 }
@@ -375,6 +379,10 @@ func (m *eventLogWriter) AddDropEvent(
 
 // ProcessAndSubmitEvents implements scexec.EventLogger
 func (m *eventLogWriter) ProcessAndSubmitEvents(ctx context.Context) error {
+
+	// TODO(ajwerner): Construct all of the events and send them as a batch.
+	// Perhaps the underlying EventLogger should just be accumulating events
+	// to be sent later.
 	for _, events := range m.eventStatementMap {
 		// A dependent event is one which is generated because of a
 		// dependency getting modified from the source object. An example
@@ -445,9 +453,13 @@ func (m *eventLogWriter) ProcessAndSubmitEvents(ctx context.Context) error {
 			}
 			// Generate event log entries for the source event only. The dependent
 			// events will be ignored.
-			if m.logEvent != nil {
-				err := m.logEvent(ctx, m.txn, 0, sourceEvent.descID, *sourceEvent.metadata, sourceEvent.event)
-				if err != nil {
+			//
+			// TODO(ajwerner): Either do something with this computed event always
+			// or short-circuit this function altogether if we don't have a logger.
+			if m.eventLogger != nil {
+				if err := m.eventLogger.LogEvent(
+					ctx, m.txn, 0, sourceEvent.descID, *sourceEvent.metadata, sourceEvent.event,
+				); err != nil {
 					return err
 				}
 			}

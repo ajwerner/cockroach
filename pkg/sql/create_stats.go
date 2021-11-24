@@ -640,24 +640,21 @@ func (r *createStatsResumer) Resume(ctx context.Context, execCtx interface{}) er
 	// CREATE STATISTICS statement.
 	// See: https://github.com/cockroachdb/cockroach/issues/57739
 	return evalCtx.ExecCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		return logEventInternalForSQLStatements(ctx,
-			evalCtx.ExecCfg, txn,
-			0, /* depth: use event_log=2 for vmodule filtering */
-			eventLogOptions{dst: LogEverywhere},
+		return logEventInternalForSQLStatements(
+			ctx, evalCtx.ExecCfg.InternalExecutor, evalCtx.Settings,
+			txn, evalCtx.NodeID, 0, eventLogOptions{dst: LogEverywhere},
 			eventpb.CommonSQLEventDetails{
 				Statement:         redact.Sprint(details.Statement),
 				Tag:               "CREATE STATISTICS",
 				User:              evalCtx.SessionData().User().Normalized(),
 				ApplicationName:   evalCtx.SessionData().ApplicationName,
 				PlaceholderValues: []string{}, /* no placeholders known at this point */
-			},
-			eventLogEntry{
+			}, eventLogEntry{
 				targetID: int32(details.Table.ID),
 				event: &eventpb.CreateStatistics{
 					TableName: details.FQTableName,
 				},
-			},
-		)
+			})
 	})
 }
 

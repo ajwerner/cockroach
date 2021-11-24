@@ -21,8 +21,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scdeps"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
@@ -191,12 +194,10 @@ func (p *planner) getCommonSQLEventDetails() eventpb.CommonSQLEventDetails {
 func (p *planner) logEventsWithOptions(
 	ctx context.Context, depth int, opts eventLogOptions, entries ...eventLogEntry,
 ) error {
-	return logEventInternalForSQLStatements(ctx,
-		p.extendedEvalCtx.ExecCfg, p.txn,
-		1+depth,
-		opts,
-		p.getCommonSQLEventDetails(),
-		entries...)
+	return logEventInternalForSQLStatements(
+		ctx, p.execCfg.InternalExecutor, p.execCfg.Settings, p.txn, p.execCfg.NodeID,
+		1+depth, opts, p.getCommonSQLEventDetails(), entries...,
+	)
 }
 
 // logEventInternalForSchemaChange emits a cluster event in the
@@ -226,7 +227,7 @@ func logEventInternalForSchemaChanges(
 	// wraps the call in a db.Txn() callback, which confuses the vmodule
 	// filtering. Easiest is to pretend the event is sourced here.
 	return insertEventRecords(
-		ctx, execCfg.InternalExecutor,
+		ctx, execCfg.InternalExecutor, execCfg.Settings,
 		txn,
 		int32(execCfg.NodeID.SQLInstanceID()), /* reporter ID */
 		1,                                     /* depth: use this function as origin */
@@ -259,8 +260,10 @@ func makeCommonSQLEventDetails(
 // returns no error.
 func logEventInternalForSQLStatements(
 	ctx context.Context,
-	execCfg *ExecutorConfig,
+	ie sqlutil.InternalExecutor,
+	settings *cluster.Settings,
 	txn *kv.Txn,
+	idContainer *base.SQLIDContainer,
 	depth int,
 	opts eventLogOptions,
 	commonSQLEventDetails eventpb.CommonSQLEventDetails,
@@ -287,20 +290,40 @@ func logEventInternalForSQLStatements(
 	}
 
 	return insertEventRecords(ctx,
-		execCfg.InternalExecutor, txn,
-		int32(execCfg.NodeID.SQLInstanceID()), /* reporter ID */
-		1+depth,                               /* depth */
-		opts,                                  /* eventLogOptions */
-		entries...,                            /* ...eventLogEntry */
+		ie, settings, txn,
+		int32(idContainer.SQLInstanceID()), /* reporter ID */
+		1+depth,                            /* depth */
+		opts,                               /* eventLogOptions */
+		entries...,                         /* ...eventLogEntry */
 	)
 }
 
-// LogEventForSchemaChanger allows then declarative schema changer
-// to generate event log entries with context information available
-// inside that package.
-func LogEventForSchemaChanger(
+// eventLogger implements scdeps.EventLogger and is used to expose
+// event logging to the schemachanger layer.
+//
+// TODO(ajwerner): Expose accumulating a batch and then writing it in a single
+// go as opposed to one at a time.
+type eventLogger struct {
+	settings    *cluster.Settings
+	idContainer *base.SQLIDContainer
+	ie          sqlutil.InternalExecutor
+}
+
+// NewEventLogger constructs a new EventLogger for the declarative schema changer.
+func NewEventLogger(
+	settings *cluster.Settings, idContainer *base.SQLIDContainer, ie *InternalExecutor,
+) scdeps.EventLogger {
+	return &eventLogger{
+		settings:    settings,
+		idContainer: idContainer,
+		ie:          ie,
+	}
+}
+
+var _ scdeps.EventLogger = (*eventLogger)(nil)
+
+func (ev *eventLogger) LogEvent(
 	ctx context.Context,
-	execCfg interface{},
 	txn *kv.Txn,
 	depth int,
 	descID descpb.ID,
@@ -309,13 +332,7 @@ func LogEventForSchemaChanger(
 ) error {
 	entry := eventLogEntry{targetID: int32(descID), event: event}
 	commonPayload := makeCommonSQLEventDetails(metadata.Username, metadata.Statement, metadata.AppName)
-	return logEventInternalForSQLStatements(ctx,
-		execCfg.(*ExecutorConfig),
-		txn,
-		depth,
-		eventLogOptions{dst: LogEverywhere},
-		*commonPayload,
-		entry)
+	return logEventInternalForSQLStatements(ctx, ev.ie, ev.settings, txn, ev.idContainer, depth, eventLogOptions{dst: LogEverywhere}, *commonPayload, entry)
 }
 
 // LogEventForJobs emits a cluster event in the context of a job.
@@ -350,7 +367,7 @@ func LogEventForJobs(
 	// wraps the call in a db.Txn() callback, which confuses the vmodule
 	// filtering. Easiest is to pretend the event is sourced here.
 	return insertEventRecords(
-		ctx, execCfg.InternalExecutor,
+		ctx, execCfg.InternalExecutor, execCfg.Settings,
 		txn,
 		int32(execCfg.NodeID.SQLInstanceID()), /* reporter ID */
 		1,                                     /* depth: use this function for vmodule filtering */
@@ -396,7 +413,8 @@ const (
 // This converts to a call to insertEventRecords() with just 1 entry.
 func InsertEventRecord(
 	ctx context.Context,
-	ex *InternalExecutor,
+	ie sqlutil.InternalExecutor,
+	settings *cluster.Settings,
 	txn *kv.Txn,
 	reportingID int32,
 	dst LogEventDestination,
@@ -406,7 +424,7 @@ func InsertEventRecord(
 	// We use depth=1 because the caller of this function typically
 	// wraps the call in a db.Txn() callback, which confuses the vmodule
 	// filtering. Easiest is to pretend the event is sourced here.
-	return insertEventRecords(ctx, ex, txn, reportingID,
+	return insertEventRecords(ctx, ie, settings, txn, reportingID,
 		1, /* depth: use this function */
 		eventLogOptions{dst: dst},
 		eventLogEntry{targetID: targetID, event: info})
@@ -424,7 +442,8 @@ func InsertEventRecord(
 // should be removed after v21.1 is released.
 func insertEventRecords(
 	ctx context.Context,
-	ex *InternalExecutor,
+	ex sqlutil.InternalExecutor,
+	settings *cluster.Settings,
 	txn *kv.Txn,
 	reportingID int32,
 	depth int,
@@ -463,7 +482,7 @@ func insertEventRecords(
 	}
 
 	// If we only want to log externally and not write to the events table, early exit.
-	loggingToSystemTable := opts.dst.hasFlag(LogToSystemTable) && eventLogSystemTableEnabled.Get(&ex.s.cfg.Settings.SV)
+	loggingToSystemTable := opts.dst.hasFlag(LogToSystemTable) && eventLogSystemTableEnabled.Get(&settings.SV)
 	if !loggingToSystemTable {
 		// Simply emit the events to their respective channels and call it a day.
 		if opts.dst.hasFlag(LogExternally) {

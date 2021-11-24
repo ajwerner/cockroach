@@ -100,7 +100,7 @@ func NewJobRunDependencies(
 	db *kv.DB,
 	internalExecutor sqlutil.InternalExecutor,
 	indexBackfiller scexec.IndexBackfiller,
-	logEventFn LogEventCallback,
+	eventLogger EventLogger,
 	jobRegistry *jobs.Registry,
 	job *jobs.Job,
 	codec keys.SQLCodec,
@@ -115,7 +115,7 @@ func NewJobRunDependencies(
 		db:                db,
 		internalExecutor:  internalExecutor,
 		indexBackfiller:   indexBackfiller,
-		logEventFn:        logEventFn,
+		eventLogger:       eventLogger,
 		jobRegistry:       jobRegistry,
 		job:               job,
 		codec:             codec,
@@ -132,7 +132,7 @@ type jobExecutionDeps struct {
 	db                *kv.DB
 	internalExecutor  sqlutil.InternalExecutor
 	indexBackfiller   scexec.IndexBackfiller
-	logEventFn        LogEventCallback
+	eventLogger       EventLogger
 	jobRegistry       *jobs.Registry
 	job               *jobs.Job
 
@@ -168,7 +168,7 @@ func (d *jobExecutionDeps) WithTxnInJob(
 				jobRegistry:     d.jobRegistry,
 				indexValidator:  d.indexValidator,
 				partitioner:     d.partitioner,
-				eventLogWriter:  newEventLogWriter(txn, d.logEventFn),
+				eventLogWriter:  newEventLogWriter(txn, d.eventLogger),
 			},
 		})
 	})

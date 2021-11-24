@@ -874,7 +874,7 @@ func (n *Node) recordJoinEvent(ctx context.Context) {
 		retryOpts.Closer = n.stopper.ShouldQuiesce()
 		for r := retry.Start(retryOpts); r.Next(); {
 			if err := n.storeCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-				return sql.InsertEventRecord(ctx, n.sqlExec,
+				return sql.InsertEventRecord(ctx, n.sqlExec, n.storeCfg.Settings,
 					txn,
 					int32(n.Descriptor.NodeID), /* reporting ID: the node where the event is logged */
 					sql.LogToSystemTable|sql.LogToDevChannelIfVerbose, /* LogEventDestination: we already call log.StructuredEvent above */

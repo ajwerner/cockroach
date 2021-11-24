@@ -2504,6 +2504,7 @@ func (s *Server) Decommission(
 				return sql.InsertEventRecord(
 					ctx,
 					s.sqlServer.execCfg.InternalExecutor,
+					s.st,
 					txn,
 					int32(s.NodeID()), /* reporting ID: the node where the event is logged */
 					sql.LogToSystemTable|sql.LogToDevChannelIfVerbose, /* we already call log.StructuredEvent above */
