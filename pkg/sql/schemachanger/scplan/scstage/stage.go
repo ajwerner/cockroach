@@ -13,8 +13,10 @@ package scstage
 import (
 	"fmt"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scgraph"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/screl"
 	"github.com/cockroachdb/errors"
 )
 
@@ -65,36 +67,41 @@ func decorateStages(stages []Stage) []Stage {
 }
 
 // ValidateStages checks that the plan is valid.
-func ValidateStages(stages []Stage) error {
+func ValidateStages(stages []Stage, g *scgraph.Graph) error {
 	if len(stages) == 0 {
 		return nil
 	}
 
-	// Check that the terminal node statuses are valid for their target direction.
-	initial := stages[0].Before.Nodes
-	final := stages[len(stages)-1].After.Nodes
-	if nInitial, nFinal := len(initial), len(final); nInitial != nFinal {
-		return errors.Errorf("initial state has %d nodes, final state has %d", nInitial, nFinal)
-	}
-	for i, initialNode := range initial {
-		finalNode := final[i]
-		initialTarget, finalTarget := initialNode.Target, finalNode.Target
-		if initialTarget != finalTarget {
-			return errors.Errorf("target mismatch between initial and final nodes at index %d: %s != %s",
-				i, initialTarget.String(), finalTarget.String())
+	// Check that each stage has internally-consistent states.
+	for i, stage := range stages {
+		if err := validateInternalStageStates(stage); err != nil {
+			return errors.Wrapf(err, "stage %d of %d", i+1, len(stages))
 		}
+	}
 
-		e := initialTarget.Element()
-		switch initialTarget.Direction {
+	// Check that the stage states all line up correctly from one to the next.
+	for i := range stages {
+		if i == 0 {
+			continue
+		}
+		if err := validateAdjacentStagesStates(stages[i-1], stages[i]); err != nil {
+			return errors.Wrapf(err, "stages %d and %d of %d", i, i+1, len(stages))
+		}
+	}
+
+	// Check that the final state is valid.
+	final := stages[len(stages)-1].After.Nodes
+	for i, node := range final {
+		switch node.Direction {
 		case scpb.Target_ADD:
-			if finalNode.Status != scpb.Status_PUBLIC {
-				return errors.Errorf("final status is %s instead of public at index %d for adding %T %s",
-					finalNode.Status, i, e, e)
+			if node.Status != scpb.Status_PUBLIC {
+				return errors.Errorf("final status is %s instead of public at index %d for adding %+v",
+					node.Status, i, node.Element())
 			}
 		case scpb.Target_DROP:
-			if finalNode.Status != scpb.Status_ABSENT {
-				return errors.Errorf("final status is %s instead of absent at index %d for dropping %T %s",
-					finalNode.Status, i, e, e)
+			if node.Status != scpb.Status_ABSENT {
+				return errors.Errorf("final status is %s instead of absent at index %d for dropping %+v",
+					node.Status, i, node.Element())
 			}
 		}
 	}
@@ -108,9 +115,9 @@ func ValidateStages(stages []Stage) error {
 		}
 	}
 
-	// Check that revertibility is monotonically decreasing.
 	revertibleAllowed := true
 	for _, stage := range stages {
+		// Check that revertibility is monotonically decreasing.
 		if !stage.Revertible {
 			revertibleAllowed = false
 		}
@@ -118,6 +125,132 @@ func ValidateStages(stages []Stage) error {
 			return errors.Errorf("%s: preceded by non-revertible stage",
 				stage.String())
 		}
+
+		// Check stage internal consistency.
+		if err := validateStageSubgraph(stage, g); err != nil {
+			return errors.Wrapf(err, "%s", stage.String())
+		}
 	}
+	return nil
+}
+
+func validateInternalStageStates(stage Stage) error {
+	before := stage.Before.Nodes
+	after := stage.After.Nodes
+	if na, nb := len(after), len(before); na != nb {
+		return errors.Errorf("Before state has %d nodes and After state has %d nodes",
+			nb, na)
+	}
+	for j := range before {
+		beforeTarget, afterTarget := before[j].Target, after[j].Target
+		if ea, eb := afterTarget.Element(), beforeTarget.Element(); ea != eb {
+			return errors.Errorf("target at index %d has Before element %+v and After element %+v",
+				j, eb, ea)
+		}
+		if da, db := afterTarget.Direction, beforeTarget.Direction; da != db {
+			return errors.Errorf("target at index %d has Before direction %s and After direction %s",
+				j, db, da)
+		}
+	}
+	return nil
+}
+
+func validateAdjacentStagesStates(previous, next Stage) error {
+	after := previous.After.Nodes
+	before := next.Before.Nodes
+	if na, nb := len(after), len(before); na != nb {
+		return errors.Errorf("node count mismatch: %d != %d",
+			na, nb)
+	}
+	for j, beforeNode := range before {
+		afterNode := after[j]
+		if sa, sb := afterNode.Status, beforeNode.Status; sa != sb {
+			return errors.Errorf("node status mismatch at index %d: %s != %s",
+				j, afterNode.Status.String(), beforeNode.Status.String())
+		}
+		if da, db := afterNode.Direction, beforeNode.Direction; da != db {
+			return errors.Errorf("target direction mismatch at index %d: %s != %s",
+				j, da.String(), db.String())
+		}
+		if ea, eb := afterNode.Element(), beforeNode.Element(); ea != eb {
+			return errors.Errorf("target element mismatch at index %d: %+v != %+v",
+				j, ea, eb)
+		}
+	}
+	return nil
+}
+
+func validateStageSubgraph(stage Stage, g *scgraph.Graph) error {
+	// Transform the ops in a non-repeating sequence of their original op edges.
+	var queue []*scgraph.OpEdge
+	if stage.Ops != nil {
+		for _, op := range stage.Ops.Slice() {
+			oe := g.GetOpEdgeFromOp(op)
+			if oe == nil {
+				continue
+			}
+			if len(queue) == 0 || queue[len(queue)-1] != oe {
+				queue = append(queue, oe)
+			}
+		}
+	}
+
+	// Check that the precedence constraints are satisfied by walking from the
+	// initial state towards the final state of the stage.
+	fulfilled := map[*scpb.Node]bool{}
+	current := append([]*scpb.Node{}, stage.Before.Nodes...)
+	for _, n := range current {
+		fulfilled[n] = true
+	}
+	// Outer loop of our state machine which attempts to progress towards the
+	// final state.
+	for hasProgressed := true; hasProgressed; {
+		hasProgressed = false
+		// Try to make progress for each target.
+		for i, n := range current {
+			if n.Status == stage.After.Nodes[i].Status {
+				// We're done for this target.
+				continue
+			}
+			oe, ok := g.GetOpEdgeFrom(n)
+			if !ok {
+				// This shouldn't happen.
+				return errors.Errorf("cannot find op-edge path from %s to %s",
+					screl.NodeString(stage.Before.Nodes[i]), screl.NodeString(stage.After.Nodes[i]))
+			}
+
+			// Prevent making progress on this target if there are unmet dependencies.
+			var hasUnmetDeps bool
+			if err := g.ForEachDepEdgeTo(oe.To(), func(de *scgraph.DepEdge) error {
+				hasUnmetDeps = hasUnmetDeps || !fulfilled[de.From()]
+				return nil
+			}); err != nil {
+				return err
+			}
+			if hasUnmetDeps {
+				continue
+			}
+
+			// Prevent making progress on this target unless this op edge has been
+			// optimized away or is the next in the queue.
+			if len(queue) > 0 && oe == queue[0] {
+				queue = queue[1:]
+			} else if !g.IsOpEdgeOptimizedOut(oe) {
+				continue
+			}
+
+			current[i] = oe.To()
+			fulfilled[oe.To()] = true
+			hasProgressed = true
+		}
+	}
+	// When we stop making progress we expect to have reached the After state.
+	for i, n := range current {
+		if n != stage.After.Nodes[i] {
+			return errors.Errorf("internal inconsistency, expected %s after walking the graph in direction %s, ended in %s",
+				screl.NodeString(stage.After.Nodes[i]), n.Direction.String(), n.Status)
+		}
+	}
+
 	return nil
 }
