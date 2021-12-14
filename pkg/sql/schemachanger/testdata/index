@@ -11,9 +11,7 @@ begin transaction #1
 # begin StatementPhase
 # end StatementPhase
 # begin PreCommitPhase
-## PreCommitPhase stage 1 of 1 with 4 MutationType ops
-create job #1: "Schema change job"
-  descriptor IDs: [54]
+## PreCommitPhase stage 1 of 2 with 1 MutationType ops
 upsert descriptor #54
   ...
      id: 54
@@ -34,7 +32,7 @@ upsert descriptor #54
   +      - v
   +      keySuffixColumnIds:
   +      - 1
-  +      name: idx1
+  +      name: t_v_idx
   +      partitioning: {}
   +      sharded: {}
   +      storeColumnIds: []
@@ -43,7 +41,6 @@ upsert descriptor #54
   +    mutationId: 1
   +    state: DELETE_ONLY
      name: t
-  +  newSchemaChangeJobId: "1"
      nextColumnId: 3
      nextFamilyId: 1
   -  nextIndexId: 2
@@ -57,6 +54,28 @@ upsert descriptor #54
      unexposedParentSchemaId: 51
   -  version: "1"
   +  version: "2"
+## PreCommitPhase stage 2 of 2 with 3 MutationType ops
+create job #1: "Schema change job"
+  descriptor IDs: [54]
+upsert descriptor #54
+  ...
+         keySuffixColumnIds:
+         - 1
+  -      name: t_v_idx
+  +      name: idx1
+         partitioning: {}
+         sharded: {}
+  ...
+       state: DELETE_ONLY
+     name: t
+  +  newSchemaChangeJobId: "1"
+     nextColumnId: 3
+     nextFamilyId: 1
+  ...
+       time: {}
+     unexposedParentSchemaId: 51
+  -  version: "2"
+  +  version: "3"
 # end PreCommitPhase
 commit transaction #1
 # begin PostCommitPhase
@@ -74,8 +93,8 @@ upsert descriptor #54
   ...
        time: {}
      unexposedParentSchemaId: 51
-  -  version: "2"
-  +  version: "3"
+  -  version: "3"
+  +  version: "4"
 commit transaction #2
 begin transaction #3
 ## PostCommitPhase stage 2 of 6 with 1 BackfillType ops
@@ -149,7 +168,7 @@ upsert descriptor #54
   ...
        time: {}
      unexposedParentSchemaId: 51
-  -  version: "3"
-  +  version: "4"
+  -  version: "4"
+  +  version: "5"
 commit transaction #7
 # end PostCommitPhase

@@ -5,10 +5,9 @@ CREATE TABLE defaultdb.t1 (id INT PRIMARY KEY, name varchar(256), money int)
 ops
 CREATE INDEX id1 ON defaultdb.t1 (id, name) STORING (money)
 ----
-PreCommitPhase stage 1 of 1 with 2 MutationType ops
+PreCommitPhase stage 1 of 2 with 1 MutationType ops
   transitions:
     [SecondaryIndex:{DescID: 54, IndexID: 2}, ABSENT, ADD] -> DELETE_ONLY
-    [IndexName:{DescID: 54, IndexID: 2, Name: id1}, ABSENT, ADD] -> PUBLIC
   ops:
     *scop.MakeAddedIndexDeleteOnly
       IndexID: 2
@@ -22,6 +21,10 @@ PreCommitPhase stage 1 of 1 with 2 MutationType ops
       StoreColumnIDs:
       - 3
       TableID: 54
+PreCommitPhase stage 2 of 2 with 1 MutationType ops
+  transitions:
+    [IndexName:{DescID: 54, IndexID: 2, Name: id1}, ABSENT, ADD] -> PUBLIC
+  ops:
     *scop.SetIndexName
       IndexID: 2
       Name: id1
@@ -60,20 +63,19 @@ CREATE INDEX id1 ON defaultdb.t1 (id, name) STORING (money)
 ----
 - from: [IndexName:{DescID: 54, IndexID: 2, Name: id1}, PUBLIC]
   to:   [SecondaryIndex:{DescID: 54, IndexID: 2}, DELETE_AND_WRITE_ONLY]
-  kind: Precedence
+  kind: StrictPrecedence
   rule: index needs a name to be assigned
 - from: [SecondaryIndex:{DescID: 54, IndexID: 2}, DELETE_ONLY]
   to:   [IndexName:{DescID: 54, IndexID: 2, Name: id1}, PUBLIC]
-  kind: Precedence
+  kind: StrictPrecedence
   rule: index name is assigned once the index is created
 
 ops
 CREATE INVERTED INDEX CONCURRENTLY id1 ON defaultdb.t1 (id, name) STORING (money)
 ----
-PreCommitPhase stage 1 of 1 with 2 MutationType ops
+PreCommitPhase stage 1 of 2 with 1 MutationType ops
   transitions:
     [SecondaryIndex:{DescID: 54, IndexID: 2}, ABSENT, ADD] -> DELETE_ONLY
-    [IndexName:{DescID: 54, IndexID: 2, Name: id1}, ABSENT, ADD] -> PUBLIC
   ops:
     *scop.MakeAddedIndexDeleteOnly
       Concurrently: true
@@ -89,6 +91,10 @@ PreCommitPhase stage 1 of 1 with 2 MutationType ops
       StoreColumnIDs:
       - 3
       TableID: 54
+PreCommitPhase stage 2 of 2 with 1 MutationType ops
+  transitions:
+    [IndexName:{DescID: 54, IndexID: 2, Name: id1}, ABSENT, ADD] -> PUBLIC
+  ops:
     *scop.SetIndexName
       IndexID: 2
       Name: id1
@@ -127,21 +133,19 @@ CREATE INDEX id1 ON defaultdb.t1 (id, name) STORING (money)
 ----
 - from: [IndexName:{DescID: 54, IndexID: 2, Name: id1}, PUBLIC]
   to:   [SecondaryIndex:{DescID: 54, IndexID: 2}, DELETE_AND_WRITE_ONLY]
-  kind: Precedence
+  kind: StrictPrecedence
   rule: index needs a name to be assigned
 - from: [SecondaryIndex:{DescID: 54, IndexID: 2}, DELETE_ONLY]
   to:   [IndexName:{DescID: 54, IndexID: 2, Name: id1}, PUBLIC]
-  kind: Precedence
+  kind: StrictPrecedence
   rule: index name is assigned once the index is created
 
 ops
 CREATE INDEX id1 ON defaultdb.t1 (id, name) STORING (money) PARTITION BY LIST (id) (PARTITION p1 VALUES IN (1))
 ----
-PreCommitPhase stage 1 of 1 with 3 MutationType ops
+PreCommitPhase stage 1 of 2 with 1 MutationType ops
   transitions:
-    [Partitioning:{DescID: 54, IndexID: 2}, ABSENT, ADD] -> PUBLIC
     [SecondaryIndex:{DescID: 54, IndexID: 2}, ABSENT, ADD] -> DELETE_ONLY
-    [IndexName:{DescID: 54, IndexID: 2, Name: id1}, ABSENT, ADD] -> PUBLIC
   ops:
     *scop.MakeAddedIndexDeleteOnly
       IndexID: 2
@@ -155,6 +159,11 @@ PreCommitPhase stage 1 of 1 with 3 MutationType ops
       StoreColumnIDs:
       - 3
       TableID: 54
+PreCommitPhase stage 2 of 2 with 2 MutationType ops
+  transitions:
+    [Partitioning:{DescID: 54, IndexID: 2}, ABSENT, ADD] -> PUBLIC
+    [IndexName:{DescID: 54, IndexID: 2, Name: id1}, ABSENT, ADD] -> PUBLIC
+  ops:
     *scop.AddIndexPartitionInfo
       IndexID: 2
       ListPartitions:
@@ -203,13 +212,13 @@ CREATE INDEX id1 ON defaultdb.t1 (id, name) STORING (money) PARTITION BY LIST (i
 ----
 - from: [IndexName:{DescID: 54, IndexID: 2, Name: id1}, PUBLIC]
   to:   [SecondaryIndex:{DescID: 54, IndexID: 2}, DELETE_AND_WRITE_ONLY]
-  kind: Precedence
+  kind: StrictPrecedence
   rule: index needs a name to be assigned
 - from: [SecondaryIndex:{DescID: 54, IndexID: 2}, DELETE_ONLY]
   to:   [IndexName:{DescID: 54, IndexID: 2, Name: id1}, PUBLIC]
-  kind: Precedence
+  kind: StrictPrecedence
   rule: index name is assigned once the index is created
 - from: [SecondaryIndex:{DescID: 54, IndexID: 2}, DELETE_ONLY]
   to:   [Partitioning:{DescID: 54, IndexID: 2}, PUBLIC]
-  kind: Precedence
+  kind: StrictPrecedence
   rule: partitioning information needs the basic index as created
