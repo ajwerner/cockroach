@@ -13,6 +13,7 @@ package schemadesc
 import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 )
 
@@ -56,7 +57,7 @@ func (p virtual) GetID() descpb.ID       { return p.id }
 func (p virtual) GetName() string        { return p.name }
 func (p virtual) GetParentID() descpb.ID { return descpb.InvalidID }
 func (p virtual) GetPrivileges() *descpb.PrivilegeDescriptor {
-	return descpb.NewVirtualSchemaPrivilegeDescriptor()
+	return catpb.NewVirtualSchemaPrivilegeDescriptor()
 }
 
 type virtualBase struct{}

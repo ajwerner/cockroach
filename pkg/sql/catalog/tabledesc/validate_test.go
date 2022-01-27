@@ -1276,7 +1276,7 @@ func TestValidateTableDesc(t *testing.T) {
 				NextColumnID: 4,
 				NextFamilyID: 1,
 				NextIndexID:  5,
-				Privileges:   descpb.NewBasePrivilegeDescriptor(security.AdminRoleName()),
+				Privileges:   catpb.NewBasePrivilegeDescriptor(security.AdminRoleName()),
 			}},
 		{`index "sec" cannot store virtual column "c3"`,
 			descpb.TableDescriptor{
@@ -1357,7 +1357,7 @@ func TestValidateTableDesc(t *testing.T) {
 				NextColumnID: 4,
 				NextFamilyID: 1,
 				NextIndexID:  5,
-				Privileges:   descpb.NewBasePrivilegeDescriptor(security.AdminRoleName()),
+				Privileges:   catpb.NewBasePrivilegeDescriptor(security.AdminRoleName()),
 			}},
 		{`index "new_sec" cannot store virtual column "c3"`,
 			descpb.TableDescriptor{
@@ -1438,7 +1438,7 @@ func TestValidateTableDesc(t *testing.T) {
 				NextColumnID: 4,
 				NextFamilyID: 1,
 				NextIndexID:  5,
-				Privileges:   descpb.NewBasePrivilegeDescriptor(security.AdminRoleName()),
+				Privileges:   catpb.NewBasePrivilegeDescriptor(security.AdminRoleName()),
 			}},
 		{`index "sec" cannot store virtual column "v"`,
 			descpb.TableDescriptor{
@@ -1998,7 +1998,7 @@ func TestValidateCrossTableReferences(t *testing.T) {
 		var cb nstree.MutableCatalog
 		cb.UpsertDescriptorEntry(dbdesc.NewBuilder(&descpb.DatabaseDescriptor{ID: 1}).BuildImmutable())
 		for _, otherDesc := range test.otherDescs {
-			otherDesc.Privileges = descpb.NewBasePrivilegeDescriptor(security.AdminRoleName())
+			otherDesc.Privileges = catpb.NewBasePrivilegeDescriptor(security.AdminRoleName())
 			cb.UpsertDescriptorEntry(NewBuilder(&otherDesc).BuildImmutable())
 		}
 		desc := NewBuilder(&test.desc).BuildImmutable()

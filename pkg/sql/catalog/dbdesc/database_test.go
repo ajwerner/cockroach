@@ -17,6 +17,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/internal/validate"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/nstree"
@@ -99,7 +100,7 @@ func TestValidateDatabaseDesc(t *testing.T) {
 			descpb.DatabaseDescriptor{
 				Name:       "db",
 				ID:         0,
-				Privileges: descpb.NewBaseDatabasePrivilegeDescriptor(security.RootUserName()),
+				Privileges: catpb.NewBaseDatabasePrivilegeDescriptor(security.RootUserName()),
 			},
 		},
 		{
@@ -108,7 +109,7 @@ func TestValidateDatabaseDesc(t *testing.T) {
 				Name:         "multi-region-db",
 				ID:           200,
 				RegionConfig: &descpb.DatabaseDescriptor_RegionConfig{},
-				Privileges:   descpb.NewBaseDatabasePrivilegeDescriptor(security.RootUserName()),
+				Privileges:   catpb.NewBaseDatabasePrivilegeDescriptor(security.RootUserName()),
 			},
 		},
 	}
@@ -271,7 +272,7 @@ func TestValidateCrossDatabaseReferences(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		privilege := descpb.NewBasePrivilegeDescriptor(security.AdminRoleName())
+		privilege := catpb.NewBasePrivilegeDescriptor(security.AdminRoleName())
 		var cb nstree.MutableCatalog
 		test.desc.Privileges = privilege
 		desc := NewBuilder(&test.desc).BuildImmutable()
