@@ -66,7 +66,7 @@ func (ddb *databaseDescriptorBuilder) RunPostDeserializationChanges() {
 	// want any default privileges on the system database.
 	if ddb.original.GetID() != keys.SystemDatabaseID {
 		if ddb.maybeModified.DefaultPrivileges == nil {
-			ddb.maybeModified.DefaultPrivileges = catprivilege.MakeDefaultPrivilegeDescriptor(descpb.DefaultPrivilegeDescriptor_DATABASE)
+			ddb.maybeModified.DefaultPrivileges = catprivilege.MakeDefaultPrivilegeDescriptor(catpb.DefaultPrivilegeDescriptor_DATABASE)
 			createdDefaultPrivileges = true
 		}
 
@@ -95,7 +95,7 @@ func (ddb *databaseDescriptorBuilder) RunRestoreChanges(
 }
 
 func maybeConvertIncompatibleDBPrivilegesToDefaultPrivileges(
-	privileges *descpb.PrivilegeDescriptor, defaultPrivileges *descpb.DefaultPrivilegeDescriptor,
+	privileges *catpb.PrivilegeDescriptor, defaultPrivileges *catpb.DefaultPrivilegeDescriptor,
 ) (hasChanged bool) {
 	var pgIncompatibleDBPrivileges = privilege.List{
 		privilege.SELECT, privilege.INSERT, privilege.UPDATE, privilege.DELETE,
@@ -116,7 +116,7 @@ func maybeConvertIncompatibleDBPrivilegesToDefaultPrivileges(
 		privileges.Users[i] = user
 
 		// Convert the incompatible privileges to default privileges.
-		role := defaultPrivileges.FindOrCreateUser(descpb.DefaultPrivilegesRole{ForAllRoles: true})
+		role := defaultPrivileges.FindOrCreateUser(catpb.DefaultPrivilegesRole{ForAllRoles: true})
 		tableDefaultPrivilegesForAllRoles := role.DefaultPrivilegesPerObject[tree.Tables]
 
 		defaultPrivilegesForUser := tableDefaultPrivilegesForAllRoles.FindOrCreateUser(user.User())

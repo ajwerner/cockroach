@@ -21,6 +21,10 @@ delete comment for descriptor #106 of type SchemaCommentType
 create job #1: "schema change job"
   descriptor IDs: [104 106]
 upsert descriptor #104
+   database:
+  +  declarativeSchemaChangeJobId: "1"
+     id: 104
+     modificationTime: {}
   ...
        public:
          id: 105
@@ -29,6 +33,10 @@ upsert descriptor #104
   -  version: "2"
   +  version: "3"
 upsert descriptor #106
+   schema:
+  +  declarativeSchemaChangeJobId: "1"
+     id: 106
+     modificationTime: {}
   ...
          withGrantOption: 2
        version: 2
@@ -44,6 +52,16 @@ write *eventpb.DropSchema to event log for descriptor #106: DROP SCHEMA ‹db›
 update progress of schema change job #1
 set schema change job #1 to non-cancellable
 delete schema namespace entry {104 0 sc} -> 106
+upsert descriptor #104
+   database:
+  -  declarativeSchemaChangeJobId: "1"
+     id: 104
+     modificationTime: {}
+  ...
+       public:
+         id: 105
+  -  version: "3"
+  +  version: "4"
 delete descriptor #106
 commit transaction #2
 # end PostCommitPhase
@@ -79,11 +97,11 @@ create job #1: "schema change job"
 delete object namespace entry {104 107 t} -> 108
 upsert descriptor #108
   ...
-     modificationTime: {}
-     name: t
-  +  newSchemaChangeJobId: "1"
-     nextColumnId: 4
-     nextFamilyId: 1
+     createAsOfTime:
+       wallTime: "1"
+  +  declarativeSchemaChangeJobId: "1"
+     families:
+     - columnIds:
   ...
      replacementOf:
        time: {}
@@ -103,11 +121,11 @@ update progress of schema change job #1
 set schema change job #1 to non-cancellable
 upsert descriptor #108
   ...
-     modificationTime: {}
-     name: t
-  -  newSchemaChangeJobId: "1"
-     nextColumnId: 4
-     nextFamilyId: 1
+     createAsOfTime:
+       wallTime: "1"
+  -  declarativeSchemaChangeJobId: "1"
+     families:
+     - columnIds:
   ...
      state: DROP
      unexposedParentSchemaId: 107
@@ -132,6 +150,10 @@ create job #1: "schema change job"
 delete object namespace entry {104 107 e} -> 109
 delete object namespace entry {104 107 _e} -> 110
 upsert descriptor #104
+   database:
+  +  declarativeSchemaChangeJobId: "1"
+     id: 104
+     modificationTime: {}
   ...
        public:
          id: 105
@@ -140,6 +162,10 @@ upsert descriptor #104
   -  version: "4"
   +  version: "5"
 upsert descriptor #107
+   schema:
+  +  declarativeSchemaChangeJobId: "1"
+     id: 107
+     modificationTime: {}
   ...
          withGrantOption: 2
        version: 2
@@ -147,6 +173,11 @@ upsert descriptor #107
   +  state: DROP
   +  version: "2"
 upsert descriptor #109
+   type:
+     arrayTypeId: 110
+  +  declarativeSchemaChangeJobId: "1"
+     enumMembers:
+     - logicalRepresentation: a
   ...
          withGrantOption: 2
        version: 2
@@ -154,6 +185,12 @@ upsert descriptor #109
   +  state: DROP
   +  version: "2"
 upsert descriptor #110
+  ...
+       family: ArrayFamily
+       oid: 100110
+  +  declarativeSchemaChangeJobId: "1"
+     id: 110
+     kind: ALIAS
   ...
          withGrantOption: 2
        version: 2
@@ -170,6 +207,16 @@ write *eventpb.DropType to event log for descriptor #110: DROP SCHEMA ‹db›.�
 update progress of schema change job #1
 set schema change job #1 to non-cancellable
 delete schema namespace entry {104 0 sc} -> 107
+upsert descriptor #104
+   database:
+  -  declarativeSchemaChangeJobId: "1"
+     id: 104
+     modificationTime: {}
+  ...
+       public:
+         id: 105
+  -  version: "5"
+  +  version: "6"
 delete descriptor #107
 delete descriptor #109
 delete descriptor #110
@@ -192,6 +239,10 @@ delete role settings for database on #104
 create job #1: "schema change job"
   descriptor IDs: [104 105]
 upsert descriptor #104
+   database:
+  +  declarativeSchemaChangeJobId: "1"
+     id: 104
+     modificationTime: {}
   ...
          withGrantOption: 2
        version: 2
@@ -203,6 +254,10 @@ upsert descriptor #104
   +  state: DROP
   +  version: "6"
 upsert descriptor #105
+   schema:
+  +  declarativeSchemaChangeJobId: "1"
+     id: 105
+     modificationTime: {}
   ...
          withGrantOption: 2
        version: 2
@@ -222,6 +277,10 @@ set schema change job #1 to non-cancellable
 delete database namespace entry {0 0 db} -> 104
 delete schema namespace entry {104 0 public} -> 105
 upsert descriptor #104
+   database:
+  -  declarativeSchemaChangeJobId: "1"
+     id: 104
+     modificationTime: {}
   ...
        version: 2
      state: DROP
@@ -308,6 +367,10 @@ delete object namespace entry {111 113 typ} -> 122
 delete object namespace entry {111 113 _typ} -> 123
 delete object namespace entry {111 113 v5} -> 124
 upsert descriptor #111
+   database:
+  +  declarativeSchemaChangeJobId: "1"
+     id: 111
+     modificationTime: {}
   ...
          withGrantOption: 2
        version: 2
@@ -321,6 +384,10 @@ upsert descriptor #111
   +  state: DROP
   +  version: "3"
 upsert descriptor #112
+   schema:
+  +  declarativeSchemaChangeJobId: "1"
+     id: 112
+     modificationTime: {}
   ...
          withGrantOption: 2
        version: 2
@@ -328,6 +395,10 @@ upsert descriptor #112
   +  state: DROP
   +  version: "2"
 upsert descriptor #113
+   schema:
+  +  declarativeSchemaChangeJobId: "1"
+     id: 113
+     modificationTime: {}
   ...
          withGrantOption: 2
        version: 2
@@ -343,14 +414,9 @@ upsert descriptor #114
   -    columnIds:
   -    - 3
   -    id: 117
+  +  declarativeSchemaChangeJobId: "1"
      families:
      - columnIds:
-  ...
-     modificationTime: {}
-     name: sq1
-  +  newSchemaChangeJobId: "1"
-     parentId: 111
-     primaryIndex:
   ...
        sequenceOwner: {}
        start: "1"
@@ -367,14 +433,9 @@ upsert descriptor #115
   -    columnIds:
   -    - 3
   -    id: 116
+  +  declarativeSchemaChangeJobId: "1"
      families:
      - columnIds:
-  ...
-     modificationTime: {}
-     name: sq1
-  +  newSchemaChangeJobId: "1"
-     parentId: 111
-     primaryIndex:
   ...
        sequenceOwner: {}
        start: "1"
@@ -398,6 +459,7 @@ upsert descriptor #116
   -    - 115
      createAsOfTime:
        wallTime: "1"
+  +  declarativeSchemaChangeJobId: "1"
      dependedOnBy:
   -  - columnIds:
   -    - 2
@@ -405,12 +467,6 @@ upsert descriptor #116
   +  - {}
      families:
      - columnIds:
-  ...
-     modificationTime: {}
-     name: t1
-  +  newSchemaChangeJobId: "1"
-     nextColumnId: 4
-     nextFamilyId: 1
   ...
      replacementOf:
        time: {}
@@ -434,15 +490,10 @@ upsert descriptor #117
   -    - 114
      createAsOfTime:
        wallTime: "1"
+  +  declarativeSchemaChangeJobId: "1"
   +  dependedOnBy: []
      families:
      - columnIds:
-  ...
-     modificationTime: {}
-     name: t1
-  +  newSchemaChangeJobId: "1"
-     nextColumnId: 4
-     nextFamilyId: 1
   ...
      replacementOf:
        time: {}
@@ -463,13 +514,9 @@ upsert descriptor #118
   -    id: 120
   -  dependsOn:
   -  - 116
+  +  declarativeSchemaChangeJobId: "1"
      formatVersion: 3
      id: 118
-     modificationTime: {}
-     name: v1
-  +  newSchemaChangeJobId: "1"
-     nextColumnId: 2
-     nextMutationId: 1
   ...
      replacementOf:
        time: {}
@@ -493,13 +540,9 @@ upsert descriptor #119
   -    id: 121
   -  dependsOn:
   -  - 118
+  +  declarativeSchemaChangeJobId: "1"
      formatVersion: 3
      id: 119
-     modificationTime: {}
-     name: v2
-  +  newSchemaChangeJobId: "1"
-     nextColumnId: 3
-     nextMutationId: 1
   ...
      replacementOf:
        time: {}
@@ -515,13 +558,9 @@ upsert descriptor #120
   -  dependsOn:
   -  - 118
   -  - 119
+  +  declarativeSchemaChangeJobId: "1"
      formatVersion: 3
      id: 120
-     modificationTime: {}
-     name: v3
-  +  newSchemaChangeJobId: "1"
-     nextColumnId: 3
-     nextMutationId: 1
   ...
      replacementOf:
        time: {}
@@ -541,13 +580,9 @@ upsert descriptor #121
   -    id: 124
   -  dependsOn:
   -  - 119
+  +  declarativeSchemaChangeJobId: "1"
      formatVersion: 3
      id: 121
-     modificationTime: {}
-     name: v4
-  +  newSchemaChangeJobId: "1"
-     nextColumnId: 3
-     nextMutationId: 1
   ...
      replacementOf:
        time: {}
@@ -557,6 +592,11 @@ upsert descriptor #121
   +  version: "3"
      viewQuery: (SELECT n2, n1 FROM db1.sc1.v2)
 upsert descriptor #122
+   type:
+     arrayTypeId: 123
+  +  declarativeSchemaChangeJobId: "1"
+     enumMembers:
+     - logicalRepresentation: a
   ...
          withGrantOption: 2
        version: 2
@@ -567,6 +607,12 @@ upsert descriptor #122
   +  state: DROP
   +  version: "3"
 upsert descriptor #123
+  ...
+       family: ArrayFamily
+       oid: 100123
+  +  declarativeSchemaChangeJobId: "1"
+     id: 123
+     kind: ALIAS
   ...
          withGrantOption: 2
        version: 2
@@ -582,14 +628,9 @@ upsert descriptor #124
        wallTime: "1"
   -  dependsOn:
   -  - 121
+  +  declarativeSchemaChangeJobId: "1"
      dependsOnTypes:
      - 122
-  ...
-     modificationTime: {}
-     name: v5
-  +  newSchemaChangeJobId: "1"
-     nextColumnId: 4
-     nextMutationId: 1
   ...
      replacementOf:
        time: {}
@@ -613,6 +654,10 @@ delete database namespace entry {0 0 db1} -> 111
 delete schema namespace entry {111 0 public} -> 112
 delete schema namespace entry {111 0 sc1} -> 113
 upsert descriptor #111
+   database:
+  -  declarativeSchemaChangeJobId: "1"
+     id: 111
+     modificationTime: {}
   ...
        version: 2
      state: DROP
@@ -620,11 +665,11 @@ upsert descriptor #111
   +  version: "4"
 upsert descriptor #114
   ...
-     modificationTime: {}
-     name: sq1
-  -  newSchemaChangeJobId: "1"
-     parentId: 111
-     primaryIndex:
+     createAsOfTime:
+       wallTime: "1"
+  -  declarativeSchemaChangeJobId: "1"
+     families:
+     - columnIds:
   ...
      state: DROP
      unexposedParentSchemaId: 112
@@ -632,11 +677,11 @@ upsert descriptor #114
   +  version: "4"
 upsert descriptor #115
   ...
-     modificationTime: {}
-     name: sq1
-  -  newSchemaChangeJobId: "1"
-     parentId: 111
-     primaryIndex:
+     createAsOfTime:
+       wallTime: "1"
+  -  declarativeSchemaChangeJobId: "1"
+     families:
+     - columnIds:
   ...
      state: DROP
      unexposedParentSchemaId: 113
@@ -644,11 +689,11 @@ upsert descriptor #115
   +  version: "4"
 upsert descriptor #116
   ...
-     modificationTime: {}
-     name: t1
-  -  newSchemaChangeJobId: "1"
-     nextColumnId: 4
-     nextFamilyId: 1
+     createAsOfTime:
+       wallTime: "1"
+  -  declarativeSchemaChangeJobId: "1"
+     dependedOnBy:
+     - {}
   ...
      state: DROP
      unexposedParentSchemaId: 113
@@ -656,11 +701,11 @@ upsert descriptor #116
   +  version: "4"
 upsert descriptor #117
   ...
-     modificationTime: {}
-     name: t1
-  -  newSchemaChangeJobId: "1"
-     nextColumnId: 4
-     nextFamilyId: 1
+     createAsOfTime:
+       wallTime: "1"
+  -  declarativeSchemaChangeJobId: "1"
+     dependedOnBy: []
+     families:
   ...
      state: DROP
      unexposedParentSchemaId: 112
@@ -668,11 +713,11 @@ upsert descriptor #117
   +  version: "3"
 upsert descriptor #118
   ...
-     modificationTime: {}
-     name: v1
-  -  newSchemaChangeJobId: "1"
-     nextColumnId: 2
-     nextMutationId: 1
+     createAsOfTime:
+       wallTime: "1"
+  -  declarativeSchemaChangeJobId: "1"
+     formatVersion: 3
+     id: 118
   ...
      state: DROP
      unexposedParentSchemaId: 113
@@ -681,11 +726,11 @@ upsert descriptor #118
      viewQuery: (SELECT name FROM db1.sc1.t1)
 upsert descriptor #119
   ...
-     modificationTime: {}
-     name: v2
-  -  newSchemaChangeJobId: "1"
-     nextColumnId: 3
-     nextMutationId: 1
+     createAsOfTime:
+       wallTime: "1"
+  -  declarativeSchemaChangeJobId: "1"
+     formatVersion: 3
+     id: 119
   ...
      state: DROP
      unexposedParentSchemaId: 113
@@ -694,11 +739,11 @@ upsert descriptor #119
      viewQuery: (SELECT name AS n1, name AS n2 FROM db1.sc1.v1)
 upsert descriptor #120
   ...
-     modificationTime: {}
-     name: v3
-  -  newSchemaChangeJobId: "1"
-     nextColumnId: 3
-     nextMutationId: 1
+     createAsOfTime:
+       wallTime: "1"
+  -  declarativeSchemaChangeJobId: "1"
+     formatVersion: 3
+     id: 120
   ...
      state: DROP
      unexposedParentSchemaId: 113
@@ -707,11 +752,11 @@ upsert descriptor #120
      viewQuery: (SELECT name, n1 FROM db1.sc1.v1, db1.sc1.v2)
 upsert descriptor #121
   ...
-     modificationTime: {}
-     name: v4
-  -  newSchemaChangeJobId: "1"
-     nextColumnId: 3
-     nextMutationId: 1
+     createAsOfTime:
+       wallTime: "1"
+  -  declarativeSchemaChangeJobId: "1"
+     formatVersion: 3
+     id: 121
   ...
      state: DROP
      unexposedParentSchemaId: 113
@@ -720,11 +765,11 @@ upsert descriptor #121
      viewQuery: (SELECT n2, n1 FROM db1.sc1.v2)
 upsert descriptor #124
   ...
-     modificationTime: {}
-     name: v5
-  -  newSchemaChangeJobId: "1"
-     nextColumnId: 4
-     nextMutationId: 1
+     createAsOfTime:
+       wallTime: "1"
+  -  declarativeSchemaChangeJobId: "1"
+     dependsOnTypes:
+     - 122
   ...
      state: DROP
      unexposedParentSchemaId: 113

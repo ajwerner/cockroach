@@ -131,6 +131,7 @@ var validationMap = []struct {
 			"NewSchemaChangeJobID":          {status: iSolemnlySwearThisFieldIsValidated},
 			"RowLevelTTL":                   {status: iSolemnlySwearThisFieldIsValidated},
 			"ExcludeDataFromBackup":         {status: thisFieldReferencesNoObjects},
+			"DeclarativeSchemaChangeJobID":  {status: iSolemnlySwearThisFieldIsValidated},
 		},
 	},
 	{
