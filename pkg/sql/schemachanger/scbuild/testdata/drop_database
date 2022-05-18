@@ -929,7 +929,7 @@ DROP DATABASE db1 CASCADE
   details:
     descriptorId: 117
     owner: root
-- [[PrimaryIndex:{DescID: 109, IndexID: 1, ConstraintID: 1}, ABSENT], PUBLIC]
+- [[PrimaryIndex:{DescID: 109, IndexID: 1, ConstraintID: 1, ReferencedIndexID: 0}, ABSENT], PUBLIC]
   details:
     embeddedIndex:
       constraintId: 1
@@ -943,7 +943,7 @@ DROP DATABASE db1 CASCADE
       - 2
       - 3
       tableId: 109
-- [[PrimaryIndex:{DescID: 110, IndexID: 1, ConstraintID: 1}, ABSENT], PUBLIC]
+- [[PrimaryIndex:{DescID: 110, IndexID: 1, ConstraintID: 1, ReferencedIndexID: 0}, ABSENT], PUBLIC]
   details:
     embeddedIndex:
       constraintId: 1

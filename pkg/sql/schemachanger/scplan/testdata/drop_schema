@@ -536,7 +536,7 @@ DROP SCHEMA defaultdb.SC1 CASCADE
   kind: Precedence
   rule: dependents removed before column
 - from: [IndexName:{DescID: 106, Name: t1_pkey, IndexID: 1}, ABSENT]
-  to:   [PrimaryIndex:{DescID: 106, IndexID: 1, ConstraintID: 1}, ABSENT]
+  to:   [PrimaryIndex:{DescID: 106, IndexID: 1, ConstraintID: 1, ReferencedIndexID: 0}, ABSENT]
   kind: Precedence
   rule: dependents removed before index
 - from: [IndexName:{DescID: 106, Name: t1_pkey, IndexID: 1}, ABSENT]
@@ -695,7 +695,7 @@ DROP SCHEMA defaultdb.SC1 CASCADE
   to:   [View:{DescID: 113}, DROPPED]
   kind: Precedence
   rule: dependent element removal before descriptor drop
-- from: [PrimaryIndex:{DescID: 106, IndexID: 1, ConstraintID: 1}, VALIDATED]
+- from: [PrimaryIndex:{DescID: 106, IndexID: 1, ConstraintID: 1, ReferencedIndexID: 0}, VALIDATED]
   to:   [IndexName:{DescID: 106, Name: t1_pkey, IndexID: 1}, ABSENT]
   kind: Precedence
   rule: dependents removed after index no longer public
@@ -728,7 +728,7 @@ DROP SCHEMA defaultdb.SC1 CASCADE
   kind: SameStagePrecedence
   rule: dependent element removal right after descriptor removal
 - from: [Table:{DescID: 106}, ABSENT]
-  to:   [PrimaryIndex:{DescID: 106, IndexID: 1, ConstraintID: 1}, ABSENT]
+  to:   [PrimaryIndex:{DescID: 106, IndexID: 1, ConstraintID: 1, ReferencedIndexID: 0}, ABSENT]
   kind: SameStagePrecedence
   rule: dependent element removal right after descriptor removal
 - from: [TableComment:{DescID: 106, Comment: t1 is good table}, ABSENT]
@@ -1011,7 +1011,7 @@ PreCommitPhase stage 1 of 1 with 74 MutationType ops
     [[Column:{DescID: 106, ColumnID: 4294967294}, ABSENT], PUBLIC] -> WRITE_ONLY
     [[ColumnName:{DescID: 106, Name: tableoid, ColumnID: 4294967294}, ABSENT], PUBLIC] -> ABSENT
     [[ColumnType:{DescID: 106, ColumnFamilyID: 0, ColumnID: 4294967294}, ABSENT], PUBLIC] -> ABSENT
-    [[PrimaryIndex:{DescID: 106, IndexID: 1, ConstraintID: 1}, ABSENT], PUBLIC] -> VALIDATED
+    [[PrimaryIndex:{DescID: 106, IndexID: 1, ConstraintID: 1, ReferencedIndexID: 0}, ABSENT], PUBLIC] -> VALIDATED
     [[IndexName:{DescID: 106, Name: t1_pkey, IndexID: 1}, ABSENT], PUBLIC] -> ABSENT
     [[Namespace:{DescID: 107, Name: v1, ReferencedDescID: 100}, ABSENT], PUBLIC] -> ABSENT
     [[Owner:{DescID: 107}, ABSENT], PUBLIC] -> ABSENT
@@ -1392,7 +1392,7 @@ PostCommitNonRevertiblePhase stage 1 of 1 with 57 MutationType ops
     [[Column:{DescID: 106, ColumnID: 3}, ABSENT], WRITE_ONLY] -> ABSENT
     [[Column:{DescID: 106, ColumnID: 4294967295}, ABSENT], WRITE_ONLY] -> ABSENT
     [[Column:{DescID: 106, ColumnID: 4294967294}, ABSENT], WRITE_ONLY] -> ABSENT
-    [[PrimaryIndex:{DescID: 106, IndexID: 1, ConstraintID: 1}, ABSENT], VALIDATED] -> ABSENT
+    [[PrimaryIndex:{DescID: 106, IndexID: 1, ConstraintID: 1, ReferencedIndexID: 0}, ABSENT], VALIDATED] -> ABSENT
     [[View:{DescID: 107}, ABSENT], DROPPED] -> ABSENT
     [[Column:{DescID: 107, ColumnID: 1}, ABSENT], WRITE_ONLY] -> ABSENT
     [[Column:{DescID: 107, ColumnID: 4294967295}, ABSENT], WRITE_ONLY] -> ABSENT

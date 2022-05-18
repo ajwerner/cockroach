@@ -31,7 +31,7 @@ enum Status {
   //
   ABSENT = 1;
   PUBLIC = 2;
-  // TRANSIENT is like PUBLIC except the element is not expected to
+  // TRANSIENT is like ABSENT->PUBLIC->ABSENT; the element is not expected to
   // persist once the schema change involving it is complete.
   TRANSIENT = 3;
 
@@ -49,6 +49,9 @@ enum Status {
   MERGE_ONLY = 10;
   BACKFILLED = 11;
   BACKFILL_ONLY = 12;
+
+  // Intermediate states on the transient index dropping path
+  TRANSIENT_DELETE_ONLY = 13;
 }
 
 // TargetMetadata refers to the metadata for individual elements, where

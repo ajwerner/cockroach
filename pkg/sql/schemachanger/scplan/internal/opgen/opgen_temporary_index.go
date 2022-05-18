@@ -18,7 +18,7 @@ import (
 
 func init() {
 	opRegistry.register((*scpb.TemporaryIndex)(nil),
-		toPublic(
+		toTransient(
 			scpb.Status_ABSENT,
 			to(scpb.Status_DELETE_ONLY,
 				minPhase(scop.PreCommitPhase),
@@ -39,11 +39,31 @@ func init() {
 					}
 				}),
 			),
-			to(scpb.Status_PUBLIC),
+			to(scpb.Status_TRANSIENT_DELETE_ONLY,
+				revertible(false),
+				emit(func(this *scpb.TemporaryIndex) scop.Op {
+					return &scop.MakeDroppedIndexDeleteOnly{
+						TableID: this.TableID,
+						IndexID: this.IndexID,
+					}
+				}),
+			),
+			to(scpb.Status_TRANSIENT,
+				emit(func(this *scpb.TemporaryIndex) scop.Op {
+					return &scop.CreateGcJobForIndex{
+						TableID: this.TableID,
+						IndexID: this.IndexID,
+					}
+				}),
+				emit(func(this *scpb.TemporaryIndex) scop.Op {
+					return &scop.MakeIndexAbsent{
+						TableID: this.TableID,
+						IndexID: this.IndexID,
+					}
+				})),
 		),
 		toAbsent(
-			scpb.Status_PUBLIC,
-			equiv(scpb.Status_WRITE_ONLY),
+			scpb.Status_WRITE_ONLY,
 			to(scpb.Status_DELETE_ONLY,
 				revertible(false),
 				emit(func(this *scpb.TemporaryIndex) scop.Op {
@@ -53,6 +73,7 @@ func init() {
 					}
 				}),
 			),
+			equiv(scpb.Status_TRANSIENT_DELETE_ONLY),
 			to(scpb.Status_ABSENT,
 				emit(func(this *scpb.TemporaryIndex) scop.Op {
 					return &scop.CreateGcJobForIndex{
@@ -65,8 +86,8 @@ func init() {
 						TableID: this.TableID,
 						IndexID: this.IndexID,
 					}
-				}),
-			),
+				})),
+			equiv(scpb.Status_TRANSIENT),
 		),
 	)
 }

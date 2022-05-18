@@ -62,6 +62,8 @@ const (
 	ReferencedDescID
 	// Comment is the comment metadata on descriptors.
 	Comment
+	// ReferencedIndexID is the index ID to which this element refers.
+	ReferencedIndexID
 
 	// TargetStatus is the target status of an element.
 	TargetStatus
@@ -128,11 +130,13 @@ var elementSchemaOptions = []rel.SchemaOption{
 		rel.EntityAttr(DescID, "TableID"),
 		rel.EntityAttr(IndexID, "IndexID"),
 		rel.EntityAttr(ConstraintID, "ConstraintID"),
+		rel.EntityAttr(ReferencedIndexID, "TemporaryIndexID"),
 	),
 	rel.EntityMapping(t((*scpb.SecondaryIndex)(nil)),
 		rel.EntityAttr(DescID, "TableID"),
 		rel.EntityAttr(IndexID, "IndexID"),
 		rel.EntityAttr(ConstraintID, "ConstraintID"),
+		rel.EntityAttr(ReferencedIndexID, "TemporaryIndexID"),
 	),
 	rel.EntityMapping(t((*scpb.TemporaryIndex)(nil)),
 		rel.EntityAttr(DescID, "TableID"),

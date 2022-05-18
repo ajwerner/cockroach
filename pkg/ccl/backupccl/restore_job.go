@@ -1801,7 +1801,7 @@ func (r *restoreResumer) publishDescriptors(
 			}
 			newIdx := found.IndexDescDeepCopy()
 			mutTable.RemovePublicNonPrimaryIndex(found.Ordinal())
-			if err := mutTable.AddIndexMutation(ctx, &newIdx, descpb.DescriptorMutation_ADD, r.settings); err != nil {
+			if err := mutTable.AddIndexMutationMaybeWithBackfillingTempIndex(ctx, &newIdx, descpb.DescriptorMutation_ADD, r.settings); err != nil {
 				return err
 			}
 		}

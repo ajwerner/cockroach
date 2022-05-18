@@ -26,6 +26,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/errors"
 )
 
 // CreateIndex implements CREATE INDEX.
@@ -193,12 +195,7 @@ func CreateIndex(b BuildCtx, n *tree.CreateIndex) {
 	// Assign the ID here, since we may have added columns
 	// and made a new primary key above.
 	index.SourceIndexID = source.IndexID
-	switch t := relation.(type) {
-	case *scpb.Table:
-		index.IndexID = b.NextTableIndexID(t)
-	case *scpb.View:
-		index.IndexID = b.NextViewIndexID(t)
-	}
+	index.IndexID = nextRelationIndexID(b, relation)
 	sec := &scpb.SecondaryIndex{Index: index}
 	b.Add(sec)
 	b.Add(&scpb.IndexName{
@@ -212,6 +209,32 @@ func CreateIndex(b BuildCtx, n *tree.CreateIndex) {
 			IndexID:                index.IndexID,
 			PartitioningDescriptor: b.SecondaryIndexPartitioningDescriptor(sec, n.PartitionByIndex.PartitionBy),
 		})
+	}
+
+	temp := &scpb.TemporaryIndex{
+		Index:                    protoutil.Clone(sec).(*scpb.SecondaryIndex).Index,
+		IsUsingSecondaryEncoding: true,
+	}
+	temp.TemporaryIndexID = 0
+	temp.IndexID = nextRelationIndexID(b, relation)
+	b.AddTransient(temp)
+	if n.PartitionByIndex.ContainsPartitions() {
+		b.Add(&scpb.IndexPartitioning{
+			TableID:                temp.TableID,
+			IndexID:                temp.IndexID,
+			PartitioningDescriptor: b.SecondaryIndexPartitioningDescriptor(sec, n.PartitionByIndex.PartitionBy),
+		})
+	}
+}
+
+func nextRelationIndexID(b BuildCtx, relation scpb.Element) catid.IndexID {
+	switch t := relation.(type) {
+	case *scpb.Table:
+		return b.NextTableIndexID(t)
+	case *scpb.View:
+		return b.NextViewIndexID(t)
+	default:
+		panic(errors.AssertionFailedf("unexpected relation element of type %T", relation))
 	}
 }
 

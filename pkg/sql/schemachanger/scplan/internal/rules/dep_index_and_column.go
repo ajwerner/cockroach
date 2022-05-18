@@ -66,12 +66,42 @@ func init() {
 		),
 		element(scpb.Status_PUBLIC,
 			(*scpb.IndexName)(nil),
-			(*scpb.IndexPartitioning)(nil),
 			(*scpb.IndexComment)(nil),
 		),
 		screl.DescID,
 		screl.IndexID,
 	).register()
+
+	depRule(
+		"index partitioning is applied in the same stage index comes to exist",
+		scgraph.SameStagePrecedence,
+		scpb.ToPublic,
+		element(scpb.Status_DELETE_ONLY,
+			(*scpb.PrimaryIndex)(nil),
+			(*scpb.SecondaryIndex)(nil),
+		),
+		element(scpb.Status_PUBLIC,
+			(*scpb.IndexPartitioning)(nil),
+		),
+		screl.DescID,
+		screl.IndexID,
+	)
+	(&depRuleSpec{
+		ruleName:         "index partitioning is applied in the same stage temporary index comes to exist",
+		edgeKind:         scgraph.SameStagePrecedence,
+		fromTargetStatus: scpb.Transient.Status(),
+		toTargetStatus:   scpb.ToPublic.Status(),
+		from: element(scpb.Status_DELETE_ONLY,
+			(*scpb.TemporaryIndex)(nil),
+		),
+		to: element(scpb.Status_PUBLIC,
+			(*scpb.IndexPartitioning)(nil),
+		),
+		joinAttrs: []screl.Attr{
+			screl.DescID,
+			screl.IndexID,
+		},
+	}).register()
 
 	depRule(
 		"partial predicate set right after secondary index existence",
@@ -153,6 +183,42 @@ func init() {
 		screl.DescID,
 		screl.IndexID,
 	).register()
+}
+
+// These rules ensure that before an offline-backfilled index can begin
+// backfilling, the corresponding temporary index exists in WRITE_ONLY.
+func init() {
+	var (
+		from, fromTarget, fromNode         = targetNodeVars("from")
+		to, toTarget, toNode               = targetNodeVars("to")
+		descID, tempIndexID        rel.Var = "desc-id", "temp-index-id"
+	)
+	registerDepRule(
+		"temp index is WRITE_ONLY before backfill",
+		scgraph.Precedence,
+		fromNode, toNode,
+		screl.MustQuery(
+			from.Type(
+				(*scpb.TemporaryIndex)(nil),
+			),
+			to.Type(
+				(*scpb.PrimaryIndex)(nil),
+				(*scpb.SecondaryIndex)(nil),
+			),
+			descID.Entities(screl.DescID, from, to),
+			to.AttrEqVar(screl.ReferencedIndexID, tempIndexID),
+			from.AttrEqVar(screl.IndexID, tempIndexID),
+
+			fromTarget.AttrEq(screl.TargetStatus, scpb.Transient.Status()),
+			toTarget.AttrEq(screl.TargetStatus, scpb.ToPublic.Status()),
+
+			fromNode.AttrEq(screl.CurrentStatus, scpb.Status_WRITE_ONLY),
+			toNode.AttrEq(screl.CurrentStatus, scpb.Status_BACKFILLED),
+
+			screl.JoinTargetNode(from, fromTarget, fromNode),
+			screl.JoinTargetNode(to, toTarget, toNode),
+		),
+	)
 }
 
 // These rules ensure that column-dependent elements, like a column's name, its
@@ -408,7 +474,7 @@ func init() {
 		element(scpb.Status_DELETE_ONLY,
 			(*scpb.Column)(nil),
 		),
-		element(scpb.Status_DELETE_ONLY,
+		element(scpb.Status_BACKFILL_ONLY,
 			(*scpb.PrimaryIndex)(nil),
 			(*scpb.SecondaryIndex)(nil),
 		),

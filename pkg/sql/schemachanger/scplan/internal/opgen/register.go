@@ -37,6 +37,10 @@ func toAbsent(initialStatus scpb.Status, specs ...transitionSpec) targetSpec {
 	return asTargetSpec(scpb.Status_ABSENT, initialStatus, specs...)
 }
 
+func toTransient(initalStatus scpb.Status, specs ...transitionSpec) targetSpec {
+	return asTargetSpec(scpb.Status_TRANSIENT, initalStatus, specs...)
+}
+
 func asTargetSpec(to, from scpb.Status, specs ...transitionSpec) targetSpec {
 	return targetSpec{from: from, to: to, transitionSpecs: specs}
 }

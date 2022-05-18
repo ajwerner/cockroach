@@ -42,6 +42,9 @@ type BuildCtx interface {
 	// Add adds an absent element to the BuilderState, targeting PUBLIC.
 	Add(element scpb.Element)
 
+	// AddTransient adds an absent element to the BuilderState, targeting TRANSIENT.
+	AddTransient(element scpb.Element)
+
 	// Drop sets the ABSENT target on an existing element in the BuilderState.
 	Drop(element scpb.Element)
 
