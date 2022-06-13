@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
-	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -320,7 +319,7 @@ func bootstrapCluster(
 		if i == 0 {
 			schema := GetBootstrapSchema(&initCfg.defaultZoneConfig, &initCfg.defaultSystemZoneConfig)
 			initialValues, tableSplits := schema.GetInitialValues()
-			splits := append(config.StaticSplits(), tableSplits...)
+			splits := append(bootstrap.StaticSplits(), tableSplits...)
 			sort.Slice(splits, func(i, j int) bool {
 				return splits[i].Less(splits[j])
 			})

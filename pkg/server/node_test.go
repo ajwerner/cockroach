@@ -20,13 +20,13 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
-	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/bootstrap"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -92,7 +92,7 @@ func TestBootstrapCluster(t *testing.T) {
 		roachpb.Key("\x04store-idgen"),
 		keys.NodeLivenessKey(firstNodeID),
 	}
-	for _, splitKey := range config.StaticSplits() {
+	for _, splitKey := range bootstrap.StaticSplits() {
 		meta2Key := keys.RangeMetaKey(splitKey)
 		expectedKeys = append(expectedKeys, meta2Key.AsRawKey())
 	}

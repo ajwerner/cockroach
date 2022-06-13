@@ -798,7 +798,7 @@ func ExpectedInitialRangeCount(
 ) (int, error) {
 	_, splits := bootstrap.MakeMetadataSchema(codec, defaultZoneConfig, defaultSystemZoneConfig).GetInitialValues()
 	// N splits means N+1 ranges.
-	return len(config.StaticSplits()) + len(splits) + 1, nil
+	return len(bootstrap.StaticSplits()) + len(splits) + 1, nil
 }
 
 // Stores returns the collection of stores from this TestServer's node.

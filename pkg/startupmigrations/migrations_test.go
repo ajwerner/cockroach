@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
+	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/startupmigrations/leasemanager"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
@@ -623,7 +624,7 @@ func TestExpectedInitialRangeCount(t *testing.T) {
 			return errors.New("last migration has not completed")
 		}
 
-		sysCfg := s.SystemConfigProvider().GetSystemConfig()
+		sysCfg := s.SpanConfigKVSubscriber().(spanconfig.KVSubscriber)
 		if sysCfg == nil {
 			return errors.New("gossipped system config not available")
 		}

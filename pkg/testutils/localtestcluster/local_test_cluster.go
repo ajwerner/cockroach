@@ -18,7 +18,6 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
-	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/config/zonepb"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -246,7 +245,7 @@ func (ltc *LocalTestCluster) Start(t testing.TB, baseCtx *base.Config, initFacto
 		)
 		var tableSplits []roachpb.RKey
 		initialValues, tableSplits = schema.GetInitialValues()
-		splits = append(config.StaticSplits(), tableSplits...)
+		splits = append(bootstrap.StaticSplits(), tableSplits...)
 		sort.Slice(splits, func(i, j int) bool {
 			return splits[i].Less(splits[j])
 		})

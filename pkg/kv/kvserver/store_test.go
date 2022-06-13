@@ -122,7 +122,7 @@ func (opts *testStoreOpts) splits() (_kvs []roachpb.KeyValue, _splits []roachpb.
 	if !opts.createSystemRanges {
 		return kvs, nil
 	}
-	splits = append(config.StaticSplits(), splits...)
+	splits = append(bootstrap.StaticSplits(), splits...)
 	sort.Slice(splits, func(i, j int) bool {
 		return splits[i].Less(splits[j])
 	})

@@ -37,7 +37,6 @@ func TestMergeQueueShouldQueue(t *testing.T) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop(ctx)
 	tsc := TestStoreConfig(nil)
-	tsc.SpanConfigsDisabled = true
 	testCtx.StartWithStoreConfig(ctx, t, stopper, tsc)
 
 	mq := newMergeQueue(testCtx.store, testCtx.store.DB())
@@ -49,6 +48,21 @@ func TestMergeQueueShouldQueue(t *testing.T) {
 
 	config.TestingSetZoneConfig(config.ObjectID(bootstrap.TestingUserDescID(0)), *zonepb.NewZoneConfig())
 	config.TestingSetZoneConfig(config.ObjectID(bootstrap.TestingUserDescID(1)), *zonepb.NewZoneConfig())
+	r := fakeSpanConfigReader{
+		needsSplit: func(ctx context.Context, start, end roachpb.RKey) bool {
+			sp := roachpb.RSpan{start.Next(), end}
+			return sp.ContainsKey(tableKey(1))
+		},
+		computeSplitKey: func(ctx context.Context, start, end roachpb.RKey) roachpb.RKey {
+			sp := roachpb.RSpan{start.Next(), end}
+			switch {
+			case sp.ContainsKey(tableKey(1)):
+				return tableKey(1)
+			default:
+				return nil
+			}
+		},
+	}
 
 	type testCase struct {
 		startKey, endKey []byte
@@ -158,7 +172,10 @@ func TestMergeQueueShouldQueue(t *testing.T) {
 			zoneConfig := zonepb.DefaultZoneConfigRef()
 			zoneConfig.RangeMinBytes = proto.Int64(tc.minBytes)
 			repl.SetSpanConfig(zoneConfig.AsSpanConfig())
-			shouldQ, priority := mq.shouldQueue(ctx, hlc.ClockTimestamp{}, repl, config.NewSystemConfig(zoneConfig))
+			r.getSpanConfigForKey = func(ctx context.Context, key roachpb.RKey) (roachpb.SpanConfig, error) {
+				return zoneConfig.AsSpanConfig(), nil
+			}
+			shouldQ, priority := mq.shouldQueue(ctx, hlc.ClockTimestamp{}, repl, &r)
 			if tc.expShouldQ != shouldQ {
 				t.Errorf("incorrect shouldQ: expected %v but got %v", tc.expShouldQ, shouldQ)
 			}
@@ -167,4 +184,28 @@ func TestMergeQueueShouldQueue(t *testing.T) {
 			}
 		})
 	}
+}
+
+type fakeSpanConfigReader struct {
+	needsSplit          func(ctx context.Context, start, end roachpb.RKey) bool
+	computeSplitKey     func(ctx context.Context, start, end roachpb.RKey) roachpb.RKey
+	getSpanConfigForKey func(
+		ctx context.Context, key roachpb.RKey,
+	) (roachpb.SpanConfig, error)
+}
+
+func (f fakeSpanConfigReader) NeedsSplit(ctx context.Context, start, end roachpb.RKey) bool {
+	return f.needsSplit(ctx, start, end)
+}
+
+func (f fakeSpanConfigReader) ComputeSplitKey(
+	ctx context.Context, start, end roachpb.RKey,
+) roachpb.RKey {
+	return f.computeSplitKey(ctx, start, end)
+}
+
+func (f fakeSpanConfigReader) GetSpanConfigForKey(
+	ctx context.Context, key roachpb.RKey,
+) (roachpb.SpanConfig, error) {
+	return f.getSpanConfigForKey(ctx, key)
 }
