@@ -1183,7 +1183,7 @@ func (w *workerCoordinator) performRequestAsync(
 
 			// Finally, process the results and add the ResumeSpans to be
 			// processed as well.
-			if err := processSingleRangeResults(ctx, w.s, req, br, fp); err != nil {
+			if err := processSingleRangeResponse(ctx, w.s, req, br, fp); err != nil {
 				w.s.results.setError(err)
 			}
 		}); err != nil {
@@ -1192,15 +1192,6 @@ func (w *workerCoordinator) performRequestAsync(
 		w.asyncRequestCleanup(true /* budgetMuAlreadyLocked */)
 		w.s.results.setError(err)
 	}
-}
-
-// singleRangeBatchResponseFootprint is the footprint of the shape of the
-// response to a singleRangeBatch.
-type singleRangeBatchResponseFootprint struct {
-	memoryFootprintBytes                  int64
-	resumeReqsMemUsage                    int64
-	numIncompleteGets, numIncompleteScans int
-	numGetResults, numScanResults         int
 }
 
 // calculateFootprint calculates the memory footprint of the batch response as
@@ -1247,7 +1238,7 @@ func calculateFootprint(
 	return fp
 }
 
-// processSingleRangeResults creates a Result for each non-empty response found
+// processSingleRangeResponse creates a Result for each non-empty response found
 // in the BatchResponse. The ResumeSpans, if found, are added into a new
 // singleRangeBatch request that is added to be picked up by the mainLoop of the
 // worker coordinator. This method assumes that req is no longer needed by the
@@ -1255,6 +1246,30 @@ func calculateFootprint(
 //
 // It also assumes that the budget has already been reconciled with the
 // reservations for Results that will be created.
+func processSingleRangeResponse(
+	ctx context.Context,
+	s *Streamer,
+	req singleRangeBatch,
+	br *roachpb.BatchResponse,
+	fp singleRangeBatchResponseFootprint,
+) error {
+	if err := processSingleRangeResults(ctx, s, req, br, fp); err != nil {
+		return err
+	}
+	if fp.hasIncomplete() {
+		resumeReq, err := buildResumeSingeRangeBatch(req, br, fp)
+		if err != nil {
+			return err
+		}
+		s.requestsToServe.add(resumeReq)
+	}
+	return nil
+}
+
+// processSingleRangeResults examines the body of a BatchResponse and its
+// associated singleRangeBatch to add any results. If there are no results,
+// this function is a no-op. This function handles the associated bookkeeping
+// on the streamer as it processes the results.
 func processSingleRangeResults(
 	ctx context.Context,
 	s *Streamer,
@@ -1262,8 +1277,176 @@ func processSingleRangeResults(
 	br *roachpb.BatchResponse,
 	fp singleRangeBatchResponseFootprint,
 ) error {
+
+	// If there are no results, this function has nothing to do.
+	if !fp.hasResults() {
+		return nil
+	}
+
+	// We will add some Results into the results buffer, and
+	// doneAddingLocked() call below requires that the budget's mutex is
+	// held. It also must be acquired before the streamer's mutex is locked,
+	// so we have to do this right away.
+	// TODO(yuzefovich): check whether the lock contention on this mutex is
+	// noticeable and possibly refactor the code so that the budget's mutex
+	// is only acquired for the duration of doneAddingLocked().
+	s.budget.mu.Lock()
+	defer s.budget.mu.Unlock()
+	// We will create some Result objects, so we at least will need to
+	// update the average response size estimate, guarded by the streamer's
+	// lock.
+	s.mu.Lock()
+
+	// TODO(yuzefovich): some of the responses might be partial, yet the
+	// estimator doesn't distinguish the footprint of the full response vs
+	// the partial one. Think more about this.
+	s.mu.avgResponseEstimator.update(
+		fp.memoryFootprintBytes, int64(fp.numGetResults+fp.numScanResults),
+	)
+
+	// If we have any Scan results to create and the Scan requests can
+	// return multiple rows, we'll need to consult
+	// s.mu.numRangesPerScanRequest, so we'll defer unlocking the streamer's
+	// mutex. However, if only Get results or Scan results of single rows
+	// will be created, we can unlock the streamer's mutex right away.
+	if fp.numScanResults > 0 && !s.hints.SingleRowLookup {
+		defer s.mu.Unlock()
+	} else {
+		s.mu.Unlock()
+	}
+
+	// Now we can get the resultsBuffer's mutex - it must be acquired after
+	// the Streamer's one.
+	s.results.Lock()
+	defer s.results.Unlock()
+	defer s.results.doneAddingLocked(ctx)
+
+	// memoryTokensBytes accumulates all reservations that are made for all
+	// Results created below. The accounting for these reservations has already
+	// been performed, and memoryTokensBytes should be exactly equal to
+	// memoryFootprintBytes, so we use it only as an additional check.
+	var memoryTokensBytes int64
+
+	for i, resp := range br.Responses {
+		position := req.positions[i]
+		var subRequestIdx int32
+		if req.subRequestIdx != nil {
+			subRequestIdx = req.subRequestIdx[i]
+		}
+		reply := resp.GetInner()
+		switch req.reqs[i].GetInner().(type) {
+		case *roachpb.GetRequest:
+			get := reply.(*roachpb.GetResponse)
+			// This Get was completed.
+			if get.ResumeSpan != nil {
+				continue
+			}
+			if get.IntentValue != nil {
+				return errors.AssertionFailedf(
+					"unexpectedly got an IntentValue back from a SQL GetRequest %v", *get.IntentValue,
+				)
+			}
+			result := Result{
+				GetResp:        get,
+				Position:       position,
+				subRequestIdx:  subRequestIdx,
+				subRequestDone: true,
+			}
+			result.memoryTok.streamer = s
+			result.memoryTok.toRelease = getResponseSize(get)
+			memoryTokensBytes += result.memoryTok.toRelease
+			if buildutil.CrdbTestBuild {
+				if fp.numGetResults == 0 {
+					return errors.AssertionFailedf(
+						"unexpectedly found a non-empty GetResponse when numGetResults is zero",
+					)
+				}
+			}
+			s.results.addLocked(result)
+		case *roachpb.ScanRequest:
+			scan := reply.(*roachpb.ScanResponse)
+			if len(scan.Rows) > 0 {
+				return errors.AssertionFailedf(
+					"unexpectedly got a ScanResponse using KEY_VALUES response format",
+				)
+			}
+			if len(scan.IntentRows) > 0 {
+				return errors.AssertionFailedf(
+					"unexpectedly got a ScanResponse with non-nil IntentRows",
+				)
+			}
+			if len(scan.BatchResponses) == 0 && scan.ResumeSpan != nil {
+				continue
+			}
+			// Only the second part of the conditional is true whenever we
+			// received an empty response for the Scan request (i.e. there
+			// was no data in the span to scan). In such a scenario we still
+			// create a Result with no data that the client will skip over
+			// (this approach makes it easier to support Scans that span
+			// multiple ranges and the last range has no data in it - we
+			// want to be able to set Complete field on such an empty
+			// Result).
+			result := Result{
+				Position:       position,
+				subRequestIdx:  subRequestIdx,
+				subRequestDone: scan.ResumeSpan == nil,
+			}
+			result.memoryTok.streamer = s
+			result.memoryTok.toRelease = scanResponseSize(scan)
+			memoryTokensBytes += result.memoryTok.toRelease
+			result.ScanResp = scan
+			if s.hints.SingleRowLookup {
+				result.scanComplete = true
+			} else if scan.ResumeSpan == nil {
+				// The scan within the range is complete.
+				if s.mode == OutOfOrder {
+					s.mu.numRangesPerScanRequest[position]--
+					result.scanComplete = s.mu.numRangesPerScanRequest[position] == 0
+				} else {
+					// In InOrder mode, the scan is marked as complete when
+					// the last sub-request is satisfied. Note that it is ok
+					// if the previous sub-requests haven't been satisfied
+					// yet - the inOrderResultsBuffer will not emit this
+					// Result until the previous sub-requests are responded
+					// to.
+					numSubRequests := s.mu.numRangesPerScanRequest[position]
+					result.scanComplete = result.subRequestIdx+1 == numSubRequests
+				}
+			}
+			if buildutil.CrdbTestBuild {
+				if fp.numScanResults == 0 {
+					return errors.AssertionFailedf(
+						"unexpectedly found a ScanResponse when numScanResults is zero",
+					)
+				}
+			}
+			s.results.addLocked(result)
+		}
+	}
+
+	if buildutil.CrdbTestBuild {
+		if fp.memoryFootprintBytes != memoryTokensBytes {
+			panic(errors.AssertionFailedf(
+				"different calculation of memory footprint\ncalculateFootprint: %d bytes\n"+
+					"processSingleRangeResponse: %d bytes", fp.memoryFootprintBytes, memoryTokensBytes,
+			))
+		}
+	}
+
+	return nil
+}
+
+// buildResumeSingleRangeBatch consumes a BatchResponse for a singleRangeBatch
+// which contains incomplete requests and returns the next singleRangeBatch to
+// be submitted. Note that for maximal memory reuse, the original request and
+// response may no longer be utilized.
+//
+// Note that it should only be called if the response has any incomplete
+// requests.
+func buildResumeSingeRangeBatch(
+	req singleRangeBatch, br *roachpb.BatchResponse, fp singleRangeBatchResponseFootprint,
+) (resumeReq singleRangeBatch, _ error) {
 	numIncompleteRequests := fp.numIncompleteGets + fp.numIncompleteScans
-	var resumeReq singleRangeBatch
 	// We have to allocate the new Get and Scan requests, but we can reuse the
 	// reqs, the positions, and the subRequestIdx slices.
 	resumeReq.reqs = req.reqs[:numIncompleteRequests]
@@ -1282,70 +1465,7 @@ func processSingleRangeResults(
 		union roachpb.RequestUnion_Scan
 	}, fp.numIncompleteScans)
 	var resumeReqIdx int
-	// memoryTokensBytes accumulates all reservations that are made for all
-	// Results created below. The accounting for these reservations has already
-	// been performed, and memoryTokensBytes should be exactly equal to
-	// memoryFootprintBytes, so we use it only as an additional check.
-	var memoryTokensBytes int64
-	if numIncompleteRequests > 0 {
-		// We will have a resume request that we'll need to add into the
-		// requestsProvider.
-		//
-		// We do this in a deferred function to avoid the need to hold the
-		// requestsProvider's lock throughout the whole function. This lock must
-		// be acquired before the streamer's lock (which is done in the
-		// following if-block). Additionally, if we did acquire the
-		// requestsProvider's lock, we would have to change add() method to
-		// addLocked() which is less pleasant.
-		defer func() {
-			// Make to sure to nil out old requests that we didn't include into
-			// the resume request. We don't have to do this if there aren't any
-			// incomplete requests since req and resumeReq will be garbage
-			// collected on their own.
-			for i := numIncompleteRequests; i < len(req.reqs); i++ {
-				req.reqs[i] = roachpb.RequestUnion{}
-			}
-			s.requestsToServe.add(resumeReq)
-		}()
-	}
-	if fp.numGetResults > 0 || fp.numScanResults > 0 {
-		// We will add some Results into the results buffer, and
-		// doneAddingLocked() call below requires that the budget's mutex is
-		// held. It also must be acquired before the streamer's mutex is locked,
-		// so we have to do this right away.
-		// TODO(yuzefovich): check whether the lock contention on this mutex is
-		// noticeable and possibly refactor the code so that the budget's mutex
-		// is only acquired for the duration of doneAddingLocked().
-		s.budget.mu.Lock()
-		defer s.budget.mu.Unlock()
-		// We will create some Result objects, so we at least will need to
-		// update the average response size estimate, guarded by the streamer's
-		// lock.
-		s.mu.Lock()
-		// TODO(yuzefovich): some of the responses might be partial, yet the
-		// estimator doesn't distinguish the footprint of the full response vs
-		// the partial one. Think more about this.
-		s.mu.avgResponseEstimator.update(
-			fp.memoryFootprintBytes, int64(fp.numGetResults+fp.numScanResults),
-		)
 
-		// If we have any Scan results to create and the Scan requests can
-		// return multiple rows, we'll need to consult
-		// s.mu.numRangesPerScanRequest, so we'll defer unlocking the streamer's
-		// mutex. However, if only Get results or Scan results of single rows
-		// will be created, we can unlock the streamer's mutex right away.
-		if fp.numScanResults > 0 && !s.hints.SingleRowLookup {
-			defer s.mu.Unlock()
-		} else {
-			s.mu.Unlock()
-		}
-
-		// Now we can get the resultsBuffer's mutex - it must be acquired after
-		// the Streamer's one.
-		s.results.Lock()
-		defer s.results.Unlock()
-		defer s.results.doneAddingLocked(ctx)
-	}
 	for i, resp := range br.Responses {
 		position := req.positions[i]
 		var subRequestIdx int32
@@ -1356,141 +1476,54 @@ func processSingleRangeResults(
 		switch origRequest := req.reqs[i].GetInner().(type) {
 		case *roachpb.GetRequest:
 			get := reply.(*roachpb.GetResponse)
-			if get.ResumeSpan != nil {
-				// This Get wasn't completed - update the original
-				// request according to the ResumeSpan and include it
-				// into the batch again.
-				newGet := gets[0]
-				gets = gets[1:]
-				newGet.req.SetSpan(*get.ResumeSpan)
-				newGet.req.KeyLocking = origRequest.KeyLocking
-				newGet.union.Get = &newGet.req
-				resumeReq.reqs[resumeReqIdx].Value = &newGet.union
-				resumeReq.positions = append(resumeReq.positions, position)
-				if req.subRequestIdx != nil {
-					resumeReq.subRequestIdx = append(resumeReq.subRequestIdx, subRequestIdx)
-				}
-				if resumeReq.minTargetBytes == 0 {
-					resumeReq.minTargetBytes = get.ResumeNextBytes
-				}
-				resumeReqIdx++
-			} else {
-				// This Get was completed.
-				if get.IntentValue != nil {
-					return errors.AssertionFailedf(
-						"unexpectedly got an IntentValue back from a SQL GetRequest %v", *get.IntentValue,
-					)
-				}
-				result := Result{
-					GetResp:        get,
-					Position:       position,
-					subRequestIdx:  subRequestIdx,
-					subRequestDone: true,
-				}
-				result.memoryTok.streamer = s
-				result.memoryTok.toRelease = getResponseSize(get)
-				memoryTokensBytes += result.memoryTok.toRelease
-				if buildutil.CrdbTestBuild {
-					if fp.numGetResults == 0 {
-						return errors.AssertionFailedf(
-							"unexpectedly found a non-empty GetResponse when numGetResults is zero",
-						)
-					}
-				}
-				s.results.addLocked(result)
+			if get.ResumeSpan == nil {
+				continue
 			}
-
+			// This Get wasn't completed - update the original
+			// request according to the ResumeSpan and include it
+			// into the batch again.
+			newGet := gets[0]
+			gets = gets[1:]
+			newGet.req.SetSpan(*get.ResumeSpan)
+			newGet.req.KeyLocking = origRequest.KeyLocking
+			newGet.union.Get = &newGet.req
+			resumeReq.reqs[resumeReqIdx].Value = &newGet.union
+			resumeReq.positions = append(resumeReq.positions, position)
+			if req.subRequestIdx != nil {
+				resumeReq.subRequestIdx = append(resumeReq.subRequestIdx, subRequestIdx)
+			}
+			if resumeReq.minTargetBytes == 0 {
+				resumeReq.minTargetBytes = get.ResumeNextBytes
+			}
+			resumeReqIdx++
 		case *roachpb.ScanRequest:
 			scan := reply.(*roachpb.ScanResponse)
-			if len(scan.Rows) > 0 {
-				return errors.AssertionFailedf(
-					"unexpectedly got a ScanResponse using KEY_VALUES response format",
-				)
+			if scan.ResumeSpan == nil {
+				continue
 			}
-			if len(scan.IntentRows) > 0 {
-				return errors.AssertionFailedf(
-					"unexpectedly got a ScanResponse with non-nil IntentRows",
-				)
+			// This Scan wasn't completed - update the original
+			// request according to the ResumeSpan and include it
+			// into the batch again.
+			newScan := scans[0]
+			scans = scans[1:]
+			newScan.req.SetSpan(*scan.ResumeSpan)
+			newScan.req.ScanFormat = roachpb.BATCH_RESPONSE
+			newScan.req.KeyLocking = origRequest.KeyLocking
+			newScan.union.Scan = &newScan.req
+			resumeReq.reqs[resumeReqIdx].Value = &newScan.union
+			resumeReq.positions = append(resumeReq.positions, position)
+			if req.subRequestIdx != nil {
+				resumeReq.subRequestIdx = append(resumeReq.subRequestIdx, subRequestIdx)
 			}
-			if len(scan.BatchResponses) > 0 || scan.ResumeSpan == nil {
-				// Only the second part of the conditional is true whenever we
-				// received an empty response for the Scan request (i.e. there
-				// was no data in the span to scan). In such a scenario we still
-				// create a Result with no data that the client will skip over
-				// (this approach makes it easier to support Scans that span
-				// multiple ranges and the last range has no data in it - we
-				// want to be able to set Complete field on such an empty
-				// Result).
-				result := Result{
-					Position:       position,
-					subRequestIdx:  subRequestIdx,
-					subRequestDone: scan.ResumeSpan == nil,
-				}
-				result.memoryTok.streamer = s
-				result.memoryTok.toRelease = scanResponseSize(scan)
-				memoryTokensBytes += result.memoryTok.toRelease
-				result.ScanResp = scan
-				if s.hints.SingleRowLookup {
-					result.scanComplete = true
-				} else if scan.ResumeSpan == nil {
-					// The scan within the range is complete.
-					if s.mode == OutOfOrder {
-						s.mu.numRangesPerScanRequest[position]--
-						result.scanComplete = s.mu.numRangesPerScanRequest[position] == 0
-					} else {
-						// In InOrder mode, the scan is marked as complete when
-						// the last sub-request is satisfied. Note that it is ok
-						// if the previous sub-requests haven't been satisfied
-						// yet - the inOrderResultsBuffer will not emit this
-						// Result until the previous sub-requests are responded
-						// to.
-						numSubRequests := s.mu.numRangesPerScanRequest[position]
-						result.scanComplete = result.subRequestIdx+1 == numSubRequests
-					}
-				}
-				if buildutil.CrdbTestBuild {
-					if fp.numScanResults == 0 {
-						return errors.AssertionFailedf(
-							"unexpectedly found a ScanResponse when numScanResults is zero",
-						)
-					}
-				}
-				s.results.addLocked(result)
+			if resumeReq.minTargetBytes == 0 {
+				resumeReq.minTargetBytes = scan.ResumeNextBytes
 			}
-			if scan.ResumeSpan != nil {
-				// This Scan wasn't completed - update the original
-				// request according to the ResumeSpan and include it
-				// into the batch again.
-				newScan := scans[0]
-				scans = scans[1:]
-				newScan.req.SetSpan(*scan.ResumeSpan)
-				newScan.req.ScanFormat = roachpb.BATCH_RESPONSE
-				newScan.req.KeyLocking = origRequest.KeyLocking
-				newScan.union.Scan = &newScan.req
-				resumeReq.reqs[resumeReqIdx].Value = &newScan.union
-				resumeReq.positions = append(resumeReq.positions, position)
-				if req.subRequestIdx != nil {
-					resumeReq.subRequestIdx = append(resumeReq.subRequestIdx, subRequestIdx)
-				}
-				if resumeReq.minTargetBytes == 0 {
-					resumeReq.minTargetBytes = scan.ResumeNextBytes
-				}
-				resumeReqIdx++
+			resumeReqIdx++
 
-				// Unset the ResumeSpan on the result in order to not confuse
-				// the user of the Streamer. Non-nil resume span was already
-				// included into resumeReq above.
-				scan.ResumeSpan = nil
-			}
-		}
-	}
-
-	if buildutil.CrdbTestBuild {
-		if fp.memoryFootprintBytes != memoryTokensBytes {
-			panic(errors.AssertionFailedf(
-				"different calculation of memory footprint\ncalculateFootprint: %d bytes\n"+
-					"processSingleRangeResults: %d bytes", fp.memoryFootprintBytes, memoryTokensBytes,
-			))
+			// Unset the ResumeSpan on the result in order to not confuse
+			// the user of the Streamer. Non-nil resume span was already
+			// included into resumeReq above.
+			scan.ResumeSpan = nil
 		}
 	}
 
@@ -1516,7 +1549,32 @@ func processSingleRangeResults(
 		}
 	}
 
-	return nil
+	// Make to sure to nil out old requests that we didn't include into
+	// the resume request. We don't have to do this if there aren't any
+	// incomplete requests since req and resumeReq will be garbage
+	// collected on their own.
+	for i := numIncompleteRequests; i < len(req.reqs); i++ {
+		req.reqs[i] = roachpb.RequestUnion{}
+	}
+
+	return resumeReq, nil
+}
+
+// singleRangeBatchResponseFootprint is the footprint of the shape of the
+// response to a singleRangeBatch.
+type singleRangeBatchResponseFootprint struct {
+	memoryFootprintBytes                  int64
+	resumeReqsMemUsage                    int64
+	numIncompleteGets, numIncompleteScans int
+	numGetResults, numScanResults         int
+}
+
+func (fp singleRangeBatchResponseFootprint) hasResults() bool {
+	return fp.numGetResults > 0 || fp.numScanResults > 0
+}
+
+func (fp singleRangeBatchResponseFootprint) hasIncomplete() bool {
+	return fp.numIncompleteGets > 0 || fp.numScanResults > 0
 }
 
 var zeroInt32Slice []int32
