@@ -1113,14 +1113,13 @@ func (w *workerCoordinator) performRequestAsync(
 			// if any are present. At the moment, due to limitations of the KV
 			// layer (#75452) we cannot reuse original requests because the KV
 			// doesn't allow mutability.
-			memoryFootprintBytes, resumeReqsMemUsage, numIncompleteGets,
-				numIncompleteScans, numGetResults, numScanResults := calculateFootprint(req, br)
+			fp := calculateFootprint(req, br)
 
 			// Now adjust the budget based on the actual memory footprint of
 			// non-empty responses as well as resume spans, if any.
-			respOverestimate := targetBytes - memoryFootprintBytes
-			reqOveraccounted := req.reqsReservedBytes - resumeReqsMemUsage
-			if resumeReqsMemUsage == 0 {
+			respOverestimate := targetBytes - fp.memoryFootprintBytes
+			reqOveraccounted := req.reqsReservedBytes - fp.resumeReqsMemUsage
+			if fp.resumeReqsMemUsage == 0 {
 				// There will be no resume request, so we will lose the
 				// reference to the slices in req and can release its memory
 				// reservation.
@@ -1172,12 +1171,11 @@ func (w *workerCoordinator) performRequestAsync(
 
 			// Do admission control after we've finalized the memory accounting.
 			if br != nil && w.responseAdmissionQ != nil {
-				responseAdmission := admission.WorkInfo{
+				if _, err := w.responseAdmissionQ.Admit(ctx, admission.WorkInfo{
 					TenantID:   roachpb.SystemTenantID,
 					Priority:   admissionpb.WorkPriority(w.requestAdmissionHeader.Priority),
 					CreateTime: w.requestAdmissionHeader.CreateTime,
-				}
-				if _, err := w.responseAdmissionQ.Admit(ctx, responseAdmission); err != nil {
+				}); err != nil {
 					w.s.results.setError(err)
 					return
 				}
@@ -1185,10 +1183,7 @@ func (w *workerCoordinator) performRequestAsync(
 
 			// Finally, process the results and add the ResumeSpans to be
 			// processed as well.
-			if err := processSingleRangeResults(
-				ctx, w.s, req, br, memoryFootprintBytes, resumeReqsMemUsage,
-				numIncompleteGets, numIncompleteScans, numGetResults, numScanResults,
-			); err != nil {
+			if err := processSingleRangeResults(ctx, w.s, req, br, fp); err != nil {
 				w.s.results.setError(err)
 			}
 		}); err != nil {
@@ -1197,6 +1192,15 @@ func (w *workerCoordinator) performRequestAsync(
 		w.asyncRequestCleanup(true /* budgetMuAlreadyLocked */)
 		w.s.results.setError(err)
 	}
+}
+
+// singleRangeBatchResponseFootprint is the footprint of the shape of the
+// response to a singleRangeBatch.
+type singleRangeBatchResponseFootprint struct {
+	memoryFootprintBytes                  int64
+	resumeReqsMemUsage                    int64
+	numIncompleteGets, numIncompleteScans int
+	numGetResults, numScanResults         int
 }
 
 // calculateFootprint calculates the memory footprint of the batch response as
@@ -1210,12 +1214,7 @@ func (w *workerCoordinator) performRequestAsync(
 // to be created for Get and Scan responses, respectively.
 func calculateFootprint(
 	req singleRangeBatch, br *roachpb.BatchResponse,
-) (
-	memoryFootprintBytes int64,
-	resumeReqsMemUsage int64,
-	numIncompleteGets, numIncompleteScans int,
-	numGetResults, numScanResults int,
-) {
+) (fp singleRangeBatchResponseFootprint) {
 	for i, resp := range br.Responses {
 		reply := resp.GetInner()
 		switch req.reqs[i].GetInner().(type) {
@@ -1223,29 +1222,29 @@ func calculateFootprint(
 			get := reply.(*roachpb.GetResponse)
 			if get.ResumeSpan != nil {
 				// This Get wasn't completed.
-				resumeReqsMemUsage += requestSize(get.ResumeSpan.Key, get.ResumeSpan.EndKey)
-				numIncompleteGets++
+				fp.resumeReqsMemUsage += requestSize(get.ResumeSpan.Key, get.ResumeSpan.EndKey)
+				fp.numIncompleteGets++
 			} else {
 				// This Get was completed.
-				memoryFootprintBytes += getResponseSize(get)
-				numGetResults++
+				fp.memoryFootprintBytes += getResponseSize(get)
+				fp.numGetResults++
 			}
 		case *roachpb.ScanRequest:
 			scan := reply.(*roachpb.ScanResponse)
 			if len(scan.BatchResponses) > 0 {
-				memoryFootprintBytes += scanResponseSize(scan)
+				fp.memoryFootprintBytes += scanResponseSize(scan)
 			}
 			if len(scan.BatchResponses) > 0 || scan.ResumeSpan == nil {
-				numScanResults++
+				fp.numScanResults++
 			}
 			if scan.ResumeSpan != nil {
 				// This Scan wasn't completed.
-				resumeReqsMemUsage += requestSize(scan.ResumeSpan.Key, scan.ResumeSpan.EndKey)
-				numIncompleteScans++
+				fp.resumeReqsMemUsage += requestSize(scan.ResumeSpan.Key, scan.ResumeSpan.EndKey)
+				fp.numIncompleteScans++
 			}
 		}
 	}
-	return memoryFootprintBytes, resumeReqsMemUsage, numIncompleteGets, numIncompleteScans, numGetResults, numScanResults
+	return fp
 }
 
 // processSingleRangeResults creates a Result for each non-empty response found
@@ -1261,12 +1260,9 @@ func processSingleRangeResults(
 	s *Streamer,
 	req singleRangeBatch,
 	br *roachpb.BatchResponse,
-	memoryFootprintBytes int64,
-	resumeReqsMemUsage int64,
-	numIncompleteGets, numIncompleteScans int,
-	numGetResults, numScanResults int,
+	fp singleRangeBatchResponseFootprint,
 ) error {
-	numIncompleteRequests := numIncompleteGets + numIncompleteScans
+	numIncompleteRequests := fp.numIncompleteGets + fp.numIncompleteScans
 	var resumeReq singleRangeBatch
 	// We have to allocate the new Get and Scan requests, but we can reuse the
 	// reqs, the positions, and the subRequestIdx slices.
@@ -1275,16 +1271,16 @@ func processSingleRangeResults(
 	resumeReq.subRequestIdx = req.subRequestIdx[:0]
 	// We've already reconciled the budget with the actual reservation for the
 	// requests with the ResumeSpans.
-	resumeReq.reqsReservedBytes = resumeReqsMemUsage
+	resumeReq.reqsReservedBytes = fp.resumeReqsMemUsage
 	resumeReq.overheadAccountedFor = req.overheadAccountedFor
 	gets := make([]struct {
 		req   roachpb.GetRequest
 		union roachpb.RequestUnion_Get
-	}, numIncompleteGets)
+	}, fp.numIncompleteGets)
 	scans := make([]struct {
 		req   roachpb.ScanRequest
 		union roachpb.RequestUnion_Scan
-	}, numIncompleteScans)
+	}, fp.numIncompleteScans)
 	var resumeReqIdx int
 	// memoryTokensBytes accumulates all reservations that are made for all
 	// Results created below. The accounting for these reservations has already
@@ -1312,7 +1308,7 @@ func processSingleRangeResults(
 			s.requestsToServe.add(resumeReq)
 		}()
 	}
-	if numGetResults > 0 || numScanResults > 0 {
+	if fp.numGetResults > 0 || fp.numScanResults > 0 {
 		// We will add some Results into the results buffer, and
 		// doneAddingLocked() call below requires that the budget's mutex is
 		// held. It also must be acquired before the streamer's mutex is locked,
@@ -1329,14 +1325,16 @@ func processSingleRangeResults(
 		// TODO(yuzefovich): some of the responses might be partial, yet the
 		// estimator doesn't distinguish the footprint of the full response vs
 		// the partial one. Think more about this.
-		s.mu.avgResponseEstimator.update(memoryFootprintBytes, int64(numGetResults+numScanResults))
+		s.mu.avgResponseEstimator.update(
+			fp.memoryFootprintBytes, int64(fp.numGetResults+fp.numScanResults),
+		)
 
 		// If we have any Scan results to create and the Scan requests can
 		// return multiple rows, we'll need to consult
 		// s.mu.numRangesPerScanRequest, so we'll defer unlocking the streamer's
 		// mutex. However, if only Get results or Scan results of single rows
 		// will be created, we can unlock the streamer's mutex right away.
-		if numScanResults > 0 && !s.hints.SingleRowLookup {
+		if fp.numScanResults > 0 && !s.hints.SingleRowLookup {
 			defer s.mu.Unlock()
 		} else {
 			s.mu.Unlock()
@@ -1393,7 +1391,7 @@ func processSingleRangeResults(
 				result.memoryTok.toRelease = getResponseSize(get)
 				memoryTokensBytes += result.memoryTok.toRelease
 				if buildutil.CrdbTestBuild {
-					if numGetResults == 0 {
+					if fp.numGetResults == 0 {
 						return errors.AssertionFailedf(
 							"unexpectedly found a non-empty GetResponse when numGetResults is zero",
 						)
@@ -1451,7 +1449,7 @@ func processSingleRangeResults(
 					}
 				}
 				if buildutil.CrdbTestBuild {
-					if numScanResults == 0 {
+					if fp.numScanResults == 0 {
 						return errors.AssertionFailedf(
 							"unexpectedly found a ScanResponse when numScanResults is zero",
 						)
@@ -1488,15 +1486,15 @@ func processSingleRangeResults(
 	}
 
 	if buildutil.CrdbTestBuild {
-		if memoryFootprintBytes != memoryTokensBytes {
+		if fp.memoryFootprintBytes != memoryTokensBytes {
 			panic(errors.AssertionFailedf(
 				"different calculation of memory footprint\ncalculateFootprint: %d bytes\n"+
-					"processSingleRangeResults: %d bytes", memoryFootprintBytes, memoryTokensBytes,
+					"processSingleRangeResults: %d bytes", fp.memoryFootprintBytes, memoryTokensBytes,
 			))
 		}
 	}
 
-	if numGetResults == 0 && numScanResults == 0 {
+	if fp.numGetResults == 0 && fp.numScanResults == 0 {
 		// We received an empty response.
 		if req.minTargetBytes != 0 {
 			// We previously have already received an empty response for this
