@@ -26,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
@@ -288,20 +289,8 @@ func addColumn(b BuildCtx, spec addColumnSpec) (backing *scpb.PrimaryIndex) {
 	}
 	// Check whether a target to add a new primary index already exists. If so,
 	// simply add the new column to its storing columns.
-	var existing, freshlyAdded *scpb.PrimaryIndex
-	allTargets := b.QueryByID(spec.tbl.TableID)
-	publicTargets := allTargets.Filter(
-		func(_ scpb.Status, target scpb.TargetStatus, _ scpb.Element) bool {
-			return target == scpb.ToPublic
-		},
-	)
-	scpb.ForEachPrimaryIndex(publicTargets, func(status scpb.Status, _ scpb.TargetStatus, idx *scpb.PrimaryIndex) {
-		existing = idx
-		if status == scpb.Status_ABSENT || status == scpb.Status_BACKFILL_ONLY {
-			// TODO(postamar): does it matter that there could be more than one?
-			freshlyAdded = idx
-		}
-	})
+	tableID := spec.tbl.TableID
+	existing, freshlyAdded := getPrimaryIndexes(b, tableID)
 	if freshlyAdded != nil {
 		var tempIndex *scpb.TemporaryIndex
 		scpb.ForEachTemporaryIndex(b.QueryByID(spec.tbl.TableID), func(
@@ -335,7 +324,7 @@ func addColumn(b BuildCtx, spec addColumnSpec) (backing *scpb.PrimaryIndex) {
 			TableID:       spec.tbl.TableID,
 			IndexID:       freshlyAdded.IndexID,
 			ColumnID:      spec.col.ColumnID,
-			OrdinalInKind: getNextStoredIndexColumnOrdinal(allTargets, freshlyAdded),
+			OrdinalInKind: getNextStoredIndexColumnOrdinal(b.QueryByID(spec.tbl.TableID), freshlyAdded),
 			Kind:          scpb.IndexColumn_STORED,
 		}
 		b.Add(ic)
@@ -346,10 +335,7 @@ func addColumn(b BuildCtx, spec addColumnSpec) (backing *scpb.PrimaryIndex) {
 	}
 	// Otherwise, create a new primary index target and swap it with the existing
 	// primary index.
-	if existing == nil {
-		// TODO(postamar): can this even be possible?
-		panic(pgerror.Newf(pgcode.NoPrimaryKey, "missing active primary key"))
-	}
+
 	// As a special case, if we have a new column which has no computed
 	// expression and no default value, then we can just add it to the
 	// current primary index; there's no need to build a new index as
@@ -376,6 +362,7 @@ func addColumn(b BuildCtx, spec addColumnSpec) (backing *scpb.PrimaryIndex) {
 	// to public before the column is published as public. We'll need to figure
 	// out how to make sure that that happens atomically. Leaving that for a
 	// follow-up change in order to get this in.
+	allTargets := b.QueryByID(spec.tbl.TableID)
 	if spec.def == nil && spec.colType.ComputeExpr == nil {
 		b.Add(&scpb.IndexColumn{
 			TableID:       spec.tbl.TableID,
@@ -386,50 +373,42 @@ func addColumn(b BuildCtx, spec addColumnSpec) (backing *scpb.PrimaryIndex) {
 		})
 		return existing
 	}
+
+	return createNewPrimaryIndex(b, spec.tbl, existing, func(
+		b BuildCtx, newIndex *scpb.PrimaryIndex, existingColumns []*scpb.IndexColumn,
+	) (newColumns []*scpb.IndexColumn) {
+		for _, ec := range existingColumns {
+			cloned := protoutil.Clone(ec).(*scpb.IndexColumn)
+			cloned.IndexID = newIndex.IndexID
+			newColumns = append(newColumns, cloned)
+			b.Add(cloned)
+		}
+		ic := &scpb.IndexColumn{
+			TableID:       newIndex.TableID,
+			IndexID:       newIndex.IndexID,
+			ColumnID:      spec.col.ColumnID,
+			OrdinalInKind: getNextStoredIndexColumnOrdinal(allTargets, newIndex),
+			Kind:          scpb.IndexColumn_STORED,
+		}
+		newColumns = append(newColumns, ic)
+		b.Add(ic)
+		return newColumns
+	})
+}
+
+func createNewPrimaryIndex(
+	b BuildCtx,
+	tbl *scpb.Table,
+	existing *scpb.PrimaryIndex,
+	handleExistingColumns func(b BuildCtx, newIndex *scpb.PrimaryIndex, existingColumns []*scpb.IndexColumn) (newColumns []*scpb.IndexColumn),
+) *scpb.PrimaryIndex {
 	// Drop all existing primary index elements.
-	b.Drop(existing)
-	var existingName *scpb.IndexName
-	var existingPartitioning *scpb.IndexPartitioning
-	scpb.ForEachIndexName(publicTargets, func(_ scpb.Status, _ scpb.TargetStatus, name *scpb.IndexName) {
-		if name.IndexID == existing.IndexID {
-			existingName = name
-		}
-	})
-	scpb.ForEachIndexPartitioning(publicTargets, func(_ scpb.Status, _ scpb.TargetStatus, part *scpb.IndexPartitioning) {
-		if part.IndexID == existing.IndexID {
-			existingPartitioning = part
-		}
-	})
-	var existingColumns []*scpb.IndexColumn
-	scpb.ForEachIndexColumn(publicTargets, func(_ scpb.Status, _ scpb.TargetStatus, e *scpb.IndexColumn) {
-		if e.IndexID == existing.IndexID {
-			existingColumns = append(existingColumns, e)
-			b.Drop(e)
-		}
-	})
-	if existingPartitioning != nil {
-		b.Drop(existingPartitioning)
-	}
-	if existingName != nil {
-		b.Drop(existingName)
-	}
+	existingName, existingPartitioning, existingColumns := dropExistingPrimaryIndex(b, existing)
 	// Create the new primary index element and its dependents.
 	replacement := protoutil.Clone(existing).(*scpb.PrimaryIndex)
-	replacement.IndexID = b.NextTableIndexID(spec.tbl)
+	replacement.IndexID = b.NextTableIndexID(tbl)
 	replacement.SourceIndexID = existing.IndexID
-	for _, ec := range existingColumns {
-		cloned := protoutil.Clone(ec).(*scpb.IndexColumn)
-		cloned.IndexID = replacement.IndexID
-		b.Add(cloned)
-	}
-	ic := &scpb.IndexColumn{
-		TableID:       spec.tbl.TableID,
-		IndexID:       replacement.IndexID,
-		ColumnID:      spec.col.ColumnID,
-		OrdinalInKind: getNextStoredIndexColumnOrdinal(allTargets, replacement),
-		Kind:          scpb.IndexColumn_STORED,
-	}
-	b.Add(ic)
+	replacementColumns := handleExistingColumns(b, replacement, existingColumns)
 	replacement.TemporaryIndexID = replacement.IndexID + 1
 	b.Add(replacement)
 	if existingName != nil {
@@ -442,25 +421,83 @@ func addColumn(b BuildCtx, spec addColumnSpec) (backing *scpb.PrimaryIndex) {
 		updatedPartitioning.IndexID = replacement.IndexID
 		b.Add(updatedPartitioning)
 	}
-
 	temp := &scpb.TemporaryIndex{
 		Index:                    protoutil.Clone(replacement).(*scpb.PrimaryIndex).Index,
 		IsUsingSecondaryEncoding: false,
 	}
 	temp.TemporaryIndexID = 0
-	temp.IndexID = b.NextTableIndexID(spec.tbl)
+	temp.IndexID = b.NextTableIndexID(tbl)
 	b.AddTransient(temp)
 	if existingPartitioning != nil {
 		updatedPartitioning := protoutil.Clone(existingPartitioning).(*scpb.IndexPartitioning)
 		updatedPartitioning.IndexID = temp.IndexID
 		b.Add(updatedPartitioning)
 	}
-	for _, ec := range append(existingColumns, ic) {
+	for _, ec := range replacementColumns {
 		cloned := protoutil.Clone(ec).(*scpb.IndexColumn)
 		cloned.IndexID = temp.IndexID
 		b.Add(cloned)
 	}
 	return replacement
+}
+
+func dropExistingPrimaryIndex(
+	b BuildCtx, existing *scpb.PrimaryIndex,
+) (
+	existingName *scpb.IndexName,
+	existingPartitioning *scpb.IndexPartitioning,
+	existingColumns []*scpb.IndexColumn,
+) {
+	b.Drop(existing)
+	publicTargets := b.QueryByID(existing.TableID).Filter(publicTargetFilter)
+	scpb.ForEachIndexName(publicTargets, func(_ scpb.Status, _ scpb.TargetStatus, name *scpb.IndexName) {
+		if name.IndexID == existing.IndexID {
+			existingName = name
+		}
+	})
+	scpb.ForEachIndexPartitioning(publicTargets, func(_ scpb.Status, _ scpb.TargetStatus, part *scpb.IndexPartitioning) {
+		if part.IndexID == existing.IndexID {
+			existingPartitioning = part
+		}
+	})
+	scpb.ForEachIndexColumn(publicTargets, func(_ scpb.Status, _ scpb.TargetStatus, e *scpb.IndexColumn) {
+		if e.IndexID == existing.IndexID {
+			existingColumns = append(existingColumns, e)
+			b.Drop(e)
+		}
+	})
+	if existingPartitioning != nil {
+		b.Drop(existingPartitioning)
+	}
+	if existingName != nil {
+		b.Drop(existingName)
+	}
+	return existingName, existingPartitioning, existingColumns
+}
+
+func publicTargetFilter(_ scpb.Status, target scpb.TargetStatus, _ scpb.Element) bool {
+	return target == scpb.ToPublic
+}
+
+func getPrimaryIndexes(
+	b BuildCtx, tableID catid.DescID,
+) (existing, freshlyAdded *scpb.PrimaryIndex) {
+	allTargets := b.QueryByID(tableID)
+	publicTargets := allTargets.Filter(publicTargetFilter)
+	scpb.ForEachPrimaryIndex(publicTargets, func(status scpb.Status, _ scpb.TargetStatus, idx *scpb.PrimaryIndex) {
+		if status == scpb.Status_PUBLIC {
+			existing = idx
+		}
+		if status == scpb.Status_ABSENT || status == scpb.Status_BACKFILL_ONLY {
+			// TODO(postamar): does it matter that there could be more than one?
+			freshlyAdded = idx
+		}
+	})
+	if existing == nil {
+		// TODO(postamar): can this even be possible?
+		panic(pgerror.Newf(pgcode.NoPrimaryKey, "missing active primary key"))
+	}
+	return existing, freshlyAdded
 }
 
 func getNextStoredIndexColumnOrdinal(allTargets ElementResultSet, idx *scpb.PrimaryIndex) uint32 {
