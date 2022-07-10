@@ -79,7 +79,7 @@ func EndToEndSideEffects(t *testing.T, dir string, newCluster NewClusterFunc) {
 			stmts, err := parser.Parse(d.Input)
 			require.NoError(t, err)
 			require.NotEmpty(t, stmts)
-			execStmts := func() {
+			execStmts := func(t *testing.T) {
 				for _, stmt := range stmts {
 					tdb.Exec(t, stmt.SQL)
 				}
@@ -89,7 +89,7 @@ func EndToEndSideEffects(t *testing.T, dir string, newCluster NewClusterFunc) {
 			switch d.Cmd {
 			case "setup":
 				a := prettyNamespaceDump(t, tdb)
-				execStmts()
+				execStmts(t)
 				b := prettyNamespaceDump(t, tdb)
 				return sctestutils.Diff(a, b, sctestutils.DiffArgs{CompactLevel: 1})
 
@@ -101,7 +101,8 @@ func EndToEndSideEffects(t *testing.T, dir string, newCluster NewClusterFunc) {
 					stmtSqls = append(stmtSqls, stmt.SQL)
 				}
 				// Keep test cluster in sync.
-				defer execStmts()
+
+				defer t.Run("exec", execStmts)
 
 				// Wait for any jobs due to previous schema changes to finish.
 				sctestdeps.WaitForNoRunningSchemaChanges(t, tdb)

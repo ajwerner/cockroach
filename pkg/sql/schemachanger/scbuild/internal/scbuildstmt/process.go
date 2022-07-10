@@ -44,7 +44,7 @@ func (s supportedStatement) IsFullySupported(mode sessiondatapb.NewSchemaChanger
 // with the use_declarative_schema_changer session variable.
 var supportedStatements = map[reflect.Type]supportedStatement{
 	// Alter table will have commands individually whitelisted via the
-	// supportedAlterTableStatements list, so wwe will consider it fully supported
+	// supportedAlterTableCommands list, so wwe will consider it fully supported
 	// here.
 	reflect.TypeOf((*tree.AlterTable)(nil)):          {AlterTable, true},
 	reflect.TypeOf((*tree.CreateIndex)(nil)):         {CreateIndex, false},

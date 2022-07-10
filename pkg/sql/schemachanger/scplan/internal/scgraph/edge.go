@@ -12,6 +12,7 @@ package scgraph
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scop"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/screl"
@@ -91,9 +92,26 @@ type DepEdge struct {
 	from, to *screl.Node
 	kind     DepEdgeKind
 
-	// TODO(ajwerner): Deal with the possibility that multiple rules could
-	// generate the same edge.
-	rule RuleName
+	rules RuleNames
+}
+
+type RuleNames []RuleName
+
+func (rn RuleNames) String() string {
+	var sb strings.Builder
+	if len(rn) == 1 {
+		sb.WriteString(string(rn[0]))
+	} else {
+		sb.WriteString("[")
+		for i, r := range rn {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(string(r))
+		}
+		sb.WriteString("]")
+	}
+	return sb.String()
 }
 
 // From implements the Edge interface.
@@ -103,7 +121,7 @@ func (de *DepEdge) From() *screl.Node { return de.from }
 func (de *DepEdge) To() *screl.Node { return de.to }
 
 // Name returns the name of the rule which generated this edge.
-func (de *DepEdge) Name() RuleName { return de.rule }
+func (de *DepEdge) Name() RuleNames { return de.rules }
 
 // Kind returns the kind of the DepEdge.
 func (de *DepEdge) Kind() DepEdgeKind { return de.kind }

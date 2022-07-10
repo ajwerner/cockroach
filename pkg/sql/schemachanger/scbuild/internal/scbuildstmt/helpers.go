@@ -48,13 +48,13 @@ func dropRestrictDescriptor(b BuildCtx, id catid.DescID) (hasChanged bool) {
 			return
 		}
 		b.CheckPrivilege(e, privilege.DROP)
-		dropElement(b, e)
+		dropElementWhenDroppingDescriptor(b, e)
 		hasChanged = true
 	})
 	return hasChanged
 }
 
-func dropElement(b BuildCtx, e scpb.Element) {
+func dropElementWhenDroppingDescriptor(b BuildCtx, e scpb.Element) {
 	// TODO(postamar): remove this dirty hack ASAP, see column/index dep rules.
 	switch t := e.(type) {
 	case *scpb.ColumnType:
@@ -115,7 +115,7 @@ func dropCascadeDescriptor(b BuildCtx, id catid.DescID) {
 			// Don't actually drop any elements of virtual schemas.
 			return
 		}
-		dropElement(b, e)
+		dropElementWhenDroppingDescriptor(b, e)
 		switch t := e.(type) {
 		case *scpb.EnumType:
 			dropCascadeDescriptor(next, t.ArrayTypeID)
@@ -149,7 +149,7 @@ func dropCascadeDescriptor(b BuildCtx, id catid.DescID) {
 			*scpb.ForeignKeyConstraint,
 			*scpb.SequenceOwner,
 			*scpb.DatabaseRegionConfig:
-			dropElement(b, e)
+			dropElementWhenDroppingDescriptor(b, e)
 		}
 	})
 }

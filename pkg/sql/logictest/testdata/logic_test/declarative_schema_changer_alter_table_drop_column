@@ -1,0 +1,10 @@
+statement ok
+SET serial_normalization = sql_sequence;
+
+statement ok
+CREATE TABLE foo (i INT PRIMARY KEY, j SERIAL, k INT)
+
+statement ok
+SET use_declarative_schema_changer = 'unsafe'
+
+statement ok

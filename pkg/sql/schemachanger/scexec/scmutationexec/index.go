@@ -178,6 +178,7 @@ func (m *visitor) MakeAddedSecondaryIndexPublic(
 	for idx, idxMutation := range tbl.GetMutations() {
 		if idxMutation.GetIndex() != nil &&
 			idxMutation.GetIndex().ID == op.IndexID {
+			idxMutation.Direction = descpb.DescriptorMutation_ADD
 			err := tbl.MakeMutationComplete(idxMutation)
 			if err != nil {
 				return err

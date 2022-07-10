@@ -124,7 +124,7 @@ func buildStages(bc buildContext) (stages []Stage) {
 			if bs.phase == scop.LatestPhase {
 				// This should never happen, we should always be able to make forward
 				// progress because we haven't reached the terminal state yet.
-				panic(errors.AssertionFailedf("unable to make progress"))
+				panic(errors.AssertionFailedf("unable to make progress: %v", stages))
 			}
 			bs.phase++
 			sb = bc.makeStageBuilder(bs)

@@ -12,7 +12,7 @@ begin transaction #1
 # begin StatementPhase
 checking for feature: DROP INDEX
 increment telemetry for sql.schema.drop_index
-## StatementPhase stage 1 of 1 with 7 MutationType ops
+## StatementPhase stage 1 of 1 with 5 MutationType ops
 upsert descriptor #104
   ...
          family: StringFamily
@@ -114,8 +114,8 @@ upsert descriptor #104
   +    - WRITE_ONLY
   +    - ABSENT
   +    - PUBLIC
-  +    - ABSENT
-  +    - ABSENT
+  +    - PUBLIC
+  +    - PUBLIC
   +    - PUBLIC
   +    - VALIDATED
   +    - ABSENT
@@ -248,7 +248,7 @@ upsert descriptor #104
        - ABSENT
        - PUBLIC
   ...
-       - ABSENT
+       - PUBLIC
        - PUBLIC
   -    - VALIDATED
   +    - DELETE_ONLY
@@ -281,10 +281,10 @@ upsert descriptor #104
      unexposedParentSchemaId: 101
   -  version: "8"
   +  version: "9"
-update progress of schema change job #1: "PostCommitNonRevertiblePhase stage 2 of 2 with 5 MutationType ops pending"
+update progress of schema change job #1: "PostCommitNonRevertiblePhase stage 2 of 2 with 7 MutationType ops pending"
 commit transaction #3
 begin transaction #4
-## PostCommitNonRevertiblePhase stage 2 of 2 with 7 MutationType ops
+## PostCommitNonRevertiblePhase stage 2 of 2 with 9 MutationType ops
 upsert descriptor #104
   ...
      createAsOfTime:
@@ -296,8 +296,8 @@ upsert descriptor #104
   -    - DELETE_ONLY
   -    - ABSENT
   -    - PUBLIC
-  -    - ABSENT
-  -    - ABSENT
+  -    - PUBLIC
+  -    - PUBLIC
   -    - PUBLIC
   -    - DELETE_ONLY
   -    - ABSENT

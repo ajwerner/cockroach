@@ -108,7 +108,14 @@ func dropAnIndex(
 	if sie == nil {
 		panic(errors.AssertionFailedf("programming error: cannot find secondary index element."))
 	}
-
+	// Cannot drop the index if not CASCADE and a unique constraint depends on it.
+	if dropBehavior != tree.DropCascade && sie.IsUnique && !sie.IsCreatedExplicitly {
+		panic(errors.WithHint(
+			pgerror.Newf(pgcode.DependentObjectsStillExist,
+				"index %q is in use as unique constraint", index.String()),
+			"use CASCADE if you really want to drop it.",
+		))
+	}
 	dropSecondaryIndex(b, index, dropBehavior, sie, toBeDroppedIndexElms)
 }
 
@@ -119,16 +126,6 @@ func dropSecondaryIndex(
 	sie *scpb.SecondaryIndex,
 	toBeDroppedIndexElms ElementResultSet,
 ) {
-
-	// Cannot drop the index if not CASCADE and a unique constraint depends on it.
-	if dropBehavior != tree.DropCascade && sie.IsUnique && !sie.IsCreatedExplicitly {
-		panic(errors.WithHint(
-			pgerror.Newf(pgcode.DependentObjectsStillExist,
-				"index %q is in use as unique constraint", index.String()),
-			"use CASCADE if you really want to drop it.",
-		))
-	}
-
 	// Maybe drop dependent views.
 	// If CASCADE and there are "dependent" views (i.e. views that use this
 	// to-be-dropped index), then we will drop all dependent views and their

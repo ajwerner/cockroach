@@ -200,17 +200,30 @@ deprules
     - joinOnIndexID($index-name, $index, $table-id, $index-id)
     - joinTargetNode($index-name, $index-name-target, $index-name-node)
     - joinTargetNode($index, $index-target, $index-node)
-- name: temp and secondary index columns removed just before removing the index
+- name: secondary index columns removed just before removing the index
   from: index-node
   kind: SameStagePrecedence
   to: index-column-node
   query:
     - $index[Type] = '*scpb.IndexColumn'
-    - $index-column[Type] IN ['*scpb.SecondaryIndex', '*scpb.TemporaryIndex']
+    - $index-column[Type] = '*scpb.SecondaryIndex'
     - joinOnIndexID($index, $index-column, $table-id, $index-id)
     - toAbsent($index-target, $index-column-target)
     - $index-node[CurrentStatus] = ABSENT
     - $index-column-node[CurrentStatus] = ABSENT
+    - joinTargetNode($index, $index-target, $index-node)
+    - joinTargetNode($index-column, $index-column-target, $index-column-node)
+- name: temp index columns removed just before removing the index
+  from: index-node
+  kind: SameStagePrecedence
+  to: index-column-node
+  query:
+    - $index[Type] = '*scpb.IndexColumn'
+    - $index-column[Type] = '*scpb.TemporaryIndex'
+    - joinOnIndexID($index, $index-column, $table-id, $index-id)
+    - toAbsent($index-target, $index-column-target)
+    - $index-node[CurrentStatus] = ABSENT
+    - $index-column-node[CurrentStatus] = TRANSIENT_ABSENT
     - joinTargetNode($index, $index-target, $index-node)
     - joinTargetNode($index-column, $index-column-target, $index-column-node)
 - name: index no longer public before dependents removed

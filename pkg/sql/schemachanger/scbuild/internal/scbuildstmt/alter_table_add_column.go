@@ -292,45 +292,7 @@ func addColumn(b BuildCtx, spec addColumnSpec) (backing *scpb.PrimaryIndex) {
 	tableID := spec.tbl.TableID
 	existing, freshlyAdded := getPrimaryIndexes(b, tableID)
 	if freshlyAdded != nil {
-		var tempIndex *scpb.TemporaryIndex
-		scpb.ForEachTemporaryIndex(b.QueryByID(spec.tbl.TableID), func(
-			status scpb.Status, ts scpb.TargetStatus, e *scpb.TemporaryIndex,
-		) {
-			if ts != scpb.Transient {
-				return
-			}
-			if e.IndexID == freshlyAdded.TemporaryIndexID {
-				if tempIndex != nil {
-					panic(errors.AssertionFailedf(
-						"multiple temporary index elements exist with index id %d for table %d",
-						freshlyAdded.TemporaryIndexID, e.TableID,
-					))
-				}
-				tempIndex = e
-			}
-		})
-		if tempIndex == nil {
-			panic(errors.AssertionFailedf(
-				"failed to find temporary index element for new primary index id %d for table %d",
-				freshlyAdded.IndexID, freshlyAdded.TableID,
-			))
-		}
-		// Exceptionally, we can edit the element directly here, by virtue of it
-		// currently being in the ABSENT state we know that it was introduced as a
-		// PUBLIC target by the current statement.
-
-		// We want to just add a new index column to the index and to its temp index.
-		ic := &scpb.IndexColumn{
-			TableID:       spec.tbl.TableID,
-			IndexID:       freshlyAdded.IndexID,
-			ColumnID:      spec.col.ColumnID,
-			OrdinalInKind: getNextStoredIndexColumnOrdinal(b.QueryByID(spec.tbl.TableID), freshlyAdded),
-			Kind:          scpb.IndexColumn_STORED,
-		}
-		b.Add(ic)
-		tempIC := protoutil.Clone(ic).(*scpb.IndexColumn)
-		tempIC.IndexID = tempIndex.IndexID
-		b.Add(tempIC)
+		handleAddColumnFreshlyAddedPrimaryIndex(b, spec, freshlyAdded)
 		return freshlyAdded
 	}
 	// Otherwise, create a new primary index target and swap it with the existing
@@ -351,7 +313,7 @@ func addColumn(b BuildCtx, spec addColumnSpec) (backing *scpb.PrimaryIndex) {
 	// making a new column public is not revertible).
 	//
 	// If ever we were to change how we encoded NULLs, perhaps so that we could
-	// intepret a missing value as an arbitrary default expression, we'd need
+	// interpret a missing value as an arbitrary default expression, we'd need
 	// to revisit this optimization.
 	//
 	// TODO(ajwerner): The above comment is incorrect in that we don't mark
@@ -394,6 +356,55 @@ func addColumn(b BuildCtx, spec addColumnSpec) (backing *scpb.PrimaryIndex) {
 		b.Add(ic)
 		return newColumns
 	})
+}
+
+func handleAddColumnFreshlyAddedPrimaryIndex(
+	b BuildCtx, spec addColumnSpec, freshlyAdded *scpb.PrimaryIndex,
+) {
+	// TODO(ajwerner): Make sure we aren't removing any columns from this index.
+	// If we are, it means that this transaction is both adding and removing
+	// physical columns from the table, and we need an intermediate, transient
+	// primary index.
+
+	var tempIndex *scpb.TemporaryIndex
+	scpb.ForEachTemporaryIndex(b.QueryByID(spec.tbl.TableID), func(
+		status scpb.Status, ts scpb.TargetStatus, e *scpb.TemporaryIndex,
+	) {
+		if ts != scpb.Transient {
+			return
+		}
+		if e.IndexID == freshlyAdded.TemporaryIndexID {
+			if tempIndex != nil {
+				panic(errors.AssertionFailedf(
+					"multiple temporary index elements exist with index id %d for table %d",
+					freshlyAdded.TemporaryIndexID, e.TableID,
+				))
+			}
+			tempIndex = e
+		}
+	})
+	if tempIndex == nil {
+		panic(errors.AssertionFailedf(
+			"failed to find temporary index element for new primary index id %d for table %d",
+			freshlyAdded.IndexID, freshlyAdded.TableID,
+		))
+	}
+	// Exceptionally, we can edit the element directly here, by virtue of it
+	// currently being in the ABSENT state we know that it was introduced as a
+	// PUBLIC target by the current statement.
+
+	// We want to just add a new index column to the index and to its temp index.
+	ic := &scpb.IndexColumn{
+		TableID:       spec.tbl.TableID,
+		IndexID:       freshlyAdded.IndexID,
+		ColumnID:      spec.col.ColumnID,
+		OrdinalInKind: getNextStoredIndexColumnOrdinal(b.QueryByID(spec.tbl.TableID), freshlyAdded),
+		Kind:          scpb.IndexColumn_STORED,
+	}
+	b.Add(ic)
+	tempIC := protoutil.Clone(ic).(*scpb.IndexColumn)
+	tempIC.IndexID = tempIndex.IndexID
+	b.Add(tempIC)
 }
 
 func createNewPrimaryIndex(
@@ -479,20 +490,22 @@ func publicTargetFilter(_ scpb.Status, target scpb.TargetStatus, _ scpb.Element)
 	return target == scpb.ToPublic
 }
 
+func statusAbsentOrBackfillOnly(status scpb.Status, _ scpb.TargetStatus, _ scpb.Element) bool {
+	return status == scpb.Status_ABSENT || status == scpb.Status_BACKFILL_ONLY
+}
+
+func statusPublic(status scpb.Status, _ scpb.TargetStatus, _ scpb.Element) bool {
+	return status == scpb.Status_PUBLIC
+}
+
 func getPrimaryIndexes(
 	b BuildCtx, tableID catid.DescID,
 ) (existing, freshlyAdded *scpb.PrimaryIndex) {
 	allTargets := b.QueryByID(tableID)
-	publicTargets := allTargets.Filter(publicTargetFilter)
-	scpb.ForEachPrimaryIndex(publicTargets, func(status scpb.Status, _ scpb.TargetStatus, idx *scpb.PrimaryIndex) {
-		if status == scpb.Status_PUBLIC {
-			existing = idx
-		}
-		if status == scpb.Status_ABSENT || status == scpb.Status_BACKFILL_ONLY {
-			// TODO(postamar): does it matter that there could be more than one?
-			freshlyAdded = idx
-		}
-	})
+	_, _, freshlyAdded = scpb.FindPrimaryIndex(allTargets.
+		Filter(publicTargetFilter).
+		Filter(statusAbsentOrBackfillOnly))
+	_, _, existing = scpb.FindPrimaryIndex(allTargets.Filter(statusPublic))
 	if existing == nil {
 		// TODO(postamar): can this even be possible?
 		panic(pgerror.Newf(pgcode.NoPrimaryKey, "missing active primary key"))

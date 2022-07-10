@@ -161,20 +161,32 @@ func init() {
 	// this is roundabout: dropping a column from an index which is itself
 	// being dropped is treated as a no-op by the execution layer.
 	registerDepRule(
-		"temp and secondary index columns removed just before removing the index",
+		"secondary index columns removed just before removing the index",
 		scgraph.SameStagePrecedence,
 		"index", "index-column",
 		func(from, to nodeVars) rel.Clauses {
 			return rel.Clauses{
 				from.el.Type((*scpb.IndexColumn)(nil)),
-				to.el.Type(
-					(*scpb.SecondaryIndex)(nil),
-					(*scpb.TemporaryIndex)(nil),
-				),
+				to.el.Type((*scpb.SecondaryIndex)(nil)),
 				joinOnIndexID(from.el, to.el, "table-id", "index-id"),
 				toAbsent(from.target, to.target),
 				currentStatus(from.node, scpb.Status_ABSENT),
 				currentStatus(to.node, scpb.Status_ABSENT),
+			}
+		},
+	)
+	registerDepRule(
+		"temp index columns removed just before removing the index",
+		scgraph.SameStagePrecedence,
+		"index", "index-column",
+		func(from, to nodeVars) rel.Clauses {
+			return rel.Clauses{
+				from.el.Type((*scpb.IndexColumn)(nil)),
+				to.el.Type((*scpb.TemporaryIndex)(nil)),
+				joinOnIndexID(from.el, to.el, "table-id", "index-id"),
+				toAbsent(from.target, to.target),
+				currentStatus(from.node, scpb.Status_ABSENT),
+				currentStatus(to.node, scpb.Status_TRANSIENT_ABSENT),
 			}
 		},
 	)
@@ -316,9 +328,10 @@ func init() {
 		},
 	)
 
+	// TODO(ajwerner): Understand this rule and why it needs to exist.
 	registerDepRule(
-		"column named right before column type becomes public",
-		scgraph.SameStagePrecedence,
+		"column named before column type becomes public",
+		scgraph.Precedence,
 		"column-name", "column-type",
 		func(from, to nodeVars) rel.Clauses {
 			return rel.Clauses{

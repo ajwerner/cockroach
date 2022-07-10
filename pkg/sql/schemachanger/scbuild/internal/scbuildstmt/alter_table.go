@@ -24,29 +24,35 @@ import (
 	"github.com/cockroachdb/errors"
 )
 
-// supportedAlterTableStatements tracks alter table operations fully supported by
+// supportedAlterTableCommands tracks alter table operations fully supported by
 // declarative schema  changer. Operations marked as non-fully supported can
 // only be with the use_declarative_schema_changer session variable.
-var supportedAlterTableStatements = map[reflect.Type]supportedStatement{
-	reflect.TypeOf((*tree.AlterTableAddColumn)(nil)):  {alterTableAddColumn, true},
-	reflect.TypeOf((*tree.AlterTableDropColumn)(nil)): {alterTableDropColumn, true},
+var supportedAlterTableCommands = map[reflect.Type]*supportedStatement{
+	reflect.TypeOf((*tree.AlterTableAddColumn)(nil)): {
+		fn:             alterTableAddColumn,
+		fullySupported: true,
+	},
+	reflect.TypeOf((*tree.AlterTableDropColumn)(nil)): {
+		fn:             alterTableDropColumn,
+		fullySupported: true,
+	},
 }
 
 func init() {
-	// Check function signatures inside the supportedAlterTableStatements map.
-	for statementType, statementEntry := range supportedAlterTableStatements {
+	// Check function signatures inside the supportedAlterTableCommands map.
+	for alterTableCommandType, statementEntry := range supportedAlterTableCommands {
 		callBackType := reflect.TypeOf(statementEntry.fn)
 		if callBackType.Kind() != reflect.Func {
 			panic(errors.AssertionFailedf("%v entry for statement is "+
-				"not a function", statementType))
+				"not a function", alterTableCommandType))
 		}
 		if callBackType.NumIn() != 4 ||
 			!callBackType.In(0).Implements(reflect.TypeOf((*BuildCtx)(nil)).Elem()) ||
 			callBackType.In(1) != reflect.TypeOf((*tree.TableName)(nil)) ||
 			callBackType.In(2) != reflect.TypeOf((*scpb.Table)(nil)) ||
-			callBackType.In(3) != statementType {
+			callBackType.In(3) != alterTableCommandType {
 			panic(errors.AssertionFailedf("%v entry for alter table statement "+
-				"does not have a valid signature got %v", statementType, callBackType))
+				"does not have a valid signature got %v", alterTableCommandType, callBackType))
 		}
 	}
 }
@@ -63,7 +69,7 @@ func AlterTable(b BuildCtx, n *tree.AlterTable) {
 	// first, since we don't want to do extra work in this transaction
 	// only to bail out later.
 	for _, cmd := range n.Cmds {
-		info, ok := supportedAlterTableStatements[reflect.TypeOf(cmd)]
+		info, ok := supportedAlterTableCommands[reflect.TypeOf(cmd)]
 		if !ok {
 			panic(scerrors.NotImplementedError(cmd))
 		}
@@ -92,15 +98,18 @@ func AlterTable(b BuildCtx, n *tree.AlterTable) {
 	b.SetUnresolvedNameAnnotation(n.Table, &tn)
 	b.IncrementSchemaChangeAlterCounter("table")
 	for _, cmd := range n.Cmds {
-		info := supportedAlterTableStatements[reflect.TypeOf(cmd)]
+		info := supportedAlterTableCommands[reflect.TypeOf(cmd)]
 		// Invoke the callback function, with the concrete types.
 		fn := reflect.ValueOf(info.fn)
-		fn.Call([]reflect.Value{
-			reflect.ValueOf(b),
-			reflect.ValueOf(&tn),
-			reflect.ValueOf(tbl),
-			reflect.ValueOf(cmd),
-		})
+		fn.Call(asValues(b, &tn, tbl, cmd))
 		b.IncrementSubWorkID()
 	}
+}
+
+func asValues(vals ...interface{}) []reflect.Value {
+	ret := make([]reflect.Value, len(vals))
+	for i, v := range vals {
+		ret[i] = reflect.ValueOf(v)
+	}
+	return ret
 }
