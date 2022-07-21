@@ -67,7 +67,7 @@ func New(
 	f *rangefeed.Factory,
 	clock *hlc.Clock,
 ) sqlinstance.Provider {
-	storage := instancestorage.NewStorage(db, codec, slProvider)
+	storage := instancestorage.NewStorage(db, codec, slProvider.CachedReader())
 	reader := instancestorage.NewReader(storage, slProvider.CachedReader(), f, codec, clock, stopper)
 	p := &provider{
 		storage:      storage,
