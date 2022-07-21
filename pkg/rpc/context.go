@@ -1240,8 +1240,19 @@ func (rpcCtx *Context) grpcDialOptions(
 		dialOpts = append(dialOpts, grpc.WithContextDialer(dialerFunc))
 	}
 
+	unaryInterceptors := rpcCtx.clientUnaryInterceptors
+	if rpcCtx.Knobs.StreamClientInterceptor != nil {
+		if testingUnaryInterceptor := rpcCtx.Knobs.UnaryClientInterceptor(
+			target, class,
+		); testingUnaryInterceptor != nil {
+			// Make a copy of the interceptors slice and append the knob one.
+			unaryInterceptors = append(append([]grpc.UnaryClientInterceptor(nil),
+				unaryInterceptors...),
+				testingUnaryInterceptor)
+		}
+	}
 	if len(rpcCtx.clientUnaryInterceptors) > 0 {
-		dialOpts = append(dialOpts, grpc.WithChainUnaryInterceptor(rpcCtx.clientUnaryInterceptors...))
+		dialOpts = append(dialOpts, grpc.WithChainUnaryInterceptor(unaryInterceptors...))
 	}
 	if len(streamInterceptors) > 0 {
 		dialOpts = append(dialOpts, grpc.WithChainStreamInterceptor(streamInterceptors...))
