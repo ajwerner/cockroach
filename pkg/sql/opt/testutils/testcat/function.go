@@ -91,22 +91,19 @@ func (tc *Catalog) CreateFunction(c *tree.CreateFunction) {
 	if tc.udfs == nil {
 		tc.udfs = make(map[string]*tree.ResolvedFunctionDefinition)
 	}
-
-	overload := &tree.Overload{
-		Types:        argTypes,
-		ReturnType:   tree.FixedReturnType(retType),
-		Body:         body,
-		Volatility:   v,
-		NullableArgs: nullableArgs,
-	}
-	prefixedOverload := tree.MakeQualifiedOverload("public", overload)
-	def := &tree.ResolvedFunctionDefinition{
-		Name: name,
-		// TODO(mgartner): Consider setting Class and CompositeInsensitive fo
-		// overloads.
-		Overloads: []tree.QualifiedOverload{prefixedOverload},
-	}
-	tc.udfs[name] = def
+	tc.udfs[name] = tree.NewResolvedFunctionDefinition(
+		name, "public", []*tree.Overload{
+			{
+				Types:        argTypes,
+				ReturnType:   tree.FixedReturnType(retType),
+				Body:         body,
+				Volatility:   v,
+				NullableArgs: nullableArgs,
+				// TODO(mgartner): Consider setting Class and CompositeInsensitive fo
+				// overloads.
+			},
+		},
+	)
 }
 
 func collectFuncOptions(o tree.FunctionOptions) (body string, v volatility.V, nullableArgs bool) {
@@ -166,10 +163,10 @@ func collectFuncOptions(o tree.FunctionOptions) (body string, v volatility.V, nu
 // formatFunction nicely formats a function definition creating in the opt test
 // catalog using a treeprinter for debugging and testing.
 func formatFunction(fn *tree.ResolvedFunctionDefinition) string {
-	if len(fn.Overloads) != 1 {
+	if fn.NumOverloads() != 1 {
 		panic(fmt.Errorf("functions with multiple overloads not supported"))
 	}
-	o := fn.Overloads[0]
+	_, o := fn.GetOverload(0)
 	tp := treeprinter.New()
 	nullStr := ""
 	if !o.NullableArgs {

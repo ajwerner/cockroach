@@ -14,6 +14,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
@@ -43,7 +44,26 @@ type ResolvedFunctionDefinition struct {
 	// not qualified.
 	Name string
 
-	Overloads []QualifiedOverload
+	overloads []*Overload
+	schemas   []string
+}
+
+// NewResolvedFunctionDefinition constructs a new ResolvedFunctionDefinition.
+func NewResolvedFunctionDefinition(
+	name string, schema string, overloads []*Overload,
+) *ResolvedFunctionDefinition {
+	repeatString := func(s string, n int) []string {
+		ret := make([]string, n)
+		for i := 0; i < n; i++ {
+			ret[i] = s
+		}
+		return ret
+	}
+	return &ResolvedFunctionDefinition{
+		Name:      name,
+		overloads: overloads,
+		schemas:   repeatString(schema, len(overloads)),
+	}
 }
 
 // QualifiedOverload is a wrapper of Overload prefixed with a schema name.
@@ -51,11 +71,6 @@ type ResolvedFunctionDefinition struct {
 type QualifiedOverload struct {
 	Schema string
 	*Overload
-}
-
-// MakeQualifiedOverload creates a new QualifiedOverload.
-func MakeQualifiedOverload(schema string, overload *Overload) QualifiedOverload {
-	return QualifiedOverload{Schema: schema, Overload: overload}
 }
 
 // FunctionProperties defines the properties of the built-in
@@ -231,15 +246,17 @@ func (fd *ResolvedFunctionDefinition) MergeWith(
 	if fd.Name != another.Name {
 		return nil, errors.Newf("cannot merge function definition of %q with %q", fd.Name, another.Name)
 	}
-
+	combineStrings := func(a, b []string) []string {
+		return append(append(make([]string, 0, len(a)+len(b)), a...), b...)
+	}
+	combineOverloads := func(a, b []*Overload) []*Overload {
+		return append(append(make([]*Overload, 0, len(a)+len(b)), a...), b...)
+	}
 	return &ResolvedFunctionDefinition{
 		Name:      fd.Name,
-		Overloads: combineOverloads(fd.Overloads, another.Overloads),
+		overloads: combineOverloads(fd.overloads, another.overloads),
+		schemas:   combineStrings(fd.schemas, another.schemas),
 	}, nil
-}
-
-func combineOverloads(a, b []QualifiedOverload) []QualifiedOverload {
-	return append(append(make([]QualifiedOverload, 0, len(a)+len(b)), a...), b...)
 }
 
 // GetClass returns function class by checking each overload's Class and returns
@@ -250,9 +267,9 @@ func combineOverloads(a, b []QualifiedOverload) []QualifiedOverload {
 // method, function is resolved to one overload, so that we can get rid of this
 // function and similar methods below.
 func (fd *ResolvedFunctionDefinition) GetClass() (FunctionClass, error) {
-	ret := fd.Overloads[0].Class
-	for i := range fd.Overloads {
-		if fd.Overloads[i].Class != ret {
+	ret := fd.overloads[0].Class
+	for _, overload := range fd.overloads {
+		if overload.Class != ret {
 			return 0, pgerror.Newf(pgcode.AmbiguousFunction, "ambiguous function class on %s", fd.Name)
 		}
 	}
@@ -265,9 +282,9 @@ func (fd *ResolvedFunctionDefinition) GetClass() (FunctionClass, error) {
 // different length. This is good enough since we don't create UDF with
 // ReturnLabel.
 func (fd *ResolvedFunctionDefinition) GetReturnLabel() ([]string, error) {
-	ret := fd.Overloads[0].ReturnLabels
-	for i := range fd.Overloads {
-		if len(ret) != len(fd.Overloads[i].ReturnLabels) {
+	ret := fd.overloads[0].ReturnLabels
+	for _, overload := range fd.overloads {
+		if len(ret) != len(overload.ReturnLabels) {
 			return nil, pgerror.Newf(pgcode.AmbiguousFunction, "ambiguous function return label on %s", fd.Name)
 		}
 	}
@@ -278,32 +295,110 @@ func (fd *ResolvedFunctionDefinition) GetReturnLabel() ([]string, error) {
 // checking each overload's HasSequenceArguments flag. Ambiguous error is
 // returned if there is any overload has a different flag.
 func (fd *ResolvedFunctionDefinition) GetHasSequenceArguments() (bool, error) {
-	ret := fd.Overloads[0].HasSequenceArguments
-	for i := range fd.Overloads {
-		if ret != fd.Overloads[i].HasSequenceArguments {
+	ret := fd.overloads[0].HasSequenceArguments
+	for _, overload := range fd.overloads {
+		if ret != overload.HasSequenceArguments {
 			return false, pgerror.Newf(pgcode.AmbiguousFunction, "ambiguous function sequence argument on %s", fd.Name)
 		}
 	}
 	return ret, nil
 }
 
+// OverloadIterator is used to iterate the overloads of a
+// ResolvedFunctionDefinition. It follows the pattern of iterutil in
+// terms of error handling.
+type OverloadIterator = func(schema string, overload *Overload) error
+
+// ForEachOverload iterates the set of overloads.
+func (fd *ResolvedFunctionDefinition) ForEachOverload(it OverloadIterator) error {
+	for i, overload := range fd.overloads {
+		if err := iterutil.Map(it(fd.schemas[i], overload)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// NumOverloads returns the number of overloads.
+func (fd *ResolvedFunctionDefinition) NumOverloads() int {
+	return len(fd.overloads)
+}
+
+// GetOverload returns the ith overload. Note that i must be less than
+// NumOverloads.
+func (fd *ResolvedFunctionDefinition) GetOverload(i int) (schemaName string, overload *Overload) {
+	return fd.schemas[i], fd.overloads[i]
+}
+
+func (fd *ResolvedFunctionDefinition) overloadImpls() []overloadImpl {
+	ret := make([]overloadImpl, len(fd.overloads))
+	for i, ol := range fd.overloads {
+		ret[i] = ol
+	}
+	return ret
+}
+
+// GetSchemasForOverloads finds the set of schemas for the passed overloads.
+// Note that if any of the overloads provided as arguments are not from this
+// ResolvedFunctionDefinition, an error will be returned. The result maps
+// schemas to indices into the input.
+func (fd *ResolvedFunctionDefinition) GetSchemasForOverloads(
+	overloads []*Overload,
+) (map[string]util.FastIntSet, error) {
+	overloadsToIndexes, err := fd.findOverloads(overloads)
+	if err != nil {
+		return nil, err
+	}
+	ret := make(map[string]util.FastIntSet)
+	for !overloadsToIndexes.Empty() {
+		var curSchema string
+		var curMatches util.FastIntSet
+		overloadsToIndexes.ForEach(func(inputOrd, fdOrd int) {
+			switch schema := fd.schemas[fdOrd]; curSchema {
+			case "":
+				curSchema = schema
+				fallthrough
+			case schema:
+				curMatches.Add(inputOrd)
+			}
+		})
+		ret[curSchema] = curMatches
+		curMatches.ForEach(overloadsToIndexes.Unset)
+	}
+	return ret, nil
+}
+
+// findOverloads maps the passed overloads to their indexes in the
+// ResolvedFunctionDefinition.
+func (fd *ResolvedFunctionDefinition) findOverloads(
+	overloads []*Overload,
+) (overloadsToIndexes util.FastIntMap, _ error) {
+	// TODO(ajwerner): Consider allocating a map to do the search if the number
+	// of candidates is very large. We only expect this if the number of schemas
+	// with a function of the correct name and matching type signatures is very
+	// large. For now, just do the quadratic search.
+outer:
+	for i, ol := range overloads {
+		for j, other := range fd.overloads {
+			if ol == other {
+				overloadsToIndexes.Set(i, j)
+				continue outer
+			}
+		}
+		return util.FastIntMap{}, errors.AssertionFailedf(
+			"failed to find overload in ResolvedFunctionDefinition %s", fd.Name,
+		)
+	}
+	return overloadsToIndexes, nil
+}
+
 // QualifyBuiltinFunctionDefinition qualified all overloads in a function
 // definition with a schema name. Note that this function can only be used for
-// builtin function.
+// builtin functions.
 func QualifyBuiltinFunctionDefinition(
 	def *FunctionDefinition, schema string,
 ) *ResolvedFunctionDefinition {
-	ret := &ResolvedFunctionDefinition{
-		Name:      def.Name,
-		Overloads: make([]QualifiedOverload, 0, len(def.Definition)),
-	}
-	for _, o := range def.Definition {
-		ret.Overloads = append(
-			ret.Overloads,
-			MakeQualifiedOverload(schema, o),
-		)
-	}
-	return ret
+	return NewResolvedFunctionDefinition(def.Name, schema, def.Definition)
 }
 
 // GetBuiltinFuncDefinitionOrFail is similar to GetBuiltinFuncDefinition but

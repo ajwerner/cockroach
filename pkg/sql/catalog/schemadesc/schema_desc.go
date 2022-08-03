@@ -440,10 +440,7 @@ func (desc *immutable) GetResolvedFuncDefinition(
 	if !found {
 		return nil, false
 	}
-	funcDef := &tree.ResolvedFunctionDefinition{
-		Name:      name,
-		Overloads: make([]tree.QualifiedOverload, 0, len(funcDescPb.Overloads)),
-	}
+	var overloads []*tree.Overload
 	for i := range funcDescPb.Overloads {
 		retType := funcDescPb.Overloads[i].ReturnType
 		overload := &tree.Overload{
@@ -462,11 +459,10 @@ func (desc *immutable) GetResolvedFuncDefinition(
 			)
 		}
 		overload.Types = argTypes
-		prefixedOverload := tree.MakeQualifiedOverload(desc.GetName(), overload)
-		funcDef.Overloads = append(funcDef.Overloads, prefixedOverload)
+		overloads = append(overloads, overload)
 	}
 
-	return funcDef, true
+	return tree.NewResolvedFunctionDefinition(name, desc.GetName(), overloads), true
 }
 
 // IsSchemaNameValid returns whether the input name is valid for a user defined

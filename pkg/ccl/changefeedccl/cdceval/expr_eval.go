@@ -622,12 +622,12 @@ func checkFunctionSupported(
 		fnVolatility = fnCall.ResolvedOverload().Volatility
 	} else {
 		// Pick highest volatility overload.
-		for i := range funcDef.Overloads {
-			overload := funcDef.Overloads[i].Overload
+		_ = funcDef.ForEachOverload(func(_ string, overload *tree.Overload) error {
 			if overload.Volatility > fnVolatility {
 				fnVolatility = overload.Volatility
 			}
-		}
+			return nil
+		})
 	}
 
 	// Aggregates, generators and window functions are not supported.

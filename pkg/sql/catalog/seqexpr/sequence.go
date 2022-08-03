@@ -26,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/builtins/builtinconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/errors"
 )
 
@@ -62,43 +63,45 @@ func GetSequenceFromFunc(funcExpr *tree.FuncExpr) (*SeqIdentifier, error) {
 	}
 
 	hasSequenceArguments, err := def.GetHasSequenceArguments()
-	if err != nil {
+	if err != nil || !hasSequenceArguments {
 		return nil, err
 	}
-
-	if hasSequenceArguments {
-		found := false
-		for i := range def.Overloads {
-			// Find the overload that matches funcExpr.
-			if len(funcExpr.Exprs) == def.Overloads[i].Types.Length() {
-				found = true
-				argTypes, ok := def.Overloads[i].Types.(tree.ArgTypes)
-				if !ok {
-					panic(pgerror.Newf(
-						pgcode.InvalidFunctionDefinition,
-						"%s has invalid argument types", funcExpr.Func.String(),
-					))
-				}
-				for i := 0; i < def.Overloads[i].Types.Length(); i++ {
-					// Find the sequence name arg.
-					argName := argTypes[i].Name
-					if argName == builtinconstants.SequenceNameArg {
-						arg := funcExpr.Exprs[i]
-						if seqIdentifier := getSequenceIdentifier(arg); seqIdentifier != nil {
-							return seqIdentifier, nil
-						}
-					}
+	var id *SeqIdentifier
+	if err := def.ForEachOverload(func(
+		schema string, overload *tree.Overload,
+	) error {
+		// Find the overload that matches funcExpr.
+		if len(funcExpr.Exprs) != overload.Types.Length() {
+			return nil
+		}
+		argTypes, ok := overload.Types.(tree.ArgTypes)
+		if !ok {
+			return errors.WithAssertionFailure(pgerror.Newf(
+				pgcode.InvalidFunctionDefinition,
+				"%s has invalid argument types", funcExpr.Func.String(),
+			))
+		}
+		for i := 0; i < overload.Types.Length(); i++ {
+			// Find the sequence name arg.
+			argName := argTypes[i].Name
+			if argName == builtinconstants.SequenceNameArg {
+				arg := funcExpr.Exprs[i]
+				if id = getSequenceIdentifier(arg); id != nil {
+					return iterutil.StopIteration()
 				}
 			}
 		}
-		if !found {
-			panic(pgerror.New(
-				pgcode.DatatypeMismatch,
-				"could not find matching function overload for given arguments",
-			))
-		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
-	return nil, nil
+	if id != nil {
+		return id, nil
+	}
+	panic(pgerror.New(
+		pgcode.DatatypeMismatch,
+		"could not find matching function overload for given arguments",
+	))
 }
 
 // getSequenceIdentifier takes a tree.Expr and extracts the

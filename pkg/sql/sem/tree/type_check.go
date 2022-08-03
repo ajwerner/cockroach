@@ -21,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree/treecmp"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/volatility"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
@@ -1073,11 +1074,7 @@ func (expr *FuncExpr) TypeCheck(
 		}
 	}
 
-	overloadImpls := make([]overloadImpl, 0, len(def.Overloads))
-	for i := range def.Overloads {
-		overloadImpls = append(overloadImpls, def.Overloads[i])
-	}
-	typedSubExprs, fns, err := typeCheckOverloadedExprs(ctx, semaCtx, desired, overloadImpls, false, expr.Exprs...)
+	typedSubExprs, fns, err := typeCheckOverloadedExprs(ctx, semaCtx, desired, def.overloadImpls(), false, expr.Exprs...)
 	if err != nil {
 		return nil, pgerror.Wrapf(err, pgcode.InvalidParameterValue, "%s()", def.Name)
 	}
@@ -1085,7 +1082,7 @@ func (expr *FuncExpr) TypeCheck(
 	var nullableArgFns []overloadImpl
 	var notNullableArgsFn []overloadImpl
 	for _, f := range fns {
-		if f.(QualifiedOverload).NullableArgs {
+		if f.(*Overload).NullableArgs {
 			nullableArgFns = append(nullableArgFns, f)
 		} else {
 			notNullableArgsFn = append(notNullableArgsFn, f)
@@ -1145,11 +1142,13 @@ func (expr *FuncExpr) TypeCheck(
 	}
 
 	// Get overloads from the most significant schema in search path.
-	typeCheckedOverloads := make([]QualifiedOverload, len(fns))
+	typeCheckedOverloads := make([]*Overload, len(fns))
 	for i := range fns {
-		typeCheckedOverloads[i] = fns[i].(QualifiedOverload)
+		typeCheckedOverloads[i] = fns[i].(*Overload)
 	}
-	favoredOverloads, err := getMostSignificantOverloads(typeCheckedOverloads, searchPath)
+	favoredOverloads, err := getMostSignificantOverloads(
+		typeCheckedOverloads, searchPath, def.GetSchemasForOverloads,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1166,7 +1165,7 @@ func (expr *FuncExpr) TypeCheck(
 	}
 
 	// Just pick the first overload from the search path.
-	overloadImpl := favoredOverloads[0].Overload
+	overloadImpl := favoredOverloads[0]
 	if overloadImpl.Private {
 		return nil, pgerror.Wrapf(errPrivateFunction, pgcode.ReservedName,
 			"%s()", errors.Safe(def.Name))
@@ -2943,8 +2942,10 @@ func (stripFuncsVisitor) VisitPost(expr Expr) Expr { return expr }
 // schema in the search path. If search path is not provided or empty, all
 // overloads are returned.
 func getMostSignificantOverloads(
-	overloads []QualifiedOverload, searchPath SearchPath,
-) ([]QualifiedOverload, error) {
+	overloads []*Overload,
+	searchPath SearchPath,
+	getOverloadSchemas func([]*Overload) (map[string]util.FastIntSet, error),
+) ([]*Overload, error) {
 	if searchPath == nil || searchPath == EmptySearchPath {
 		return overloads, nil
 	}
@@ -2966,22 +2967,20 @@ func getMostSignificantOverloads(
 		return overloads, nil
 	}
 
-	ret := make([]QualifiedOverload, 0, len(overloads))
-	err := searchPath.IterateSearchPath(func(schema string) error {
-
-		found := false
-		for i := range overloads {
-			if overloads[i].Schema == schema {
-				found = true
-				ret = append(ret, overloads[i])
-			}
-		}
-		if found {
-			return iterutil.StopIteration()
-		}
-		return nil
-	})
+	var ret []*Overload
+	schemas, err := getOverloadSchemas(overloads)
 	if err != nil {
+		return nil, err
+	}
+	if err := searchPath.IterateSearchPath(func(schema string) error {
+		indexes, ok := schemas[schema]
+		if !ok {
+			return nil
+		}
+		ret = make([]*Overload, 0, indexes.Len())
+		indexes.ForEach(func(i int) { ret = append(ret, overloads[i]) })
+		return iterutil.StopIteration()
+	}); err != nil {
 		return nil, err
 	}
 	return ret, nil

@@ -88,27 +88,32 @@ CREATE FUNCTION f() RETURNS VOID IMMUTABLE LANGUAGE SQL AS $$ SELECT 1 $$;`)
 		path := sessiondata.MakeSearchPath(searchPathArray)
 		funcDef, err := funcResolver.ResolveFunction(ctx, &fname, &path)
 		require.NoError(t, err)
-		require.Equal(t, 2, len(funcDef.Overloads))
+		require.Equal(t, 2, funcDef.NumOverloads())
 
 		// Verify Function Signature looks good
-		sort.Slice(funcDef.Overloads, func(i, j int) bool {
-			return funcDef.Overloads[i].Overload.Oid < funcDef.Overloads[j].Overload.Oid
+		var overloads []*tree.Overload
+		funcDef.ForEachOverload(func(_ string, overload *tree.Overload) error {
+			overloads = append(overloads, overload)
+			return nil
 		})
-		require.Equal(t, 100110, int(funcDef.Overloads[0].Oid))
-		require.True(t, funcDef.Overloads[0].UDFContainsOnlySignature)
-		require.True(t, funcDef.Overloads[0].IsUDF)
-		require.Equal(t, 1, len(funcDef.Overloads[0].Types.Types()))
-		require.NotEqual(t, funcDef.Overloads[0].Types.Types()[0].TypeMeta, types.UserDefinedTypeMetadata{})
-		require.Equal(t, types.EnumFamily, funcDef.Overloads[0].Types.Types()[0].Family())
-		require.Equal(t, types.Int, funcDef.Overloads[0].ReturnType([]tree.TypedExpr{}))
+		sort.Slice(overloads, func(i, j int) bool {
+			return overloads[i].Oid < overloads[j].Oid
+		})
+		require.Equal(t, 100110, int(overloads[0].Oid))
+		require.True(t, overloads[0].UDFContainsOnlySignature)
+		require.True(t, overloads[0].IsUDF)
+		require.Equal(t, 1, len(overloads[0].Types.Types()))
+		require.NotZero(t, overloads[0].Types.Types()[0].TypeMeta)
+		require.Equal(t, types.EnumFamily, overloads[0].Types.Types()[0].Family())
+		require.Equal(t, types.Int, overloads[0].ReturnType([]tree.TypedExpr{}))
 
-		require.Equal(t, 100111, int(funcDef.Overloads[1].Oid))
-		require.True(t, funcDef.Overloads[1].UDFContainsOnlySignature)
-		require.True(t, funcDef.Overloads[1].IsUDF)
-		require.Equal(t, 0, len(funcDef.Overloads[1].Types.Types()))
-		require.Equal(t, types.Void, funcDef.Overloads[1].ReturnType([]tree.TypedExpr{}))
+		require.Equal(t, 100111, int(overloads[1].Oid))
+		require.True(t, overloads[1].UDFContainsOnlySignature)
+		require.True(t, overloads[1].IsUDF)
+		require.Equal(t, 0, len(overloads[1].Types.Types()))
+		require.Equal(t, types.Void, overloads[1].ReturnType([]tree.TypedExpr{}))
 
-		overload, err := funcResolver.ResolveFunctionByOID(ctx, funcDef.Overloads[0].Oid)
+		overload, err := funcResolver.ResolveFunctionByOID(ctx, overloads[0].Oid)
 		require.NoError(t, err)
 		require.Equal(t, `SELECT a FROM defaultdb.public.t;
 SELECT b FROM defaultdb.public.t@t_idx_b;
@@ -118,11 +123,11 @@ SELECT nextval(105:::REGCLASS);`, overload.Body)
 		require.True(t, overload.IsUDF)
 		require.False(t, overload.UDFContainsOnlySignature)
 		require.Equal(t, 1, len(overload.Types.Types()))
-		require.NotEqual(t, overload.Types.Types()[0].TypeMeta, types.UserDefinedTypeMetadata{})
+		require.NotZero(t, overload.Types.Types()[0].TypeMeta)
 		require.Equal(t, types.EnumFamily, overload.Types.Types()[0].Family())
 		require.Equal(t, types.Int, overload.ReturnType([]tree.TypedExpr{}))
 
-		overload, err = funcResolver.ResolveFunctionByOID(ctx, funcDef.Overloads[1].Oid)
+		overload, err = funcResolver.ResolveFunctionByOID(ctx, overloads[1].Oid)
 		require.NoError(t, err)
 		require.Equal(t, `SELECT 1;`, overload.Body)
 		require.True(t, overload.IsUDF)
@@ -235,15 +240,20 @@ CREATE FUNCTION sc1.lower() RETURNS INT IMMUTABLE LANGUAGE SQL AS $$ SELECT 3 $$
 			}
 			require.NoError(t, err)
 
-			require.Equal(t, len(tc.expectedBody), len(funcDef.Overloads))
-			bodies := make([]string, len(funcDef.Overloads))
-			schemas := make([]string, len(funcDef.Overloads))
-			for i, o := range funcDef.Overloads {
+			require.Equal(t, len(tc.expectedBody), funcDef.NumOverloads())
+			bodies := make([]string, 0, funcDef.NumOverloads())
+			schemas := make([]string, 0, funcDef.NumOverloads())
+			require.NoError(t, funcDef.ForEachOverload(func(
+				schema string, o *tree.Overload,
+			) error {
 				overload, err := funcResolver.ResolveFunctionByOID(ctx, o.Oid)
-				require.NoError(t, err)
-				bodies[i] = overload.Body
-				schemas[i] = o.Schema
-			}
+				if err != nil {
+					return err
+				}
+				bodies = append(bodies, overload.Body)
+				schemas = append(schemas, schema)
+				return nil
+			}))
 			require.Equal(t, tc.expectedBody, bodies)
 			require.Equal(t, tc.expectedSchema, schemas)
 		}

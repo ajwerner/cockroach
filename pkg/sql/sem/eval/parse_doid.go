@@ -78,11 +78,11 @@ func ParseDOid(ctx *Context, s string, t *types.T) (*tree.DOid, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(funcDef.Overloads) > 1 {
+		if funcDef.NumOverloads() > 1 {
 			return nil, pgerror.Newf(pgcode.AmbiguousAlias,
 				"more than one function named '%s'", funcDef.Name)
 		}
-		overload := funcDef.Overloads[0]
+		_, overload := funcDef.GetOverload(0)
 		return tree.NewDOidWithTypeAndName(overload.Oid, t, funcDef.Name), nil
 	case oid.T_regtype:
 		parsedTyp, err := ctx.Planner.GetTypeFromValidSQLSyntax(s)

@@ -68,9 +68,10 @@ func TestResolveFunction(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			for _, o := range funcDef.Overloads {
-				require.Equal(t, tc.expectedSchema, o.Schema)
-			}
+			funcDef.ForEachOverload(func(schema string, _ *tree.Overload) error {
+				require.Equal(t, tc.expectedSchema, schema)
+				return nil
+			})
 		})
 	}
 }

@@ -121,7 +121,9 @@ func helpWithFunction(sqllex sqlLexer, f tree.ResolvableFunctionReference) int {
 	// documentation, so we need to also combine the descriptions
 	// together.
 	lastInfo := ""
-	for i, b := range d.Overloads {
+	var i int
+	_ = d.ForEachOverload(func(schema string, b *tree.Overload) error {
+		defer func() { i++ }()
 		if b.Info != "" && b.Info != lastInfo {
 			if i > 0 {
 				fmt.Fprintln(w, "---")
@@ -133,7 +135,8 @@ func helpWithFunction(sqllex sqlLexer, f tree.ResolvableFunctionReference) int {
 
 		simplifyRet := b.Class == tree.GeneratorClass
 		fmt.Fprintf(w, "%s%s\n", d.Name, b.Signature(simplifyRet))
-	}
+		return nil
+	})
 	_ = w.Flush()
 	msg.Text = buf.String()
 

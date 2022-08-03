@@ -175,33 +175,17 @@ func TestAddResolvedFuncDef(t *testing.T) {
 		{
 			def: &tree.FunctionDefinition{Name: "crdb_internal.fun", Definition: []*tree.Overload{{}, {}}},
 			resolved: map[string]*tree.ResolvedFunctionDefinition{
-				"crdb_internal.fun": {
-					Name: "crdb_internal.fun",
-					Overloads: []tree.QualifiedOverload{
-						{
-							Schema:   "crdb_internal",
-							Overload: &tree.Overload{},
-						},
-						{
-							Schema:   "crdb_internal",
-							Overload: &tree.Overload{},
-						},
-					},
-				},
+				"crdb_internal.fun": tree.NewResolvedFunctionDefinition(
+					"fun", "crdb_internal", []*tree.Overload{{}, {}},
+				),
 			},
 		},
 		{
 			def: &tree.FunctionDefinition{Name: "fun", Definition: []*tree.Overload{{}}},
 			resolved: map[string]*tree.ResolvedFunctionDefinition{
-				"pg_catalog.fun": {
-					Name: "fun",
-					Overloads: []tree.QualifiedOverload{
-						{
-							Schema:   "pg_catalog",
-							Overload: &tree.Overload{},
-						},
-					},
-				},
+				"pg_catalog.fun": tree.NewResolvedFunctionDefinition(
+					"fun", "pg_catalog", []*tree.Overload{{}, {}},
+				),
 			},
 		},
 		{
@@ -211,24 +195,12 @@ func TestAddResolvedFuncDef(t *testing.T) {
 				FunctionProperties: tree.FunctionProperties{AvailableOnPublicSchema: true},
 			},
 			resolved: map[string]*tree.ResolvedFunctionDefinition{
-				"pg_catalog.fun": {
-					Name: "fun",
-					Overloads: []tree.QualifiedOverload{
-						{
-							Schema:   "pg_catalog",
-							Overload: &tree.Overload{},
-						},
-					},
-				},
-				"public.fun": {
-					Name: "fun",
-					Overloads: []tree.QualifiedOverload{
-						{
-							Schema:   "public",
-							Overload: &tree.Overload{},
-						},
-					},
-				},
+				"pg_catalog.fun": tree.NewResolvedFunctionDefinition(
+					"fun", "pg_catalog", []*tree.Overload{{}},
+				),
+				"public.fun": tree.NewResolvedFunctionDefinition(
+					"fun", "public", []*tree.Overload{{}},
+				),
 			},
 		},
 	}

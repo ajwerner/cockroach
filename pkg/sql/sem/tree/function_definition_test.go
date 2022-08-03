@@ -79,9 +79,10 @@ func TestBuiltinFunctionResolver(t *testing.T) {
 				require.Nil(t, funcDef)
 				return
 			}
-			for _, o := range funcDef.Overloads {
-				require.Equal(t, tc.expectedSchema, o.Schema)
-			}
+			funcDef.ForEachOverload(func(schema string, _ *tree.Overload) error {
+				require.Equal(t, tc.expectedSchema, schema)
+				return nil
+			})
 		})
 	}
 }

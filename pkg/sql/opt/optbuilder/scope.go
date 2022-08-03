@@ -1142,24 +1142,31 @@ func isOrderedSetAggregate(
 
 	// FunctionProperties exist in function definitions and their overloads, so we
 	// unset all private fields here.
-	unsetPrivate := func(def *tree.ResolvedFunctionDefinition) {
-		for i := range def.Overloads {
-			newOverload := def.Overloads[i]
-			newOverload.Private = false
-			def.Overloads[i] = newOverload
+	unsetPrivate := func(def *tree.ResolvedFunctionDefinition) *tree.ResolvedFunctionDefinition {
+		overloads := make([]*tree.Overload, 0, def.NumOverloads())
+		var schema string
+		if err := def.ForEachOverload(func(overloadSchema string, overload *tree.Overload) error {
+			if schema != "" && schema != overloadSchema {
+				return errors.AssertionFailedf("unexpected schema mismatch in isOrderedSetAggregate: %s != %s",
+					schema, overloadSchema)
+			}
+			schema = overloadSchema
+			clone := *overload
+			clone.Private = false
+			overloads = append(overloads, &clone)
+			return nil
+		}); err != nil {
+			panic(err)
 		}
+		return tree.NewResolvedFunctionDefinition(def.Name, schema, overloads)
 	}
 	switch def.Name {
 	case "percentile_disc":
 		builtinDef := tree.ResolvedBuiltinFuncDefs[catconstants.PgCatalogName+"."+"percentile_disc_impl"]
-		newDef := *builtinDef
-		unsetPrivate(&newDef)
-		return &newDef, true
+		return unsetPrivate(builtinDef), true
 	case "percentile_cont":
 		builtinDef := tree.ResolvedBuiltinFuncDefs[catconstants.PgCatalogName+"."+"percentile_cont_impl"]
-		newDef := *builtinDef
-		unsetPrivate(&newDef)
-		return &newDef, true
+		return unsetPrivate(builtinDef), true
 	}
 	return def, false
 }
