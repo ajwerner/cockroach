@@ -233,7 +233,9 @@ func (t *Database) iterate(where values, hasAttrs ordinalSet, f entityIterator) 
 		})
 		if !failed {
 			if err = f.visit((entity)(cv.values)); err != nil {
-				err = iterutil.Map(err)
+				if err != errResultSetNotEmpty {
+					err = iterutil.Map(err)
+				}
 				return false
 			}
 		}
