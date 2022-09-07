@@ -353,6 +353,15 @@ func isWithExpression(element scpb.Element) bool {
 	return err == nil
 }
 
+func isTypeDescriptor(element scpb.Element) bool {
+	switch element.(type) {
+	case *scpb.EnumType, *scpb.AliasType:
+		return true
+	default:
+		return false
+	}
+}
+
 func getExpressionOrPanic(element scpb.Element) *scpb.Expression {
 	ret, err := getExpression(element)
 	if err != nil {

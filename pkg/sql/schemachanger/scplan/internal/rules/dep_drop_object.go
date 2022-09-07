@@ -116,33 +116,47 @@ func init() {
 		scgraph.SameStagePrecedence,
 		"referenced-descriptor", "referencing-via-type",
 		func(from, to nodeVars) rel.Clauses {
+			fromDescID := rel.Var("fromDescID")
 			return rel.Clauses{
-				from.typeFilter(IsDescriptor),
+				from.typeFilter(isTypeDescriptor),
+				from.joinTargetNode(),
 				to.typeFilter(isSimpleDependent, isWithTypeT),
+				from.el.AttrEqVar(screl.DescID, fromDescID),
+				to.el.AttrContainsVar(screl.ReferencedTypeDescIDs, fromDescID),
 				statusesToAbsent(from, scpb.Status_DROPPED, to, scpb.Status_ABSENT),
-				filterElements("RefByTypeT", from, to, func(from, to scpb.Element) bool {
-					refID := screl.GetDescID(from)
-					typeT := getTypeTOrPanic(to)
-					return typeT != nil && idInIDs(typeT.ClosedTypeIDs, refID)
-				}),
 			}
 		},
 	)
 
 	registerDepRule(
-		"descriptor drop right before removing dependent with expr ref",
+		"descriptor drop right before removing dependent with expr ref to sequence",
 		scgraph.SameStagePrecedence,
 		"referenced-descriptor", "referencing-via-expr",
 		func(from, to nodeVars) rel.Clauses {
+			seqID := rel.Var("seqID")
 			return rel.Clauses{
-				from.typeFilter(IsDescriptor),
+				from.Type((*scpb.Sequence)(nil)),
+				from.joinTargetNode(),
 				to.typeFilter(isSimpleDependent, isWithExpression),
+				from.el.AttrEqVar(screl.DescID, seqID),
+				to.el.AttrContainsVar(screl.ReferencedSequenceIDs, seqID),
 				statusesToAbsent(from, scpb.Status_DROPPED, to, scpb.Status_ABSENT),
-				filterElements("RefByExpression", from, to, func(from, to scpb.Element) bool {
-					refID := screl.GetDescID(from)
-					expr := getExpressionOrPanic(to)
-					return expr != nil && (idInIDs(expr.UsesTypeIDs, refID) || idInIDs(expr.UsesSequenceIDs, refID))
-				}),
+			}
+		},
+	)
+	registerDepRule(
+		"descriptor drop right before removing dependent with expr ref to type",
+		scgraph.SameStagePrecedence,
+		"referenced-descriptor", "referencing-via-expr",
+		func(from, to nodeVars) rel.Clauses {
+			typeID := rel.Var("typeID")
+			return rel.Clauses{
+				from.typeFilter(isTypeDescriptor),
+				from.joinTargetNode(),
+				to.typeFilter(isSimpleDependent, isWithExpression),
+				from.el.AttrEqVar(screl.DescID, typeID),
+				to.el.AttrContainsVar(screl.ReferencedTypeDescIDs, typeID),
+				statusesToAbsent(from, scpb.Status_DROPPED, to, scpb.Status_ABSENT),
 			}
 		},
 	)

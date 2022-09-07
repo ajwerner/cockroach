@@ -20,7 +20,12 @@ var equalityAttrs = func() []rel.Attr {
 	s := make([]rel.Attr, 0, AttrMax)
 	s = append(s, rel.Type)
 	for a := Attr(1); a <= AttrMax; a++ {
-		s = append(s, a)
+		switch a {
+		case ReferencedTypeDescIDs:
+			// Do not compare on slice attributes.
+		default:
+			s = append(s, a)
+		}
 	}
 	return s
 }()

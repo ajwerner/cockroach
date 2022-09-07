@@ -100,6 +100,10 @@ func New(cs scpb.CurrentState) (*Graph, error) {
 				{Attr: rel.Type, Eq: reflect.TypeOf((*screl.Node)(nil))},
 			},
 		},
+		{
+			Attrs:    []rel.Attr{screl.ReferencedTypeDescIDs},
+			Inverted: true,
+		},
 	}...)
 	if err != nil {
 		return nil, err
