@@ -60,6 +60,29 @@ func (t *entitySet) insert(v interface{}, es entityStore) (int, error) {
 	for _, field := range ti.fields {
 		var val uintptr
 		switch {
+		case field.isSlice():
+			// In this case, we want to create slice members for each member in
+			// the slice and then be done with it.
+			fvi := field.value(vp)
+			if fvi == nil {
+				continue
+			}
+			fv := reflect.ValueOf(fvi)
+			if fv.Kind() != reflect.Slice {
+				errors.AssertionFailedf("expected a slice type, got %v", fv.Type())
+			}
+			for i := 0; i < fv.Len(); i++ {
+				smpv := reflect.New(field.sliceMemberType.Elem())
+				smv := smpv.Elem()
+				smv.Field(0).Set(value)
+				smv.Field(1).Set(reflect.ValueOf(i))
+				smv.Field(2).Set(fv.Index(i))
+				if _, err := es.insert(smpv.Interface(), es); err != nil {
+					return 0, err
+				}
+			}
+			continue
+
 		case field.isStruct():
 			fv := field.value(vp)
 			if fv == nil {

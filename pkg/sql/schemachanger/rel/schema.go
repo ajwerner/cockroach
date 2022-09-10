@@ -21,16 +21,19 @@ import (
 
 // Schema defines a mapping of entities to their attributes and decomposition.
 type Schema struct {
-	name                     string
-	attrs                    []Attr
-	attrTypes                []reflect.Type
-	attrToOrdinal            map[Attr]ordinal
-	entityTypes              []*entityTypeSchema
-	entityTypeSchemas        map[reflect.Type]*entityTypeSchema
-	typeOrdinal, selfOrdinal ordinal
-	stringAttrs              ordinalSet
-	rules                    []*RuleDef
-	rulesByName              map[string]*RuleDef
+	name                                  string
+	attrs                                 []Attr
+	attrTypes                             []reflect.Type
+	sliceOrdinals                         ordinalSet
+	sliceOrdinalTypes                     map[ordinal]*entityTypeSchema
+	attrToOrdinal                         map[Attr]ordinal
+	entityTypes                           []*entityTypeSchema
+	entityTypeSchemas                     map[reflect.Type]*entityTypeSchema
+	typeOrdinal, selfOrdinal              ordinal
+	sliceIndexOrdinal, sliceSourceOrdinal ordinal
+	stringAttrs                           ordinalSet
+	rules                                 []*RuleDef
+	rulesByName                           map[string]*RuleDef
 }
 
 type entityTypeSchemaSort Schema
@@ -77,6 +80,11 @@ type entityTypeSchema struct {
 
 	// typID is the rank of the type of this entity in the schema.
 	typID uintptr
+
+	// isSliceMemberType is true if this type exists to support containment
+	// operations over a slice type.
+	isSliceMemberType bool
+	sliceAttr         ordinal
 }
 
 type fieldInfo struct {
@@ -87,6 +95,8 @@ type fieldInfo struct {
 	value           func(unsafe.Pointer) interface{}
 	inline          func(unsafe.Pointer) (uintptr, bool)
 	fieldFlags
+
+	sliceMemberType reflect.Type
 }
 
 type fieldFlags int8
@@ -98,6 +108,7 @@ func (f fieldFlags) isInt() bool     { return f&intField != 0 }
 func (f fieldFlags) isUint() bool    { return f&uintField != 0 }
 func (f fieldFlags) isIntLike() bool { return f&(intField|uintField) != 0 }
 func (f fieldFlags) isString() bool  { return f&stringField != 0 }
+func (f fieldFlags) isSlice() bool   { return f&sliceField != 0 }
 
 const (
 	intField fieldFlags = 1 << iota
@@ -105,6 +116,7 @@ const (
 	stringField
 	structField
 	pointerField
+	sliceField
 )
 
 func buildSchema(name string, opts ...SchemaOption) *Schema {
@@ -116,6 +128,7 @@ func buildSchema(name string, opts ...SchemaOption) *Schema {
 		Schema: &Schema{
 			name:              name,
 			attrToOrdinal:     make(map[Attr]ordinal),
+			sliceOrdinalTypes: make(map[ordinal]*entityTypeSchema),
 			entityTypeSchemas: make(map[reflect.Type]*entityTypeSchema),
 			rulesByName:       make(map[string]*RuleDef),
 		},
@@ -143,6 +156,31 @@ func buildSchema(name string, opts ...SchemaOption) *Schema {
 type schemaBuilder struct {
 	*Schema
 	m schemaMappings
+}
+
+func makeSliceMemberType(srcType, sliceType reflect.Type) reflect.Type {
+	return reflect.StructOf([]reflect.StructField{
+		{
+			Name: "Source",
+			Type: srcType,
+		},
+		{
+			Name: "Index",
+			Type: reflect.TypeOf((*int)(nil)).Elem(),
+		},
+		{
+			Name: "Value",
+			Type: sliceType.Elem(),
+		},
+	})
+}
+
+func (sb *schemaBuilder) maybeInitializeSliceMemberAttributes() {
+	if sb.sliceIndexOrdinal != 0 {
+		return
+	}
+	sb.sliceIndexOrdinal = sb.maybeAddAttribute(sliceIndex, reflect.TypeOf((*int)(nil)).Elem())
+	sb.sliceSourceOrdinal = sb.maybeAddAttribute(sliceSource, reflect.TypeOf((*interface{})(nil)).Elem())
 }
 
 func (sb *schemaBuilder) maybeAddAttribute(a Attr, typ reflect.Type) ordinal {
@@ -182,7 +220,9 @@ func checkType(typ, exp reflect.Type) error {
 	return nil
 }
 
-func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, attributeMappings []attrMapping) {
+func (sb *schemaBuilder) maybeAddTypeMapping(
+	t reflect.Type, attributeMappings []attrMapping,
+) *entityTypeSchema {
 	isStructPointer := func(tt reflect.Type) bool {
 		return tt.Kind() == reflect.Ptr && tt.Elem().Kind() == reflect.Struct
 	}
@@ -221,6 +261,7 @@ func (sb *schemaBuilder) maybeAddTypeMapping(t reflect.Type, attributeMappings [
 	}
 	sb.entityTypeSchemas[t] = ts
 	sb.entityTypes = append(sb.entityTypes, ts)
+	return ts
 }
 
 func makeFieldFlags(t reflect.Type) (fieldFlags, bool) {
@@ -231,6 +272,8 @@ func makeFieldFlags(t reflect.Type) (fieldFlags, bool) {
 	}
 	kind := t.Kind()
 	switch {
+	case kind == reflect.Slice && !f.isPtr():
+		f |= sliceField
 	case kind == reflect.Struct && f.isPtr():
 		f |= structField
 	case kind == reflect.String:
@@ -259,13 +302,43 @@ func (sb *schemaBuilder) addTypeAttrMapping(a Attr, t reflect.Type, sel string) 
 	if flags.isPtr() && flags.isScalar() {
 		typ = cur.Elem()
 	}
-	ord := sb.maybeAddAttribute(a, typ)
+	var ord ordinal
+	var sliceMemberType reflect.Type
+	if flags.isSlice() {
+		// We need to add the slice type and then return, or
+		// perhaps, add some annotation to the type that this
+		// is a slice, and it refers to xyz.
+		sb.maybeInitializeSliceMemberAttributes()
+		sliceMemberType = reflect.PtrTo(makeSliceMemberType(t, typ))
+		st := sb.maybeAddTypeMapping(sliceMemberType, []attrMapping{
+			{
+				a:         sliceSource,
+				selectors: []string{"Source"},
+			},
+			{
+				a:         sliceIndex,
+				selectors: []string{"Index"},
+			},
+			{
+				a:         a,
+				selectors: []string{"Value"},
+			},
+		})
+		st.isSliceMemberType = true
+		ord = sb.attrToOrdinal[a]
+		sb.sliceOrdinalTypes[ord] = st
+		sb.sliceOrdinals = sb.sliceOrdinals.add(ord)
+		st.sliceAttr = ord
+	} else {
+		ord = sb.maybeAddAttribute(a, typ)
+	}
 
 	f := fieldInfo{
-		fieldFlags: flags,
-		path:       sel,
-		attr:       ord,
-		typ:        typ,
+		fieldFlags:      flags,
+		path:            sel,
+		attr:            ord,
+		typ:             typ,
+		sliceMemberType: sliceMemberType,
 	}
 	makeValueGetter := func(t reflect.Type, offset uintptr) func(u unsafe.Pointer) reflect.Value {
 		return func(u unsafe.Pointer) reflect.Value {
@@ -285,6 +358,15 @@ func (sb *schemaBuilder) addTypeAttrMapping(a Attr, t reflect.Type, sel string) 
 		vg := makeValueGetter(cur, offset)
 		if f.isPtr() && f.isStruct() {
 			f.value = getPtrValue(vg)
+		} else if f.isSlice() {
+			f.value = func(u unsafe.Pointer) interface{} {
+				got := vg(u)
+				ge := got.Elem()
+				if ge.IsNil() || ge.Len() == 0 {
+					return nil
+				}
+				return ge.Interface()
+			}
 		} else if f.isPtr() && f.isScalar() {
 			f.value = func(u unsafe.Pointer) interface{} {
 				got := vg(u)
@@ -300,6 +382,8 @@ func (sb *schemaBuilder) addTypeAttrMapping(a Attr, t reflect.Type, sel string) 
 			}
 		}
 		switch {
+		case f.isSlice():
+			// f.inline is not defined
 		case f.isPtr() && f.isInt():
 			f.inline = func(u unsafe.Pointer) (uintptr, bool) {
 				got := vg(u)
@@ -333,7 +417,7 @@ func (sb *schemaBuilder) addTypeAttrMapping(a Attr, t reflect.Type, sel string) 
 	{
 		if f.isStruct() {
 			f.comparableValue = getPtrValue(makeValueGetter(cur, offset))
-		} else {
+		} else if !f.isSlice() {
 			compType := getComparableType(typ)
 			if f.isPtr() && f.isScalar() {
 				compType = reflect.PtrTo(compType)

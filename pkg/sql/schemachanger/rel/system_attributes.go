@@ -33,6 +33,9 @@ const (
 
 	// Self is an attribute which stores the variable itself.
 	Self
+
+	sliceSource
+	sliceIndex
 )
 
 var _ Attr = systemAttribute(0)

@@ -35,6 +35,10 @@ func (v notValueExpr) encoded() interface{} {
 	return valueForYAML(v.value)
 }
 
+func (c containsExpr) encoded() interface{} {
+	return valueForYAML(c.v)
+}
+
 func (a anyExpr) encoded() interface{} {
 	ret := make([]interface{}, 0, len(a))
 	for _, v := range a {

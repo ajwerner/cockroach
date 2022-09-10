@@ -145,13 +145,62 @@ func (p *queryBuilder) processClause(t Clause) {
 }
 
 func (p *queryBuilder) processTripleDecl(fd tripleDecl) {
+	ord := p.sc.mustGetOrdinal(fd.attribute)
+	if p.maybeHandleContains(fd, ord) {
+		return
+	}
 	f := fact{
 		variable: p.maybeAddVar(fd.entity, true /* entity */),
-		attr:     p.sc.mustGetOrdinal(fd.attribute),
+		attr:     ord,
+		value:    p.processValueExpr(fd.value),
 	}
-	f.value = p.processValueExpr(fd.value)
 	p.typeCheck(f)
 	p.facts = append(p.facts, f)
+}
+
+func (p *queryBuilder) maybeHandleContains(fd tripleDecl, ord ordinal) (isContains bool) {
+	contains, isContains := fd.value.(containsExpr)
+	attrType, isContainAttr := p.sc.sliceOrdinalTypes[ord]
+	switch {
+	case isContains == isContainAttr:
+		// all good
+	case !isContainAttr:
+		panic(errors.Errorf("cannot use Contains for non-slice attribute %v", fd.attribute))
+	case !isContains:
+		panic(errors.Errorf("cannot use attribute %v for operations other than Contains"))
+	}
+	if !isContains {
+		return false
+	}
+	p.handleContains(
+		fd.entity, ord, contains.v, attrType.typ,
+	)
+	return true
+}
+
+func (p *queryBuilder) handleContains(source Var, ord ordinal, val expr, typ reflect.Type) {
+	id := p.fillSlot(slot{}, true)
+	for _, f := range []fact{
+		{
+			variable: id,
+			attr:     ord,
+			value:    p.processValueExpr(val),
+		},
+		{
+			variable: id,
+			attr:     p.sc.sliceSourceOrdinal,
+			value:    p.processValueExpr(source),
+		},
+		{
+			variable: id,
+			attr:     p.sc.typeOrdinal,
+			value:    p.processValueExpr(valueExpr{typ}),
+		},
+	} {
+		p.typeCheck(f)
+		p.facts = append(p.facts, f)
+	}
+	p.maybeAddVar(source, true)
 }
 
 func (p *queryBuilder) processEqDecl(t eqDecl) {
@@ -245,6 +294,8 @@ func (p *queryBuilder) processValueExpr(rawValue expr) slotIdx {
 			panic(err)
 		}
 		return p.fillSlot(slot{not: tv}, false)
+	case containsExpr:
+		return p.processValueExpr(v.v)
 	default:
 		panic(errors.AssertionFailedf("unknown expr type %T", rawValue))
 	}

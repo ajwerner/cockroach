@@ -72,6 +72,10 @@ type Index struct {
 	// attribute existence from the query itself and to free the query-writer
 	// from needing to define a bogus Var.
 	Exists []Attr
+
+	// Inverted is true if the index is an inverted index over slice membership.
+	// If true, the attributes may only refer to a slice membership type.
+	Inverted bool
 }
 
 // NewDatabase constructs a new Database with the specified indexes.
@@ -82,8 +86,12 @@ func NewDatabase(sc *Schema, indexes ...Index) (*Database, error) {
 			hash:    map[interface{}]int{},
 			strings: map[string]int{},
 		},
-		indexes: make([]index, len(indexes)),
 	}
+	indexes, err := maybeExpandInvertedIndexes(sc, indexes)
+	if err != nil {
+		return nil, err
+	}
+	t.indexes = make([]index, len(indexes))
 	for i, di := range indexes {
 		var set, exists ordinalSet
 		ords := make([]ordinal, len(di.Attrs))
@@ -135,14 +143,73 @@ func NewDatabase(sc *Schema, indexes ...Index) (*Database, error) {
 				)
 			}
 		}
-
-		spec := indexSpec{mask: set, attrs: ords, s: &t.entitySet, exists: exists, where: predicate}
+		spec := indexSpec{
+			mask:       set,
+			attrs:      ords,
+			s:          &t.entitySet,
+			exists:     exists,
+			where:      predicate,
+			isInverted: di.Inverted,
+		}
 		t.indexes[i] = index{
 			indexSpec: spec,
 			tree:      btree.New(32),
 		}
 	}
 	return t, nil
+}
+
+func maybeExpandInvertedIndexes(sc *Schema, indexes []Index) ([]Index, error) {
+	if !containsInverted(indexes) {
+		return indexes, nil
+	}
+	var expanded []Index
+	for _, idx := range indexes {
+		if !idx.Inverted {
+			expanded = append(expanded, idx)
+			continue
+		}
+		if len(idx.Attrs) > 1 {
+			return nil, errors.Errorf("inverted indexes may only reference a single slice attribute, got %v", idx.Attrs)
+		}
+		ord, err := sc.getOrdinal(idx.Attrs[0])
+		if err != nil {
+			return nil, errors.Wrap(err, "invalid index attribute")
+		}
+		et, ok := sc.sliceOrdinalTypes[ord]
+		if !ok {
+			return nil, errors.Errorf("inverted index references non-slice attribute %v", idx.Attrs[0])
+		}
+		if len(idx.Where) > 0 {
+			return nil, errors.Errorf("inverted indexes are implicitly partial and cannot be further constrained")
+		}
+		if len(idx.Exists) > 0 {
+			return nil, errors.Errorf("inverted indexes may not have existence constraints")
+		}
+		where := []IndexWhere{{
+			Attr: Type,
+			Eq:   et.typ,
+		}}
+		expanded = append(expanded, Index{
+			Attrs:    []Attr{idx.Attrs[0], sliceSource, sliceIndex},
+			Where:    where,
+			Inverted: true,
+		}, Index{
+			Attrs:    []Attr{sliceSource, idx.Attrs[0], sliceIndex},
+			Where:    where,
+			Inverted: true,
+		})
+	}
+	return expanded, nil
+}
+
+func containsInverted(indexes []Index) bool {
+	for i := range indexes {
+		if indexes[i].Inverted {
+			return true
+		}
+	}
+	return false
 }
 
 // entityStore is an abstraction to permit the relevant recursion of interning
@@ -157,17 +224,28 @@ type entityStore interface {
 
 // insert implements entityStore.
 func (t *Database) insert(v interface{}, es entityStore) (id int, err error) {
+	if id, ok := t.entitySet.hash[v]; ok {
+		return id, nil
+	}
 	id, err = t.entitySet.insert(v, es)
 	if err != nil {
 		return 0, err
 	}
 	e := (*values)(&t.entitySet.entities[id])
+	typIdx, ok := e.get(t.schema.typeOrdinal)
+	if !ok {
+		return 0, errors.AssertionFailedf("unknown type for entity %T: %v", v, v)
+	}
+	typ := t.schema.entityTypes[typIdx]
 	for i := range t.indexes {
 		idx := &t.indexes[i]
 		if !idx.matchesPredicate(e) {
 			continue
 		}
 		if idx.exists != 0 && !idx.exists.isContainedIn(e.attrs) {
+			continue
+		}
+		if typ.isSliceMemberType && !idx.isInverted {
 			continue
 		}
 		idx.tree.ReplaceOrInsert(&valuesItem{values: *e, idx: &idx.indexSpec})
@@ -196,11 +274,12 @@ type index struct {
 }
 
 type indexSpec struct {
-	s      *entitySet
-	mask   ordinalSet
-	attrs  []ordinal
-	exists ordinalSet
-	where  values
+	s          *entitySet
+	mask       ordinalSet
+	attrs      []ordinal
+	exists     ordinalSet
+	where      values
+	isInverted bool
 }
 
 // entityIterator is used to iterate Entities.
@@ -271,6 +350,10 @@ func (t *Database) chooseIndex(
 			continue
 		}
 		if !dims[i].matchesPredicate(&where) {
+			continue
+		}
+		hasSliceAttrs := !hasAttrs.intersection(t.schema.sliceOrdinals).empty()
+		if hasSliceAttrs && !dims[i].isInverted {
 			continue
 		}
 		best, bestOverlap = i, overlap
