@@ -28,6 +28,7 @@ func init() {
 		func(from, to nodeVars) rel.Clauses {
 			return rel.Clauses{
 				from.Type((*scpb.Column)(nil)),
+				from.joinTarget(),
 				to.typeFilter(isColumnDependent),
 				joinOnColumnID(from, to, "table-id", "col-id"),
 				statusesToPublicOrTransient(from, scpb.Status_DELETE_ONLY, to, scpb.Status_PUBLIC),
@@ -41,8 +42,9 @@ func init() {
 		"dependent", "column",
 		func(from, to nodeVars) rel.Clauses {
 			return rel.Clauses{
-				from.typeFilter(isColumnDependent),
 				to.Type((*scpb.Column)(nil)),
+				to.joinTarget(),
+				from.typeFilter(isColumnDependent),
 				joinOnColumnID(from, to, "table-id", "col-id"),
 				statusesToPublicOrTransient(from, scpb.Status_PUBLIC, to, scpb.Status_PUBLIC),
 			}
@@ -97,6 +99,12 @@ func init() {
 			status := rel.Var("status")
 			return rel.Clauses{
 				from.Type((*scpb.Column)(nil)),
+				// Join the target early to check whether we're dropping this column
+				// before searching for the other column, which is unconstrained
+				// other than the table, which might have thousands of columns.
+				// This rule will be quadratic if you are adding thousands of columns
+				// to a table at a time.
+				from.joinTarget(),
 				to.Type((*scpb.Column)(nil)),
 				joinOnDescID(from, to, "table-id"),
 				toPublicOrTransient(from, to),

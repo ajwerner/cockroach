@@ -41,9 +41,11 @@ func init() {
 		scpb.Status_ABSENT, scpb.Status_ABSENT,
 		func(from, to nodeVars) rel.Clauses {
 			return rel.Clauses{
-				from.typeFilter(isColumnDependent),
 				to.Type((*scpb.Column)(nil)),
+				to.joinTarget(),
+				to.joinTargetNode(),
 				joinOnColumnID(from, to, "table-id", "col-id"),
+				from.typeFilter(isColumnDependent),
 			}
 		},
 	)
