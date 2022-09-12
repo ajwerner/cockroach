@@ -159,17 +159,23 @@ func (ec *evalContext) visit(e entity) error {
 	// Fill in the slots corresponding to this entity and its attributes.
 	setEntitySlots := func() (foundContradiction bool) {
 		// TODO(ajwerner): Constrain to just the facts about this variable.
+		curEntity := ec.q.entities[ec.cur]
 		for _, f := range ec.facts {
-			if f.variable != ec.q.entities[ec.cur] {
+			var toSet slotIdx
+			switch {
+			case f.value == curEntity && f.attr == ec.q.schema.selfOrdinal:
+				toSet = f.variable
+			case f.variable == curEntity:
+				toSet = f.value
+			default:
 				continue
 			}
-
 			tv, ok := e.getTypedValue(&ec.db.entitySet, f.attr)
 			if !ok {
 				return true // we have no value for this attribute, contradiction
 			}
 			if contradiction := maybeSet(
-				ec.slots, f.value, tv, &slotsFilled,
+				ec.slots, toSet, tv, &slotsFilled,
 			); contradiction {
 				return true
 			}

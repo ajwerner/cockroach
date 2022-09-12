@@ -81,7 +81,11 @@ func (g *Graph) Database() *rel.Database {
 func New(cs scpb.CurrentState) (*Graph, error) {
 	db, err := rel.NewDatabase(screl.Schema, []rel.Index{
 		{
-			Attrs:  []rel.Attr{rel.Type, screl.DescID, screl.ColumnID},
+			Attrs:  []rel.Attr{screl.DescID, screl.ColumnID, rel.Type},
+			Exists: []rel.Attr{screl.DescID, screl.ColumnID},
+		},
+		{
+			Attrs:  []rel.Attr{rel.Type, screl.DescID, screl.IndexID},
 			Exists: []rel.Attr{screl.DescID},
 		},
 		{
