@@ -89,8 +89,6 @@ func init() {
 	// set iff the parent relation is dropped. This is a dirty hack, ideally we
 	// should be able to express the _absence_ of a target element as a query
 	// clause.
-	//
-	// TODO(postamar): express this rule in a saner way
 	registerDepRuleForDrop(
 		"partial predicate removed right before secondary index when not dropping relation",
 		scgraph.SameStagePrecedence,
@@ -101,11 +99,7 @@ func init() {
 				from.Type((*scpb.SecondaryIndexPartial)(nil)),
 				to.Type((*scpb.SecondaryIndex)(nil)),
 				joinOnIndexID(from, to, "table-id", "index-id"),
-				rel.Filter("relationIsNotBeingDropped", from.el)(
-					func(ip *scpb.SecondaryIndexPartial) bool {
-						return !ip.IsRelationBeingDropped
-					},
-				),
+				descriptorIsNotBeingDropped(from.el),
 			}
 		},
 	)

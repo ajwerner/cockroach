@@ -44,6 +44,7 @@ func init() {
 				to.Type((*scpb.Column)(nil)),
 				to.joinTarget(),
 				to.joinTargetNode(),
+				from.typeFilter(isColumnDependent),
 				joinOnColumnID(from, to, "table-id", "col-id"),
 				from.typeFilter(isColumnDependent),
 			}
@@ -60,8 +61,8 @@ func init() {
 		"dependent", "column-type",
 		func(from, to nodeVars) rel.Clauses {
 			return rel.Clauses{
-				from.typeFilter(isColumnTypeDependent),
 				to.Type((*scpb.ColumnType)(nil)),
+				from.typeFilter(isColumnTypeDependent),
 				joinOnColumnID(from, to, "table-id", "col-id"),
 				statusesToAbsent(from, scpb.Status_ABSENT, to, scpb.Status_ABSENT),
 			}
@@ -83,8 +84,6 @@ func init() {
 	// Note that DEFAULT and ON UPDATE expressions are column-dependent elements
 	// which also hold references to other descriptors. The rule prior to this one
 	// ensures that they transition to ABSENT before scpb.ColumnType does.
-	//
-	// TODO(postamar): express this rule in a saner way
 	registerDepRule(
 		"column type removed right before column when not dropping relation",
 		scgraph.SameStagePrecedence,
@@ -95,11 +94,7 @@ func init() {
 				to.Type((*scpb.Column)(nil)),
 				joinOnColumnID(from, to, "table-id", "col-id"),
 				statusesToAbsent(from, scpb.Status_ABSENT, to, scpb.Status_ABSENT),
-				rel.Filter("relationIsNotBeingDropped", from.el)(
-					func(ct *scpb.ColumnType) bool {
-						return !ct.IsRelationBeingDropped
-					},
-				),
+				descriptorIsNotBeingDropped(from.el),
 			}
 		},
 	)

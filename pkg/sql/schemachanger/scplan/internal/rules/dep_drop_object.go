@@ -64,6 +64,7 @@ func init() {
 		func(from, to nodeVars) rel.Clauses {
 			return rel.Clauses{
 				from.typeFilter(IsDescriptor),
+				from.joinTargetNode(),
 				to.typeFilter(isSimpleDependent),
 				joinOnDescID(from, to, "desc-id"),
 				statusesToAbsent(from, scpb.Status_DROPPED, to, scpb.Status_ABSENT),
