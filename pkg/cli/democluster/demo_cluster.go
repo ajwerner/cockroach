@@ -322,28 +322,7 @@ func (c *transientCluster) Start(
 			// Now, all servers have been started enough to know their own RPC serving
 			// addresses, but nothing else. Assemble the artificial latency map.
 			c.infoLog(ctx, "initializing latency map")
-			for i, serv := range c.servers {
-				latencyMap := serv.Cfg.TestingKnobs.Server.(*server.TestingKnobs).ContextTestingKnobs.ArtificialLatencyMap
-				srcLocality, ok := serv.Cfg.Locality.Find("region")
-				if !ok {
-					continue
-				}
-				srcLocalityMap, ok := regionToRegionToLatency[srcLocality]
-				if !ok {
-					continue
-				}
-				for j, dst := range c.servers {
-					if i == j {
-						continue
-					}
-					dstLocality, ok := dst.Cfg.Locality.Find("region")
-					if !ok {
-						continue
-					}
-					latency := srcLocalityMap[dstLocality]
-					latencyMap[dst.ServingRPCAddr()] = latency
-				}
-			}
+			localityLatencies.Apply(c)
 		}
 		return nil
 	}(phaseCtx); err != nil {
@@ -1420,6 +1399,14 @@ func (s unixSocketDetails) String() string {
 
 func (c *transientCluster) NumNodes() int {
 	return len(c.servers)
+}
+
+func (c *transientCluster) NumServers() int {
+	return len(c.servers)
+}
+
+func (c *transientCluster) Server(i int) serverutils.TestServerInterface {
+	return c.servers[i]
 }
 
 func (c *transientCluster) GetLocality(nodeID int32) string {
