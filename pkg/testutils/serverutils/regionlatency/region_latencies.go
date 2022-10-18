@@ -13,6 +13,7 @@
 package regionlatency
 
 import (
+	"sort"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/server"
@@ -45,7 +46,7 @@ type RoundTripLatency = time.Duration
 // OneWayLatency is the time to go from a region to another region.
 type OneWayLatency = time.Duration
 
-// Apply is used to inject the latency pairs into the ArtificialLatencyMap.
+// Apply is used to inject the latency pairs into the InjectedLatencyOracle.
 // This step must be done after the servers have been created but before they
 // have been allowed to issue RPCs. It is intended to be paired with the
 // server testing knob PauseAfterGettingRPCAddresses.
@@ -53,17 +54,17 @@ func (m LatencyMap) Apply(tc TestCluster) {
 	for i, n := 0, tc.NumServers(); i < n; i++ {
 		serv := tc.Server(i)
 		latencyMap := serv.TestingKnobs().Server.(*server.TestingKnobs).
-			ContextTestingKnobs.ArtificialLatencyMap
+			ContextTestingKnobs.InjectedLatencyOracle
 		cfg := serv.ExecutorConfig().(sql.ExecutorConfig)
 		srcLocality, ok := cfg.Locality.Find("region")
 		if !ok {
 			continue
 		}
-		for j := 0; j < n; j++ {
-			if i == j {
+		for j := 0; j < tc.NumServers(); j++ {
+			dst := tc.Server(j)
+			if dst == serv {
 				continue
 			}
-			dst := tc.Server(i)
 			dstCfg := dst.ExecutorConfig().(sql.ExecutorConfig)
 			dstLocality, ok := dstCfg.Locality.Find("region")
 			if !ok {
@@ -73,7 +74,7 @@ func (m LatencyMap) Apply(tc TestCluster) {
 			if !ok {
 				continue
 			}
-			latencyMap[dst.ServingRPCAddr()] = int((l / time.Millisecond).Nanoseconds())
+			latencyMap.SetLatency(dst.ServingRPCAddr(), l)
 		}
 	}
 }
@@ -85,6 +86,16 @@ func (m LatencyMap) GetLatency(a, b Region) (OneWayLatency, bool) {
 	}
 	toB, ok := fromA[b]
 	return toB, ok
+}
+
+// GetRegions returns a slice of regions stored in the map.
+func (m LatencyMap) GetRegions() []Region {
+	regions := make([]Region, 0, len(m.m))
+	for r := range m.m {
+		regions = append(regions, r)
+	}
+	sort.Strings(regions)
+	return regions
 }
 
 // RoundTripPairs are pairs of round-trip latency between regions.

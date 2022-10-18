@@ -371,7 +371,8 @@ func (c *transientCluster) Start(
 
 			c.tenantServers = make([]serverutils.TestTenantInterface, c.demoCtx.NumNodes)
 			for i := 0; i < c.demoCtx.NumNodes; i++ {
-				latencyMap := c.servers[i].Cfg.TestingKnobs.Server.(*server.TestingKnobs).ContextTestingKnobs.ArtificialLatencyMap
+				latencyMap := c.servers[i].Cfg.TestingKnobs.Server.(*server.TestingKnobs).
+					ContextTestingKnobs.InjectedLatencyOracle
 				c.infoLog(ctx, "starting tenant node %d", i)
 				tenantStopper := stop.NewStopper()
 				ts, err := c.servers[i].StartTenant(ctx, base.TestTenantArgs{
@@ -389,7 +390,7 @@ func (c *transientCluster) Start(
 					TestingKnobs: base.TestingKnobs{
 						Server: &server.TestingKnobs{
 							ContextTestingKnobs: rpc.ContextTestingKnobs{
-								ArtificialLatencyMap: latencyMap,
+								InjectedLatencyOracle: latencyMap,
 							},
 						},
 					},
@@ -531,7 +532,7 @@ func (c *transientCluster) createAndAddNode(
 		// started listening on RPC, and before they proceed with their
 		// startup routine.
 		serverKnobs.ContextTestingKnobs = rpc.ContextTestingKnobs{
-			ArtificialLatencyMap: make(map[string]int),
+			InjectedLatencyOracle: make(rpc.InjectedLatencyMap),
 		}
 	}
 
