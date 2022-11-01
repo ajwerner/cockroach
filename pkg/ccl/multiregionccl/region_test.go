@@ -10,20 +10,26 @@ package multiregionccl_test
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/ccl/multiregionccl/multiregionccltestutils"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/errors"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -989,4 +995,66 @@ INSERT INTO db.rbr VALUES (1,1),(2,2),(3,3);
 			})
 		}
 	}
+}
+
+// startTestCluster starts a 3 node cluster.
+//
+// Note, if a testfeed depends on particular testing knobs, those may
+// need to be applied to each of the servers in the test cluster
+// returned from this function.
+func TestMultiRegionDatabaseStats(t *testing.T) {
+	skip.UnderStressRace(t, "multinode setup doesn't work under testrace")
+	ctx := context.Background()
+	knobs := base.TestingKnobs{}
+
+	regionToNumServers := make(map[string]int, 6)
+	regionToNumServers["us-east"] = 3
+	regionToNumServers["us-west"] = 3
+
+	tc, db, cleanup := multiregionccltestutils.TestingCreateMultiRegionClusterWithRegionList(
+		t,
+		regionToNumServers, /* numServers */
+		knobs,
+		multiregionccltestutils.WithUseDatabase("d"),
+	)
+
+	defer cleanup()
+
+	_, err := db.ExecContext(ctx,
+		`CREATE DATABASE test PRIMARY REGION "us-west";
+    use test;
+    CREATE TABLE a(id uuid primary key);`)
+	fmt.Print("admin: replicas: before err check\n")
+	require.NoError(t, err)
+
+	row := db.QueryRowContext(ctx,
+		`use test;
+    with x as (show ranges from table a) select replicas from x;`)
+	var replicas string
+	err = row.Scan(&replicas)
+	require.NoError(t, err)
+	fmt.Printf("replicas: %s \n", replicas)
+
+	s := tc.Server(0)
+
+	time.Sleep(5 * time.Second)
+
+	nodeIDs := []roachpb.NodeID{1, 2, 3}
+	testutils.SucceedsWithin(t, func() error {
+
+		fmt.Println("admin: region_test api call")
+		var resp serverpb.DatabaseDetailsResponse
+		require.NoError(t, serverutils.GetJSONProto(s, "/_admin/v1/databases/test?include_stats=true", &resp))
+		fmt.Printf("admin: region_test api result: %s, rangeCount %d\n", resp.Stats.NodeIDs, resp.Stats.RangeCount)
+
+		if resp.Stats.RangeCount != int64(1) {
+			return errors.Newf("expected range-count=1, got %d", resp.Stats.RangeCount)
+		}
+		if len(resp.Stats.NodeIDs) != len(nodeIDs) {
+			return errors.Newf("expected node-ids=%s, got %s", nodeIDs, resp.Stats.NodeIDs)
+		}
+		assert.Equal(t, nodeIDs, resp.Stats.NodeIDs, "NodeIDs")
+
+		return nil
+	}, 10*time.Second)
 }
