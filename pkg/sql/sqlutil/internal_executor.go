@@ -20,6 +20,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 )
 
+type TransactionalExecutor struct {
+	*kv.Txn
+	InternalExecutor
+}
+
 // InternalExecutor is meant to be used by layers below SQL in the system that
 // nevertheless want to execute SQL queries (presumably against system tables).
 // It is extracted in this "sqlutil" package to avoid circular references and
@@ -214,6 +219,8 @@ type InternalExecutorFactory interface {
 	// NewInternalExecutor constructs a new internal executor.
 	// TODO (janexing): this should be deprecated soon.
 	NewInternalExecutor(sd *sessiondata.SessionData) InternalExecutor
+
+	Txn(context.Context, func(context.Context, TransactionalExecutor) error, ...TxnOption) error
 
 	// TxnWithExecutor enables callers to run transactions with a *Collection such that all
 	// retrieved immutable descriptors are properly leased and all mutable

@@ -1477,3 +1477,20 @@ func (ief *InternalExecutorFactory) TxnWithExecutor(
 		opts...,
 	)
 }
+
+// TxnWithExecutor is to run queries with internal executor in a transactional
+// manner.
+func (ief *InternalExecutorFactory) Txn(
+	ctx context.Context,
+	f func(ctx context.Context, txn sqlutil.TransactionalExecutor) error,
+	opts ...sqlutil.TxnOption,
+) error {
+	return ief.TxnWithExecutor(ctx, ief.server.cfg.DB, nil, func(
+		ctx context.Context, txn *kv.Txn, ie sqlutil.InternalExecutor,
+	) error {
+		return f(ctx, sqlutil.TransactionalExecutor{
+			Txn:              txn,
+			InternalExecutor: ie,
+		})
+	}, opts...)
+}

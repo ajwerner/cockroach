@@ -41,65 +41,53 @@ import (
 // TODO(ajwerner): Hook into the alerts infrastructure and metrics to provide
 // visibility into corruption when it is detected.
 
-// storage interacts with the durable state of the protectedts subsystem.
-type storage struct {
+// Manager interacts with the durable state of the protectedts subsystem.
+type Manager struct {
 	settings *cluster.Settings
 	ex       sqlutil.InternalExecutor
 
 	knobs *protectedts.TestingKnobs
 }
 
-var _ protectedts.Storage = (*storage)(nil)
-
-// TODO(adityamaru): Delete in 22.2.
-func useDeprecatedProtectedTSStorage(
-	ctx context.Context, st *cluster.Settings, knobs *protectedts.TestingKnobs,
-) bool {
-	return knobs.DisableProtectedTimestampForMultiTenant
+type storage struct {
+	txn      sqlutil.TransactionalExecutor
+	settings *cluster.Settings
+	knobs    *protectedts.TestingKnobs
 }
 
-// New creates a new Storage.
-func New(
-	settings *cluster.Settings, ex sqlutil.InternalExecutor, knobs *protectedts.TestingKnobs,
-) protectedts.Storage {
-	if knobs == nil {
-		knobs = &protectedts.TestingKnobs{}
+func (p *storage) Protect(ctx context.Context, r *ptpb.Record) error {
+	if err := validateRecordForProtect(ctx, r, p.settings, p.knobs); err != nil {
+		return err
 	}
-	return &storage{settings: settings, ex: ex, knobs: knobs}
-}
 
-var errNoTxn = errors.New("must provide a non-nil transaction")
-
-func (p *storage) UpdateTimestamp(
-	ctx context.Context, txn *kv.Txn, id uuid.UUID, timestamp hlc.Timestamp,
-) error {
-	row, err := p.ex.QueryRowEx(ctx, "protectedts-update", txn,
-		sessiondata.InternalExecutorOverride{User: username.NodeUserName()},
-		updateTimestampQuery, id.GetBytesMut(), timestamp.WithSynthetic(false).AsOfSystemTime())
-	if err != nil {
-		return errors.Wrapf(err, "failed to update record %v", id)
+	meta := r.Meta
+	if meta == nil {
+		// v20.1 crashes in rowToRecord and Manager.Release if it finds a NULL
+		// value in system.protected_ts_records.meta. v20.2 and above handle
+		// this correctly, but we need to maintain mixed version compatibility
+		// for at least one release.
+		// TODO(nvanbenschoten): remove this for v21.1.
+		meta = []byte{}
 	}
-	if len(row) == 0 {
-		return protectedts.ErrNotExists
-	}
-	return nil
-}
 
-func (p *storage) deprecatedProtect(
-	ctx context.Context, txn *kv.Txn, r *ptpb.Record, meta []byte,
-) error {
+	// Clear the `DeprecatedSpans` field even if it has been set by the caller.
+	// Once the `AlterSystemProtectedTimestampAddColumn` migration has run, we
+	// only want to persist the `target` on which the pts record applies. We have
+	// already verified that the record has a valid `target`.
+	r.DeprecatedSpans = nil
 	s := makeSettings(p.settings)
-	encodedSpans, err := protoutil.Marshal(&Spans{Spans: r.DeprecatedSpans})
+	encodedTarget, err := protoutil.Marshal(&ptpb.Target{Union: r.Target.GetUnion(),
+		IgnoreIfExcludedFromBackup: r.Target.IgnoreIfExcludedFromBackup})
 	if err != nil { // how can this possibly fail?
 		return errors.Wrap(err, "failed to marshal spans")
 	}
-	it, err := p.ex.QueryIteratorEx(ctx, "protectedts-deprecated-protect", txn,
+	it, err := p.txn.QueryIteratorEx(ctx, "protectedts-protect", p.txn.Txn,
 		sessiondata.InternalExecutorOverride{User: username.NodeUserName()},
-		protectQueryWithoutTarget,
+		protectQuery,
 		s.maxSpans, s.maxBytes, len(r.DeprecatedSpans),
 		r.ID, r.Timestamp.WithSynthetic(false).AsOfSystemTime(),
 		r.MetaType, meta,
-		len(r.DeprecatedSpans), encodedSpans)
+		len(r.DeprecatedSpans), encodedTarget, encodedTarget)
 	if err != nil {
 		return errors.Wrapf(err, "failed to write record %v", r.ID)
 	}
@@ -115,15 +103,8 @@ func (p *storage) deprecatedProtect(
 		log.Infof(ctx, "encountered %v when writing record %v", err, r.ID)
 	}
 	if failed := *row[0].(*tree.DBool); failed {
-		curNumSpans := int64(*row[1].(*tree.DInt))
-		if s.maxSpans > 0 && curNumSpans+int64(len(r.DeprecatedSpans)) > s.maxSpans {
-			return errors.WithHint(
-				errors.Errorf("protectedts: limit exceeded: %d+%d > %d spans", curNumSpans,
-					len(r.DeprecatedSpans), s.maxSpans),
-				"SET CLUSTER SETTING kv.protectedts.max_spans to a higher value")
-		}
-		curBytes := int64(*row[2].(*tree.DInt))
-		recordBytes := int64(len(encodedSpans) + len(r.Meta) + len(r.MetaType))
+		curBytes := int64(*row[1].(*tree.DInt))
+		recordBytes := int64(len(encodedTarget) + len(r.Meta) + len(r.MetaType))
 		if s.maxBytes > 0 && curBytes+recordBytes > s.maxBytes {
 			return errors.WithHint(
 				errors.Errorf("protectedts: limit exceeded: %d+%d > %d bytes", curBytes, recordBytes,
@@ -132,10 +113,166 @@ func (p *storage) deprecatedProtect(
 		}
 		return protectedts.ErrExists
 	}
+
 	return nil
 }
 
-func (p *storage) Protect(ctx context.Context, txn *kv.Txn, r *ptpb.Record) error {
+func (p *storage) GetRecord(ctx context.Context, id uuid.UUID) (*ptpb.Record, error) {
+	row, err := p.txn.QueryRowEx(ctx, "protectedts-GetRecord", p.txn.Txn,
+		sessiondata.InternalExecutorOverride{User: username.NodeUserName()},
+		getRecordQuery, id.GetBytesMut())
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to read record %v", id)
+	}
+	if len(row) == 0 {
+		return nil, protectedts.ErrNotExists
+	}
+	var r ptpb.Record
+	if err := rowToRecord(row, &r, false /* isDeprecatedRow */); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (p storage) MarkVerified(ctx context.Context, id uuid.UUID) error {
+	numRows, err := p.txn.ExecEx(ctx, "protectedts-MarkVerified", p.txn.Txn,
+		sessiondata.InternalExecutorOverride{User: username.NodeUserName()},
+		markVerifiedQuery, id.GetBytesMut())
+	if err != nil {
+		return errors.Wrapf(err, "failed to mark record %v as verified", id)
+	}
+	if numRows == 0 {
+		return protectedts.ErrNotExists
+	}
+	return nil
+}
+
+func (p storage) Release(ctx context.Context, id uuid.UUID) error {
+	numRows, err := p.txn.ExecEx(ctx, "protectedts-Release", p.txn.Txn,
+		sessiondata.InternalExecutorOverride{User: username.NodeUserName()},
+		releaseQuery, id.GetBytesMut())
+	if err != nil {
+		return errors.Wrapf(err, "failed to release record %v", id)
+	}
+	if numRows == 0 {
+		return protectedts.ErrNotExists
+	}
+	return nil
+}
+
+func (p storage) GetMetadata(ctx context.Context) (ptpb.Metadata, error) {
+	row, err := p.txn.QueryRowEx(ctx, "protectedts-GetMetadata", p.txn.Txn,
+		sessiondata.InternalExecutorOverride{User: username.NodeUserName()},
+		getMetadataQuery)
+	if err != nil {
+		return ptpb.Metadata{}, errors.Wrap(err, "failed to read metadata")
+	}
+	if row == nil {
+		return ptpb.Metadata{}, errors.New("failed to read metadata")
+	}
+	return ptpb.Metadata{
+		Version:    uint64(*row[0].(*tree.DInt)),
+		NumRecords: uint64(*row[1].(*tree.DInt)),
+		NumSpans:   uint64(*row[2].(*tree.DInt)),
+		TotalBytes: uint64(*row[3].(*tree.DInt)),
+	}, nil
+}
+
+func (p storage) GetState(ctx context.Context) (ptpb.State, error) {
+	md, err := p.GetMetadata(ctx)
+	if err != nil {
+		return ptpb.State{}, err
+	}
+	records, err := p.getRecords(ctx)
+	if err != nil {
+		return ptpb.State{}, err
+	}
+	return ptpb.State{
+		Metadata: md,
+		Records:  records,
+	}, nil
+}
+
+func (p *storage) getRecords(ctx context.Context) ([]ptpb.Record, error) {
+	it, err := p.txn.QueryIteratorEx(ctx, "protectedts-GetRecords", p.txn.Txn,
+		sessiondata.InternalExecutorOverride{User: username.NodeUserName()}, getRecordsQuery)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read records")
+	}
+
+	var ok bool
+	var records []ptpb.Record
+	for ok, err = it.Next(ctx); ok; ok, err = it.Next(ctx) {
+		var record ptpb.Record
+		if err := rowToRecord(it.Cur(), &record, false /* isDeprecatedRow */); err != nil {
+			log.Errorf(ctx, "failed to parse row as record: %v", err)
+		}
+		records = append(records, record)
+	}
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read records")
+	}
+	return records, nil
+}
+
+func (s storage) UpdateTimestamp(ctx context.Context, id uuid.UUID, timestamp hlc.Timestamp) error {
+	row, err := s.txn.QueryRowEx(ctx, "protectedts-update", s.txn.Txn,
+		sessiondata.InternalExecutorOverride{User: username.NodeUserName()},
+		updateTimestampQuery, id.GetBytesMut(), timestamp.WithSynthetic(false).AsOfSystemTime())
+	if err != nil {
+		return errors.Wrapf(err, "failed to update record %v", id)
+	}
+	if len(row) == 0 {
+		return protectedts.ErrNotExists
+	}
+	return nil
+}
+
+func (p *Manager) WithTxn(txn sqlutil.TransactionalExecutor) protectedts.Storage2 {
+	return &storage{
+		txn:      txn,
+		settings: p.settings,
+		knobs:    p.knobs,
+	}
+}
+
+var _ protectedts.Storage = (*Manager)(nil)
+
+// TODO(adityamaru): Delete in 22.2.
+func useDeprecatedProtectedTSStorage(
+	ctx context.Context, st *cluster.Settings, knobs *protectedts.TestingKnobs,
+) bool {
+	return knobs.DisableProtectedTimestampForMultiTenant
+}
+
+// New creates a new Storage.
+func New(
+	settings *cluster.Settings, ex sqlutil.InternalExecutor, knobs *protectedts.TestingKnobs,
+) *Manager {
+	if knobs == nil {
+		knobs = &protectedts.TestingKnobs{}
+	}
+	return &Manager{settings: settings, ex: ex, knobs: knobs}
+}
+
+var errNoTxn = errors.New("must provide a non-nil transaction")
+
+func (p *Manager) UpdateTimestamp(
+	ctx context.Context, txn *kv.Txn, id uuid.UUID, timestamp hlc.Timestamp,
+) error {
+	row, err := p.ex.QueryRowEx(ctx, "protectedts-update", txn,
+		sessiondata.InternalExecutorOverride{User: username.NodeUserName()},
+		updateTimestampQuery, id.GetBytesMut(), timestamp.WithSynthetic(false).AsOfSystemTime())
+	if err != nil {
+		return errors.Wrapf(err, "failed to update record %v", id)
+	}
+	if len(row) == 0 {
+		return protectedts.ErrNotExists
+	}
+	return nil
+}
+
+func (p *Manager) Protect(ctx context.Context, txn *kv.Txn, r *ptpb.Record) error {
 	if err := validateRecordForProtect(ctx, r, p.settings, p.knobs); err != nil {
 		return err
 	}
@@ -145,21 +282,12 @@ func (p *storage) Protect(ctx context.Context, txn *kv.Txn, r *ptpb.Record) erro
 
 	meta := r.Meta
 	if meta == nil {
-		// v20.1 crashes in rowToRecord and storage.Release if it finds a NULL
+		// v20.1 crashes in rowToRecord and Manager.Release if it finds a NULL
 		// value in system.protected_ts_records.meta. v20.2 and above handle
 		// this correctly, but we need to maintain mixed version compatibility
 		// for at least one release.
 		// TODO(nvanbenschoten): remove this for v21.1.
 		meta = []byte{}
-	}
-
-	// The `target` column was added to `system.protected_ts_records` as part of
-	// the tenant migration `AlterSystemProtectedTimestampAddColumn`. Prior to the
-	// migration we should continue write records that protect `spans`.
-	//
-	// TODO(adityamaru): Delete in 22.2 once we exclusively protect `target`s.
-	if useDeprecatedProtectedTSStorage(ctx, p.settings, p.knobs) {
-		return p.deprecatedProtect(ctx, txn, r, meta)
 	}
 
 	// Clear the `DeprecatedSpans` field even if it has been set by the caller.
@@ -209,7 +337,7 @@ func (p *storage) Protect(ctx context.Context, txn *kv.Txn, r *ptpb.Record) erro
 	return nil
 }
 
-func (p *storage) deprecatedGetRecord(
+func (p *Manager) deprecatedGetRecord(
 	ctx context.Context, txn *kv.Txn, id uuid.UUID,
 ) (*ptpb.Record, error) {
 	row, err := p.ex.QueryRowEx(ctx, "protectedts-deprecated-GetRecord", txn,
@@ -228,7 +356,7 @@ func (p *storage) deprecatedGetRecord(
 	return &r, nil
 }
 
-func (p *storage) GetRecord(ctx context.Context, txn *kv.Txn, id uuid.UUID) (*ptpb.Record, error) {
+func (p *Manager) GetRecord(ctx context.Context, txn *kv.Txn, id uuid.UUID) (*ptpb.Record, error) {
 	if txn == nil {
 		return nil, errNoTxn
 	}
@@ -258,7 +386,7 @@ func (p *storage) GetRecord(ctx context.Context, txn *kv.Txn, id uuid.UUID) (*pt
 	return &r, nil
 }
 
-func (p *storage) MarkVerified(ctx context.Context, txn *kv.Txn, id uuid.UUID) error {
+func (p *Manager) MarkVerified(ctx context.Context, txn *kv.Txn, id uuid.UUID) error {
 	if txn == nil {
 		return errNoTxn
 	}
@@ -274,7 +402,7 @@ func (p *storage) MarkVerified(ctx context.Context, txn *kv.Txn, id uuid.UUID) e
 	return nil
 }
 
-func (p *storage) Release(ctx context.Context, txn *kv.Txn, id uuid.UUID) error {
+func (p *Manager) Release(ctx context.Context, txn *kv.Txn, id uuid.UUID) error {
 	if txn == nil {
 		return errNoTxn
 	}
@@ -290,7 +418,7 @@ func (p *storage) Release(ctx context.Context, txn *kv.Txn, id uuid.UUID) error 
 	return nil
 }
 
-func (p *storage) GetMetadata(ctx context.Context, txn *kv.Txn) (ptpb.Metadata, error) {
+func (p *Manager) GetMetadata(ctx context.Context, txn *kv.Txn) (ptpb.Metadata, error) {
 	if txn == nil {
 		return ptpb.Metadata{}, errNoTxn
 	}
@@ -311,7 +439,7 @@ func (p *storage) GetMetadata(ctx context.Context, txn *kv.Txn) (ptpb.Metadata, 
 	}, nil
 }
 
-func (p *storage) GetState(ctx context.Context, txn *kv.Txn) (ptpb.State, error) {
+func (p *Manager) GetState(ctx context.Context, txn *kv.Txn) (ptpb.State, error) {
 	if txn == nil {
 		return ptpb.State{}, errNoTxn
 	}
@@ -329,7 +457,7 @@ func (p *storage) GetState(ctx context.Context, txn *kv.Txn) (ptpb.State, error)
 	}, nil
 }
 
-func (p *storage) deprecatedGetRecords(ctx context.Context, txn *kv.Txn) ([]ptpb.Record, error) {
+func (p *Manager) deprecatedGetRecords(ctx context.Context, txn *kv.Txn) ([]ptpb.Record, error) {
 	it, err := p.ex.QueryIteratorEx(ctx, "protectedts-deprecated-GetRecords", txn,
 		sessiondata.InternalExecutorOverride{User: username.NodeUserName()},
 		getRecordsWithoutTargetQuery)
@@ -352,10 +480,7 @@ func (p *storage) deprecatedGetRecords(ctx context.Context, txn *kv.Txn) ([]ptpb
 	return records, nil
 }
 
-func (p *storage) getRecords(ctx context.Context, txn *kv.Txn) ([]ptpb.Record, error) {
-	if useDeprecatedProtectedTSStorage(ctx, p.settings, p.knobs) {
-		return p.deprecatedGetRecords(ctx, txn)
-	}
+func (p *Manager) getRecords(ctx context.Context, txn *kv.Txn) ([]ptpb.Record, error) {
 
 	it, err := p.ex.QueryIteratorEx(ctx, "protectedts-GetRecords", txn,
 		sessiondata.InternalExecutorOverride{User: username.NodeUserName()}, getRecordsQuery)
@@ -385,7 +510,7 @@ func (p *storage) getRecords(ctx context.Context, txn *kv.Txn) ([]ptpb.Record, e
 // solve. Malformed records can still be removed (and hopefully will be).
 //
 // isDeprecatedRow indicates if the supplied row was generated by one of the
-// deprecated PTS storage methods, and as such, does not include the target
+// deprecated PTS Manager methods, and as such, does not include the target
 // column.
 func rowToRecord(row tree.Datums, r *ptpb.Record, isDeprecatedRow bool) error {
 	r.ID = row[0].(*tree.DUuid).UUID.GetBytes()

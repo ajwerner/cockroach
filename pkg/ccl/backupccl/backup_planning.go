@@ -31,6 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobsprotectedts"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts/ptpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/scheduledjobs"
@@ -48,6 +49,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/sql/syntheticprivilege"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/interval"
@@ -919,12 +921,11 @@ func collectTelemetry(
 func getScheduledBackupExecutionArgsFromSchedule(
 	ctx context.Context,
 	env scheduledjobs.JobSchedulerEnv,
-	txn *kv.Txn,
-	ie *sql.InternalExecutor,
+	txn sqlutil.TransactionalExecutor,
 	scheduleID int64,
 ) (*jobs.ScheduledJob, *backuppb.ScheduledBackupExecutionArgs, error) {
 	// Load the schedule that has spawned this job.
-	sj, err := jobs.LoadScheduledJob(ctx, env, scheduleID, ie, txn)
+	sj, err := jobs.LoadScheduledJob(ctx, env, scheduleID, txn.InternalExecutor, txn.Txn)
 	if err != nil {
 		return nil, nil, errors.Wrapf(err, "failed to load scheduled job %d", scheduleID)
 	}
@@ -1162,9 +1163,8 @@ func getProtectedTimestampTargetForBackup(backupManifest backuppb.BackupManifest
 
 func protectTimestampForBackup(
 	ctx context.Context,
-	execCfg *sql.ExecutorConfig,
-	txn *kv.Txn,
 	jobID jobspb.JobID,
+	pts protectedts.Storage2,
 	backupManifest backuppb.BackupManifest,
 	backupDetails jobspb.BackupDetails,
 ) error {
@@ -1182,9 +1182,14 @@ func protectTimestampForBackup(
 	// `exclude_data_from_backup`. This ensures that the backup job does not
 	// holdup GC on that table span for the duration of execution.
 	target.IgnoreIfExcludedFromBackup = true
-	rec := jobsprotectedts.MakeRecord(*backupDetails.ProtectedTimestampRecord, int64(jobID),
-		tsToProtect, backupManifest.Spans, jobsprotectedts.Jobs, target)
-	return execCfg.ProtectedTimestampProvider.Protect(ctx, txn, rec)
+	return pts.Protect(ctx, jobsprotectedts.MakeRecord(
+		*backupDetails.ProtectedTimestampRecord,
+		int64(jobID),
+		tsToProtect,
+		backupManifest.Spans,
+		jobsprotectedts.Jobs,
+		target,
+	))
 }
 
 // checkForNewDatabases returns an error if any new complete databases were

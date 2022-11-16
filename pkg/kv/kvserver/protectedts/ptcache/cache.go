@@ -14,11 +14,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts/ptpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
@@ -31,8 +31,8 @@ import (
 
 // Cache implements protectedts.Cache.
 type Cache struct {
-	db       *kv.DB
-	storage  protectedts.Storage
+	ief      sqlutil.InternalExecutorFactory
+	storage  protectedts.Manager
 	stopper  *stop.Stopper
 	settings *cluster.Settings
 	sf       singleflight.Group
@@ -56,15 +56,15 @@ type Cache struct {
 
 // Config configures a Cache.
 type Config struct {
-	DB       *kv.DB
-	Storage  protectedts.Storage
-	Settings *cluster.Settings
+	InternalExecutorFactory sqlutil.InternalExecutorFactory
+	Storage                 protectedts.Manager
+	Settings                *cluster.Settings
 }
 
 // New returns a new cache.
 func New(config Config) *Cache {
 	c := &Cache{
-		db:       config.DB,
+		ief:      config.InternalExecutorFactory,
 		storage:  config.Storage,
 		settings: config.Settings,
 	}
@@ -226,7 +226,7 @@ func (c *Cache) doUpdate(ctx context.Context) error {
 		state          ptpb.State
 		ts             hlc.Timestamp
 	)
-	err := c.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
+	err := c.ief.Txn(ctx, func(ctx context.Context, txn sqlutil.TransactionalExecutor) (err error) {
 		// NB: because this is a read-only transaction, the commit will be a no-op;
 		// returning nil here means the transaction will commit and will never need
 		// to change its read timestamp.
@@ -235,14 +235,15 @@ func (c *Cache) doUpdate(ctx context.Context) error {
 				ts = txn.ReadTimestamp()
 			}
 		}()
-		md, err := c.storage.GetMetadata(ctx, txn)
+		pts := c.storage.WithTxn(txn)
+		md, err := pts.GetMetadata(ctx)
 		if err != nil {
 			return errors.Wrap(err, "failed to fetch protectedts metadata")
 		}
 		if versionChanged = md.Version != prev.Version; !versionChanged {
 			return nil
 		}
-		if state, err = c.storage.GetState(ctx, txn); err != nil {
+		if state, err = pts.GetState(ctx); err != nil {
 			return errors.Wrap(err, "failed to fetch protectedts state")
 		}
 		return nil

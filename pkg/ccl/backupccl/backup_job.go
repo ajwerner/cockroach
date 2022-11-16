@@ -46,6 +46,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
@@ -370,13 +371,13 @@ func backup(
 }
 
 func releaseProtectedTimestamp(
-	ctx context.Context, txn *kv.Txn, pts protectedts.Storage, ptsID *uuid.UUID,
+	ctx context.Context, pts protectedts.Storage2, ptsID *uuid.UUID,
 ) error {
 	// If the job doesn't have a protected timestamp then there's nothing to do.
 	if ptsID == nil {
 		return nil
 	}
-	err := pts.Release(ctx, txn, *ptsID)
+	err := pts.Release(ctx, *ptsID)
 	if errors.Is(err, protectedts.ErrNotExists) {
 		// No reason to return an error which might cause problems if it doesn't
 		// seem to exist.
@@ -495,9 +496,11 @@ func (b *backupResumer) Resume(ctx context.Context, execCtx interface{}) error {
 			details.ProtectedTimestampRecord = &protectedtsID
 
 			if details.ProtectedTimestampRecord != nil {
-				if err := p.ExecCfg().DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+				if err := p.ExecCfg().InternalExecutorFactory.Txn(ctx, func(
+					ctx context.Context, tie sqlutil.TransactionalExecutor,
+				) error {
 					return protectTimestampForBackup(
-						ctx, p.ExecCfg(), txn, b.job.ID(), m, details,
+						ctx, b.job.ID(), p.ExecCfg().ProtectedTimestampProvider.WithTxn(tie), m, details,
 					)
 				}); err != nil {
 					return err

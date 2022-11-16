@@ -88,8 +88,8 @@ var testCases = []testCase{
 		ops: []op{
 			funcOp(func(ctx context.Context, t *testing.T, tCtx *testContext) {
 				rec := newRecord(tCtx, hlc.Timestamp{}, "", nil, tableTarget(42), tableSpan(42))
-				err := tCtx.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-					return tCtx.pts.Protect(ctx, txn, &rec)
+				err := tCtx.ief.Txn(ctx, func(ctx context.Context, txn sqlutil.TransactionalExecutor) error {
+					return tCtx.pts.WithTxn(txn).Protect(ctx, &rec)
 				})
 				require.Regexp(t, "invalid zero value timestamp", err.Error())
 			}),
@@ -102,8 +102,8 @@ var testCases = []testCase{
 				rec := newRecord(tCtx, tCtx.tc.Server(0).Clock().Now(), "", nil, tableTarget(42),
 					tableSpan(42))
 				rec.Verified = true
-				err := tCtx.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-					return tCtx.pts.Protect(ctx, txn, &rec)
+				err := tCtx.ief.Txn(ctx, func(ctx context.Context, txn sqlutil.TransactionalExecutor) error {
+					return tCtx.pts.WithTxn(txn).Protect(ctx, &rec)
 				})
 				require.Regexp(t, "cannot create a verified record", err.Error())
 			}),
@@ -126,8 +126,8 @@ var testCases = []testCase{
 			funcOp(func(ctx context.Context, t *testing.T, tCtx *testContext) {
 				rec := newRecord(tCtx, tCtx.tc.Server(0).Clock().Now(), "", nil, tableTarget(42), tableSpan(42))
 				rec.ID = pickOneRecord(tCtx).GetBytes()
-				err := tCtx.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-					return tCtx.pts.Protect(ctx, txn, &rec)
+				err := tCtx.ief.Txn(ctx, func(ctx context.Context, txn sqlutil.TransactionalExecutor) error {
+					return tCtx.pts.WithTxn(txn).Protect(ctx, &rec)
 				})
 				require.EqualError(t, err, protectedts.ErrExists.Error())
 			}),
@@ -240,8 +240,8 @@ var testCases = []testCase{
 		ops: []op{
 			funcOp(func(ctx context.Context, t *testing.T, tCtx *testContext) {
 				var rec *ptpb.Record
-				err := tCtx.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
-					rec, err = tCtx.pts.GetRecord(ctx, txn, randomID(tCtx))
+				err := tCtx.ief.Txn(ctx, func(ctx context.Context, txn sqlutil.TransactionalExecutor) (err error) {
+					rec, err = tCtx.pts.WithTxn(txn).GetRecord(ctx, randomID(tCtx))
 					return err
 				})
 				require.EqualError(t, err, protectedts.ErrNotExists.Error())
@@ -289,28 +289,10 @@ var testCases = []testCase{
 		name: "UpdateTimestamp -- does not exist",
 		ops: []op{
 			funcOp(func(ctx context.Context, t *testing.T, tCtx *testContext) {
-				err := tCtx.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
-					return tCtx.pts.UpdateTimestamp(ctx, txn, randomID(tCtx), hlc.Timestamp{WallTime: 1})
+				err := tCtx.ief.Txn(ctx, func(ctx context.Context, txn sqlutil.TransactionalExecutor) (err error) {
+					return tCtx.pts.WithTxn(txn).UpdateTimestamp(ctx, randomID(tCtx), hlc.Timestamp{WallTime: 1})
 				})
 				require.EqualError(t, err, protectedts.ErrNotExists.Error())
-			}),
-		},
-	},
-	{
-		name: "nil transaction errors",
-		ops: []op{
-			funcOp(func(ctx context.Context, t *testing.T, tCtx *testContext) {
-				rec := newRecord(tCtx, tCtx.tc.Server(0).Clock().Now(), "", nil, tableTarget(42), tableSpan(42))
-				const msg = "must provide a non-nil transaction"
-				require.Regexp(t, msg, tCtx.pts.Protect(ctx, nil /* txn */, &rec).Error())
-				require.Regexp(t, msg, tCtx.pts.Release(ctx, nil /* txn */, uuid.MakeV4()).Error())
-				require.Regexp(t, msg, tCtx.pts.MarkVerified(ctx, nil /* txn */, uuid.MakeV4()).Error())
-				_, err := tCtx.pts.GetRecord(ctx, nil /* txn */, uuid.MakeV4())
-				require.Regexp(t, msg, err.Error())
-				_, err = tCtx.pts.GetMetadata(ctx, nil /* txn */)
-				require.Regexp(t, msg, err.Error())
-				_, err = tCtx.pts.GetState(ctx, nil /* txn */)
-				require.Regexp(t, msg, err.Error())
 			}),
 		},
 	},
@@ -320,8 +302,8 @@ var testCases = []testCase{
 			funcOp(func(ctx context.Context, t *testing.T, tCtx *testContext) {
 				rec := newRecord(tCtx, tCtx.tc.Server(0).Clock().Now().WithSynthetic(true), "", nil, tableTarget(42),
 					tableSpan(42))
-				err := tCtx.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-					return tCtx.pts.Protect(ctx, txn, &rec)
+				err := tCtx.ief.Txn(ctx, func(ctx context.Context, txn sqlutil.TransactionalExecutor) error {
+					return tCtx.pts.WithTxn(txn).Protect(ctx, &rec)
 				})
 				require.NoError(t, err)
 				// Synthetic should be reset when writing timestamps to make it
@@ -346,8 +328,9 @@ var testCases = []testCase{
 }
 
 type testContext struct {
-	pts protectedts.Storage
+	pts protectedts.Manager
 	tc  *testcluster.TestCluster
+	ief sqlutil.InternalExecutorFactory
 	db  *kv.DB
 
 	// If set to false, the test will be run with
@@ -412,8 +395,8 @@ type markVerifiedOp struct {
 
 func (mv markVerifiedOp) run(ctx context.Context, t *testing.T, tCtx *testContext) {
 	id := mv.idFunc(tCtx)
-	err := tCtx.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		return tCtx.pts.MarkVerified(ctx, txn, id)
+	err := tCtx.ief.Txn(ctx, func(ctx context.Context, txn sqlutil.TransactionalExecutor) error {
+		return tCtx.pts.WithTxn(txn).MarkVerified(ctx, id)
 	})
 	if !testutils.IsError(err, mv.expErr) {
 		t.Fatalf("expected error to match %q, got %q", mv.expErr, err)
@@ -440,8 +423,8 @@ func (p protectOp) run(ctx context.Context, t *testing.T, tCtx *testContext) {
 	if p.idFunc != nil {
 		rec.ID = p.idFunc(tCtx).GetBytes()
 	}
-	err := tCtx.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		return tCtx.pts.Protect(ctx, txn, &rec)
+	err := tCtx.ief.Txn(ctx, func(ctx context.Context, txn sqlutil.TransactionalExecutor) error {
+		return tCtx.pts.WithTxn(txn).Protect(ctx, &rec)
 	})
 	if !testutils.IsError(err, p.expErr) {
 		t.Fatalf("expected error to match %q, got %q", p.expErr, err)
@@ -476,8 +459,8 @@ type updateTimestampOp struct {
 
 func (p updateTimestampOp) run(ctx context.Context, t *testing.T, tCtx *testContext) {
 	id := pickOneRecord(tCtx)
-	err := tCtx.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
-		return tCtx.pts.UpdateTimestamp(ctx, txn, id, p.updateTimestamp)
+	err := tCtx.ief.Txn(ctx, func(ctx context.Context, txn sqlutil.TransactionalExecutor) error {
+		return tCtx.pts.WithTxn(txn).UpdateTimestamp(ctx, id, p.updateTimestamp)
 	})
 	if !testutils.IsError(err, p.expErr) {
 		t.Fatalf("expected error to match %q, got %q", p.expErr, err)
