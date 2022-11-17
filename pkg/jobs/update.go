@@ -23,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -39,6 +40,199 @@ import (
 // The function is free to modify contents of JobMetadata in place (but the
 // changes will be ignored unless JobUpdater is used).
 type UpdateFn func(txn *kv.Txn, md JobMetadata, ju *JobUpdater) error
+
+type Updater struct {
+	j   *Job
+	txn *kv.Txn
+	ie  sqlutil.InternalExecutor
+}
+
+func (j *Job) NoTxn() Updater {
+	return Updater{j: j}
+}
+
+func (j *Job) WithTxn(txn sqlutil.TransactionalExecutor) Updater {
+	return Updater{j: j, txn: txn.Txn, ie: txn.InternalExecutor}
+}
+
+func (juh Updater) update(ctx context.Context, useReadLock bool, updateFn UpdateFn) (retErr error) {
+	if juh.txn == nil {
+		return juh.j.registry.internalExecutorFactory.TxnWithExecutor(ctx, juh.j.registry.db, nil, func(
+			ctx context.Context, txn *kv.Txn, ie sqlutil.InternalExecutor,
+		) error {
+			juh.ie, juh.txn = ie, txn
+			return juh.update(ctx, useReadLock, updateFn)
+		})
+	}
+	ctx, sp := tracing.ChildSpan(ctx, "update-job")
+	defer sp.Finish()
+
+	var payload *jobspb.Payload
+	var progress *jobspb.Progress
+	var status Status
+	var runStats *RunStats
+	j := juh.j
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Wrapf(retErr, "job %d", j.id)
+			return
+		}
+		j.mu.Lock()
+		defer j.mu.Unlock()
+		if payload != nil {
+			j.mu.payload = *payload
+		}
+		if progress != nil {
+			j.mu.progress = *progress
+		}
+		if runStats != nil {
+			j.mu.runStats = runStats
+		}
+		if status != "" {
+			j.mu.status = status
+		}
+	}()
+
+	row, err := juh.ie.QueryRowEx(
+		ctx, "select-job", juh.txn,
+		sessiondata.InternalExecutorOverride{User: username.RootUserName()},
+		getSelectStmtForJobUpdate(j.session != nil, useReadLock), j.ID(),
+	)
+	if err != nil {
+		return err
+	}
+	if row == nil {
+		return errors.Errorf("not found in system.jobs table")
+	}
+
+	if status, err = unmarshalStatus(row[0]); err != nil {
+		return err
+	}
+	if payload, err = UnmarshalPayload(row[1]); err != nil {
+		return err
+	}
+	if progress, err = UnmarshalProgress(row[2]); err != nil {
+		return err
+	}
+	if j.session != nil {
+		if row[3] == tree.DNull {
+			return errors.Errorf(
+				"with status %q: expected session %q but found NULL",
+				status, j.session.ID())
+		}
+		storedSession := []byte(*row[3].(*tree.DBytes))
+		if !bytes.Equal(storedSession, j.session.ID().UnsafeBytes()) {
+			return errors.Errorf(
+				"with status %q: expected session %q but found %q",
+				status, j.session.ID(), sqlliveness.SessionID(storedSession))
+		}
+	} else {
+		log.VInfof(ctx, 1, "job %d: update called with no session ID", j.ID())
+	}
+
+	md := JobMetadata{
+		ID:       j.ID(),
+		Status:   status,
+		Payload:  payload,
+		Progress: progress,
+	}
+
+	offset := 0
+	if j.session != nil {
+		offset = 1
+	}
+	var lastRun *tree.DTimestamp
+	var ok bool
+	lastRun, ok = row[3+offset].(*tree.DTimestamp)
+	if !ok {
+		return errors.AssertionFailedf("expected timestamp last_run, but got %T", lastRun)
+	}
+	var numRuns *tree.DInt
+	numRuns, ok = row[4+offset].(*tree.DInt)
+	if !ok {
+		return errors.AssertionFailedf("expected int num_runs, but got %T", numRuns)
+	}
+	md.RunStats = &RunStats{
+		NumRuns: int(*numRuns),
+		LastRun: lastRun.Time,
+	}
+
+	var ju JobUpdater
+	if err := updateFn(juh.txn, md, &ju); err != nil {
+		return err
+	}
+	if j.registry.knobs.BeforeUpdate != nil {
+		if err := j.registry.knobs.BeforeUpdate(md, ju.md); err != nil {
+			return err
+		}
+	}
+
+	if !ju.hasUpdates() {
+		return nil
+	}
+
+	// Build a statement of the following form, depending on which properties
+	// need updating:
+	//
+	//   UPDATE system.jobs
+	//   SET
+	//     [status = $2,]
+	//     [payload = $y,]
+	//     [progress = $z]
+	//   WHERE
+	//     id = $1
+
+	var setters []string
+	params := []interface{}{j.ID()} // $1 is always the job ID.
+	addSetter := func(column string, value interface{}) {
+		params = append(params, value)
+		setters = append(setters, fmt.Sprintf("%s = $%d", column, len(params)))
+	}
+
+	if ju.md.Status != "" {
+		addSetter("status", ju.md.Status)
+	}
+
+	if ju.md.Payload != nil {
+		payload = ju.md.Payload
+		payloadBytes, err := protoutil.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		addSetter("payload", payloadBytes)
+	}
+
+	if ju.md.Progress != nil {
+		progress = ju.md.Progress
+		progress.ModifiedMicros = timeutil.ToUnixMicros(juh.txn.ReadTimestamp().GoTime())
+		progressBytes, err := protoutil.Marshal(progress)
+		if err != nil {
+			return err
+		}
+		addSetter("progress", progressBytes)
+	}
+
+	if ju.md.RunStats != nil {
+		runStats = ju.md.RunStats
+		addSetter("last_run", ju.md.RunStats.LastRun)
+		addSetter("num_runs", ju.md.RunStats.NumRuns)
+	}
+
+	updateStmt := fmt.Sprintf(
+		"UPDATE system.jobs SET %s WHERE id = $1",
+		strings.Join(setters, ", "),
+	)
+	n, err := juh.ie.Exec(ctx, "job-update", juh.txn, updateStmt, params...)
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return errors.Errorf(
+			"expected exactly one row affected, but %d rows affected by job update", n,
+		)
+	}
+	return nil
+}
 
 // RunStats consists of job-run statistics: num of runs and last-run timestamp.
 type RunStats struct {
@@ -135,12 +329,22 @@ func UpdateHighwaterProgressed(highWater hlc.Timestamp, md JobMetadata, ju *JobU
 //
 // Note that there are various convenience wrappers (like FractionProgressed)
 // defined in jobs.go.
-func (j *Job) Update(ctx context.Context, txn *kv.Txn, updateFn UpdateFn) error {
+func (juh Updater) Update(ctx context.Context, updateFn UpdateFn) error {
 	const useReadLock = false
-	return j.update(ctx, txn, useReadLock, updateFn)
+	return juh.update(ctx, useReadLock, updateFn)
 }
 
-func (j *Job) update(ctx context.Context, txn *kv.Txn, useReadLock bool, updateFn UpdateFn) error {
+func (u Updater) now() time.Time {
+	return u.j.registry.clock.Now().GoTime()
+}
+
+func (j *Job) update(
+	ctx context.Context,
+	txn *kv.Txn,
+	ie sqlutil.InternalExecutor,
+	useReadLock bool,
+	updateFn UpdateFn,
+) error {
 	ctx, sp := tracing.ChildSpan(ctx, "update-job")
 	defer sp.Finish()
 

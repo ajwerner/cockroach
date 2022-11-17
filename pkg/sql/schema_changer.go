@@ -1935,7 +1935,10 @@ func (sc *SchemaChanger) maybeReverseMutations(ctx context.Context, causingError
 	// Get the other tables whose foreign key backreferences need to be removed.
 	alreadyReversed := false
 	const kvTrace = true // TODO(ajwerner): figure this out
-	err := sc.txn(ctx, func(ctx context.Context, txn *kv.Txn, descsCol *descs.Collection) error {
+	err := sc.txnWithExecutor(ctx, func(
+		ctx context.Context, txn *kv.Txn, _ *sessiondata.SessionData,
+		descsCol *descs.Collection, ie sqlutil.InternalExecutor,
+	) error {
 		scTable, err := descsCol.GetMutableTableVersionByID(ctx, sc.descID, txn)
 		if err != nil {
 			return err
@@ -2061,7 +2064,7 @@ func (sc *SchemaChanger) maybeReverseMutations(ctx context.Context, causingError
 			if err != nil {
 				return err
 			}
-			if err := sc.jobRegistry.Failed(ctx, txn, jobID, causingError); err != nil {
+			if err := sc.jobRegistry.Failed(ctx, txn, ie, jobID, causingError); err != nil {
 				return err
 			}
 		}

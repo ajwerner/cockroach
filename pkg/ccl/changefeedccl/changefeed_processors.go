@@ -1224,7 +1224,7 @@ func (cf *changeFrontier) checkpointJobProgress(
 	var updateSkipped error
 	if cf.js.job != nil {
 
-		if err := cf.js.job.Update(cf.Ctx, nil, func(
+		if err := cf.js.job.NoTxn().Update(cf.Ctx, func(
 			txn *kv.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater,
 		) error {
 			// If we're unable to update the job due to the job state, such as during

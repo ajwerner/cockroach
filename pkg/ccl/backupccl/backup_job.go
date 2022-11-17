@@ -546,7 +546,7 @@ func (b *backupResumer) Resume(ctx context.Context, execCtx interface{}) error {
 		// Update the job payload (non-volatile job definition) once, with the now
 		// resolved destination, updated description, etc. If we resume again we'll
 		// skip this whole block so this isn't an excessive update of payload.
-		if err := b.job.Update(ctx, nil, func(txn *kv.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
+		if err := b.job.NoTxn().Update(ctx, func(txn *kv.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
 			if err := md.CheckRunningOrReverting(); err != nil {
 				return err
 			}
@@ -692,10 +692,12 @@ func (b *backupResumer) Resume(ctx context.Context, execCtx interface{}) error {
 	}
 
 	if details.ProtectedTimestampRecord != nil && !b.testingKnobs.ignoreProtectedTimestamps {
-		if err := p.ExecCfg().DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+		if err := p.ExecCfg().InternalExecutorFactory.Txn(ctx, func(
+			ctx context.Context, txn sqlutil.TransactionalExecutor,
+		) error {
 			details := b.job.Details().(jobspb.BackupDetails)
-			return releaseProtectedTimestamp(ctx, txn, p.ExecCfg().ProtectedTimestampProvider,
-				details.ProtectedTimestampRecord)
+			pts := p.ExecCfg().ProtectedTimestampProvider.WithTxn(txn)
+			return releaseProtectedTimestamp(ctx, pts, details.ProtectedTimestampRecord)
 		}); err != nil {
 			log.Errorf(ctx, "failed to release protected timestamp: %v", err)
 		}
@@ -1016,10 +1018,10 @@ func (b *backupResumer) OnFailOrCancel(
 	p := execCtx.(sql.JobExecContext)
 	cfg := p.ExecCfg()
 	b.deleteCheckpoint(ctx, cfg, p.User())
-	if err := cfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+	if err := cfg.InternalExecutorFactory.Txn(ctx, func(ctx context.Context, txn sqlutil.TransactionalExecutor) error {
 		details := b.job.Details().(jobspb.BackupDetails)
-		return releaseProtectedTimestamp(ctx, txn, cfg.ProtectedTimestampProvider,
-			details.ProtectedTimestampRecord)
+		pts := cfg.ProtectedTimestampProvider.WithTxn(txn)
+		return releaseProtectedTimestamp(ctx, pts, details.ProtectedTimestampRecord)
 	}); err != nil {
 		return err
 	}

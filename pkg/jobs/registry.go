@@ -505,6 +505,7 @@ func (r *Registry) CreateAdoptableJobWithTxn(
 	// Record now has JobID field.
 	record.JobID = jobID
 	j := r.newJob(ctx, record)
+
 	if err := j.runInTxn(ctx, txn, func(ctx context.Context, txn *kv.Txn) error {
 		// Note: although the following uses ReadTimestamp and
 		// ReadTimestamp can diverge from the value of now() throughout a
@@ -644,7 +645,7 @@ func (r *Registry) LoadClaimedJob(ctx context.Context, jobID jobspb.JobID) (*Job
 	if err != nil {
 		return nil, err
 	}
-	if err := j.load(ctx, nil); err != nil {
+	if err := j.NoTxn().load(ctx); err != nil {
 		return nil, err
 	}
 	return j, nil
@@ -681,7 +682,7 @@ func (r *Registry) UpdateJobWithTxn(
 		id:       jobID,
 		registry: r,
 	}
-	return j.update(ctx, txn, useReadLock, updateFunc)
+	return j.update(ctx, txn, nil, useReadLock, updateFunc)
 }
 
 // TODO (sajjad): make maxAdoptionsPerLoop a cluster setting.
@@ -1050,9 +1051,9 @@ func (r *Registry) CancelRequested(ctx context.Context, txn *kv.Txn, id jobspb.J
 
 // PauseRequested marks the job with id as paused-requested using the specified txn (may be nil).
 func (r *Registry) PauseRequested(
-	ctx context.Context, txn *kv.Txn, id jobspb.JobID, reason string,
+	ctx context.Context, txn sqlutil.TransactionalExecutor, id jobspb.JobID, reason string,
 ) error {
-	job, resumer, err := r.getJobFn(ctx, txn, id)
+	job, resumer, err := r.getJobFn(ctx, txn.Txn, id)
 	if err != nil {
 		return err
 	}
@@ -1060,7 +1061,7 @@ func (r *Registry) PauseRequested(
 	if pr, ok := resumer.(PauseRequester); ok {
 		onPauseRequested = pr.OnPauseRequest
 	}
-	return job.PauseRequested(ctx, txn, onPauseRequested, reason)
+	return job.WithTxn(txn).PauseRequested(ctx, onPauseRequested, reason)
 }
 
 // Succeeded marks the job with id as succeeded.
@@ -1074,23 +1075,33 @@ func (r *Registry) Succeeded(ctx context.Context, txn *kv.Txn, id jobspb.JobID) 
 
 // Failed marks the job with id as failed.
 func (r *Registry) Failed(
-	ctx context.Context, txn *kv.Txn, id jobspb.JobID, causingError error,
+	ctx context.Context,
+	txn *kv.Txn,
+	ie sqlutil.InternalExecutor,
+	id jobspb.JobID,
+	causingError error,
 ) error {
 	job, _, err := r.getJobFn(ctx, txn, id)
 	if err != nil {
 		return err
 	}
-	return job.failed(ctx, txn, causingError, nil)
+	return job.WithTxn(sqlutil.TransactionalExecutor{
+		Txn: txn, InternalExecutor: ie,
+	}).failed(ctx, causingError)
 }
 
 // Unpause changes the paused job with id to running or reverting using the
 // specified txn (may be nil).
-func (r *Registry) Unpause(ctx context.Context, txn *kv.Txn, id jobspb.JobID) error {
+func (r *Registry) Unpause(
+	ctx context.Context, txn *kv.Txn, ie sqlutil.InternalExecutor, id jobspb.JobID,
+) error {
 	job, _, err := r.getJobFn(ctx, txn, id)
 	if err != nil {
 		return err
 	}
-	return job.unpaused(ctx, txn)
+	return job.WithTxn(sqlutil.TransactionalExecutor{
+		Txn: txn, InternalExecutor: ie,
+	}).unpaused(ctx)
 }
 
 // Resumer is a resumable job, and is associated with a Job object. Jobs can be
@@ -1341,7 +1352,7 @@ func (r *Registry) stepThroughStateMachine(
 		return errors.NewAssertionErrorWithWrappedErrf(jobErr,
 			"job %d: unexpected status %s provided to state machine", job.ID(), status)
 	case StatusCanceled:
-		if err := job.canceled(ctx, nil /* txn */, nil /* fn */); err != nil {
+		if err := job.NoTxn().canceled(ctx); err != nil {
 			// If we can't transactionally mark the job as canceled then it will be
 			// restarted during the next adopt loop and reverting will be retried.
 			return errors.WithSecondaryError(

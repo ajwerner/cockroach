@@ -235,7 +235,7 @@ func ingest(ctx context.Context, execCtx sql.JobExecContext, ingestionJob *jobs.
 		}
 
 		// TODO(casper): update running status
-		err = ingestionJob.Update(ctx, nil, func(txn *kv.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
+		err = ingestionJob.NoTxn().Update(ctx, func(txn *kv.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
 			if md.Progress.GetStreamIngest().StartTime.Less(startTime) {
 				md.Progress.GetStreamIngest().StartTime = startTime
 			}
