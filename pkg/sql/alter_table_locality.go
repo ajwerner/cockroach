@@ -427,7 +427,7 @@ func (n *alterTableSetLocalityNode) alterTableLocalityFromOrToRegionalByRow(
 		}
 	}
 
-	// We re-use ALTER PRIMARY KEY to do the the work for us.
+	// We re-use ALTER PRIMARY KEY to do the work for us.
 	//
 	// Altering to REGIONAL BY ROW is effectively a PRIMARY KEY swap where we
 	// add the implicit partitioning to the PK, with all indexes underneath
