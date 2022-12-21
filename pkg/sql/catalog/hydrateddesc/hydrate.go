@@ -25,7 +25,7 @@ import (
 
 // HydrationLookupFunc is the type of function required to look up type
 // descriptors and their parent schemas and databases when hydrating an object.
-type HydrationLookupFunc func(ctx context.Context, id descpb.ID) (catalog.Descriptor, error)
+type HydrationLookupFunc func(ctx context.Context, id descpb.ID, skipHydration bool) (catalog.Descriptor, error)
 
 // IsHydratable returns false iff the descriptor definitely does not require
 // hydration
@@ -69,7 +69,7 @@ func MakeTypeLookupFuncForHydration(
 	return func(ctx context.Context, id descpb.ID) (tn tree.TypeName, typ catalog.TypeDescriptor, err error) {
 		typDesc := c.LookupDescriptor(id)
 		if typDesc == nil {
-			typDesc, err = lookupFn(ctx, id)
+			typDesc, err = lookupFn(ctx, id, false)
 			if err != nil {
 				if errors.Is(err, catalog.ErrDescriptorNotFound) {
 					n := tree.Name(fmt.Sprintf("[%d]", id))
@@ -91,7 +91,7 @@ func MakeTypeLookupFuncForHydration(
 		}
 		dbDesc := c.LookupDescriptor(typ.GetParentID())
 		if dbDesc == nil {
-			dbDesc, err = lookupFn(ctx, typ.GetParentID())
+			dbDesc, err = lookupFn(ctx, typ.GetParentID(), true)
 			if err != nil {
 				if errors.Is(err, catalog.ErrDescriptorNotFound) {
 					n := fmt.Sprintf("[%d]", typ.GetParentID())
@@ -105,7 +105,7 @@ func MakeTypeLookupFuncForHydration(
 		}
 		scDesc := c.LookupDescriptor(typ.GetParentSchemaID())
 		if scDesc == nil {
-			scDesc, err = lookupFn(ctx, typ.GetParentSchemaID())
+			scDesc, err = lookupFn(ctx, typ.GetParentSchemaID(), true)
 			if err != nil {
 				if errors.Is(err, catalog.ErrDescriptorNotFound) {
 					n := fmt.Sprintf("[%d]", typ.GetParentSchemaID())

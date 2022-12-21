@@ -179,6 +179,8 @@ type CommonLookupFlags struct {
 	// ParentID enforces that the resolved descriptor exist with this parent
 	// ID if non-zero.
 	ParentID catid.DescID
+
+	SkipHydration bool
 }
 
 // SchemaLookupFlags is the flag struct suitable for GetSchemaByName().
