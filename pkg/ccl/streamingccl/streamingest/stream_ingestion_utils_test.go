@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl"
-	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdctest"
+	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/validator"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/repstream/streampb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -27,7 +27,7 @@ import (
 // streamClientValidatorWrapper wraps a Validator and exposes additional methods
 // used by stream ingestion to check for correctness.
 type streamClientValidator struct {
-	cdctest.StreamValidator
+	validator.StreamValidator
 	rekeyer *backupccl.KeyRewriter
 
 	mu syncutil.Mutex
@@ -40,7 +40,7 @@ type streamClientValidator struct {
 // The wrapper also allows querying the orderValidator to retrieve streamed
 // events from an in-memory store.
 func newStreamClientValidator(rekeyer *backupccl.KeyRewriter) *streamClientValidator {
-	ov := cdctest.NewStreamOrderValidator()
+	ov := validator.NewStreamOrderValidator()
 	return &streamClientValidator{
 		StreamValidator: ov,
 		rekeyer:         rekeyer,
