@@ -695,7 +695,16 @@ type Manager struct {
 	sem          *quotapool.IntPool
 }
 
-const leaseConcurrencyLimit = 5
+// LeaseConcurrencyLimit is a limit on the concurrency of lease requests.
+var LeaseConcurrencyLimit = settings.RegisterIntSetting(
+	settings.TenantWritable,
+	"sql.catalog.lease.concurrency_limit",
+	"maximum allowed concurrency of lease refreshes",
+	DefaultConcurrencyLimit,
+	settings.NonNegativeInt,
+)
+
+const DefaultConcurrencyLimit = 5
 
 // NewLeaseManager creates a new Manager.
 //
@@ -737,8 +746,14 @@ func NewLeaseManager(
 		names:            makeNameCache(),
 		ambientCtx:       ambientCtx,
 		stopper:          stopper,
-		sem:              quotapool.NewIntPool("lease manager", leaseConcurrencyLimit),
+		sem: quotapool.NewIntPool(
+			"lease manager",
+			uint64(LeaseConcurrencyLimit.Get(&settings.SV)),
+		),
 	}
+	LeaseConcurrencyLimit.SetOnChange(&settings.SV, func(ctx context.Context) {
+		lm.sem.UpdateCapacity(uint64(LeaseConcurrencyLimit.Get(&settings.SV)))
+	})
 	lm.storage.regionPrefix = &atomic.Value{}
 	lm.storage.regionPrefix.Store(enum.One)
 	lm.stopper.AddCloser(lm.sem.Closer("stopper"))

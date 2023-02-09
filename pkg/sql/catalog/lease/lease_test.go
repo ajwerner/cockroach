@@ -3388,3 +3388,138 @@ func TestDescriptorRemovedFromCacheWhenLeaseRenewalForThisDescriptorFails(t *tes
 			typeDesc.GetName(), typeDesc.GetID())
 	})
 }
+
+// TestLeaseConcurrencyLimit ensures that updates to the lease concurrency
+// limit propagate.
+func TestLeaseConcurrencyLimit(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	var filter atomic.Value
+	noopFilter := kvserverbase.ReplicaRequestFilter(func(ctx context.Context, request *roachpb.BatchRequest) *roachpb.Error {
+		return nil
+	})
+	filter.Store(noopFilter)
+	ctx := context.Background()
+	var blocked atomic.Int64
+	blockCh := make(chan struct{})
+	s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{
+		Knobs: base.TestingKnobs{
+			Store: &kvserver.StoreTestingKnobs{
+				TestingRequestFilter: func(ctx context.Context, request *roachpb.BatchRequest) *roachpb.Error {
+					return nil
+					//return filter.Load().(kvserverbase.ReplicaRequestFilter)(ctx, request)
+				},
+			},
+			SQLLeaseManager: &lease.ManagerTestingKnobs{
+				LeaseStoreTestingKnobs: lease.StorageTestingKnobs{
+					LeaseAcquiredEvent: func(desc catalog.Descriptor, err error) {
+						if desc.GetParentID() == keys.SystemDatabaseID ||
+							desc.GetID() == keys.SystemDatabaseID {
+							return
+						}
+						blocked.Add(1)
+						defer blocked.Add(-1)
+						<-blockCh
+					},
+				},
+			},
+		},
+	})
+	defer s.Stopper().Stop(ctx)
+	tdb := sqlutils.MakeSQLRunner(sqlDB)
+	var tableCounter int
+	createTable := func() (id descpb.ID) {
+		tableName := fmt.Sprintf("table%d", tableCounter)
+		tableCounter++
+		require.NoError(t, crdb.ExecuteTx(ctx, sqlDB, nil, func(tx *gosql.Tx) error {
+			_, err := tx.Exec(fmt.Sprintf(
+				"CREATE TABLE %s (i INT PRIMARY KEY)", tableName,
+			))
+			if err != nil {
+				return err
+			}
+			return tx.QueryRow(fmt.Sprintf(
+				"SELECT '%s'::regclass::int", tableName,
+			)).Scan(&id)
+		}))
+
+		return id
+	}
+	// Create N tables and get their IDs.
+	lm := s.LeaseManager().(*lease.Manager)
+	const (
+		numTables = 20
+	)
+	// What do we want to do? We want to block requests to write to the
+	// lease table until the concurrency limit is reached. Then wait
+	// a touch and make sure nobody else shows up.
+	/*
+		leaseTablePrefix := s.Codec().TablePrefix(keys.LeaseTableID)
+		leaseTableSpan := roachpb.Span{
+			Key:    leaseTablePrefix,
+			EndKey: leaseTablePrefix.PrefixEnd(),
+		}
+		isWritingLeaseRequest := func(ctx context.Context, request *roachpb.BatchRequest) bool {
+			if !request.IsWrite() || request.IsAdmin() {
+				return false
+			}
+			for _, r := range request.Requests {
+				if leaseTableSpan.Overlaps(r.GetInner().Header().Span()) {
+					log.Infof(ctx, "blocked %v", request)
+					return true
+				}
+			}
+			return false
+		}
+
+		var blocked int64
+		filter.Store(kvserverbase.ReplicaRequestFilter(func(ctx context.Context, request *roachpb.BatchRequest) *roachpb.Error {
+			if !isWritingLeaseRequest(ctx, request) {
+				return nil
+			}
+			atomic.AddInt64(&blocked, 1)
+			defer atomic.AddInt64(&blocked, -11)
+			select {
+			case <-ctx.Done():
+				return roachpb.NewError(ctx.Err())
+			}
+		}))
+
+	*/
+	ids := make([]descpb.ID, numTables)
+	for i := 0; i < numTables; i++ {
+		ids[i] = createTable()
+	}
+
+	// This will tell us that we have at least numTables in-flight
+	// acquisitions. We want to then observe that the concurrency
+	// does not exceed the configured amount.
+	leaseCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	for i := 0; i < numTables; i++ {
+		wg.Add(1)
+		go func(i int) {
+			_, err := lm.Acquire(leaseCtx, s.DB().Clock().Now(), ids[i])
+			assert.Error(t, err)
+		}(i)
+	}
+
+	checkExpected := func() {
+		testutils.SucceedsSoon(t, func() error {
+			got := blocked.Load()
+			min := lease.LeaseConcurrencyLimit.Get(&s.ClusterSettings().SV)
+			if got < min {
+				return errors.Errorf("expected at lease %d, got %", min, got)
+			}
+			return nil
+		})
+	}
+
+	checkExpected()
+	require.Equal(t, int64(lease.DefaultConcurrencyLimit), blocked.Load())
+	tdb.Exec(t, "SET CLUSTER SETTING sql.catalog.lease.concurrency_limit = $1", numTables/2)
+	checkExpected()
+	require.Equal(t, numTables/2, blocked.Load())
+}
