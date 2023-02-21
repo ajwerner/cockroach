@@ -332,6 +332,11 @@ type TxnSender interface {
 
 	// HasPerformedWrites returns true if a write has been performed.
 	HasPerformedWrites() bool
+
+	// SetAnchor will set the anchor key for the transaction. It is an error
+	// to call this after the anchor key has already been set, unless the anchor
+	// key is set to the provided key.
+	SetAnchor(ctx context.Context, anchor roachpb.Key) error
 }
 
 // SteppingMode is the argument type to ConfigureStepping.

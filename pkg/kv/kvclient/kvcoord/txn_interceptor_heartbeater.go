@@ -11,6 +11,7 @@
 package kvcoord
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/errors"
 )
 
 // abortTxnAsyncTimeout is the context timeout for abortTxnAsyncLocked()
@@ -202,6 +204,9 @@ func (h *txnHeartbeater) SendLocked(
 		}
 
 		// Start the heartbeat loop if it has not already started.
+		// Note that at time of writing, this code needs to be separate from the
+		// check for whether the anchor has been set because some transactions
+		// are constructed with the key already set in testing.
 		if !h.mu.loopStarted {
 			h.startHeartbeatLoopLocked(ctx)
 		}
@@ -255,6 +260,38 @@ func (h *txnHeartbeater) SendLocked(
 	}
 
 	return br, pErr
+}
+
+// setAnchorAndStartHeartbeatLoop will set the anchor key for the transaction.
+// If the key is already set, the provided key must be the same as the already
+// set key (this can happen during restarts).
+func (h *txnHeartbeater) setAnchorAndStartHeartbeatLoop(
+	ctx context.Context, anchor roachpb.Key,
+) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// This function is idempotent; if we've already set the key, no-op.
+	if bytes.Equal(h.mu.txn.Key, anchor) {
+		return nil
+	}
+	// If the key is set to something else, it's a programming error.
+	if len(h.mu.txn.Key) != 0 {
+		return errors.AssertionFailedf(
+			"anchor key already set to %v, cannot set to %v",
+			h.mu.txn.Key, anchor,
+		)
+	}
+	// If the loop is already started, it's a programming error.
+	if h.mu.loopStarted {
+		return errors.AssertionFailedf(
+			"loop already started for txn %v despite no anchor having been set",
+			h.mu.txn,
+		)
+	}
+	h.mu.txn.Key = anchor
+	h.startHeartbeatLoopLocked(ctx)
+	return nil
 }
 
 // setWrapped is part of the txnInterceptor interface.

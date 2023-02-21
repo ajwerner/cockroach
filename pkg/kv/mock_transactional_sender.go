@@ -228,6 +228,11 @@ func (m *MockTransactionalSender) GetTxnRetryableErr(
 func (m *MockTransactionalSender) ClearTxnRetryableErr(ctx context.Context) {
 }
 
+// SetAnchor is part of the TxnSender interface.
+func (m *MockTransactionalSender) SetAnchor(ctx context.Context, anchor roachpb.Key) error {
+	panic("unimplemented")
+}
+
 // HasPerformedReads is part of TxnSenderFactory.
 func (m *MockTransactionalSender) HasPerformedReads() bool {
 	panic("unimplemented")

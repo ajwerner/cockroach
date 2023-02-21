@@ -838,3 +838,47 @@ func TestTxnHeartbeaterEndTxnLoopHandling(t *testing.T) {
 		})
 	}
 }
+
+func TestTxnHeartbeater_setAnchorAndStartHeartbeatLoop(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	txn := makeTxnProto()
+	txn.Key = nil
+	th, _, _ := makeMockTxnHeartbeater(&txn)
+	defer th.stopper.Stop(ctx)
+
+	require.False(t, heartbeaterRunning(&th), "heartbeat running")
+
+	keyA := roachpb.Key("a")
+	require.NoError(t, th.setAnchorAndStartHeartbeatLoop(ctx, keyA))
+	require.True(t, heartbeaterRunning(&th), "heartbeat running")
+	require.NoError(t, th.setAnchorAndStartHeartbeatLoop(ctx, keyA))
+
+	// Ensure we get an assertion failure if we try to set the key to something
+	// different.
+	{
+		keyB := roachpb.Key("b")
+		err := th.setAnchorAndStartHeartbeatLoop(ctx, keyB)
+		require.Error(t, err)
+		require.True(t, errors.IsAssertionFailure(err), err)
+	}
+
+	// Ensure that the key does not change.
+	keyC := roachpb.Key("c")
+	ba := &roachpb.BatchRequest{}
+	ba.Header = roachpb.Header{Txn: txn.Clone()}
+	ba.Add(&roachpb.PutRequest{RequestHeader: roachpb.RequestHeader{Key: keyC}})
+
+	th.mu.Lock()
+	br, pErr := th.SendLocked(ctx, ba)
+	th.mu.Unlock()
+	require.Nil(t, pErr)
+	require.NotNil(t, br)
+	require.True(t, heartbeaterRunning(&th), "heartbeat running")
+
+	th.mu.Lock()
+	defer th.mu.Unlock()
+	require.Equal(t, keyA, roachpb.Key(th.mu.txn.Key))
+}

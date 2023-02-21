@@ -1406,3 +1406,8 @@ func (tc *TxnCoordSender) hasPerformedReadsLocked() bool {
 func (tc *TxnCoordSender) hasPerformedWritesLocked() bool {
 	return tc.mu.txn.Sequence != 0
 }
+
+// SetAnchor is part of the TxnSender interface.
+func (tc *TxnCoordSender) SetAnchor(ctx context.Context, anchor roachpb.Key) error {
+	return tc.interceptorAlloc.txnHeartbeater.setAnchorAndStartHeartbeatLoop(ctx, anchor)
+}
