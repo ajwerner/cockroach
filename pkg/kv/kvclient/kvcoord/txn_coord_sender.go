@@ -1264,6 +1264,11 @@ func (tc *TxnCoordSender) UpdateRootWithLeafFinalState(
 // This is for use by tests only. To derive leaf TxnCoordSenders,
 // use GetLeafTxnInitialState instead.
 func (tc *TxnCoordSender) TestingCloneTxn() *roachpb.Transaction {
+	return tc.cloneTxn()
+}
+
+// cloneTxn duplicates the Transaction.
+func (tc *TxnCoordSender) cloneTxn() *roachpb.Transaction {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	return tc.mu.txn.Clone()
@@ -1410,4 +1415,36 @@ func (tc *TxnCoordSender) hasPerformedWritesLocked() bool {
 // SetAnchor is part of the TxnSender interface.
 func (tc *TxnCoordSender) SetAnchor(ctx context.Context, anchor roachpb.Key) error {
 	return tc.interceptorAlloc.txnHeartbeater.setAnchorAndStartHeartbeatLoop(ctx, anchor)
+}
+
+// BlockOn is part of the TxnSender interface.
+func (tc *TxnCoordSender) BlockOn(ctx context.Context, pusheeSender kv.TxnSender) error {
+	pushee, ok := pusheeSender.(*TxnCoordSender)
+	if !ok {
+		return errors.AssertionFailedf(
+			"cannot BlockOn TxnSender of type %T which is not %T", pusheeSender, tc,
+		)
+	}
+	// If the pushee is not locking, there's nothing to push.
+	if !pushee.IsLocking() {
+		return nil
+	}
+	var ba roachpb.BatchRequest
+	{
+		pusheeTransaction := pushee.cloneTxn()
+		ba.Header.Timestamp = tc.clock.Now()
+		pushTo := pusheeTransaction.WriteTimestamp
+		ba.Header.Timestamp.Forward(pushTo)
+		ba.Add(&roachpb.PushTxnRequest{
+			RequestHeader: roachpb.RequestHeader{
+				Key: pusheeTransaction.Key,
+			},
+			PusheeTxn: pusheeTransaction.TxnMeta,
+			PusherTxn: *tc.cloneTxn(),
+			PushTo:    pushTo,
+			PushType:  roachpb.PUSH_ABORT,
+		})
+	}
+	_, pErr := tc.NonTransactionalSender().Send(ctx, &ba)
+	return pErr.GoError()
 }

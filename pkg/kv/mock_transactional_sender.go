@@ -233,6 +233,11 @@ func (m *MockTransactionalSender) SetAnchor(ctx context.Context, anchor roachpb.
 	panic("unimplemented")
 }
 
+// BlockOn is part of the TxnSender interface.
+func (tc *MockTransactionalSender) BlockOn(ctx context.Context, pusheeSender TxnSender) error {
+	panic("unimplemented")
+}
+
 // HasPerformedReads is part of TxnSenderFactory.
 func (m *MockTransactionalSender) HasPerformedReads() bool {
 	panic("unimplemented")

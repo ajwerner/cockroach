@@ -337,6 +337,16 @@ type TxnSender interface {
 	// to call this after the anchor key has already been set, unless the anchor
 	// key is set to the provided key.
 	SetAnchor(ctx context.Context, anchor roachpb.Key) error
+
+	// BlockOn is used to indicate to the deadlock detection infrastructure
+	// that this transaction is logically blocked on Pushee. This often happens
+	// when using singleflights, and this function is used by the txnsingeflight
+	// library.
+	//
+	// Note that this is a no-op if pushee is not yet locking. It is up to the
+	// creator of pushee to call SetAnchor or to anchor the transaction on a key
+	// explicitly.
+	BlockOn(ctx context.Context, pushee TxnSender) error
 }
 
 // SteppingMode is the argument type to ConfigureStepping.

@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -3017,4 +3018,135 @@ func TestTxnCoordSenderSetFixedTimestamp(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTxnCoordSender_BlockOn exercises the BlockOn method to inject a
+// dependency edge into deadlock detection corresponding to a logical
+// dependency between transactions inside the system.
+func TestTxnCoordSender_BlockOn(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	ctx := context.Background()
+
+	s := createTestDB(t)
+	defer s.Stop()
+
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer cancel()
+	readKey := func(txn *kv.Txn, key roachpb.Key) <-chan error {
+		errCh := make(chan error, 1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := txn.Get(ctx, key)
+			errCh <- err
+		}()
+		return errCh
+	}
+
+	// We want to create a deadlock such that txn0->txn1 and txn2->txn0 and then
+	// show that if we add an edge from txn1->txn2 via the BlockOn function, that
+	// we see the deadlock resolve itself.
+
+	txn0 := kv.NewTxn(ctx, s.DB, 0 /* gatewayNodeID */)
+	txn1 := kv.NewTxn(ctx, s.DB, 0 /* gatewayNodeID */)
+	txn2 := kv.NewTxn(ctx, s.DB, 0 /* gatewayNodeID */)
+
+	keyA := roachpb.Key("a")
+	keyB := roachpb.Key("b")
+	keyC := roachpb.Key("c")
+
+	require.NoError(t, txn0.Put(ctx, keyA, "a"))
+	require.NoError(t, txn1.Put(ctx, keyB, "b"))
+	require.NoError(t, txn2.Sender().SetAnchor(ctx, keyC))
+
+	// Determine up front which transaction is going to get aborted.
+	txns := [...]*kv.Txn{txn0, txn1, txn2}
+
+	// Block the two transactions and make sure that they are indeed blocked.
+	//
+	// TODO(ajwerner): Perhaps check some metrics or something like that.
+	// In practice we actually need to wait longer than 10 milliseconds.
+	txn0Ch := readKey(txn0, keyB) // txn0->txn1
+	txn2Ch := readKey(txn2, keyA) // txn2->txn0
+	require.NoError(t, func() error {
+		select {
+		case err := <-txn0Ch:
+			return errors.Wrap(err, "txn0")
+		case err := <-txn2Ch:
+			return errors.Wrap(err, "txn2")
+		case <-time.After(10 * time.Millisecond):
+			return nil
+		}
+	}())
+
+	// Add the edge from txn1->txn2 using BlockOn.
+	wg.Add(1)
+	txn1Ch := make(chan error, 1)
+	blockOnCtx, cancelBlockOnCtx := context.WithCancel(ctx)
+	defer cancelBlockOnCtx()
+	go func() {
+		defer wg.Done()
+		txn1Ch <- txn1.Sender().BlockOn(blockOnCtx, txn2.Sender())
+	}()
+
+	// waitForError will return the next available error and the idx of the
+	// corresponding txn.
+	waitForError := func() (int, error) {
+		select {
+		case err := <-txn0Ch:
+			return 0, err
+		case err := <-txn1Ch:
+			return 1, err
+		case err := <-txn2Ch:
+			return 2, err
+		}
+	}
+
+	// Collect the errors from the transactions.
+	var errs [3]error
+	for i := 0; i < len(errs); i++ {
+		id, err := waitForError()
+		t.Log(i, id, err)
+		txn := txns[id]
+		if err == nil {
+			errs[id] = txn.Commit(ctx)
+		} else if !errors.Is(err, context.Canceled) {
+			errs[id] = err
+			require.NoError(t, txn.Rollback(ctx))
+		}
+
+		// The request which called BlockOn is not aborted, then it would have to
+		// wait for the read-only transaction it blocked on to expire. Instead,
+		// cancel the push request.
+		if id == 2 {
+			cancelBlockOnCtx()
+		}
+	}
+
+	// At most two of these errors should be a retry or abort.
+	var numRetries int
+	abortOrRetryRE := regexp.MustCompile(
+		`TransactionRetryWithProtoRefreshError` +
+			`|TransactionAbortedError\(ABORT_REASON_PUSHER_ABORTED\)`,
+	)
+	for id, err := range errs {
+		switch {
+		case err == nil:
+			continue
+
+		case abortOrRetryRE.MatchString(err.Error()):
+			numRetries++
+
+		case id == 1 && errors.Is(err, context.Canceled):
+			// ok
+
+		default:
+			t.Fatalf("unexpected error %v for txn%d", err, id)
+		}
+	}
+	// Another one can be
+	require.LessOrEqual(t, numRetries, 2, errs)
 }
