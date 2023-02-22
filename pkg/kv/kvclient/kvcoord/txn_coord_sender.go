@@ -1425,15 +1425,18 @@ func (tc *TxnCoordSender) BlockOn(ctx context.Context, pusheeSender kv.TxnSender
 			"cannot BlockOn TxnSender of type %T which is not %T", pusheeSender, tc,
 		)
 	}
+	log.Infof(ctx, "in block on %v %v", tc, pushee, pushee.IsLocking())
 	// If the pushee is not locking, there's nothing to push.
 	if !pushee.IsLocking() {
+		log.Infof(ctx, "returned early", tc, pushee, pushee.IsLocking())
 		return nil
 	}
 	var ba roachpb.BatchRequest
 	{
 		pusheeTransaction := pushee.cloneTxn()
-		ba.Header.Timestamp = tc.clock.Now()
-		pushTo := pusheeTransaction.WriteTimestamp
+		pushTo := tc.clock.Now()
+		pushTo.Forward(pusheeTransaction.WriteTimestamp)
+		ba.Header.Timestamp = pushTo
 		ba.Header.Timestamp.Forward(pushTo)
 		ba.Add(&roachpb.PushTxnRequest{
 			RequestHeader: roachpb.RequestHeader{
@@ -1445,6 +1448,12 @@ func (tc *TxnCoordSender) BlockOn(ctx context.Context, pusheeSender kv.TxnSender
 			PushType:  roachpb.PUSH_ABORT,
 		})
 	}
-	_, pErr := tc.NonTransactionalSender().Send(ctx, &ba)
+	resp, pErr := tc.NonTransactionalSender().Send(ctx, &ba)
+	if pErr == nil {
+		log.Infof(ctx, " resp %v err %v %v", resp, pErr, resp.Responses[0].GetPushTxn().PusheeTxn)
+	} else {
+		log.Infof(ctx, " resp %v err %v %v", resp, pErr)
+	}
+
 	return pErr.GoError()
 }

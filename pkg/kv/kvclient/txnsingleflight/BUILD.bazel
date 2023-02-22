@@ -1,0 +1,46 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "txnsingleflight",
+    srcs = ["txnsingleflight.go"],
+    importpath = "github.com/cockroachdb/cockroach/pkg/kv/kvclient/txnsingleflight",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/kv",
+        "//pkg/roachpb",
+        "//pkg/sql/isql",
+        "//pkg/util/log",
+        "//pkg/util/stop",
+        "//pkg/util/syncutil",
+        "//pkg/util/syncutil/singleflight",
+        "//pkg/util/timeutil",
+        "//pkg/util/tracing",
+    ],
+)
+
+go_test(
+    name = "txnsingleflight_test",
+    srcs = [
+        "main_test.go",
+        "txnsingleflight_test.go",
+    ],
+    deps = [
+        ":txnsingleflight",
+        "//pkg/base",
+        "//pkg/kv",
+        "//pkg/roachpb",
+        "//pkg/security/securityassets",
+        "//pkg/security/securitytest",
+        "//pkg/server",
+        "//pkg/sql/catalog/descpb",
+        "//pkg/testutils/serverutils",
+        "//pkg/testutils/sqlutils",
+        "//pkg/testutils/testcluster",
+        "//pkg/util/encoding",
+        "//pkg/util/leaktest",
+        "//pkg/util/log",
+        "//pkg/util/timeutil",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)

@@ -383,11 +383,12 @@ func (q *Queue) UpdateTxn(ctx context.Context, txn *roachpb.Transaction) {
 	metrics.PusheeWaiting.Dec(1)
 
 	if log.V(1) && waitingPushes.Len() > 0 {
-		log.Infof(ctx, "updating %d push waiters for %s", waitingPushes.Len(), txn.ID.Short())
+		log.Infof(ctx, "updating %d push waiters for %s %v", waitingPushes.Len(), txn.ID.Short(), txn)
 	}
 	// Send on pending waiter channels outside of the mutex lock.
 	for e := waitingPushes.Front(); e != nil; e = e.Next() {
 		push := e.Value.(*waitingPush)
+		log.Infof(ctx, "sending %d push waiters for %s %v", push.req, txn)
 		push.pending <- txn
 	}
 }
