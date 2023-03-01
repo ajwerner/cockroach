@@ -90,6 +90,7 @@ func Validate(
 		vea.reportDescGetterError(collectingReferencedDescriptors, descGetterErr)
 		return vea.errors
 	}
+
 	// Descriptor forward-reference checks.
 	if !vea.validateDescriptorsAtLevel(
 		catalog.ValidationLevelForwardReferences,

@@ -296,8 +296,8 @@ func (s storage) mustGetDescriptorByID(
 	ctx context.Context, txn *kv.Txn, id descpb.ID,
 ) (catalog.Descriptor, error) {
 	cr := s.newCatalogReader(ctx)
-	const isDescriptorRequired = true
-	c, err := cr.GetByIDs(ctx, txn, []descpb.ID{id}, isDescriptorRequired, catalog.Any)
+	const isDescriptorRequired, locking = true, false
+	c, err := cr.GetByIDs(ctx, txn, []descpb.ID{id}, isDescriptorRequired, locking, catalog.Any)
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +306,7 @@ func (s storage) mustGetDescriptorByID(
 	if s.crossValidateDuringRenewal() {
 		validationLevel = validate.ImmutableRead
 	}
-	vd := catkv.NewCatalogReaderBackedValidationDereferencer(cr, txn, nil /* dvmpMaybe */)
+	vd := catkv.NewCatalogReaderBackedValidationDereferencer(cr, txn, nil /* dvmpMaybe */, locking)
 	ve := validate.Validate(
 		ctx,
 		s.settings.Version.ActiveVersion(ctx),

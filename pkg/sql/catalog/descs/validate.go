@@ -31,10 +31,28 @@ func (tc *Collection) Validate(
 	targetLevel catalog.ValidationLevel,
 	descriptors ...catalog.Descriptor,
 ) (err error) {
+	// We want to lock the descriptors we need to validate if we're going to make
+	// sure that the descriptors are exclusively locked if we're doing writing to
+	// or forcing validation of cross-descriptor references.
+	locking := targetLevel >= validate.Write
+	return tc.validate(
+		ctx, txn, telemetry, targetLevel,
+		locking, descriptors...,
+	)
+}
+
+func (tc *Collection) validate(
+	ctx context.Context,
+	txn *kv.Txn,
+	telemetry catalog.ValidationTelemetry,
+	targetLevel catalog.ValidationLevel,
+	locking bool,
+	descriptors ...catalog.Descriptor,
+) (err error) {
 	if !tc.validationModeProvider.ValidateDescriptorsOnRead() && !tc.validationModeProvider.ValidateDescriptorsOnWrite() {
 		return nil
 	}
-	vd := tc.newValidationDereferencer(txn)
+	vd := tc.newValidationDereferencer(txn, locking)
 	version := tc.settings.Version.ActiveVersion(ctx)
 	return validate.Validate(
 		ctx,
@@ -66,8 +84,10 @@ func (tc *Collection) ValidateUncommittedDescriptors(ctx context.Context, txn *k
 	return tc.Validate(ctx, txn, catalog.ValidationWriteTelemetry, validate.Write, descs...)
 }
 
-func (tc *Collection) newValidationDereferencer(txn *kv.Txn) validate.ValidationDereferencer {
-	crvd := catkv.NewCatalogReaderBackedValidationDereferencer(tc.cr, txn, tc.validationModeProvider)
+func (tc *Collection) newValidationDereferencer(
+	txn *kv.Txn, locking bool,
+) validate.ValidationDereferencer {
+	crvd := catkv.NewCatalogReaderBackedValidationDereferencer(tc.cr, txn, tc.validationModeProvider, locking)
 	return &collectionBackedDereferencer{tc: tc, crvd: crvd}
 }
 

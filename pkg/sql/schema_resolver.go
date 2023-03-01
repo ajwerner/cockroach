@@ -139,7 +139,11 @@ func (sr *schemaResolver) LookupObject(
 			if err != nil || !found {
 				return found, prefix, nil, err
 			}
-			dbDesc, err := sr.byNameGetterBuilder().MaybeGet().Database(ctx, dbName)
+			b := sr.byNameGetterBuilder()
+			if flags.RequireMutable {
+				b = b.WithLocking()
+			}
+			dbDesc, err := b.MaybeGet().Database(ctx, dbName)
 			if err != nil {
 				return found, prefix, nil, err
 			}
@@ -154,6 +158,9 @@ func (sr *schemaResolver) LookupObject(
 	b := sr.descCollection.ByName(sr.txn)
 	if !sr.skipDescriptorCache && !flags.RequireMutable {
 		b = sr.descCollection.ByNameWithLeased(sr.txn)
+	}
+	if flags.RequireMutable {
+		b = b.WithLocking()
 	}
 	if flags.IncludeOffline {
 		b = b.WithOffline()

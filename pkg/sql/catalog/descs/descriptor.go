@@ -80,8 +80,8 @@ func (tc *Collection) GetZoneConfigs(
 	// If zone config is not seen in cache, it's a good chance that the id doesn't
 	// have a corresponding descriptor so the zone config wasn't loaded with the
 	// descriptor. Or a descriptor is not resolved for schema change purpose yet.
-	const isDescriptorRequired = false
-	read, err := tc.cr.GetByIDs(ctx, txn, storageIDs.Ordered(), isDescriptorRequired, catalog.Any)
+	const isDescriptorRequired, locking = false, false
+	read, err := tc.cr.GetByIDs(ctx, txn, storageIDs.Ordered(), isDescriptorRequired, locking, catalog.Any)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +204,20 @@ func getDescriptorsByID(
 			return catalog.ErrDescriptorNotFound
 		}
 		const isDescriptorRequired = true
-		read, err := tc.cr.GetByIDs(ctx, txn, readIDs.Ordered(), isDescriptorRequired, catalog.Any)
+
+		// Ensure that we use locking if we're performing a mutable lookup, or
+		// if we're avoiding leased. The reason to avoid it when avoiding leased
+		// is that we're almost certainly in the context of a schema change
+		// and that schema change may later need these resolved descriptors.
+		// The downside here is to reduce the concurrency of potentially
+		// non-overlapping schema changes in order to avoid performing extra
+		// round-trips later.
+		locking := flags.isMutable || flags.isLocking
+		read, err := tc.cr.GetByIDs(
+			ctx, txn, readIDs.Ordered(), isDescriptorRequired,
+			locking,
+			catalog.Any,
+		)
 		if err != nil {
 			return err
 		}
@@ -657,7 +670,10 @@ func (tc *Collection) finalizeDescriptors(
 		}
 	}
 	if len(toValidate) > 0 {
-		if err := tc.Validate(ctx, txn, catalog.ValidationReadTelemetry, requiredLevel, toValidate...); err != nil {
+		if err := tc.validate(
+			ctx, txn, catalog.ValidationReadTelemetry, requiredLevel,
+			flags.isMutable, toValidate...,
+		); err != nil {
 			return err
 		}
 		for _, desc := range toValidate {

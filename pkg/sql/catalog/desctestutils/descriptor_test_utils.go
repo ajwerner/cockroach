@@ -264,13 +264,13 @@ func mustGetDescriptorByID(
 	id descpb.ID,
 	expectedType catalog.DescriptorType,
 ) (catalog.Descriptor, error) {
-	const isDescriptorRequired = true
-	c, err := cr.GetByIDs(ctx, txn, []descpb.ID{id}, isDescriptorRequired, expectedType)
+	const isDescriptorRequired, locking = true, false
+	c, err := cr.GetByIDs(ctx, txn, []descpb.ID{id}, isDescriptorRequired, locking, expectedType)
 	if err != nil {
 		return nil, err
 	}
 	desc := c.LookupDescriptor(id)
-	vd := catkv.NewCatalogReaderBackedValidationDereferencer(cr, txn, nil /* dvmpMaybe */)
+	vd := catkv.NewCatalogReaderBackedValidationDereferencer(cr, txn, nil /* dvmpMaybe */, locking)
 	ve := validate.Validate(
 		ctx, version, vd, catalog.ValidationReadTelemetry, validate.ImmutableRead, desc,
 	)

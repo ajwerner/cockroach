@@ -150,7 +150,13 @@ func TestDataDriven(t *testing.T) {
 
 			case "get_by_ids":
 				var ids []descpb.ID
+				const lockingKey = "locking"
+				var locking bool
 				for _, pair := range d.CmdArgs {
+					if pair.Key == lockingKey {
+						locking = true
+						continue
+					}
 					if len(pair.Vals) != 1 || pair.Key != "id" {
 						t.Fatalf("%s: bad id arguments", d.Pos)
 					}
@@ -160,7 +166,7 @@ func TestDataDriven(t *testing.T) {
 				}
 				q := func(ctx context.Context, txn *kv.Txn, cr catkv.CatalogReader) (nstree.Catalog, error) {
 					const isDescriptorRequired = false
-					return cr.GetByIDs(ctx, txn, ids, isDescriptorRequired, catalog.Any)
+					return cr.GetByIDs(ctx, txn, ids, isDescriptorRequired, locking, catalog.Any)
 				}
 				return h.doCatalogQuery(ctx, q)
 
@@ -207,8 +213,8 @@ func (h testHelper) argDesc(
 	id := descpb.ID(idInt)
 	var c nstree.Catalog
 	err := h.execCfg.DB.Txn(ctx, func(ctx context.Context, txn *kv.Txn) (err error) {
-		const isDescriptorRequired = true
-		c, err = h.ucr.GetByIDs(ctx, txn, []descpb.ID{id}, isDescriptorRequired, expectedType)
+		const isDescriptorRequired, locking = true, false
+		c, err = h.ucr.GetByIDs(ctx, txn, []descpb.ID{id}, isDescriptorRequired, locking, expectedType)
 		return err
 	})
 	require.NoErrorf(h.t, err,

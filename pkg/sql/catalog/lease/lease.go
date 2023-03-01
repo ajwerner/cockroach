@@ -137,9 +137,9 @@ func (m *Manager) WaitForOneVersion(
 			// descriptors can be removed or made invalid. For instance, the
 			// descriptor could be a type or a schema which is dropped by a subsequent
 			// concurrent schema change.
-			const isDescriptorRequired = false
+			const isDescriptorRequired, locking = false, false
 			cr := m.storage.newCatalogReader(ctx)
-			c, err := cr.GetByIDs(ctx, txn, []descpb.ID{id}, isDescriptorRequired, catalog.Any)
+			c, err := cr.GetByIDs(ctx, txn, []descpb.ID{id}, isDescriptorRequired, locking, catalog.Any)
 			if err != nil {
 				return err
 			}

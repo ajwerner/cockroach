@@ -61,6 +61,7 @@ type byIDStateValue struct {
 	hasScanNamespaceForDatabaseEntries bool
 	hasScanNamespaceForDatabaseSchemas bool
 	hasGetDescriptorEntries            bool
+	hasAcquiredLock                    bool
 }
 
 type byNameStateValue struct {
@@ -294,12 +295,15 @@ func (c *cachedCatalogReader) GetByIDs(
 	txn *kv.Txn,
 	ids []descpb.ID,
 	isDescriptorRequired bool,
+	locking bool,
 	expectedType catalog.DescriptorType,
 ) (nstree.Catalog, error) {
 	numUncached := 0
 	// Move any uncached IDs to the front of the slice.
 	for i, id := range ids {
-		if c.byIDState[id].hasGetDescriptorEntries || c.hasScanAll {
+		state := c.byIDState[id]
+		if (state.hasGetDescriptorEntries || c.hasScanAll) &&
+			(!isDescriptorRequired || !locking || state.hasAcquiredLock) {
 			continue
 		}
 		if desc := c.systemDatabaseCache.lookupDescriptor(c.version, id); desc != nil {
@@ -308,9 +312,9 @@ func (c *cachedCatalogReader) GetByIDs(
 		ids[i], ids[numUncached] = ids[numUncached], id
 		numUncached++
 	}
-	if numUncached > 0 && !(c.hasScanAll && !isDescriptorRequired) {
+	if numUncached > 0 {
 		uncachedIDs := ids[:numUncached]
-		read, err := c.cr.GetByIDs(ctx, txn, uncachedIDs, isDescriptorRequired, expectedType)
+		read, err := c.cr.GetByIDs(ctx, txn, uncachedIDs, isDescriptorRequired, locking, expectedType)
 		if err != nil {
 			return nstree.Catalog{}, err
 		}
@@ -320,6 +324,7 @@ func (c *cachedCatalogReader) GetByIDs(
 		for _, id := range uncachedIDs {
 			s := c.byIDState[id]
 			s.hasGetDescriptorEntries = true
+			s.hasAcquiredLock = locking
 			c.setByIDState(id, s)
 		}
 	}

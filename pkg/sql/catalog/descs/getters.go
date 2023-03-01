@@ -446,6 +446,9 @@ type contextFlags struct {
 	isOptional bool
 	// isMutable specifies that a mutable descriptor is to be returned.
 	isMutable bool
+	// isLocking specifies that the lookup of the descriptor should lock
+	// the descriptor for update, and its references.
+	isLocking bool
 }
 
 type layerFilters struct {
@@ -524,6 +527,11 @@ type ByIDGetterBuilder getterBase
 // the main client of this layer.
 func (b ByIDGetterBuilder) WithoutSynthetic() ByIDGetterBuilder {
 	b.flags.layerFilters.withoutSynthetic = true
+	return b
+}
+
+func (b ByIDGetterBuilder) WithLocking() ByIDGetterBuilder {
+	b.flags.isLocking = true
 	return b
 }
 
@@ -618,6 +626,11 @@ type ByNameGetterBuilder getterBase
 // of offline descriptors.
 func (b ByNameGetterBuilder) WithOffline() ByNameGetterBuilder {
 	b.flags.descFilters.withoutOffline = false
+	return b
+}
+
+func (b ByNameGetterBuilder) WithLocking() ByNameGetterBuilder {
+	b.flags.isLocking = true
 	return b
 }
 

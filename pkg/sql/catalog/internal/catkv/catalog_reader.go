@@ -85,10 +85,8 @@ type CatalogReader interface {
 	// entries for the desired IDs, but looks in the system database cache
 	// first if there is one.
 	GetByIDs(
-		ctx context.Context,
-		txn *kv.Txn,
-		ids []descpb.ID,
-		isDescriptorRequired bool,
+		ctx context.Context, txn *kv.Txn, ids []descpb.ID,
+		isDescriptorRequired, locking bool,
 		expectedType catalog.DescriptorType,
 	) (nstree.Catalog, error)
 
@@ -217,6 +215,7 @@ func (cr catalogReader) GetByIDs(
 	txn *kv.Txn,
 	ids []descpb.ID,
 	isDescriptorRequired bool,
+	descriptorLocking bool,
 	expectedType catalog.DescriptorType,
 ) (nstree.Catalog, error) {
 	var mc nstree.MutableCatalog
@@ -230,7 +229,12 @@ func (cr catalogReader) GetByIDs(
 	}
 	err := cq.query(ctx, txn, &mc, func(codec keys.SQLCodec, b *kv.Batch) {
 		for _, id := range ids {
-			get(ctx, b, catalogkeys.MakeDescMetadataKey(codec, id))
+			if descriptorLocking {
+				getForUpdate(ctx, b, catalogkeys.MakeDescMetadataKey(codec, id))
+			} else {
+				get(ctx, b, catalogkeys.MakeDescMetadataKey(codec, id))
+			}
+
 			for _, t := range catalogkeys.AllCommentTypes {
 				scan(ctx, b, catalogkeys.MakeObjectCommentsMetadataPrefix(codec, t, id))
 			}
@@ -279,6 +283,13 @@ func get(ctx context.Context, b *kv.Batch, key roachpb.Key) {
 	}
 }
 
+func getForUpdate(ctx context.Context, b *kv.Batch, key roachpb.Key) {
+	b.GetForUpdate(key)
+	if isEventLoggingEnabled(ctx) {
+		log.VEventfDepth(ctx, 1, 2, "GetForUpdate %s", key)
+	}
+}
+
 func scan(ctx context.Context, b *kv.Batch, prefix roachpb.Key) {
 	b.Header.MaxSpanRequestKeys = 0
 	b.Scan(prefix, prefix.PrefixEnd())
@@ -293,6 +304,9 @@ const TestingSpanOperationName = "catalog-reader-test-case"
 
 func isEventLoggingEnabled(ctx context.Context) bool {
 	// Presently, we don't want to log any events outside of tests.
+	if log.ExpensiveLogEnabled(ctx, 2) {
+		return true
+	}
 	sp := tracing.SpanFromContext(ctx)
 	return sp != nil && sp.IsVerbose() && sp.OperationName() == TestingSpanOperationName
 }
