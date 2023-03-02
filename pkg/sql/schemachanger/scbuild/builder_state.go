@@ -1195,9 +1195,8 @@ func (b *builderState) ensureDescriptor(id catid.DescID) {
 		// Handle special case of schema children, which have to be added to
 		// the back-referenced ID set but which aren't explicitly referenced in
 		// the schema descriptor itself.
-		objects := b.cr.GetAllObjectsInSchema(b.ctx, db.(catalog.DatabaseDescriptor), d)
-		_ = objects.ForEachDescriptor(func(desc catalog.Descriptor) error {
-			c.backrefs.Add(desc.GetID())
+		_ = d.ForEachFunctionSignature(func(sig descpb.SchemaDescriptor_FunctionSignature) error {
+			c.backrefs.Add(sig.ID)
 			return nil
 		})
 	default:
