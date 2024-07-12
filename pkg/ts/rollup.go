@@ -18,6 +18,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
@@ -55,7 +56,7 @@ func (rd *rollupData) toInternal(
 	for _, dp := range rd.datapoints {
 		// Determine which InternalTimeSeriesData this datapoint belongs to,
 		// creating if it has not already been created for a previous sample.
-		keyTime := normalizeToPeriod(dp.timestampNanos, keyDuration)
+		keyTime := tskeys.NormalizeToPeriod(dp.timestampNanos, keyDuration)
 		itsd, ok := resultByKeyTime[keyTime]
 		if !ok {
 			result = append(result, roachpb.InternalTimeSeriesData{
@@ -123,9 +124,9 @@ func computeRollupsFromData(data tspb.TimeSeriesData, rollupPeriodNanos int64) r
 
 	dps := data.Datapoints
 	for len(dps) > 0 {
-		rollupTimestamp := normalizeToPeriod(dps[0].TimestampNanos, rollupPeriodNanos)
+		rollupTimestamp := tskeys.NormalizeToPeriod(dps[0].TimestampNanos, rollupPeriodNanos)
 		endIdx := sort.Search(len(dps), func(i int) bool {
-			return normalizeToPeriod(dps[i].TimestampNanos, rollupPeriodNanos) > rollupTimestamp
+			return tskeys.NormalizeToPeriod(dps[i].TimestampNanos, rollupPeriodNanos) > rollupTimestamp
 		})
 		createRollupPoint(rollupTimestamp, dps[:endIdx])
 		dps = dps[endIdx:]
@@ -156,8 +157,8 @@ func (db *DB) rollupTimeSeries(
 		// MaxSpanRequestKeys to limit the number of rows in memory at one time,
 		// and will use ResumeSpan to issue additional queries if necessary.
 		targetSpan := roachpb.Span{
-			Key: MakeDataKey(timeSeries.Name, "" /* source */, timeSeries.Resolution, 0),
-			EndKey: MakeDataKey(
+			Key: tskeys.MakeDataKey(timeSeries.Name, "" /* source */, timeSeries.Resolution, 0),
+			EndKey: tskeys.MakeDataKey(
 				timeSeries.Name, "" /* source */, timeSeries.Resolution, threshold,
 			),
 		}
@@ -202,7 +203,7 @@ func (db *DB) queryAndComputeRollupsForSpan(
 	ctx context.Context,
 	series timeSeriesResolutionInfo,
 	span roachpb.Span,
-	targetResolution Resolution,
+	targetResolution tskeys.Resolution,
 	rollupDataMap map[string]rollupData,
 	qmc QueryMemoryContext,
 ) (roachpb.Span, error) {
@@ -239,7 +240,7 @@ func (db *DB) queryAndComputeRollupsForSpan(
 		var end timeSeriesSpanIterator
 		for start := makeTimeSeriesSpanIterator(span); start.isValid(); start = end {
 			rollupPeriod := targetResolution.SampleDuration()
-			sampleTimestamp := normalizeToPeriod(start.timestamp, rollupPeriod)
+			sampleTimestamp := tskeys.NormalizeToPeriod(start.timestamp, rollupPeriod)
 			datapoint := rollupDatapoint{
 				timestampNanos: sampleTimestamp,
 				max:            -math.MaxFloat64,
@@ -249,7 +250,7 @@ func (db *DB) queryAndComputeRollupsForSpan(
 			if err := qmc.resultAccount.Grow(ctx, int64(unsafe.Sizeof(datapoint))); err != nil {
 				return roachpb.Span{}, err
 			}
-			for end = start; end.isValid() && normalizeToPeriod(end.timestamp, rollupPeriod) == sampleTimestamp; end.forward() {
+			for end = start; end.isValid() && tskeys.NormalizeToPeriod(end.timestamp, rollupPeriod) == sampleTimestamp; end.forward() {
 				datapoint.last = end.last()
 				datapoint.max = math.Max(datapoint.max, end.max())
 				datapoint.min = math.Min(datapoint.min, end.min())

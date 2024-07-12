@@ -293,6 +293,7 @@ go_library(
         "//pkg/testutils/sqlutils",
         "//pkg/ts",
         "//pkg/ts/catalog",
+        "//pkg/ts/tskeys",
         "//pkg/ui",
         "//pkg/upgrade",
         "//pkg/upgrade/upgradebase",

@@ -14,6 +14,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -29,7 +30,7 @@ func TestTimeSeriesWriteMetrics(t *testing.T) {
 
 	metrics := tm.DB.Metrics()
 
-	tm.storeTimeSeriesData(resolution1ns, []tspb.TimeSeriesData{
+	tm.storeTimeSeriesData(tskeys.TestingResolution1ns, []tspb.TimeSeriesData{
 		tsd("test.multimetric", "source1",
 			tsdp(1, 100),
 			tsdp(15, 300),
@@ -60,7 +61,7 @@ func TestTimeSeriesWriteMetrics(t *testing.T) {
 	}
 
 	// Introduce an error into the db.
-	if err := tm.DB.StoreData(context.Background(), resolutionInvalid, []tspb.TimeSeriesData{
+	if err := tm.DB.StoreData(context.Background(), tskeys.TestingResolutionInvalid, []tspb.TimeSeriesData{
 		{
 			Name:   "test.multimetric",
 			Source: "source3",

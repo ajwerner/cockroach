@@ -20,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
@@ -79,7 +80,7 @@ type DB struct {
 	// pruneAgeByResolution maintains a suggested maximum age per resolution; data
 	// which is older than the given threshold for a resolution is considered
 	// eligible for deletion. Thresholds are specified in nanoseconds.
-	pruneThresholdByResolution map[Resolution]func() int64
+	pruneThresholdByResolution map[tskeys.Resolution]func() int64
 
 	// forceRowFormat is set to true if the database should write in the old row
 	// format, regardless of the current cluster setting. Currently only set to
@@ -89,13 +90,13 @@ type DB struct {
 
 // NewDB creates a new DB instance.
 func NewDB(db *kv.DB, settings *cluster.Settings) *DB {
-	pruneThresholdByResolution := map[Resolution]func() int64{
-		Resolution10s: func() int64 {
+	pruneThresholdByResolution := map[tskeys.Resolution]func() int64{
+		tskeys.Resolution10s: func() int64 {
 			return Resolution10sStorageTTL.Get(&settings.SV).Nanoseconds()
 		},
-		Resolution30m:  func() int64 { return Resolution30mStorageTTL.Get(&settings.SV).Nanoseconds() },
-		resolution1ns:  func() int64 { return resolution1nsDefaultRollupThreshold.Nanoseconds() },
-		resolution50ns: func() int64 { return resolution50nsDefaultPruneThreshold.Nanoseconds() },
+		tskeys.Resolution30m:         func() int64 { return Resolution30mStorageTTL.Get(&settings.SV).Nanoseconds() },
+		tskeys.TestingResolution1ns:  func() int64 { return resolution1nsDefaultRollupThreshold.Nanoseconds() },
+		tskeys.TestingResolution50ns: func() int64 { return resolution50nsDefaultPruneThreshold.Nanoseconds() },
 	}
 	return &DB{
 		db:                         db,
@@ -116,19 +117,19 @@ type poller struct {
 	db        *DB
 	source    DataSource
 	frequency time.Duration
-	r         Resolution
+	r         tskeys.Resolution
 	stopper   *stop.Stopper
 }
 
 // PollSource begins a Goroutine which periodically queries the supplied
 // DataSource for time series data, storing the returned data in the server.
-// Stored data will be sampled using the provided Resolution. The polling
+// Stored data will be sampled using the provided tskeys.Resolution. The polling
 // process will continue until the provided stop.Stopper is stopped.
 func (db *DB) PollSource(
 	ambient log.AmbientContext,
 	source DataSource,
 	frequency time.Duration,
-	r Resolution,
+	r tskeys.Resolution,
 	stopper *stop.Stopper,
 ) (firstDone <-chan struct{}) {
 	ambient.AddLogTag("ts-poll", nil)
@@ -204,7 +205,7 @@ func (p *poller) poll(ctx context.Context) {
 
 // StoreData writes the supplied time series data to the cockroach server.
 // Stored data will be sampled at the supplied resolution.
-func (db *DB) StoreData(ctx context.Context, r Resolution, data []tspb.TimeSeriesData) error {
+func (db *DB) StoreData(ctx context.Context, r tskeys.Resolution, data []tspb.TimeSeriesData) error {
 	if r.IsRollup() {
 		return fmt.Errorf(
 			"invalid attempt to store time series data in rollup resolution %s", r.String(),
@@ -219,7 +220,7 @@ func (db *DB) StoreData(ctx context.Context, r Resolution, data []tspb.TimeSerie
 	return nil
 }
 
-func (db *DB) tryStoreData(ctx context.Context, r Resolution, data []tspb.TimeSeriesData) error {
+func (db *DB) tryStoreData(ctx context.Context, r tskeys.Resolution, data []tspb.TimeSeriesData) error {
 	var kvs []roachpb.KeyValue
 	var totalSizeOfKvs int64
 	var totalSamples int64
@@ -236,7 +237,7 @@ func (db *DB) tryStoreData(ctx context.Context, r Resolution, data []tspb.TimeSe
 			if err := value.SetProto(&idata); err != nil {
 				return err
 			}
-			key := MakeDataKey(d.Name, d.Source, r, idata.StartTimestampNanos)
+			key := tskeys.MakeDataKey(d.Name, d.Source, r, idata.StartTimestampNanos)
 			kvs = append(kvs, roachpb.KeyValue{
 				Key:   key,
 				Value: value,
@@ -257,7 +258,7 @@ func (db *DB) tryStoreData(ctx context.Context, r Resolution, data []tspb.TimeSe
 
 // storeRollup writes the supplied time series rollup data to the cockroach
 // server.
-func (db *DB) storeRollup(ctx context.Context, r Resolution, data []rollupData) error {
+func (db *DB) storeRollup(ctx context.Context, r tskeys.Resolution, data []rollupData) error {
 	if !r.IsRollup() {
 		return fmt.Errorf(
 			"invalid attempt to store rollup data in non-rollup resolution %s", r.String(),
@@ -272,7 +273,7 @@ func (db *DB) storeRollup(ctx context.Context, r Resolution, data []rollupData) 
 	return nil
 }
 
-func (db *DB) tryStoreRollup(ctx context.Context, r Resolution, data []rollupData) error {
+func (db *DB) tryStoreRollup(ctx context.Context, r tskeys.Resolution, data []rollupData) error {
 	var kvs []roachpb.KeyValue
 
 	for _, d := range data {
@@ -285,7 +286,7 @@ func (db *DB) tryStoreRollup(ctx context.Context, r Resolution, data []rollupDat
 			if err := value.SetProto(&idata); err != nil {
 				return err
 			}
-			key := MakeDataKey(d.name, d.source, r, idata.StartTimestampNanos)
+			key := tskeys.MakeDataKey(d.name, d.source, r, idata.StartTimestampNanos)
 			kvs = append(kvs, roachpb.KeyValue{
 				Key:   key,
 				Value: value,
@@ -314,8 +315,8 @@ func (db *DB) storeKvs(ctx context.Context, kvs []roachpb.KeyValue) error {
 // computeThresholds returns a map of timestamps for each resolution supported
 // by the system. Data at a resolution which is older than the threshold
 // timestamp for that resolution is considered eligible for deletion.
-func (db *DB) computeThresholds(timestamp int64) map[Resolution]int64 {
-	result := make(map[Resolution]int64, len(db.pruneThresholdByResolution))
+func (db *DB) computeThresholds(timestamp int64) map[tskeys.Resolution]int64 {
+	result := make(map[tskeys.Resolution]int64, len(db.pruneThresholdByResolution))
 	for k, v := range db.pruneThresholdByResolution {
 		result[k] = timestamp - v()
 	}
@@ -325,7 +326,7 @@ func (db *DB) computeThresholds(timestamp int64) map[Resolution]int64 {
 // PruneThreshold returns the pruning threshold duration for this resolution,
 // expressed in nanoseconds. This duration determines how old time series data
 // must be before it is eligible for pruning.
-func (db *DB) PruneThreshold(r Resolution) int64 {
+func (db *DB) PruneThreshold(r tskeys.Resolution) int64 {
 	threshold, ok := db.pruneThresholdByResolution[r]
 	if !ok {
 		panic(fmt.Sprintf("no prune threshold found for resolution value %v", r))

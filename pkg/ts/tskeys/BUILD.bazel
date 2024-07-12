@@ -1,0 +1,30 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "tskeys",
+    srcs = [
+        "keys.go",
+        "resolution.go",
+    ],
+    importpath = "github.com/cockroachdb/cockroach/pkg/ts/tskeys",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/keys",
+        "//pkg/roachpb",
+        "//pkg/ts/tspb",
+        "//pkg/util/encoding",
+        "//pkg/util/timeutil",
+        "@com_github_cockroachdb_errors//:errors",
+        "@com_github_cockroachdb_redact//:redact",
+    ],
+)
+
+go_test(
+    name = "tskeys_test",
+    srcs = ["keys_test.go"],
+    embed = [":tskeys"],
+    deps = [
+        "//pkg/keys",
+        "//pkg/util/leaktest",
+    ],
+)

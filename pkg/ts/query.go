@@ -19,6 +19,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/ts/tsutil"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -441,7 +442,7 @@ func (tsi *timeSeriesSpanIterator) isValid() bool {
 func (db *DB) Query(
 	ctx context.Context,
 	query tspb.Query,
-	diskResolution Resolution,
+	diskResolution tskeys.Resolution,
 	timespan QueryTimespan,
 	mem QueryMemoryContext,
 ) ([]tspb.TimeSeriesDatapoint, []string, error) {
@@ -471,10 +472,10 @@ func (db *DB) Query(
 	// Create sourceSet, which tracks unique sources seen while querying.
 	sourceSet := make(map[string]struct{})
 
-	resolutions := []Resolution{diskResolution}
+	resolutions := []tskeys.Resolution{diskResolution}
 	if rollupResolution, ok := diskResolution.TargetRollupResolution(); ok {
 		if timespan.verifyDiskResolution(rollupResolution) == nil {
-			resolutions = []Resolution{rollupResolution, diskResolution}
+			resolutions = []tskeys.Resolution{rollupResolution, diskResolution}
 		}
 	}
 
@@ -540,7 +541,7 @@ func (db *DB) Query(
 func (db *DB) queryChunk(
 	ctx context.Context,
 	query tspb.Query,
-	diskResolution Resolution,
+	diskResolution tskeys.Resolution,
 	timespan QueryTimespan,
 	mem QueryMemoryContext,
 	dest *[]tspb.TimeSeriesDatapoint,
@@ -615,31 +616,31 @@ func downsampleSpans(
 	for k, span := range spans {
 		nextInsert := makeTimeSeriesSpanIterator(span)
 		for start, end := nextInsert, nextInsert; start.isValid(); start = end {
-			sampleTimestamp := normalizeToPeriod(start.timestamp, duration)
+			sampleTimestamp := tskeys.NormalizeToPeriod(start.timestamp, duration)
 
 			switch downsampler {
 			case tspb.TimeSeriesQueryAggregator_MAX:
 				max := -math.MaxFloat64
-				for ; end.isValid() && normalizeToPeriod(end.timestamp, duration) == sampleTimestamp; end.forward() {
+				for ; end.isValid() && tskeys.NormalizeToPeriod(end.timestamp, duration) == sampleTimestamp; end.forward() {
 					max = math.Max(max, end.max())
 				}
 				nextInsert.setSingleValue(max)
 			case tspb.TimeSeriesQueryAggregator_MIN:
 				min := math.MaxFloat64
-				for ; end.isValid() && normalizeToPeriod(end.timestamp, duration) == sampleTimestamp; end.forward() {
+				for ; end.isValid() && tskeys.NormalizeToPeriod(end.timestamp, duration) == sampleTimestamp; end.forward() {
 					min = math.Min(min, end.min())
 				}
 				nextInsert.setSingleValue(min)
 			case tspb.TimeSeriesQueryAggregator_AVG:
 				count, sum := uint32(0), 0.0
-				for ; end.isValid() && normalizeToPeriod(end.timestamp, duration) == sampleTimestamp; end.forward() {
+				for ; end.isValid() && tskeys.NormalizeToPeriod(end.timestamp, duration) == sampleTimestamp; end.forward() {
 					count += end.count()
 					sum += end.sum()
 				}
 				nextInsert.setSingleValue(sum / float64(count))
 			case tspb.TimeSeriesQueryAggregator_SUM:
 				sum := 0.0
-				for ; end.isValid() && normalizeToPeriod(end.timestamp, duration) == sampleTimestamp; end.forward() {
+				for ; end.isValid() && tskeys.NormalizeToPeriod(end.timestamp, duration) == sampleTimestamp; end.forward() {
 					sum += end.sum()
 				}
 				nextInsert.setSingleValue(sum)
@@ -833,7 +834,7 @@ func aggregate(agg tspb.TimeSeriesQueryAggregator, values []float64) float64 {
 func (db *DB) readFromDatabase(
 	ctx context.Context,
 	seriesName string,
-	diskResolution Resolution,
+	diskResolution tskeys.Resolution,
 	timespan QueryTimespan,
 	sources []string,
 	tenantID roachpb.TenantID,
@@ -841,7 +842,7 @@ func (db *DB) readFromDatabase(
 	// Iterate over all key timestamps which may contain data for the given
 	// sources, based on the given start/end time and the resolution.
 	b := &kv.Batch{}
-	startTimestamp := diskResolution.normalizeToSlab(timespan.StartNanos)
+	startTimestamp := diskResolution.NormalizeToSlab(timespan.StartNanos)
 	kd := diskResolution.SlabDuration()
 	for currentTimestamp := startTimestamp; currentTimestamp <= timespan.EndNanos; currentTimestamp += kd {
 		for _, source := range sources {
@@ -853,16 +854,16 @@ func (db *DB) readFromDatabase(
 				if !tenantID.IsSystem() {
 					source = tsutil.MakeTenantSource(source, tenantID.String())
 				}
-				key := MakeDataKey(seriesName, source, diskResolution, currentTimestamp)
+				key := tskeys.MakeDataKey(seriesName, source, diskResolution, currentTimestamp)
 				b.Get(key)
 			} else {
 				// Otherwise, we get the source associated with the system tenant.
-				key := MakeDataKey(seriesName, source, diskResolution, currentTimestamp)
+				key := tskeys.MakeDataKey(seriesName, source, diskResolution, currentTimestamp)
 				b.Get(key)
 				// Then we scan all keys that match the tenant source prefix since the system tenant
 				// aggregates sources across all tenants.
-				startKey := MakeDataKey(seriesName, tsutil.MakeTenantSourcePrefix(source), diskResolution, currentTimestamp)
-				endKey := MakeDataKey(seriesName, tsutil.MakeTenantSourcePrefix(source), diskResolution, currentTimestamp).PrefixEnd()
+				startKey := tskeys.MakeDataKey(seriesName, tsutil.MakeTenantSourcePrefix(source), diskResolution, currentTimestamp)
+				endKey := tskeys.MakeDataKey(seriesName, tsutil.MakeTenantSourcePrefix(source), diskResolution, currentTimestamp).PrefixEnd()
 				b.Scan(startKey, endKey)
 			}
 		}
@@ -888,7 +889,7 @@ func (db *DB) readFromDatabase(
 func (db *DB) readAllSourcesFromDatabase(
 	ctx context.Context,
 	seriesName string,
-	diskResolution Resolution,
+	diskResolution tskeys.Resolution,
 	timespan QueryTimespan,
 	tenantID roachpb.TenantID,
 ) ([]kv.KeyValue, error) {
@@ -896,10 +897,10 @@ func (db *DB) readAllSourcesFromDatabase(
 	// end keys for a scan that will return every key with data relevant to
 	// the query. Query slightly before and after the actual queried range
 	// to allow interpolation of points at the start and end of the range.
-	startKey := MakeDataKey(
+	startKey := tskeys.MakeDataKey(
 		seriesName, "" /* source */, diskResolution, timespan.StartNanos,
 	)
-	endKey := MakeDataKey(
+	endKey := tskeys.MakeDataKey(
 		seriesName, "" /* source */, diskResolution, timespan.EndNanos,
 	).PrefixEnd()
 	b := &kv.Batch{}
@@ -916,7 +917,7 @@ func (db *DB) readAllSourcesFromDatabase(
 	// Filter out rows that don't belong to the tenant source
 	var rows []kv.KeyValue
 	for _, row := range b.Results[0].Rows {
-		_, source, _, _, err := DecodeDataKey(row.Key)
+		_, source, _, _, err := tskeys.DecodeDataKey(row.Key)
 		if err != nil {
 			return nil, err
 		}
@@ -939,7 +940,7 @@ func convertKeysToSpans(
 		if err := row.ValueProto(&data); err != nil {
 			return nil, err
 		}
-		_, source, _, _, err := DecodeDataKey(row.Key)
+		_, source, _, _, err := tskeys.DecodeDataKey(row.Key)
 		if err != nil {
 			return nil, err
 		}

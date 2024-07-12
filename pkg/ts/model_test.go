@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -144,9 +145,9 @@ var modelTestInterpolationLimits = []int64{
 // modelTestSampleDurations are the various sample durations that will be
 // exercised.
 var modelTestSampleDurations = []int64{
-	Resolution10s.SampleDuration(),
-	Resolution10s.SampleDuration() * 3,
-	Resolution10s.SlabDuration(),
+	tskeys.Resolution10s.SampleDuration(),
+	tskeys.Resolution10s.SampleDuration() * 3,
+	tskeys.Resolution10s.SlabDuration(),
 }
 
 // modelTestRowCount is the number of sample periods that will be filled for
@@ -159,7 +160,7 @@ var modelTestRowCount = len(modelTestGapBitmap)
 // time earlier than the anchor time such that half of recorded samples occur
 // before the anchor time.
 var modelTestAnchorTime = time.Date(2018, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
-var modelTestStartTime = modelTestAnchorTime - int64(modelTestRowCount/2)*Resolution10s.SampleDuration()
+var modelTestStartTime = modelTestAnchorTime - int64(modelTestRowCount/2)*tskeys.Resolution10s.SampleDuration()
 
 // modelTestQueryTimes are the bounds that will be queried for the tests.
 var modelTestQueryTimes = []struct {
@@ -171,8 +172,8 @@ var modelTestQueryTimes = []struct {
 		end:   modelTestStartTime + time.Hour.Nanoseconds(),
 	},
 	{
-		start: modelTestStartTime + 20*Resolution10s.SampleDuration(),
-		end:   modelTestStartTime + 35*Resolution10s.SampleDuration(),
+		start: modelTestStartTime + 20*tskeys.Resolution10s.SampleDuration(),
+		end:   modelTestStartTime + 35*tskeys.Resolution10s.SampleDuration(),
 	},
 }
 
@@ -194,7 +195,7 @@ func TestTimeSeriesModelTest(t *testing.T) {
 				// Check the gap bitmap to see if this sample period and source get a
 				// data point.
 				if modelTestGapBitmap[rowNum%len(modelTestGapBitmap)][4*metricNum+sourceNum] > 0 {
-					tm.storeTimeSeriesData(Resolution10s, []tspb.TimeSeriesData{
+					tm.storeTimeSeriesData(tskeys.Resolution10s, []tspb.TimeSeriesData{
 						tsd(metric, source,
 							tsdp(getSampleTime(rowNum), math.Floor(r1.Float64()*10000)),
 						),
@@ -209,7 +210,7 @@ func TestTimeSeriesModelTest(t *testing.T) {
 		// Sanity check: model should contain a datapoint for all but two sample
 		// periods (one period is fully missing from the gap bitmap).
 		query := tm.makeQuery(
-			modelTestMetricNames[0], Resolution10s, modelTestStartTime, modelTestStartTime+time.Hour.Nanoseconds(),
+			modelTestMetricNames[0], tskeys.Resolution10s, modelTestStartTime, modelTestStartTime+time.Hour.Nanoseconds(),
 		)
 		query.assertSuccess(len(modelTestGapBitmap)-2, 4)
 	}
@@ -235,7 +236,7 @@ func TestTimeSeriesRollupModelTest(t *testing.T) {
 				// Check the gap bitmap to see if this sample period and source get a
 				// data point.
 				if modelTestGapBitmap[rowNum%len(modelTestGapBitmap)][4*metricNum+sourceNum] > 0 {
-					tm.storeTimeSeriesData(Resolution10s, []tspb.TimeSeriesData{
+					tm.storeTimeSeriesData(tskeys.Resolution10s, []tspb.TimeSeriesData{
 						tsd(metric, source,
 							tsdp(getSampleTime(rowNum), math.Floor(r1.Float64()*10000)),
 						),
@@ -252,7 +253,7 @@ func TestTimeSeriesRollupModelTest(t *testing.T) {
 		// Sanity check: after the rollup, the 10s resolution should only have half
 		// of its data points.
 		query := tm.makeQuery(
-			modelTestMetricNames[0], Resolution10s, modelTestStartTime, modelTestStartTime+time.Hour.Nanoseconds(),
+			modelTestMetricNames[0], tskeys.Resolution10s, modelTestStartTime, modelTestStartTime+time.Hour.Nanoseconds(),
 		)
 		query.assertSuccess(modelTestRowCount/2-1, 4)
 	}
@@ -260,7 +261,7 @@ func TestTimeSeriesRollupModelTest(t *testing.T) {
 		// Sanity check: after the rollup, the 30m resolution should contain a
 		// single data point.
 		query := tm.makeQuery(
-			modelTestMetricNames[0], Resolution30m, modelTestStartTime, modelTestStartTime+time.Hour.Nanoseconds(),
+			modelTestMetricNames[0], tskeys.Resolution30m, modelTestStartTime, modelTestStartTime+time.Hour.Nanoseconds(),
 		)
 		query.assertSuccess(1, 4)
 	}
@@ -271,7 +272,7 @@ func TestTimeSeriesRollupModelTest(t *testing.T) {
 // getSampleTime returns the timestamp for the numbered sample period in the
 // model test.
 func getSampleTime(n int) time.Duration {
-	return time.Duration(modelTestStartTime + int64(n)*Resolution10s.SampleDuration())
+	return time.Duration(modelTestStartTime + int64(n)*tskeys.Resolution10s.SampleDuration())
 }
 
 func executeQueryMatrix(t *testing.T, tm testModelRunner) {
@@ -284,7 +285,7 @@ func executeQueryMatrix(t *testing.T, tm testModelRunner) {
 							for _, queryRange := range modelTestQueryTimes {
 								for srcCount := 0; srcCount <= len(modelTestSourceNames); srcCount++ {
 									query := tm.makeQuery(
-										metric, Resolution10s, queryRange.start, queryRange.end,
+										metric, tskeys.Resolution10s, queryRange.start, queryRange.end,
 									)
 									query.setDownsampler(downsampler)
 									query.setSourceAggregator(aggregator)

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 )
 
@@ -23,7 +24,7 @@ func TestGetMaxTimespan(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	for _, tc := range []struct {
-		r                   Resolution
+		r                   tskeys.Resolution
 		opts                QueryMemoryOptions
 		expectedTimespan    int64
 		expectedErrorString string
@@ -32,7 +33,7 @@ func TestGetMaxTimespan(t *testing.T) {
 		// slabs of memory budget, as queried time span may stagger across two
 		// slabs)
 		{
-			Resolution10s,
+			tskeys.Resolution10s,
 			QueryMemoryOptions{
 				BudgetBytes:             2 * (sizeOfTimeSeriesData + sizeOfSample*360),
 				EstimatedSources:        1,
@@ -43,7 +44,7 @@ func TestGetMaxTimespan(t *testing.T) {
 		},
 		// Not enough room for to make query.
 		{
-			Resolution10s,
+			tskeys.Resolution10s,
 			QueryMemoryOptions{
 				BudgetBytes:             sizeOfTimeSeriesData + sizeOfSample*360,
 				EstimatedSources:        1,
@@ -54,7 +55,7 @@ func TestGetMaxTimespan(t *testing.T) {
 		},
 		// Not enough room because of multiple sources.
 		{
-			Resolution10s,
+			tskeys.Resolution10s,
 			QueryMemoryOptions{
 				BudgetBytes:             2 * (sizeOfTimeSeriesData + sizeOfSample*360),
 				EstimatedSources:        2,
@@ -65,7 +66,7 @@ func TestGetMaxTimespan(t *testing.T) {
 		},
 		// 6 sources, room for 1 hour.
 		{
-			Resolution10s,
+			tskeys.Resolution10s,
 			QueryMemoryOptions{
 				BudgetBytes:             12 * (sizeOfTimeSeriesData + sizeOfSample*360),
 				EstimatedSources:        6,
@@ -76,7 +77,7 @@ func TestGetMaxTimespan(t *testing.T) {
 		},
 		// 6 sources, room for 2 hours.
 		{
-			Resolution10s,
+			tskeys.Resolution10s,
 			QueryMemoryOptions{
 				BudgetBytes:             18 * (sizeOfTimeSeriesData + sizeOfSample*360),
 				EstimatedSources:        6,
@@ -87,7 +88,7 @@ func TestGetMaxTimespan(t *testing.T) {
 		},
 		// Not enough room due to interpolation buffer.
 		{
-			Resolution10s,
+			tskeys.Resolution10s,
 			QueryMemoryOptions{
 				BudgetBytes:             12 * (sizeOfTimeSeriesData + sizeOfSample*360),
 				EstimatedSources:        6,
@@ -98,7 +99,7 @@ func TestGetMaxTimespan(t *testing.T) {
 		},
 		// Sufficient room even with interpolation buffer.
 		{
-			Resolution10s,
+			tskeys.Resolution10s,
 			QueryMemoryOptions{
 				BudgetBytes:             18 * (sizeOfTimeSeriesData + sizeOfSample*360),
 				EstimatedSources:        6,
@@ -109,29 +110,29 @@ func TestGetMaxTimespan(t *testing.T) {
 		},
 		// Insufficient room for interpolation buffer (due to straddling)
 		{
-			Resolution10s,
+			tskeys.Resolution10s,
 			QueryMemoryOptions{
 				BudgetBytes:             18 * (sizeOfTimeSeriesData + sizeOfSample*360),
 				EstimatedSources:        6,
-				InterpolationLimitNanos: int64(float64(Resolution10s.SlabDuration()) * 0.75),
+				InterpolationLimitNanos: int64(float64(tskeys.Resolution10s.SlabDuration()) * 0.75),
 			},
 			0,
 			"insufficient",
 		},
 		// Sufficient room even with interpolation buffer.
 		{
-			Resolution10s,
+			tskeys.Resolution10s,
 			QueryMemoryOptions{
 				BudgetBytes:             24 * (sizeOfTimeSeriesData + sizeOfSample*360),
 				EstimatedSources:        6,
-				InterpolationLimitNanos: int64(float64(Resolution10s.SlabDuration()) * 0.75),
+				InterpolationLimitNanos: int64(float64(tskeys.Resolution10s.SlabDuration()) * 0.75),
 			},
 			(1 * time.Hour).Nanoseconds(),
 			"",
 		},
 		// 1ns test resolution.
 		{
-			resolution1ns,
+			tskeys.TestingResolution1ns,
 			QueryMemoryOptions{
 				BudgetBytes:             3 * (sizeOfTimeSeriesData + sizeOfSample*10),
 				EstimatedSources:        1,
@@ -142,7 +143,7 @@ func TestGetMaxTimespan(t *testing.T) {
 		},
 		// Overflow.
 		{
-			Resolution10s,
+			tskeys.Resolution10s,
 			QueryMemoryOptions{
 				BudgetBytes:             math.MaxInt64,
 				EstimatedSources:        1,

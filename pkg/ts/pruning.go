@@ -18,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 )
 
@@ -28,7 +29,7 @@ var (
 
 type timeSeriesResolutionInfo struct {
 	Name       string
-	Resolution Resolution
+	Resolution tskeys.Resolution
 }
 
 // findTimeSeries searches the supplied engine over the supplied key range,
@@ -80,7 +81,7 @@ func (tsdb *DB) findTimeSeries(
 		foundKey := iter.UnsafeKey().Key.Clone()
 
 		// Extract the name and resolution from the discovered key.
-		name, _, res, tsNanos, err := DecodeDataKey(foundKey)
+		name, _, res, tsNanos, err := tskeys.DecodeDataKey(foundKey)
 		if err != nil {
 			return nil, err
 		}
@@ -96,7 +97,7 @@ func (tsdb *DB) findTimeSeries(
 
 		// Set 'next' is initialized to the next possible time series key
 		// which could belong to a previously undiscovered time series.
-		next = storage.MakeMVCCMetadataKey(makeDataKeySeriesPrefix(name, res).PrefixEnd())
+		next = storage.MakeMVCCMetadataKey(tskeys.MakeDataKeySeriesPrefix(name, res).PrefixEnd())
 	}
 
 	return results, nil
@@ -126,7 +127,7 @@ func (tsdb *DB) pruneTimeSeries(
 		// Time series data for a specific resolution falls in a contiguous key
 		// range, and can be deleted with a DelRange command.
 		// The start key is the prefix unique to this name/resolution pair.
-		start := makeDataKeySeriesPrefix(timeSeries.Name, timeSeries.Resolution)
+		start := tskeys.MakeDataKeySeriesPrefix(timeSeries.Name, timeSeries.Resolution)
 
 		// The end key can be created by generating a time series key with the
 		// threshold timestamp for the resolution. If the resolution is not
@@ -135,7 +136,7 @@ func (tsdb *DB) pruneTimeSeries(
 		var end roachpb.Key
 		threshold, ok := thresholds[timeSeries.Resolution]
 		if ok {
-			end = MakeDataKey(timeSeries.Name, "", timeSeries.Resolution, threshold)
+			end = tskeys.MakeDataKey(timeSeries.Name, "", timeSeries.Resolution, threshold)
 		} else {
 			end = start.PrefixEnd()
 		}

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
@@ -67,7 +68,7 @@ func (qt *QueryTimespan) verifyBounds() error {
 
 // verifyDiskResolution returns an error if this timespan is not suitable for
 // querying the supplied disk resolution.
-func (qt *QueryTimespan) verifyDiskResolution(diskResolution Resolution) error {
+func (qt *QueryTimespan) verifyDiskResolution(diskResolution tskeys.Resolution) error {
 	resolutionSampleDuration := diskResolution.SampleDuration()
 	// Verify that sampleDuration is a multiple of
 	// diskResolution.SampleDuration().
@@ -90,7 +91,7 @@ func (qt *QueryTimespan) verifyDiskResolution(diskResolution Resolution) error {
 
 // adjustForCurrentTime adjusts the passed query timespan in order to prevent
 // certain artifacts which can occur when querying in the very recent past.
-func (qt *QueryTimespan) adjustForCurrentTime(diskResolution Resolution) error {
+func (qt *QueryTimespan) adjustForCurrentTime(diskResolution tskeys.Resolution) error {
 	// Disallow queries for the sample period containing the current system time
 	// and any later periods. This prevents returning "incomplete" data for sample
 	// periods where new data may yet be recorded, which in turn prevents an odd

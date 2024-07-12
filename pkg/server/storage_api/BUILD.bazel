@@ -53,7 +53,7 @@ go_test(
         "//pkg/testutils/serverutils",
         "//pkg/testutils/skip",
         "//pkg/testutils/testcluster",
-        "//pkg/ts",
+        "//pkg/ts/tskeys",
         "//pkg/util/leaktest",
         "//pkg/util/log",
         "//pkg/util/log/logpb",

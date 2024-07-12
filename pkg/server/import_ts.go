@@ -27,7 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/ts"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/startup"
 	"github.com/cockroachdb/errors"
@@ -175,7 +175,7 @@ func maybeImportTS(ctx context.Context, s *topLevelServer) (returnErr error) {
 			return err
 		}
 
-		name, source, _, _, err := ts.DecodeDataKey(v.Key)
+		name, source, _, _, err := tskeys.DecodeDataKey(v.Key)
 		if err != nil {
 			deferError(err)
 			continue

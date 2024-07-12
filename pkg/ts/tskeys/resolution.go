@@ -8,7 +8,7 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package ts
+package tskeys
 
 import (
 	"fmt"
@@ -27,11 +27,11 @@ func (r Resolution) String() string {
 		return "10s"
 	case Resolution30m:
 		return "30m"
-	case resolution1ns:
+	case TestingResolution1ns:
 		return "1ns"
-	case resolution50ns:
+	case TestingResolution50ns:
 		return "50ns"
-	case resolutionInvalid:
+	case TestingResolutionInvalid:
 		return "BAD"
 	}
 	return fmt.Sprintf("%d", r)
@@ -46,27 +46,27 @@ const (
 	// Resolution30m stores roll-up data from a higher resolution at a sample
 	// resolution of 30 minutes.
 	Resolution30m Resolution = 2
-	// resolution1ns stores data with a sample resolution of 1 nanosecond. Used
-	// only for testing.
-	resolution1ns Resolution = 998
-	// resolution50ns stores roll-up data from the 1ns resolution at a sample
-	// resolution of 50 nanoseconds. Used for testing.
-	resolution50ns Resolution = 999
-	// resolutionInvalid is an invalid resolution used only for testing. It causes
-	// an error to be thrown in certain methods. It is invalid because its sample
-	// period is not a divisor of its slab period.
-	resolutionInvalid Resolution = 1000
+	// TestingResolution1ns stores data with a sample resolution of 1 nanosecond.
+	// Used only for testing.
+	TestingResolution1ns Resolution = 998
+	// TestingResolution50ns stores roll-up data from the 1ns resolution at a
+	// sample resolution of 50 nanoseconds. Used for testing.
+	TestingResolution50ns Resolution = 999
+	// TestingResolutionInvalid is an invalid resolution used only for testing. It
+	// causes an error to be thrown in certain methods. It is invalid because its
+	// sample period is not a divisor of its slab period.
+	TestingResolutionInvalid Resolution = 1000
 )
 
 // sampleDurationByResolution is a map used to retrieve the sample duration
 // corresponding to a Resolution value. Sample durations are expressed in
 // nanoseconds.
 var sampleDurationByResolution = map[Resolution]int64{
-	Resolution10s:     int64(time.Second * 10),
-	Resolution30m:     int64(time.Minute * 30),
-	resolution1ns:     1,  // 1ns resolution only for tests.
-	resolution50ns:    50, // 50ns rollup only for tests.
-	resolutionInvalid: 10, // Invalid resolution.
+	Resolution10s:            int64(time.Second * 10),
+	Resolution30m:            int64(time.Minute * 30),
+	TestingResolution1ns:     1,  // 1ns resolution only for tests.
+	TestingResolution50ns:    50, // 50ns rollup only for tests.
+	TestingResolutionInvalid: 10, // Invalid resolution.
 }
 
 // slabDurationByResolution is a map used to retrieve the slab duration
@@ -74,11 +74,11 @@ var sampleDurationByResolution = map[Resolution]int64{
 // samples are stored at a single Cockroach key/value. Slab durations are
 // expressed in nanoseconds.
 var slabDurationByResolution = map[Resolution]int64{
-	Resolution10s:     int64(time.Hour),
-	Resolution30m:     int64(time.Hour * 24),
-	resolution1ns:     10,   // 1ns resolution only for tests.
-	resolution50ns:    1000, // 50ns rollup only for tests.
-	resolutionInvalid: 11,
+	Resolution10s:            int64(time.Hour),
+	Resolution30m:            int64(time.Hour * 24),
+	TestingResolution1ns:     10,   // 1ns resolution only for tests.
+	TestingResolution50ns:    1000, // 50ns rollup only for tests.
+	TestingResolutionInvalid: 11,
 }
 
 // SampleDuration returns the sample duration corresponding to this resolution
@@ -106,7 +106,7 @@ func (r Resolution) SlabDuration() int64 {
 // values about a large number of samples taken over a long period, such as
 // the min, max and sum.
 func (r Resolution) IsRollup() bool {
-	return r == Resolution30m || r == resolution50ns
+	return r == Resolution30m || r == TestingResolution50ns
 }
 
 // TargetRollupResolution returns a target resolution that data from this
@@ -116,18 +116,18 @@ func (r Resolution) TargetRollupResolution() (Resolution, bool) {
 	switch r {
 	case Resolution10s:
 		return Resolution30m, true
-	case resolution1ns:
-		return resolution50ns, true
+	case TestingResolution1ns:
+		return TestingResolution50ns, true
 	}
 	return r, false
 }
 
-func normalizeToPeriod(timestampNanos int64, period int64) int64 {
+func NormalizeToPeriod(timestampNanos int64, period int64) int64 {
 	return timestampNanos - timestampNanos%period
 }
 
-func (r Resolution) normalizeToSlab(timestampNanos int64) int64 {
-	return normalizeToPeriod(timestampNanos, r.SlabDuration())
+func (r Resolution) NormalizeToSlab(timestampNanos int64) int64 {
+	return NormalizeToPeriod(timestampNanos, r.SlabDuration())
 }
 
 // ResolutionFromProto translates the resolution enum value from time series
@@ -140,5 +140,5 @@ func ResolutionFromProto(r tspb.TimeSeriesResolution) Resolution {
 		return Resolution30m
 	default:
 	}
-	return resolutionInvalid
+	return TestingResolutionInvalid
 }

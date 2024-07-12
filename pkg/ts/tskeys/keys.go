@@ -8,7 +8,7 @@
 // by the Apache License, Version 2.0, included in the file
 // licenses/APL.txt.
 
-package ts
+package tskeys
 
 import (
 	"bytes"
@@ -58,7 +58,7 @@ import (
 // epoch; it will be truncated to an exact multiple of the supplied
 // Resolution's KeyDuration.
 func MakeDataKey(name string, source string, r Resolution, timestamp int64) roachpb.Key {
-	k := makeDataKeySeriesPrefix(name, r)
+	k := MakeDataKeySeriesPrefix(name, r)
 
 	// Normalize timestamp into a timeslot before recording.
 	timeslot := timestamp / r.SlabDuration()
@@ -67,9 +67,9 @@ func MakeDataKey(name string, source string, r Resolution, timestamp int64) roac
 	return k
 }
 
-// makeDataKeySeriesPrefix creates a key prefix for a time series at a specific
+// MakeDataKeySeriesPrefix creates a key prefix for a time series at a specific
 // resolution.
-func makeDataKeySeriesPrefix(name string, r Resolution) roachpb.Key {
+func MakeDataKeySeriesPrefix(name string, r Resolution) roachpb.Key {
 	k := append(roachpb.Key(nil), keys.TimeseriesPrefix...)
 	k = encoding.EncodeBytesAscending(k, []byte(name))
 	k = encoding.EncodeVarintAscending(k, int64(r))

@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/ts"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -244,9 +245,9 @@ func TestTimeSeriesMaintenanceQueueServer(t *testing.T) {
 	seriesName := "test.metric"
 	sourceName := "source1"
 	now := s.Clock().PhysicalNow()
-	nearPast := now - (tsdb.PruneThreshold(ts.Resolution10s) * 2)
-	farPast := now - (tsdb.PruneThreshold(ts.Resolution10s) * 4)
-	sampleDuration := ts.Resolution10s.SampleDuration()
+	nearPast := now - (tsdb.PruneThreshold(tskeys.Resolution10s) * 2)
+	farPast := now - (tsdb.PruneThreshold(tskeys.Resolution10s) * 4)
+	sampleDuration := tskeys.Resolution10s.SampleDuration()
 	datapoints := []tspb.TimeSeriesDatapoint{
 		{
 			TimestampNanos: farPast - farPast%sampleDuration,
@@ -261,7 +262,7 @@ func TestTimeSeriesMaintenanceQueueServer(t *testing.T) {
 			Value:          300.0,
 		},
 	}
-	if err := tsdb.StoreData(context.Background(), ts.Resolution10s, []tspb.TimeSeriesData{
+	if err := tsdb.StoreData(context.Background(), tskeys.Resolution10s, []tspb.TimeSeriesData{
 		{
 			Name:       seriesName,
 			Source:     sourceName,
@@ -272,8 +273,8 @@ func TestTimeSeriesMaintenanceQueueServer(t *testing.T) {
 	}
 
 	// Generate a split key at a timestamp halfway between near past and far past.
-	splitKey := ts.MakeDataKey(
-		seriesName, sourceName, ts.Resolution10s, farPast+(nearPast-farPast)/2,
+	splitKey := tskeys.MakeDataKey(
+		seriesName, sourceName, tskeys.Resolution10s, farPast+(nearPast-farPast)/2,
 	)
 
 	// Force a range split in between near past and far past. This guarantees
@@ -314,11 +315,11 @@ func TestTimeSeriesMaintenanceQueueServer(t *testing.T) {
 		dps, _, err := tsdb.Query(
 			context.Background(),
 			tspb.Query{Name: seriesName},
-			ts.Resolution10s,
+			tskeys.Resolution10s,
 			ts.QueryTimespan{
-				SampleDurationNanos: ts.Resolution10s.SampleDuration(),
+				SampleDurationNanos: tskeys.Resolution10s.SampleDuration(),
 				StartNanos:          0,
-				EndNanos:            now + ts.Resolution10s.SlabDuration(),
+				EndNanos:            now + tskeys.Resolution10s.SlabDuration(),
 				NowNanos:            now + (10 * time.Hour).Nanoseconds(),
 			},
 			memContext,

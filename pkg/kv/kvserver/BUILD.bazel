@@ -470,6 +470,7 @@ go_test(
         "//pkg/testutils/storageutils",
         "//pkg/testutils/testcluster",
         "//pkg/ts",
+        "//pkg/ts/tskeys",
         "//pkg/ts/tspb",
         "//pkg/upgrade/upgradebase",
         "//pkg/util",

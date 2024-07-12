@@ -26,7 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/status/statuspb"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/ts"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/pkg/errors"
@@ -172,7 +172,7 @@ func TestMetricsRecording(t *testing.T) {
 			"cr.store.livebytes.1",
 			"cr.node.sys.go.allocbytes.1",
 		} {
-			key := ts.MakeDataKey(keyName, "", ts.Resolution10s, now)
+			key := tskeys.MakeDataKey(keyName, "", tskeys.Resolution10s, now)
 			if err := kvDB.GetProto(ctx, key, &data); err != nil {
 				return err
 			}

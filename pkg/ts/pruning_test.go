@@ -18,6 +18,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -50,17 +51,17 @@ func TestContainsTimeSeries(t *testing.T) {
 		},
 		{
 			roachpb.RKeyMin,
-			roachpb.RKey(MakeDataKey("metric", "", Resolution10s, 0)),
+			roachpb.RKey(tskeys.MakeDataKey("metric", "", tskeys.Resolution10s, 0)),
 			true,
 		},
 		{
-			roachpb.RKey(MakeDataKey("metric", "", Resolution10s, 0)),
+			roachpb.RKey(tskeys.MakeDataKey("metric", "", tskeys.Resolution10s, 0)),
 			roachpb.RKeyMax,
 			true,
 		},
 		{
-			roachpb.RKey(MakeDataKey("metric", "", Resolution10s, 0)),
-			roachpb.RKey(MakeDataKey("metric.b", "", Resolution10s, 0)),
+			roachpb.RKey(tskeys.MakeDataKey("metric", "", tskeys.Resolution10s, 0)),
+			roachpb.RKey(tskeys.MakeDataKey("metric.b", "", tskeys.Resolution10s, 0)),
 			true,
 		},
 	} {
@@ -81,7 +82,7 @@ func TestFindTimeSeries(t *testing.T) {
 	// Populate data: two metrics, two sources, two resolutions, two keys.
 	metrics := []string{"metric.a", "metric.z"}
 	sources := []string{"source1", "source2"}
-	resolutions := []Resolution{Resolution10s, resolution1ns}
+	resolutions := []tskeys.Resolution{tskeys.Resolution10s, tskeys.TestingResolution1ns}
 	for _, metric := range metrics {
 		for _, source := range sources {
 			for _, resolution := range resolutions {
@@ -120,19 +121,19 @@ func TestFindTimeSeries(t *testing.T) {
 			expected: []timeSeriesResolutionInfo{
 				{
 					Name:       metrics[0],
-					Resolution: Resolution10s,
+					Resolution: tskeys.Resolution10s,
 				},
 				{
 					Name:       metrics[0],
-					Resolution: resolution1ns,
+					Resolution: tskeys.TestingResolution1ns,
 				},
 				{
 					Name:       metrics[1],
-					Resolution: Resolution10s,
+					Resolution: tskeys.Resolution10s,
 				},
 				{
 					Name:       metrics[1],
-					Resolution: resolution1ns,
+					Resolution: tskeys.TestingResolution1ns,
 				},
 			},
 		},
@@ -158,51 +159,51 @@ func TestFindTimeSeries(t *testing.T) {
 			expected: []timeSeriesResolutionInfo{
 				{
 					Name:       metrics[0],
-					Resolution: resolution1ns,
+					Resolution: tskeys.TestingResolution1ns,
 				},
 				{
 					Name:       metrics[1],
-					Resolution: resolution1ns,
+					Resolution: tskeys.TestingResolution1ns,
 				},
 			},
 		},
-		// Timestamp at the Resolution10s threshold doesn't prune the 10s resolutions.
+		// Timestamp at the tskeys.Resolution10s threshold doesn't prune the 10s resolutions.
 		{
 			start:     roachpb.RKeyMin,
 			end:       roachpb.RKeyMax,
-			timestamp: hlc.Timestamp{WallTime: tm.DB.PruneThreshold(Resolution10s)},
+			timestamp: hlc.Timestamp{WallTime: tm.DB.PruneThreshold(tskeys.Resolution10s)},
 			expected: []timeSeriesResolutionInfo{
 				{
 					Name:       metrics[0],
-					Resolution: resolution1ns,
+					Resolution: tskeys.TestingResolution1ns,
 				},
 				{
 					Name:       metrics[1],
-					Resolution: resolution1ns,
+					Resolution: tskeys.TestingResolution1ns,
 				},
 			},
 		},
-		// Timestamp at the Resolution10s threshold + 1ns prunes all time series.
+		// Timestamp at the tskeys.Resolution10s threshold + 1ns prunes all time series.
 		{
 			start:     roachpb.RKeyMin,
 			end:       roachpb.RKeyMax,
-			timestamp: hlc.Timestamp{WallTime: tm.DB.PruneThreshold(Resolution10s) + 1},
+			timestamp: hlc.Timestamp{WallTime: tm.DB.PruneThreshold(tskeys.Resolution10s) + 1},
 			expected: []timeSeriesResolutionInfo{
 				{
 					Name:       metrics[0],
-					Resolution: Resolution10s,
+					Resolution: tskeys.Resolution10s,
 				},
 				{
 					Name:       metrics[0],
-					Resolution: resolution1ns,
+					Resolution: tskeys.TestingResolution1ns,
 				},
 				{
 					Name:       metrics[1],
-					Resolution: Resolution10s,
+					Resolution: tskeys.Resolution10s,
 				},
 				{
 					Name:       metrics[1],
-					Resolution: resolution1ns,
+					Resolution: tskeys.TestingResolution1ns,
 				},
 			},
 		},
@@ -216,62 +217,62 @@ func TestFindTimeSeries(t *testing.T) {
 		// Key range split between metrics.
 		{
 			start:     roachpb.RKeyMin,
-			end:       roachpb.RKey(MakeDataKey("metric.b", "", Resolution10s, 0)),
+			end:       roachpb.RKey(tskeys.MakeDataKey("metric.b", "", tskeys.Resolution10s, 0)),
 			timestamp: hlc.MaxTimestamp,
 			expected: []timeSeriesResolutionInfo{
 				{
 					Name:       metrics[0],
-					Resolution: Resolution10s,
+					Resolution: tskeys.Resolution10s,
 				},
 				{
 					Name:       metrics[0],
-					Resolution: resolution1ns,
+					Resolution: tskeys.TestingResolution1ns,
 				},
 			},
 		},
 		{
-			start:     roachpb.RKey(MakeDataKey("metric.b", "", Resolution10s, 0)),
+			start:     roachpb.RKey(tskeys.MakeDataKey("metric.b", "", tskeys.Resolution10s, 0)),
 			end:       roachpb.RKeyMax,
 			timestamp: hlc.MaxTimestamp,
 			expected: []timeSeriesResolutionInfo{
 				{
 					Name:       metrics[1],
-					Resolution: Resolution10s,
+					Resolution: tskeys.Resolution10s,
 				},
 				{
 					Name:       metrics[1],
-					Resolution: resolution1ns,
+					Resolution: tskeys.TestingResolution1ns,
 				},
 			},
 		},
 		// Key range split within a metric along resolution boundary.
 		{
 			start:     roachpb.RKeyMin,
-			end:       roachpb.RKey(MakeDataKey(metrics[0], "", resolution1ns, 0)),
+			end:       roachpb.RKey(tskeys.MakeDataKey(metrics[0], "", tskeys.TestingResolution1ns, 0)),
 			timestamp: hlc.MaxTimestamp,
 			expected: []timeSeriesResolutionInfo{
 				{
 					Name:       metrics[0],
-					Resolution: Resolution10s,
+					Resolution: tskeys.Resolution10s,
 				},
 			},
 		},
 		{
-			start:     roachpb.RKey(MakeDataKey(metrics[0], "", resolution1ns, 0)),
+			start:     roachpb.RKey(tskeys.MakeDataKey(metrics[0], "", tskeys.TestingResolution1ns, 0)),
 			end:       roachpb.RKeyMax,
 			timestamp: hlc.MaxTimestamp,
 			expected: []timeSeriesResolutionInfo{
 				{
 					Name:       metrics[0],
-					Resolution: resolution1ns,
+					Resolution: tskeys.TestingResolution1ns,
 				},
 				{
 					Name:       metrics[1],
-					Resolution: Resolution10s,
+					Resolution: tskeys.Resolution10s,
 				},
 				{
 					Name:       metrics[1],
-					Resolution: resolution1ns,
+					Resolution: tskeys.TestingResolution1ns,
 				},
 			},
 		},
@@ -302,7 +303,7 @@ func TestPruneTimeSeries(t *testing.T) {
 		// Populate data: two metrics, two sources, two resolutions, two keys.
 		metrics := []string{"metric.a", "metric.z"}
 		sources := []string{"source1", "source2"}
-		resolutions := []Resolution{Resolution10s, resolution1ns}
+		resolutions := []tskeys.Resolution{tskeys.Resolution10s, tskeys.TestingResolution1ns}
 		for _, metric := range metrics {
 			for _, source := range sources {
 				for _, resolution := range resolutions {
@@ -405,7 +406,7 @@ func TestMaintainTimeSeriesWithRollups(t *testing.T) {
 	// Populate data: two metrics, two sources, two resolutions, two keys.
 	metrics := []string{"metric.a", "metric.z"}
 	sources := []string{"source1", "source2"}
-	resolutions := []Resolution{Resolution10s, resolution1ns}
+	resolutions := []tskeys.Resolution{tskeys.Resolution10s, tskeys.TestingResolution1ns}
 	for _, metric := range metrics {
 		for _, source := range sources {
 			for _, resolution := range resolutions {
@@ -438,7 +439,7 @@ func TestMaintainTimeSeriesWithRollups(t *testing.T) {
 	tm.assertKeyCount(16)
 
 	{
-		query := tm.makeQuery("metric.a", Resolution30m, 0, now)
+		query := tm.makeQuery("metric.a", tskeys.Resolution30m, 0, now)
 		query.assertSuccess(1, 2)
 	}
 
@@ -464,7 +465,7 @@ func TestMaintainTimeSeriesNoRollups(t *testing.T) {
 	// Populate data: two metrics, two sources, two resolutions, two keys.
 	metrics := []string{"metric.a", "metric.z"}
 	sources := []string{"source1", "source2"}
-	resolutions := []Resolution{Resolution10s, resolution1ns}
+	resolutions := []tskeys.Resolution{tskeys.Resolution10s, tskeys.TestingResolution1ns}
 	for _, metric := range metrics {
 		for _, source := range sources {
 			for _, resolution := range resolutions {

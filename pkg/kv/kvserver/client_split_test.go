@@ -56,7 +56,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
-	"github.com/cockroachdb/cockroach/pkg/ts"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
@@ -2287,7 +2287,7 @@ func writeRandomTimeSeriesDataToRange(
 	t testing.TB, store *kvserver.Store, rangeID roachpb.RangeID, keyPrefix []byte,
 ) (midpoint []byte) {
 	src := rand.New(rand.NewSource(0))
-	r := ts.Resolution10s
+	r := tskeys.Resolution10s
 	for i := 0; i < 20; i++ {
 		var data []tspb.TimeSeriesData
 		for j := int64(0); j <= src.Int63n(5); j++ {

@@ -28,6 +28,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/ts"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -54,7 +55,7 @@ func TestServerQuery(t *testing.T) {
 
 	// Populate data directly.
 	tsdb := s.TsDB().(*ts.DB)
-	if err := tsdb.StoreData(context.Background(), ts.Resolution10s, []tspb.TimeSeriesData{
+	if err := tsdb.StoreData(context.Background(), tskeys.Resolution10s, []tspb.TimeSeriesData{
 		{
 			Name:   "test.metric",
 			Source: "source1",
@@ -314,7 +315,7 @@ func TestServerQueryTenant(t *testing.T) {
 
 	// Populate data directly.
 	tsdb := s.TsDB().(*ts.DB)
-	if err := tsdb.StoreData(context.Background(), ts.Resolution10s, []tspb.TimeSeriesData{
+	if err := tsdb.StoreData(context.Background(), tskeys.Resolution10s, []tspb.TimeSeriesData{
 		{
 			Name:   "test.metric",
 			Source: "1",
@@ -591,10 +592,10 @@ func TestServerQueryMemoryManagement(t *testing.T) {
 	slabCount := 5
 	// Generated datapoints every 100 seconds, so compute how many we want to
 	// generate data across the target number of hours.
-	valueCount := int(ts.Resolution10s.SlabDuration()/(100*1e9)) * slabCount
+	valueCount := int(tskeys.Resolution10s.SlabDuration()/(100*1e9)) * slabCount
 
 	// MemoryBudget is a function of slab size and source count.
-	samplesPerSlab := ts.Resolution10s.SlabDuration() / ts.Resolution10s.SampleDuration()
+	samplesPerSlab := tskeys.Resolution10s.SlabDuration() / tskeys.Resolution10s.SampleDuration()
 	sizeOfSlab := int64(unsafe.Sizeof(roachpb.InternalTimeSeriesData{})) + (int64(unsafe.Sizeof(roachpb.InternalTimeSeriesSample{})) * samplesPerSlab)
 	budget := 3 * sizeOfSlab * int64(sourceCount) * int64(workerCount)
 
@@ -642,7 +643,7 @@ func TestServerDump(t *testing.T) {
 	slabCount := 5
 	// Number of datapoints to generate every hour. Generated datapoints every
 	// 100 seconds, so compute how many we want to generate data across one hour.
-	numPointsEachHour := int(ts.Resolution10s.SlabDuration() / (100 * 1e9))
+	numPointsEachHour := int(tskeys.Resolution10s.SlabDuration() / (100 * 1e9))
 	// Number of total datapoints.
 	valueCount := numPointsEachHour * slabCount
 	// We'll dump [startVal, endVal) below. To simplify the test, pick them
@@ -866,7 +867,7 @@ func generateTimeSeriesDatapoints(startValue, endValue int) []tspb.TimeSeriesDat
 func populateSeries(seriesCount, sourceCount, valueCount int, tsdb *ts.DB) error {
 	for series := 0; series < seriesCount; series++ {
 		for source := 0; source < sourceCount; source++ {
-			if err := tsdb.StoreData(context.Background(), ts.Resolution10s, []tspb.TimeSeriesData{
+			if err := tsdb.StoreData(context.Background(), tskeys.Resolution10s, []tspb.TimeSeriesData{
 				{
 					Name:       seriesName(series),
 					Source:     sourceName(source),

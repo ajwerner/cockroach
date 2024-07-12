@@ -17,6 +17,7 @@ import (
 	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -99,7 +100,7 @@ func overflowSafeMultiply64(a, b int64) (int64, bool) {
 // remaining within the given memory budget. Inputs are the resolution of data
 // being queried, the budget, the estimated number of sources, and the
 // interpolation limit being used for the query.
-func (qmc QueryMemoryContext) GetMaxTimespan(r Resolution) (int64, error) {
+func (qmc QueryMemoryContext) GetMaxTimespan(r tskeys.Resolution) (int64, error) {
 	slabDuration := r.SlabDuration()
 
 	// Compute the size of a slab.
@@ -138,14 +139,14 @@ func (qmc QueryMemoryContext) GetMaxTimespan(r Resolution) (int64, error) {
 
 // GetMaxRollupSlabs returns the maximum number of rows that should be processed
 // at one time when rolling up the given resolution.
-func (qmc QueryMemoryContext) GetMaxRollupSlabs(r Resolution) int64 {
+func (qmc QueryMemoryContext) GetMaxRollupSlabs(r tskeys.Resolution) int64 {
 	// Rollup computations only occur when columnar is true.
 	return qmc.BudgetBytes / qmc.computeSizeOfSlab(r)
 }
 
 // computeSizeOfSlab returns the size of a completely full data slab for the supplied
 // data resolution.
-func (qmc QueryMemoryContext) computeSizeOfSlab(r Resolution) int64 {
+func (qmc QueryMemoryContext) computeSizeOfSlab(r tskeys.Resolution) int64 {
 	slabDuration := r.SlabDuration()
 
 	var sizeOfSlab int64

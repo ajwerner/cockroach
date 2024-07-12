@@ -19,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -233,7 +234,7 @@ func (s *Server) Query(
 	// If not set, sampleNanos should default to ten second resolution.
 	sampleNanos := request.SampleNanos
 	if sampleNanos == 0 {
-		sampleNanos = Resolution10s.SampleDuration()
+		sampleNanos = tskeys.Resolution10s.SampleDuration()
 	}
 
 	// For the interpolation limit, use the time limit until stores are considered
@@ -322,7 +323,7 @@ func (s *Server) Query(
 					datapoints, sources, err := s.db.Query(
 						ctx,
 						query,
-						Resolution10s,
+						tskeys.Resolution10s,
 						timespan,
 						memContexts[queryIdx],
 					)
@@ -376,7 +377,7 @@ func (s *Server) Query(
 //
 // TODO(tbg): needs testing that restricting to individual timeseries works
 // and that the date range restrictions are respected. Should be easy enough to
-// set up a KV store and write some keys into it (`MakeDataKey`) to do so without
+// set up a KV store and write some keys into it (`tskeys.MakeDataKey`) to do so without
 // setting up a `*Server`.
 func (s *Server) Dump(req *tspb.DumpRequest, stream tspb.TimeSeries_DumpServer) error {
 	d := DefaultDumper{stream.Send}.Dump
@@ -409,7 +410,7 @@ func dumpImpl(
 				ctx,
 				db,
 				seriesName,
-				ResolutionFromProto(res),
+				tskeys.ResolutionFromProto(res),
 				req.StartNanos,
 				req.EndNanos,
 				d,
@@ -427,7 +428,7 @@ type DefaultDumper struct {
 }
 
 func (dd DefaultDumper) Dump(kv *roachpb.KeyValue) error {
-	name, source, _, _, err := DecodeDataKey(kv.Key)
+	name, source, _, _, err := tskeys.DecodeDataKey(kv.Key)
 	if err != nil {
 		return err
 	}
@@ -465,7 +466,7 @@ func dumpTimeseriesAllSources(
 	ctx context.Context,
 	db *kv.DB,
 	seriesName string,
-	diskResolution Resolution,
+	diskResolution tskeys.Resolution,
 	startNanos, endNanos int64,
 	dump func(*roachpb.KeyValue) error,
 ) error {
@@ -480,10 +481,10 @@ func dumpTimeseriesAllSources(
 	}
 
 	span := &roachpb.Span{
-		Key: MakeDataKey(
+		Key: tskeys.MakeDataKey(
 			seriesName, "" /* source */, diskResolution, startNanos,
 		),
-		EndKey: MakeDataKey(
+		EndKey: tskeys.MakeDataKey(
 			seriesName, "" /* source */, diskResolution, endNanos,
 		),
 	}

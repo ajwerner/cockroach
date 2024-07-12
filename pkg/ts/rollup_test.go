@@ -21,6 +21,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
@@ -132,14 +133,14 @@ func TestComputeRollupFromData(t *testing.T) {
 			tm.Start()
 			defer tm.Stop()
 
-			tm.storeInModel(resolution1ns, tc.input)
+			tm.storeInModel(tskeys.TestingResolution1ns, tc.input)
 			tm.rollup(math.MaxInt64, timeSeriesResolutionInfo{
 				Name:       "test.metric",
-				Resolution: resolution1ns,
+				Resolution: tskeys.TestingResolution1ns,
 			})
 			tm.prune(math.MaxInt64, timeSeriesResolutionInfo{
 				Name:       "test.metric",
-				Resolution: resolution1ns,
+				Resolution: tskeys.TestingResolution1ns,
 			})
 
 			var modelActual []roachpb.InternalTimeSeriesData
@@ -179,21 +180,21 @@ func TestRollupBasic(t *testing.T) {
 		series2.Datapoints = append(series2.Datapoints, tsdp(time.Duration(i), float64(i)))
 	}
 
-	tm.storeTimeSeriesData(resolution1ns, []tspb.TimeSeriesData{series1a, series1b, series2})
+	tm.storeTimeSeriesData(tskeys.TestingResolution1ns, []tspb.TimeSeriesData{series1a, series1b, series2})
 	tm.assertKeyCount(150)
 	tm.assertModelCorrect()
 
 	now := 250 + resolution1nsDefaultRollupThreshold.Nanoseconds()
 	tm.rollup(now, timeSeriesResolutionInfo{
 		Name:       "test.metric",
-		Resolution: resolution1ns,
+		Resolution: tskeys.TestingResolution1ns,
 	})
 	tm.assertKeyCount(152)
 	tm.assertModelCorrect()
 
 	tm.prune(now, timeSeriesResolutionInfo{
 		Name:       "test.metric",
-		Resolution: resolution1ns,
+		Resolution: tskeys.TestingResolution1ns,
 	})
 	tm.assertKeyCount(102)
 	tm.assertModelCorrect()
@@ -214,7 +215,7 @@ func TestRollupBasic(t *testing.T) {
 		[]timeSeriesResolutionInfo{
 			{
 				Name:       "test.othermetric",
-				Resolution: resolution1ns,
+				Resolution: tskeys.TestingResolution1ns,
 			},
 		},
 		hlc.Timestamp{
@@ -232,7 +233,7 @@ func TestRollupBasic(t *testing.T) {
 		[]timeSeriesResolutionInfo{
 			{
 				Name:       "test.othermetric",
-				Resolution: resolution1ns,
+				Resolution: tskeys.TestingResolution1ns,
 			},
 		},
 		hlc.Timestamp{
@@ -244,7 +245,7 @@ func TestRollupBasic(t *testing.T) {
 	}
 
 	{
-		query := tm.makeQuery("test.othermetric", resolution1ns, 0, 500)
+		query := tm.makeQuery("test.othermetric", tskeys.TestingResolution1ns, 0, 500)
 		query.SampleDurationNanos = 50
 		query.assertSuccess(10, 1)
 	}
@@ -265,7 +266,7 @@ func TestRollupMemoryConstraint(t *testing.T) {
 		series2.Datapoints = append(series2.Datapoints, tsdp(time.Duration(i), float64(i)))
 	}
 
-	tm.storeTimeSeriesData(resolution1ns, []tspb.TimeSeriesData{series1, series2})
+	tm.storeTimeSeriesData(tskeys.TestingResolution1ns, []tspb.TimeSeriesData{series1, series2})
 	tm.assertKeyCount(100)
 	tm.assertModelCorrect()
 
@@ -293,26 +294,26 @@ func TestRollupMemoryConstraint(t *testing.T) {
 	})
 	tm.rollupWithMemoryContext(qmc, 500+resolution1nsDefaultRollupThreshold.Nanoseconds(), timeSeriesResolutionInfo{
 		Name:       "test.othermetric",
-		Resolution: resolution1ns,
+		Resolution: tskeys.TestingResolution1ns,
 	})
 	tm.prune(500+resolution1nsDefaultRollupThreshold.Nanoseconds(), timeSeriesResolutionInfo{
 		Name:       "test.othermetric",
-		Resolution: resolution1ns,
+		Resolution: tskeys.TestingResolution1ns,
 	})
 
 	tm.assertKeyCount(51)
 	tm.assertModelCorrect()
 
 	// Ensure that we used at least 50 slabs worth of memory at one time.
-	if a, e := adjustedMon.MaximumBytes(), 50*qmc.computeSizeOfSlab(resolution1ns); a < e {
+	if a, e := adjustedMon.MaximumBytes(), 50*qmc.computeSizeOfSlab(tskeys.TestingResolution1ns); a < e {
 		t.Fatalf("memory usage for query was %d, wanted at least %d", a, e)
 	}
 
 	// Limit testing: set multiple constraints on memory and ensure that they
 	// are being respected through chunking.
 	for i, limit := range []int64{
-		25 * qmc.computeSizeOfSlab(resolution1ns),
-		10 * qmc.computeSizeOfSlab(resolution1ns),
+		25 * qmc.computeSizeOfSlab(tskeys.TestingResolution1ns),
+		10 * qmc.computeSizeOfSlab(tskeys.TestingResolution1ns),
 	} {
 		// Generate a new series.
 		seriesName := fmt.Sprintf("metric.series%d", i)
@@ -320,7 +321,7 @@ func TestRollupMemoryConstraint(t *testing.T) {
 		for j := 0; j < 500; j++ {
 			seriesData.Datapoints = append(seriesData.Datapoints, tsdp(time.Duration(j), float64(j)))
 		}
-		tm.storeTimeSeriesData(resolution1ns, []tspb.TimeSeriesData{seriesData})
+		tm.storeTimeSeriesData(tskeys.TestingResolution1ns, []tspb.TimeSeriesData{seriesData})
 		tm.assertModelCorrect()
 		tm.assertKeyCount(51 + i /* rollups from previous iterations */ + 50)
 
@@ -336,11 +337,11 @@ func TestRollupMemoryConstraint(t *testing.T) {
 		})
 		tm.rollupWithMemoryContext(qmc, 500+resolution1nsDefaultRollupThreshold.Nanoseconds(), timeSeriesResolutionInfo{
 			Name:       seriesName,
-			Resolution: resolution1ns,
+			Resolution: tskeys.TestingResolution1ns,
 		})
 		tm.prune(500+resolution1nsDefaultRollupThreshold.Nanoseconds(), timeSeriesResolutionInfo{
 			Name:       seriesName,
-			Resolution: resolution1ns,
+			Resolution: tskeys.TestingResolution1ns,
 		})
 
 		tm.assertKeyCount(51 + i + 1)

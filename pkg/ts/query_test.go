@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -53,7 +54,7 @@ func runTestCaseMultipleFormats(t *testing.T, testCase func(*testing.T, testMode
 func TestQueryBasic(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	runTestCaseMultipleFormats(t, func(t *testing.T, tm testModelRunner) {
-		tm.storeTimeSeriesData(resolution1ns, []tspb.TimeSeriesData{
+		tm.storeTimeSeriesData(tskeys.TestingResolution1ns, []tspb.TimeSeriesData{
 			tsd("test.metric", "",
 				tsdp(1, 100),
 				tsdp(5, 200),
@@ -67,11 +68,11 @@ func TestQueryBasic(t *testing.T) {
 		tm.assertKeyCount(4)
 		tm.assertModelCorrect()
 
-		query := tm.makeQuery("test.metric", resolution1ns, 0, 60)
+		query := tm.makeQuery("test.metric", tskeys.TestingResolution1ns, 0, 60)
 		query.assertSuccess(7, 1)
 
 		// Verify across multiple sources
-		tm.storeTimeSeriesData(resolution1ns, []tspb.TimeSeriesData{
+		tm.storeTimeSeriesData(tskeys.TestingResolution1ns, []tspb.TimeSeriesData{
 			tsd("test.multimetric", "source1",
 				tsdp(1, 100),
 				tsdp(15, 300),
@@ -90,7 +91,7 @@ func TestQueryBasic(t *testing.T) {
 		tm.assertModelCorrect()
 
 		// Test default query: avg downsampler, sum aggregator, no derivative.
-		query = tm.makeQuery("test.multimetric", resolution1ns, 0, 90)
+		query = tm.makeQuery("test.multimetric", tskeys.TestingResolution1ns, 0, 90)
 		query.assertSuccess(8, 2)
 		// Test with aggregator specified.
 		query.setSourceAggregator(tspb.TimeSeriesQueryAggregator_MAX)
@@ -103,7 +104,7 @@ func TestQueryBasic(t *testing.T) {
 		query.setDerivative(tspb.TimeSeriesQueryDerivative_DERIVATIVE)
 		query.assertSuccess(7, 2)
 		// Test with everything specified.
-		query = tm.makeQuery("test.multimetric", resolution1ns, 0, 90)
+		query = tm.makeQuery("test.multimetric", tskeys.TestingResolution1ns, 0, 90)
 		query.setSourceAggregator(tspb.TimeSeriesQueryAggregator_MIN)
 		query.setDownsampler(tspb.TimeSeriesQueryAggregator_MAX)
 		query.setDerivative(tspb.TimeSeriesQueryDerivative_NON_NEGATIVE_DERIVATIVE)
@@ -121,7 +122,7 @@ func TestQueryBasic(t *testing.T) {
 			tspb.TimeSeriesQueryDerivative_NONE, tspb.TimeSeriesQueryDerivative_DERIVATIVE,
 			tspb.TimeSeriesQueryDerivative_NON_NEGATIVE_DERIVATIVE,
 		}
-		query = tm.makeQuery("nodata", resolution1ns, 0, 90)
+		query = tm.makeQuery("nodata", tskeys.TestingResolution1ns, 0, 90)
 		for _, downsampler := range aggs {
 			for _, agg := range aggs {
 				for _, deriv := range derivs {
@@ -135,7 +136,7 @@ func TestQueryBasic(t *testing.T) {
 
 		// Verify querying specific sources, thus excluding other available sources
 		// in the same time period.
-		tm.storeTimeSeriesData(resolution1ns, []tspb.TimeSeriesData{
+		tm.storeTimeSeriesData(tskeys.TestingResolution1ns, []tspb.TimeSeriesData{
 			tsd("test.specificmetric", "source1",
 				tsdp(1, 9999),
 				tsdp(11, 9999),
@@ -173,7 +174,7 @@ func TestQueryBasic(t *testing.T) {
 
 		// Assert querying data from subset of sources. Includes source with no
 		// data.
-		query = tm.makeQuery("test.specificmetric", resolution1ns, 0, 90)
+		query = tm.makeQuery("test.specificmetric", tskeys.TestingResolution1ns, 0, 90)
 		query.Sources = []string{"source2", "source4", "source6"}
 		query.assertSuccess(7, 2)
 
@@ -197,16 +198,16 @@ func TestQueryDownsampling(t *testing.T) {
 	runTestCaseMultipleFormats(t, func(t *testing.T, tm testModelRunner) {
 		// Query with sampleDuration that is too small, expect error.
 		{
-			query := tm.makeQuery("", Resolution10s, 0, 10000)
+			query := tm.makeQuery("", tskeys.Resolution10s, 0, 10000)
 			query.SampleDurationNanos = 1
 			query.assertError("was not less")
 
 			// Query with sampleDuration which is not an even multiple of the resolution.
-			query.SampleDurationNanos = Resolution10s.SampleDuration() + 1
+			query.SampleDurationNanos = tskeys.Resolution10s.SampleDuration() + 1
 			query.assertError("not a multiple")
 		}
 
-		tm.storeTimeSeriesData(resolution1ns, []tspb.TimeSeriesData{
+		tm.storeTimeSeriesData(tskeys.TestingResolution1ns, []tspb.TimeSeriesData{
 			tsd("test.metric", "source1",
 				tsdp(1, 100),
 				tsdp(5, 500),
@@ -234,7 +235,7 @@ func TestQueryDownsampling(t *testing.T) {
 		tm.assertModelCorrect()
 
 		{
-			query := tm.makeQuery("test.metric", resolution1ns, 0, 60)
+			query := tm.makeQuery("test.metric", tskeys.TestingResolution1ns, 0, 60)
 			query.SampleDurationNanos = 10
 			query.assertSuccess(6, 2)
 
@@ -251,7 +252,7 @@ func TestQueryDownsampling(t *testing.T) {
 
 		// Query boundaries don't align to downsample period.
 		{
-			query := tm.makeQuery("test.metric", resolution1ns, 15, 35)
+			query := tm.makeQuery("test.metric", tskeys.TestingResolution1ns, 15, 35)
 			query.SampleDurationNanos = 10
 			query.assertSuccess(3, 2)
 		}
@@ -267,7 +268,7 @@ func TestInterpolationLimit(t *testing.T) {
 		// The first source has missing data points at 14 and 19, which can
 		// be interpolated from data points located in nearby slabs.
 		// 5 - [15, 16, 17, 18] - 25
-		tm.storeTimeSeriesData(resolution1ns, []tspb.TimeSeriesData{
+		tm.storeTimeSeriesData(tskeys.TestingResolution1ns, []tspb.TimeSeriesData{
 			tsd("metric.edgegaps", "source1",
 				tsdp(5, 500),
 				tsdp(15, 1500),
@@ -289,7 +290,7 @@ func TestInterpolationLimit(t *testing.T) {
 		tm.assertModelCorrect()
 
 		{
-			query := tm.makeQuery("metric.edgegaps", resolution1ns, 14, 19)
+			query := tm.makeQuery("metric.edgegaps", tskeys.TestingResolution1ns, 14, 19)
 			query.assertSuccess(6, 2)
 			query.InterpolationLimitNanos = 10
 			query.assertSuccess(6, 2)
@@ -298,7 +299,7 @@ func TestInterpolationLimit(t *testing.T) {
 		}
 
 		// Metric with inner gaps which may be effected by the interpolation limit.
-		tm.storeTimeSeriesData(resolution1ns, []tspb.TimeSeriesData{
+		tm.storeTimeSeriesData(tskeys.TestingResolution1ns, []tspb.TimeSeriesData{
 			tsd("metric.innergaps", "source1",
 				tsdp(1, 100),
 				tsdp(2, 200),
@@ -323,7 +324,7 @@ func TestInterpolationLimit(t *testing.T) {
 
 		// Interpolation limit 0, 2, 3, and 10.
 		{
-			query := tm.makeQuery("metric.innergaps", resolution1ns, 0, 9)
+			query := tm.makeQuery("metric.innergaps", tskeys.TestingResolution1ns, 0, 9)
 			query.assertSuccess(9, 2)
 			query.InterpolationLimitNanos = 2
 			query.assertSuccess(9, 2)
@@ -335,7 +336,7 @@ func TestInterpolationLimit(t *testing.T) {
 
 		// With explicit source list.
 		{
-			query := tm.makeQuery("metric.innergaps", resolution1ns, 0, 9)
+			query := tm.makeQuery("metric.innergaps", tskeys.TestingResolution1ns, 0, 9)
 			query.Sources = []string{"source1", "source2"}
 			query.assertSuccess(9, 2)
 			query.InterpolationLimitNanos = 2
@@ -348,7 +349,7 @@ func TestInterpolationLimit(t *testing.T) {
 
 		// With derivative.
 		{
-			query := tm.makeQuery("metric.innergaps", resolution1ns, 0, 9)
+			query := tm.makeQuery("metric.innergaps", tskeys.TestingResolution1ns, 0, 9)
 			query.Sources = []string{"source1", "source2"}
 			query.setDerivative(tspb.TimeSeriesQueryDerivative_DERIVATIVE)
 			query.assertSuccess(8, 2)
@@ -377,7 +378,7 @@ func TestQueryWorkerMemoryConstraint(t *testing.T) {
 
 		// Store data for a large metric across many keys, so we can test across
 		// many different memory maximums.
-		tm.storeTimeSeriesData(resolution1ns, []tspb.TimeSeriesData{
+		tm.storeTimeSeriesData(tskeys.TestingResolution1ns, []tspb.TimeSeriesData{
 			tsd(
 				"test.metric",
 				"source1",
@@ -412,7 +413,7 @@ func TestQueryWorkerMemoryConstraint(t *testing.T) {
 			adjustedMon.StartNoReserved(context.Background(), tm.workerMemMonitor)
 			defer adjustedMon.Stop(context.Background())
 
-			query := tm.makeQuery("test.metric", resolution1ns, 11, 109)
+			query := tm.makeQuery("test.metric", tskeys.TestingResolution1ns, 11, 109)
 			query.workerMemMonitor = adjustedMon
 			query.InterpolationLimitNanos = 10
 			query.assertSuccess(99, 3)
@@ -449,7 +450,7 @@ func TestQueryWorkerMemoryConstraint(t *testing.T) {
 
 		// Verify insufficient memory error bubbles up.
 		{
-			query := tm.makeQuery("test.metric", resolution1ns, 0, 10000)
+			query := tm.makeQuery("test.metric", tskeys.TestingResolution1ns, 0, 10000)
 			query.BudgetBytes = 1000
 			query.EstimatedSources = 3
 			query.InterpolationLimitNanos = 5
@@ -461,7 +462,7 @@ func TestQueryWorkerMemoryConstraint(t *testing.T) {
 func TestQueryWorkerMemoryMonitor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	runTestCaseMultipleFormats(t, func(t *testing.T, tm testModelRunner) {
-		tm.storeTimeSeriesData(resolution1ns, []tspb.TimeSeriesData{
+		tm.storeTimeSeriesData(tskeys.TestingResolution1ns, []tspb.TimeSeriesData{
 			tsd("test.metric", "",
 				tsdp(1, 100),
 				tsdp(5, 200),
@@ -491,7 +492,7 @@ func TestQueryWorkerMemoryMonitor(t *testing.T) {
 		defer limitedMon.Stop(context.Background())
 
 		// Assert correctness with no memory pressure.
-		query := tm.makeQuery("test.metric", resolution1ns, 0, 60)
+		query := tm.makeQuery("test.metric", tskeys.TestingResolution1ns, 0, 60)
 		query.workerMemMonitor = limitedMon
 		query.assertSuccess(7, 1)
 
@@ -533,7 +534,7 @@ func TestQueryBadRequests(t *testing.T) {
 	runTestCaseMultipleFormats(t, func(t *testing.T, tm testModelRunner) {
 		// Query with a downsampler that is invalid, expect error.
 		{
-			query := tm.makeQuery("metric.test", resolution1ns, 0, 10000)
+			query := tm.makeQuery("metric.test", tskeys.TestingResolution1ns, 0, 10000)
 			query.SampleDurationNanos = 10
 			query.setDownsampler((tspb.TimeSeriesQueryAggregator)(999))
 			query.assertError("unknown time series downsampler")
@@ -541,7 +542,7 @@ func TestQueryBadRequests(t *testing.T) {
 
 		// Query with a aggregator that is invalid, expect error.
 		{
-			query := tm.makeQuery("metric.test", resolution1ns, 0, 10000)
+			query := tm.makeQuery("metric.test", tskeys.TestingResolution1ns, 0, 10000)
 			query.SampleDurationNanos = 10
 			query.setSourceAggregator((tspb.TimeSeriesQueryAggregator)(999))
 			query.assertError("unknown time series aggregator")
@@ -549,7 +550,7 @@ func TestQueryBadRequests(t *testing.T) {
 
 		// Query with a downsampler that is invalid, expect no error (default behavior is none).
 		{
-			query := tm.makeQuery("metric.test", resolution1ns, 0, 10000)
+			query := tm.makeQuery("metric.test", tskeys.TestingResolution1ns, 0, 10000)
 			query.SampleDurationNanos = 10
 			query.setDerivative((tspb.TimeSeriesQueryDerivative)(999))
 			query.assertSuccess(0, 0)
@@ -561,7 +562,7 @@ func TestQueryNearCurrentTime(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	runTestCaseMultipleFormats(t, func(t *testing.T, tm testModelRunner) {
-		tm.storeTimeSeriesData(resolution1ns, []tspb.TimeSeriesData{
+		tm.storeTimeSeriesData(tskeys.TestingResolution1ns, []tspb.TimeSeriesData{
 			tsd("metric.test", "source1",
 				tsdp(1, 100),
 				tsdp(5, 500),
@@ -590,40 +591,40 @@ func TestQueryNearCurrentTime(t *testing.T) {
 
 		// All points returned for query with nowNanos in the future.
 		{
-			query := tm.makeQuery("metric.test", resolution1ns, 0, 500)
+			query := tm.makeQuery("metric.test", tskeys.TestingResolution1ns, 0, 500)
 			query.NowNanos = 60
 			query.assertSuccess(17, 2)
 		}
 
 		// Test query is disallowed in the future.
 		{
-			query := tm.makeQuery("metric.test", resolution1ns, 20, 500)
+			query := tm.makeQuery("metric.test", tskeys.TestingResolution1ns, 20, 500)
 			query.NowNanos = 10
 			query.assertError("cannot query time series in the future")
 		}
 
 		// Test query is truncated so that future datapoints are not queried.
 		{
-			query := tm.makeQuery("metric.test", resolution1ns, 0, 500)
+			query := tm.makeQuery("metric.test", tskeys.TestingResolution1ns, 0, 500)
 			query.NowNanos = 30
 			query.assertSuccess(10, 2)
 		}
 
 		// Data points from incomplete periods are not included.
 		{
-			query := tm.makeQuery("metric.test", resolution1ns, 0, 500)
+			query := tm.makeQuery("metric.test", tskeys.TestingResolution1ns, 0, 500)
 			query.NowNanos = 59
 			query.assertSuccess(16, 2)
 		}
 
 		// Data points for incomplete periods are not included (with downsampling).
 		{
-			query := tm.makeQuery("metric.test", resolution1ns, 0, 500)
+			query := tm.makeQuery("metric.test", tskeys.TestingResolution1ns, 0, 500)
 			query.NowNanos = 60
 			query.SampleDurationNanos = 10
 			query.assertSuccess(6, 2)
 
-			query = tm.makeQuery("metric.test", resolution1ns, 0, 500)
+			query = tm.makeQuery("metric.test", tskeys.TestingResolution1ns, 0, 500)
 			query.NowNanos = 59
 			query.SampleDurationNanos = 10
 			query.assertSuccess(5, 2)
@@ -640,7 +641,7 @@ func TestQueryRollup(t *testing.T) {
 	tm.Start()
 	defer tm.Stop()
 
-	tm.storeTimeSeriesData(resolution50ns, []tspb.TimeSeriesData{
+	tm.storeTimeSeriesData(tskeys.TestingResolution50ns, []tspb.TimeSeriesData{
 		tsd("metric.test", "source1",
 			tsdp(1, 100),
 			tsdp(45, 500),
@@ -689,19 +690,19 @@ func TestQueryRollup(t *testing.T) {
 	tm.assertModelCorrect()
 
 	{
-		query := tm.makeQuery("metric.test", resolution50ns, 100, 1500)
+		query := tm.makeQuery("metric.test", tskeys.TestingResolution50ns, 100, 1500)
 		query.assertSuccess(13, 2)
 	}
 
 	{
-		query := tm.makeQuery("metric.test", resolution50ns, 450, 850)
+		query := tm.makeQuery("metric.test", tskeys.TestingResolution50ns, 450, 850)
 		query.setDownsampler(tspb.TimeSeriesQueryAggregator_MAX)
 		query.setDownsampler(tspb.TimeSeriesQueryAggregator_MIN)
 		query.assertSuccess(5, 2)
 	}
 
 	{
-		query := tm.makeQuery("metric.test", resolution50ns, 100, 1500)
+		query := tm.makeQuery("metric.test", tskeys.TestingResolution50ns, 100, 1500)
 		query.setDerivative(tspb.TimeSeriesQueryDerivative_DERIVATIVE)
 		query.assertSuccess(13, 2)
 	}

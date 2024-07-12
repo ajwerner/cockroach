@@ -18,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
+	"github.com/cockroachdb/cockroach/pkg/ts/tskeys"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 )
@@ -187,7 +188,7 @@ func TestDiscardEarlierSamples(t *testing.T) {
 		tsdp(5*time.Hour+5*time.Minute, -1.0),
 		tsdp(5*time.Hour+5*time.Minute, -2.0),
 	)
-	internal, err := ts.ToInternal(Resolution10s.SlabDuration(), Resolution10s.SampleDuration(), false)
+	internal, err := ts.ToInternal(tskeys.Resolution10s.SlabDuration(), tskeys.Resolution10s.SampleDuration(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
